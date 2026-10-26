@@ -187,6 +187,10 @@ A summarizer replaces messages 0 to 2 (10,000 tokens) with one 500-token summary
 (3,000 tokens) follow it: the **tail**. It removes
 **9,500 tokens** from every later request, but the call that writes the summary costs money first.
 
+The request also carries 4,000 tokens of `tools` and a 4,000-token `system` prompt, before message 0.
+They are not changed by the summary, and the diagram does not draw them. They matter for one figure:
+the provider reads up to the end of `system`, so it reads 8,000 tokens on request A.
+
 The savings use the agent model's rates, because the removed tokens would have been billed to the
 agent's requests. The call uses the summarizer model's rates (see the [setup](#setup)).
 
@@ -196,7 +200,7 @@ agent's requests. The call uses the summarizer model's rates (see the [setup](#s
   zero. The response also reported `costUSD` 0.0125.
 - **Request A** (hot): the summary saves 9,500 tokens that would have been read: 9,500 × $0.30 =
   +$0.00285. But the summary changes the start of the messages, so no cached message matches. The
-  provider still reads `tools` and `system`, up to the breakpoint at the end of `system`. The
+  provider still reads `tools` and `system` (8,000 tokens), up to the breakpoint at the end of `system`. The
   summary and the tail (3,500 tokens) are written, not read (orange). The break costs
   3,500 × ($3.75 − $0.30) = −$0.01208. Request A is a net **−$0.00923**.
 - **Request B** (hot): the summary is cached now, so the 9,500 tokens would have been read.

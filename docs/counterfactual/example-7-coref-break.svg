@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1490 420" width="1490" height="420" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Turn 7: coref saves $0.00599 and breaks the cache for $0.06558</title>
-<desc id="d">One row shows the forwarded prompt of turn 7, left to right: tools and system 15,300 tokens, messages 0 to 4 11,060, message 5 20,000 before coref and 50 after, messages 6 to 11 7,900, new messages 2,000. Without coref the cache would be read up to the end of message 11, 54,260 tokens, and 2,000 written: 0.02378 dollars. With coref, the forwarded body differs from turn 6 at message 5, after the last breakpoint before it, the end of system. The provider reads only 15,300 tokens and writes 21,010: 0.08338 dollars. Two columns on the right. Operations: coref reports one rewrite on this request; Compute adds a cacheChange, the break. Compute: coref saved 19,950 read tokens, and the break moved 19,010 tokens from read to write. The total line prices them: 19,950 at 0.30 dollars per million is a saving of 0.00599, and 19,010 at the difference of 3.75 and 0.30 is a cost of 0.06558, a net of minus 0.05960 dollars.</desc>
+<desc id="d">One row shows the forwarded prompt of turn 7, left to right: tools and system 15,300 tokens, messages 0 to 4 11,060, message 5 20,000 before coref and 50 after, messages 6 to 11 7,900, new messages 2,000. Without coref the cache would be read up to the end of message 11, 54,260 tokens, and 2,000 written: 0.02378 dollars. With coref, the forwarded body differs from turn 6 at message 5, after the last breakpoint before it, the end of system. The provider reads only 15,300 tokens and writes 21,010: 0.08338 dollars. Two columns on the right. Operations: coref reports one rewrite on this request; Compute finds a cache effect, the break. Compute: coref saved 19,950 read tokens, and the break moved 19,010 tokens from read to write. The total line prices them: 19,950 at 0.30 dollars per million is a saving of 0.00599, and 19,010 at the difference of 3.75 and 0.30 is a cost of 0.06558, a net of minus 0.05960 dollars.</desc>
 <style>
 svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834}
 @media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926}}
@@ -88,7 +88,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <rect x="1065" y="200" width="410" height="58" rx="8" fill="none" stroke="var(--ink2)" stroke-width="1.2" stroke-dasharray="5 3"/>
 <text class="t2" x="1075" y="218" font-size="11">added by Compute, not reported</text>
 <rect x="1075" y="225" width="95.2" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
-<text class="t" x="1122.6" y="239" font-size="12" text-anchor="middle" font-weight="600">cacheChange</text>
+<text class="t" x="1122.6" y="239" font-size="12" text-anchor="middle" font-weight="600">cache effect</text>
 <text class="t" x="1180" y="239" font-size="11" font-weight="600">break<tspan class="t2" font-weight="400"> · coref</tspan></text>
 <text class="t" x="1300" y="239" font-size="13" font-weight="600">19,010 read → write</text>
 <line class="axis" x1="1075" y1="282" x2="1465" y2="282"/>

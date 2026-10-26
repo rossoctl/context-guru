@@ -158,7 +158,7 @@ type EntryFacts struct {
 // The enums are strings, not integers, so an unknown value from a newer operator survives a
 // decode and can be reported as unpriced (R19).
 type (
-	Kind         string // rewrite | spend | setting
+	Kind         string // rewrite | spend | setting (a request parameter that changes the cost or the cache and that the body does not show)
 	CachePhase   string // hot | cold | unknown
 	LifetimeKind string // exact | minimum | unknown
 	BillingMode  string // api | subscription | unknown

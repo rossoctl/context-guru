@@ -244,7 +244,7 @@ SU = "cg:summarize:5d21"
 
 
 def ex4():
-    tools, sysb = [("tools4", 5000)], [("sys4", 3000)]
+    tools, sysb = [("tools4", 4000)], [("sys4", 4000)]
     old = [("m0", 4000), ("m1", 3000), ("m2", 3000), ("m3", 1500), ("m4", 1500)]
     tail = old[3:]
     summary = [("summary", 500)]

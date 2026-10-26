@@ -11,6 +11,7 @@ the first changed token onward. The change can be in the content, or in a settin
 renders into the prefix. The settings are different for each provider, so this document is a list that
 grows. Each provider is added as it is read. The model keeps these changes as a `setting` context
 operation (R50) when a context operator makes them, and as a client edit when the client makes them (§5.2).
+`design.md` §4.2 maps the settings below to the position (`At`) where the provider stops matching.
 
 **OpenAI** ([prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching#which-settings-affect-the-cached-prefix),
 read 2026-10-25). A change in any of these may change the rendered prefix. The guide says a change does

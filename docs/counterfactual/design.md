@@ -463,7 +463,8 @@ type Thread struct {
 
 type Operation struct {
     ID        string // unique inside the request only; across requests, use ChangeID (R6)
-    Kind      Kind   // rewrite | spend | setting. There is no kind for a cache effect: only the library finds one (§4.4)
+    Kind      Kind   // rewrite | spend | setting. There is no kind for a cache effect: only the library finds one (§4.4).
+                     // setting: a request parameter that changes the cost or the cache and that the body does not show (§4.2)
 
     Operator  string // "context-guru.mask", "tool-prune"; the first part is set by the framework
 
@@ -615,6 +616,51 @@ name to its `from` and `to` values:
 ```
 
 `thinking` has no `from`: it was not set before, and it appears now.
+
+**What a setting change is.** A setting is a request parameter that the provider uses to build the
+prompt or to choose the model, and that the body the host sends does not show. Two requests with the
+same body can have different settings, so a comparison of body hashes (§5) cannot see the change. A
+change of content is not a setting: a different tool definition is a body change, and `Compute` finds
+it by hash. The point of the `setting` kind is that it records a change the hashes cannot find, and
+`At` says where in the prefix the provider would stop matching.
+
+The settings, and where each provider renders them, differ by provider. [`cached-prefix.md`](cached-prefix.md)
+holds the full lists with their sources (read 2026-10-25). This is what the model takes from them:
+
+| Provider | Setting | First level that stops matching | `At` |
+|---|---|---|---|
+| Anthropic | Web search toggle, citations toggle, `speed` | `system`, and `messages` after it | `system[0]` |
+| Anthropic | `tool_choice` | `messages` only | `messages[0]` |
+| Anthropic | Thinking parameters (mode, `budget_tokens`) | `messages`; `tools` and `system` too on models that render the configuration ahead of them | `messages[0]`, or `tools[0]` on those models |
+| Anthropic | `output_config.effort` | `messages`; the model default is the same as omitting it, so nothing breaks. `tools` and `system` too on some models | `messages[0]`, or `tools[0]` on those models |
+| Anthropic | `model` | Not in the provider's table. The cache is keyed to the exact prompt prefix and the model is part of the request, so the design treats it as a break (an inference) | `tools[0]` |
+| OpenAI | `model` | The guide lists it: a different model can use different weights and caching behaviour. It names no level, so the design starts the break at the start of the prompt | `tools[0]` |
+| OpenAI | `reasoning.effort`, `text.verbosity`, `parallel_tool_calls`, `text.format` | The guide says the rendered prefix may change, and gives no level | nil |
+
+Rules that follow from the table:
+
+1. **A level that stops matching breaks every later level.** On Anthropic the cache has three levels in
+   the order `tools`, `system`, `messages`. `At` is the first position of the first level that breaks.
+2. **`At` is where a break would start, not a statement that one happened.** A provider does not always
+   discard an entry when a setting changes. OpenAI says so, and for `reasoning.effort` on supported
+   models a configuration update keeps the earlier prefix. The library adds a break only when
+   `Usage.CacheRead` is below the read the forwarded body predicts (§5.2, row 3).
+3. **Where the behaviour depends on the model, the reporter chooses.** A thinking or effort change
+   starts at `tools[0]` on one model and at `messages[0]` on another. The reporter knows the model.
+   When it does not know the behaviour, it leaves `At` nil.
+4. **A nil `At` is safe.** The library then takes the read that the usage shows as the end of the valid
+   prefix, and adds `penalty_unknown` to `Unpriced` (§6.4). This reports too little, never too much. OpenAI
+   settings are nil for this reason: the guide names no level.
+5. **A change that the client makes is not a `setting` operation.** The client's own change of a
+   setting has no operator and no `ChangeID`. With equal bodies it reaches row 4 of §5.2: the entry
+   was lost early, and the break has no `ChangeID`.
+6. **Content that a provider also lists is not a setting.** `tools` on OpenAI, tool definitions and
+   images on Anthropic, and OpenAI `context_management` (compaction) change the body. They are
+   `rewrite` operations or client edits.
+
+The table covers what `cached-prefix.md` has read. It does not cover `host`, `max_output`, other
+providers, or settings added later. A setting that is not in the table has an unknown effect on the
+cache, so its `At` is nil (rule 4).
 
 ### 4.3 Why positions are (section, index)
 

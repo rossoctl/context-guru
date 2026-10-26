@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1470 714" width="1470" height="714" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1470 732" width="1470" height="732" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <title id="t">Summarization: the call costs money first, then each request saves 9,500 tokens</title>
-<desc id="d">Each row is a request, or the summarizer call. The horizontal axis is the prompt, in tokens, split by message. Before the summary, messages 0 to 2 are 10,000 tokens. The summarizer call reads those 10,000 tokens and costs 0.0125 dollars. In requests A, B and C the summary is 500 tokens, and the 9,500 tokens it removed are drawn as a hatched block at the same place in every request. Request A is hot, but it is the first request with the summary. It writes the 500-token summary and the 3,000-token tail (messages 3 and 4) to the cache instead of reading 13,000 tokens. It saves 0.00285 dollars and pays a cache break of 0.01208 dollars on the summary and the tail, a net of minus 0.00923. Request B is hot and saves 0.00285 dollars, at the cache read rate. Request C is cold, 15 minutes after B, and saves 0.03563 dollars at the cache write rate. The balance after three requests is a profit of 0.01675 dollars. Request A is drawn in a frame with two bars: the summarizer call (a spend context operation) and the prompt sent (a rewrite and a cacheChange). A column of reported operations lists the spend, the rewrite and the cacheChange on request A only: the rewrite is reported once, and Compute applies it again on B and C. A Compute column gives the tokens per tier of each request and the spend in dollars. The total line multiplies the tokens by the rates: read 19,000 at 0.30 dollars per million, write 9,500 at 3.75, a break of 3,500 tokens at the difference of the two, and the spend of 0.0125 dollars, for a profit of 0.01675 dollars. The time between requests is written between the bars: 1 minute and 15 minutes.</desc>
+<desc id="d">Each row is a request, or the summarizer call. The horizontal axis is the prompt, in tokens, split by message. Before the summary, messages 0 to 2 are 10,000 tokens. The summarizer call reads those 10,000 tokens and costs 0.0125 dollars. In requests A, B and C the summary is 500 tokens, and the 9,500 tokens it removed are drawn as a hatched block at the same place in every request. Request A is hot, but it is the first request with the summary. It writes the 500-token summary and the 3,000-token tail (messages 3 and 4) to the cache instead of reading 13,000 tokens. It saves 0.00285 dollars and pays a cache break of 0.01208 dollars on the summary and the tail, a net of minus 0.00923. Request B is hot and saves 0.00285 dollars, at the cache read rate. Request C is cold, 15 minutes after B, and saves 0.03563 dollars at the cache write rate. The balance after three requests is a profit of 0.01675 dollars. Request A is drawn in a frame with two bars: the summarizer call (a spend context operation) and the prompt sent (a rewrite and a cache break). A column of reported operations lists the spend and the rewrite on request A only: the rewrite is reported once, and Compute applies it again on B and C. The cache break is not reported. Compute finds it, so it is drawn as a dashed cache effect. The 4,000 tokens of tools and the 4,000 tokens of system before message 0 are read in every request and are not drawn. A Compute column gives the tokens per tier of each request and the spend in dollars. The total line multiplies the tokens by the rates: read 19,000 at 0.30 dollars per million, write 9,500 at 3.75, a break of 3,500 tokens at the difference of the two, and the spend of 0.0125 dollars, for a profit of 0.01675 dollars. The time between requests is written between the bars: 1 minute and 15 minutes.</desc>
 <style>
 svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834;--cost:#8a8984}
 @media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926;--cost:#8f8e88}}
@@ -25,7 +25,7 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <linearGradient id="fg"><stop offset="0.55" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
 <mask id="fade" maskContentUnits="objectBoundingBox"><rect width="1" height="1" fill="url(#fg)"/></mask>
 </defs>
-<rect class="bg" width="1470" height="714"/>
+<rect class="bg" width="1470" height="732"/>
 <text class="t" x="24" y="30" font-size="17" font-weight="600">Summarization: the call costs money first, then each request saves 9,500 tokens</text>
 <text class="t2" x="24" y="50" font-size="12">Each row is a request, or the summarizer call. Left to right is the prompt, message by message; widths are in tokens. The hatched block is what the summary removed.</text>
 <text class="t" x="395.0" y="84" font-size="12" text-anchor="middle" font-weight="600">messages 0 to 2</text>
@@ -76,10 +76,11 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <text class="t2" x="170" y="335" font-size="10">summary</text>
 <rect x="1075" y="283" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
 <text class="t" x="1108.2" y="297" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
-<rect x="1075" y="307" width="95.2" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
-<text class="t" x="1122.6" y="321" font-size="12" text-anchor="middle" font-weight="600">cacheChange</text>
+<rect x="1075" y="307" width="95.2" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text class="t" x="1122.6" y="321" font-size="12" text-anchor="middle" font-weight="600">cache effect</text>
 <text class="t" x="1180" y="297" font-size="14" font-weight="600">saved: read 9,500</text>
-<text class="t" x="1180" y="321" font-size="14" font-weight="600">cacheChange: 3,500 read → write</text>
+<text class="t" x="1180" y="321" font-size="14" font-weight="600">break: 3,500 read → write</text>
+<text class="t2" x="1180" y="338" font-size="11">found by Compute, not reported</text>
 <defs><marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink2)"/></marker></defs>
 <line class="gap" x1="178" y1="348" x2="178" y2="372" marker-end="url(#ag)"/>
 <text class="t2" x="202" y="364" font-size="11">1 min later · cache hot</text>
@@ -143,5 +144,6 @@ svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6
 <rect class="cost" x="170" y="602" width="22" height="12" rx="2"/><text class="t" x="202" y="612" font-size="12">the summarizer call, priced at summarizer-model rates</text>
 <rect class="ghost-write" x="560" y="602" width="22" height="12" rx="2"/><rect class="ghost-read" x="586" y="602" width="22" height="12" rx="2"/><text class="t" x="618" y="612" font-size="12">tokens the summary removed, at the rate they would have been billed at</text>
 <text class="t2" x="170" y="638" font-size="11">Request A is the first request with the summary. It writes the summary and the tail (orange) instead of reading the old messages. The summary and the tail are the cost of the break.</text>
+<text class="t2" x="170" y="654" font-size="11">Tools (4,000) and system (4,000) come before message 0 and are read in every request.</text>
 </g>
 </svg>
