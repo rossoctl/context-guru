@@ -94,6 +94,8 @@ STATUSLINE_META = "installed_statusline"      # the command string we wrote, so 
                                                # recognises its own work even if it is about to
                                                # write a DIFFERENT command (the plugin moved).
 STATUSLINE_PREV_META = "previous_statusline"  # what we replaced, so uninstall can hand it back.
+STATUSLINE_ASKED_META = "statusline_asked"     # true when the user asked for the line by name (0.6.1+); the
+                                               # SessionStart migration then leaves it, see retire_statusline.
 
 # enabledPlugins is the THIRD surface, and the one that decides whether this plugin's commands, skills
 # and hooks exist in a session at all (#318). `/plugin` writes it, into whichever scope the user
@@ -205,12 +207,17 @@ def apply_statusline(data: dict, command: str) -> None:
     if is_ours_statusline(data, current) and isinstance(current, dict) and "refreshInterval" in current:
         desired["refreshInterval"] = current["refreshInterval"]  # keep a value the user tuned
     if current == desired:
+        if is_ours_statusline(data, current):
+            data.setdefault(META, {})[STATUSLINE_ASKED_META] = True  # asked again for the same line: keep it
         return
     meta = data.setdefault(META, {})
     if current is not None and not is_ours_statusline(data, current):
         meta[STATUSLINE_PREV_META] = current
     data[STATUSLINE_KEY] = desired
     meta[STATUSLINE_META] = command
+    # Since 0.6.1 nothing writes the line unless the user asked for it (the install's default is off), so a line
+    # written now is wanted: the SessionStart migration (retire_statusline) must leave it.
+    meta[STATUSLINE_ASKED_META] = True
 
 
 # The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
@@ -259,6 +266,31 @@ def repoint_statusline(data: dict, running: str) -> bool:
     return True
 
 
+# The one command the 0.4.x to 0.6.0 install wrote by default (install.sh: `python3 "<scripts>/statusline.py"`).
+_DEFAULT_STATUSLINE = re.compile(r'python3 "[^"]*/scripts/statusline\.py"')
+
+
+def retire_statusline(data: dict) -> bool:
+    """Remove OUR statusLine that an install wrote by default (0.4.x to 0.6.0), in place. True if it changed.
+
+    The mod's band draws what the line drew since 0.6.1, so the default line is retired once. Before 0.6.1 nothing
+    recorded whether the user asked for a line, so only the exact DEFAULT form is retired: the bare command install.sh
+    wrote, no flags, refreshInterval 1. A line with flags (a layout the user picked) or a tuned interval was chosen:
+    it is kept, and marked asked so it is never looked at again. Never a line asked for since 0.6.1
+    (STATUSLINE_ASKED_META), and never one that is not ours by record. A line we replaced comes back, as `off` does."""
+    meta = data.get(META)
+    if isinstance(meta, dict) and meta.get(STATUSLINE_ASKED_META) is True:
+        return False
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    if not _DEFAULT_STATUSLINE.fullmatch(current.get("command", "")) or current.get("refreshInterval", 1) != 1:
+        meta[STATUSLINE_ASKED_META] = True
+        return True  # changed: the record is written, the line stays
+    changed, _ = remove_statusline_only(data)
+    return changed
+
+
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """Undo exactly what apply_statusline wrote, and nothing else — never touches `env`/routing.
     Returns (changed, restored_json). Shared by `off` (always this, regardless of whether routing
@@ -275,6 +307,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
         restored = json.dumps(meta[STATUSLINE_PREV_META], sort_keys=True)
     meta.pop(STATUSLINE_META, None)
     meta.pop(STATUSLINE_PREV_META, None)
+    meta.pop(STATUSLINE_ASKED_META, None)
     if not meta:
         data.pop(META, None)
     return True, restored
@@ -2880,6 +2913,13 @@ def cmd_add(args: argparse.Namespace) -> int:
     # with an empty string neither the user nor this call asked to set.
     if not args.url:
         if sl_unchanged:
+            # The same line, asked for again by name: record that it is wanted, or the SessionStart migration
+            # (retire_statusline) would remove a line installed before 0.6.1 that the user just asked to keep.
+            meta = data.get(META)
+            if sl_command and existed and isinstance(meta, dict) and meta.get(STATUSLINE_ASKED_META) is not True \
+                    and is_ours_statusline(data, data.get(STATUSLINE_KEY)):
+                meta[STATUSLINE_ASKED_META] = True
+                save(args.file, data)
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
             return 0
@@ -3030,7 +3070,8 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 
 def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
-    """SessionStart step: point a status line we installed at the plugin that is running now (#551).
+    """SessionStart step: retire the status line an install wrote by default (the mod's band draws it since 0.6.1),
+    else point one the user asked for at the plugin that is running now (#551).
 
     Looks at the three scopes the plugin installs into, but only at files that already hold our
     ownership record, and rewrites only that record and the command. Never fails: a file that is
@@ -3058,7 +3099,21 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
         try:
             with open(real, encoding="utf-8") as fh:
                 data = json.load(fh)
-            if not isinstance(data, dict) or not repoint_statusline(data, running):
+            if not isinstance(data, dict):
+                continue
+            kept = data.get(STATUSLINE_KEY)
+            if retire_statusline(data):
+                if data.get(STATUSLINE_KEY) is kept:
+                    # A line the user customised: kept, now marked as asked for, and repointed in the same run.
+                    repoint_statusline(data, running)
+                    save(real, data)
+                    continue
+                backup(real)  # as `off` does before the same removal
+                save(real, data)
+                print("context-guru: the status line moved into the Context Guru band above the prompt; "
+                      f"/context-guru:statusline brings the line back too ({real})")
+                continue
+            if not repoint_statusline(data, running):
                 continue
             save(real, data)
             print(f"context-guru: status line updated to this plugin version ({real})")
@@ -3407,6 +3462,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop(PING_OPT_OUT_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
+        meta.pop(STATUSLINE_ASKED_META, None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that

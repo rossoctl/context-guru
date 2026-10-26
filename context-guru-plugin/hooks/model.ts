@@ -6,6 +6,7 @@ type Entry = {
   id?: string
   name?: string
   main?: boolean
+  model?: string
   end_ts?: number
   last_ts?: number
   ttl_s?: number
@@ -44,6 +45,18 @@ export function gauge(frac: number, cells = 8): string {
   const on = Math.max(0, Math.min(cells, Math.round(frac * cells)))
   return '█'.repeat(on) + '░'.repeat(cells - on)
 }
+
+/** The commands the band's last row rotates through, each with a few words on what it does. */
+export const ROTATE = [
+  { cmd: '/context-guru:insights', why: 'see where your money goes' },
+  { cmd: '/context-guru:save-more', why: 'find a cheaper configuration' },
+  { cmd: '/context-guru:remove-mcp-and-skills', why: 'drop unused MCP and skills' },
+] as const
+/** How long each command stays on the band's last row before the next one. */
+export const ROTATE_MS = 12_000
+
+/** The command on the band's last row at `now`: one per ROTATE_MS, in order, the same on every redraw within it. */
+export const rotatingTip = (now: number): (typeof ROTATE)[number] => ROTATE[Math.floor(now / ROTATE_MS) % ROTATE.length]
 
 /** The three commands that save more (the pane's SAVE MORE section). */
 export const TIPS = [
@@ -89,6 +102,7 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     isWarm: left > 0,
     // Kept warm by pings: the last touch was one, or the keep-alive plan holds it past its own entry.
     isPinged: left > 0 && (e.keepalive === true || (held !== undefined && held > end + ttlMs)),
+    isKeepalive: e.keepalive === true,
     left: span(left),
     leftMs: Math.max(0, left),
     frac: Math.max(0, Math.min(1, left / ttlMs)),
@@ -98,7 +112,108 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     coldUsd: cold && cold > 0 ? cold : undefined,
     tokens: num(e.prefix_tokens),
     saved: num(e.saved_usd),
+    isHeld: num(e.held_until_ms) !== undefined,
+    // What the per-second clock is computed from: a newer document that moves it must replace the stored one.
+    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), num(e.held_until_ms)].join(','),
+    ...clockOf(e, now),
   }
+}
+
+/** The status line's cache clock (statusline.py remaining_seconds, held_seconds, _until_cold): seconds until the
+ * entry expires from the later of its start and end, negative once cold; the keep-alive plan's horizon while the
+ * entry itself is still warm. A plan cannot revive an expired entry. */
+function clockOf(e: Entry, now: number): { remS?: number; untilColdS?: number; ttlS: number } {
+  const last = num(e.last_ts) ?? num(e.end_ts)
+  const ttl = num(e.ttl_s)
+  const ttlS = ttl && ttl > 0 ? ttl : 300
+  if (last === undefined || !ttl || ttl <= 0) return { ttlS }
+  const remS = (Math.max(last, num(e.end_ts) ?? 0) + ttl * 1000 - now) / 1000
+  const held = num(e.held_until_ms)
+  const heldS = held === undefined ? undefined : (held - now) / 1000
+  return { remS, untilColdS: heldS !== undefined && remS > 0 && heldS > remS ? heldS : remS, ttlS }
+}
+
+/** `m:ss`, or `h:mm:ss` from one hour (statusline.py `_clock`). */
+export function clock(sec: number): string {
+  const s = Math.floor(Math.max(0, sec))
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+  const ss = String(s % 60).padStart(2, '0')
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${mm}:${ss}` : `${Math.floor(s / 60)}:${ss}`
+}
+
+export const CACHE_BAR_CELLS = 6
+export const CTX_BAR_CELLS = 8
+
+/** The status line's `cache` element, as parts the band colours: `cache ● ████░░ 4:12 ↻`, or dim `cache ○ cold 1:07:04`
+ * (the clock then counts up how long it has been cold). Green while warm, amber in the last minute (or the last fifth of
+ * the TTL), red in the last 15 s with `!`, cyan while pings hold it. Undefined when no clock is known. */
+export function cacheClock(t: ThreadView): { isCold: boolean; glyph: string; bar: string; time: string; color?: string; ping: boolean } | undefined {
+  if (t.remS === undefined || t.untilColdS === undefined) return undefined
+  if (t.untilColdS <= 0) return { isCold: true, glyph: '○', bar: '', time: clock(-t.remS), ping: false }
+  const cells = t.remS > 0 ? Math.max(0, Math.min(CACHE_BAR_CELLS, Math.round((t.remS / t.ttlS) * CACHE_BAR_CELLS))) : 0
+  const left = t.untilColdS
+  const critical = left <= 15
+  const expiring = left <= Math.max(60, t.ttlS / 5)
+  // statusline.py: `↻` while the last touch was a ping or a keep-alive plan exists, the entry itself still warm.
+  const pinged = t.remS > 0 && (t.isKeepalive || t.isHeld)
+  // OSS `_cache_segment`: cyan while pinged, except in the critical last 15 s, which keep red and `!`.
+  const color = pinged && !critical ? 'cyan' : critical ? 'error' : expiring ? 'warning' : 'success'
+  return {
+    isCold: false,
+    glyph: expiring ? '◐' : '●',
+    bar: '█'.repeat(cells) + '░'.repeat(CACHE_BAR_CELLS - cells),
+    time: clock(left) + (critical ? '!' : ''),
+    color,
+    ping: pinged,
+  }
+}
+
+/** The status line's `ctx` element: (used, window) tokens, preferring the proxy's figures as statusline.py
+ * `_ctx_numbers` does: its token count while its copy is a few seconds old (Claude Code updates its own only after a
+ * response it accepts), its window when MEASURED for the model the main thread runs. Undefined when a figure is
+ * missing or the context is larger than the window (that window is the wrong one; a clamped 100% would be a guess). */
+export function ctxNumbers(v: View, engine: { tokens?: number; window?: number } | undefined): { used: number; window: number } | undefined {
+  let used = engine?.tokens
+  let window = engine?.window
+  if (v.ageS <= CTX_PROXY_FRESH_S && (v.main.tokens ?? 0) > 0) used = v.main.tokens
+  if (v.window !== undefined && v.window > 0) window = v.window
+  if (used === undefined) used = v.main.tokens
+  if (used === undefined || !window || window <= 0 || used > window) return undefined
+  return { used, window }
+}
+const CTX_PROXY_FRESH_S = 11 // statusline.py CTX_PROXY_FRESH_SECONDS: the cachestate TTL plus a second
+
+/** The `ctx` bar: green to half, amber to 70%, red above; `⚠ rewrite near` from 85%. */
+export function ctxBar(used: number, window: number): { bar: string; pct: string; color: string; isNear: boolean } {
+  const f = Math.max(0, Math.min(1, used / window))
+  const on = Math.round(f * CTX_BAR_CELLS)
+  return {
+    bar: '█'.repeat(on) + '░'.repeat(CTX_BAR_CELLS - on),
+    pct: `${Math.round(f * 100)}%`,
+    color: f <= 0.5 ? 'success' : f <= 0.7 ? 'warning' : 'error',
+    isNear: f >= 0.85,
+  }
+}
+
+/** `saved $x of $y`, or undefined when a half is missing or nothing is priced yet (statusline.py `_money_pair`).
+ * A saving never reads below $0.00: a session that has not yet earned back what it spent shows `saved $0.00`. */
+export function moneyPair(x: number | undefined, y: number | undefined): { saved: string; of: string } | undefined {
+  if (x === undefined || y === undefined || y < 0.005) return undefined
+  return { saved: usd(Math.max(0, x)), of: usd(y) }
+}
+
+
+/** The main thread's entry, as statusline.py `_main_cs` builds it: the session entry describes the latest touch on
+ * ANY thread, so its fields give way to the main thread's own. The keep-alive plan and the next-message prices are the
+ * main thread's or none, never a sub-agent's; `keepalive` (the last touch was a ping) counts only when that touch was
+ * the main thread's. */
+function mainEntry(s: Entry, main: Entry): Entry {
+  if (main === s) return s
+  const out: Entry = { ...s }
+  for (const k of ['last_ts', 'end_ts', 'ttl_s', 'prefix_tokens', 'rewrite_usd'] as const) if (main[k] !== undefined) (out as any)[k] = main[k]
+  for (const k of ['held_until_ms', 'next_warm_usd', 'next_cold_usd'] as const) (out as any)[k] = main[k]
+  out.keepalive = s.keepalive === true && s.last_ts === main.last_ts
+  return out
 }
 
 /** What the mod shows at local time `nowLocal`, or null when there is nothing to show (no data, not routed). */
@@ -117,18 +232,36 @@ export function view(snap: Snapshot | null, nowLocal: number): View | null {
     .map((t, i) => thread(t, server, `agent${i + 1}`))
     .filter(t => t.agoMs <= AGENT_WINDOW_MS)
     .sort((a, b) => a.agoMs - b.agoMs)
-  const m = thread({ ...s, ...main, keepalive: s.keepalive }, server, 'main')
+  const m = thread(mainEntry(s, main), server, 'main')
   const money = doc.money
   const pingable = typeof main.pingable === 'boolean' ? main.pingable : typeof s.pingable === 'boolean' ? s.pingable : undefined
   const reason = main.ping_reason ?? s.ping_reason
   const sum = (k: 'saved_usd' | 'baseline_usd'): number | undefined =>
     money ? (money.main?.[k] ?? 0) + (money.others?.[k] ?? 0) : undefined
+  // The window the proxy MEASURED for the model it served, only for the main thread's own model (statusline.py
+  // `_main_cs`: a sub-agent on a 200k model must not divide a 1M context).
+  const d = doc as { window?: unknown; window_exact?: unknown; model?: unknown }
+  const mm = (main as { model?: unknown }).model
+  const sameModel = main === s || mm === d.model || main.last_ts === s.last_ts // OSS `_main_cs`: dropped only when the latest touch is another thread on another model
+  const window = d.window_exact === true && sameModel ? num(d.window) : undefined
+  const mp = (doc as { manual_pings?: { count?: unknown; saved_usd?: unknown } }).manual_pings
   return {
     url: snap.url,
     main: m,
     subs,
     saved: sum('saved_usd'),
     baseline: sum('baseline_usd'),
+    mainSaved: num(money?.main?.saved_usd),
+    mainBaseline: num(money?.main?.baseline_usd),
+    othersSaved: num(money?.others?.saved_usd),
+    othersBaseline: num(money?.others?.baseline_usd),
+    others: num((money?.others as { threads?: unknown } | undefined)?.threads) ?? 0,
+    pingsSaved: (num(mp?.count) ?? 0) > 0 ? num(mp?.saved_usd) : undefined,
+    ageS: num(doc.age_s) ?? 0,
+    isStale: doc.stale === true,
+    window,
+    update: typeof doc.update === 'string' && doc.update !== '' ? doc.update : undefined,
+    windowSaved: typeof doc.window_saved === 'string' && doc.window_saved !== '' ? doc.window_saved : undefined,
     pingable,
     pingReason: pingable === false && typeof reason === 'string' && reason !== '' ? reason : undefined,
     tip: [...(snap.tip ?? [])],
@@ -143,12 +276,23 @@ export const signature = (v: View | null): string =>
         v.url,
         v.main.isWarm,
         v.main.isPinged,
+        v.main.anchor,
         v.main.left,
         v.main.warmUsd,
         v.main.coldUsd,
         v.main.tokens,
         v.saved,
         v.baseline,
+        v.mainSaved,
+        v.mainBaseline,
+        v.othersSaved,
+        v.othersBaseline,
+        v.others,
+        v.pingsSaved,
+        v.isStale,
+        v.window,
+        v.update,
+        v.windowSaved,
         v.pingable,
         v.pingReason,
         v.tip,

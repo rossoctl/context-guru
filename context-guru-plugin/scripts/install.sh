@@ -63,7 +63,7 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 # Every fact the plan and the confirm both report. Kept in one place so `--plan` cannot describe a
 # different install from the one `--confirm` performs.
 R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0 R_NOPING=0
-R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
+R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_STATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
 R_PORT_COMMITTED=0
@@ -1330,11 +1330,13 @@ in projects that enable it themselves. To have them everywhere, $how" ;;
   esac
 }
 
-# ---- statusline, on by default -------------------------------------------------------------
-# A savings-focused install with nothing showing the savings is a worse first impression than a
-# status line that turns out to be unwanted, and unwanted is one command away (--no-statusline
-# here, or `settings.py off` any time after).
+# ---- statusline, OFF by default since 0.6.1 ---------------------------------------------------
+# The Context Guru mod's band above the prompt now draws everything the status line drew (`saved $x of
+# $y session`, the cache clock, the context bar, `▲ update`), so the install no longer writes a
+# statusLine. `--statusline` asks for it too (both then show the same figures); `/context-guru:statusline`
+# installs it any time after. `--no-statusline` is accepted and does what the default now does.
 #
+# What follows is how the line is written WHEN it is asked for.
 # SAME FILE ROUTING JUST USED — not hardcoded to user scope. This used to write unconditionally
 # to $HOME/.claude/settings.json on the theory that it "renders nothing in a project that is not
 # routed, so it's safe regardless of scope" (skills/statusline/SKILL.md). That argument covers
@@ -1361,7 +1363,7 @@ in projects that enable it themselves. To have them everywhere, $how" ;;
 # silently. `route_here()` already resolves this script's own directory from `$0` for every other
 # call in this file — reuse it instead of a placeholder nothing will ever expand.
 route_install_statusline() {
-  [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
+  [ "$R_STATUSLINE" = 1 ] || { emit "statusline=off"; return 0; }
   local sout scode=0
   # --no-backup: the routing `add` a few lines up already backed up this file's pre-install
   # state. Without this, this second call took its own backup a moment later — of "routed, no
@@ -1433,7 +1435,8 @@ if [ "${1:-}" = --route ]; then
       --upstream) route_need_value --upstream "${2:-}"; R_UPSTREAM="$2"; shift ;;
       --no-health-check) R_NOHEALTH=1 ;;
       --no-ping-header) R_NOPING=1 ;;
-      --no-statusline) R_NOSTATUSLINE=1 ;;
+      --statusline) R_STATUSLINE=1 ;;
+      --no-statusline) R_STATUSLINE=0 ;;
       --no-gitignore-check) R_NOGITIGNORE=1 ;;
       --i-understand-machine-wide) R_USERSCOPE=1 ;;
       --i-consent-to-traffic-interception) R_CONSENT=1 ;;

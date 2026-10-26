@@ -1,9 +1,12 @@
 // Context Guru mod: a calm band above the prompt and a pane (/context-guru).
 //
-// One home per fact (the status line owns the money, the cache clock and the context bar):
-//   band row 1  next-message price (warm vs cold), Ping or why it is off, hide (the dashboard link is in the pane)
-//   band row 2  one chip per named sub-agent cache (default on; `a` or the pane button turns it off)
-//   band row 3  the weekly tip, only when a command is stale
+// The mod is the whole display: the status line is no longer installed, so what it drew lives here, the same way:
+//   band row 1  next-message price (warm vs cold), Ping or why it is off, hide, the dashboard link
+//   band row 2  the status line's row: `▲ update`, `saved $x of $y session · saved $z of $q subagents ↻ $p pings`
+//               (on a subscription `5h 34% · saved 1.2M rd / 85.0k wr` instead of money),
+//               the cache clock (`cache ● ████░░ 4:12`, dim `cache ○ cold 1:07:04` once cold), `ctx ████░░░░ 41%`
+//   band row 3  one chip per named sub-agent cache (default on; `a` or the pane button turns it off)
+//   band row 4  the weekly tip when a command is stale, else one command and what it does, rotating
 //   pane        next message, agents table, saved lately, cache hits, misses by hour, context, save more
 // A cold cache is drawn (dim), never removed: the next message pays the rewrite and the user should see it.
 //
@@ -17,7 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { PaneData, Snapshot, ThreadView, View } from '../types'
-import { TIPS, heatCells, pingReason, pingToast, reasonWords, shortReason, signature, spark, stack, usd, view, weeklyTip, words } from './model'
+import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, pingReason, pingToast, reasonWords, rotatingTip, shortReason, signature, spark, stack, usd, view, weeklyTip, words } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -31,6 +34,8 @@ const isHidden = atom({ plugin: 'context-guru', key: 'isHidden' } as const, fals
 const isAgentsOff = atom({ plugin: 'context-guru', key: 'isAgentsOff' } as const, false)
 const paneData = atom({ plugin: 'context-guru', key: 'paneData' } as const, null)
 const lastPing = atom({ plugin: 'context-guru', key: 'lastPing' } as const, '')
+const context = atom({ plugin: 'context-guru', key: 'context' } as const, null)
+const tick = atom({ plugin: 'context-guru', key: 'tick' } as const, 0)
 
 let seen = ''
 let transcript = '' // this session's transcript path, from the classic hooks: it names the sub-agents
@@ -78,7 +83,11 @@ async function refreshSoon($: Engine): Promise<void> {
 }
 
 async function load($: Engine): Promise<void> {
-  const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id(), ...(transcript ? ['--transcript', transcript] : [])])
+  // On a Claude subscription the status line showed the 5-hour window's saved tokens, not money: the window's start
+  // is its reset time less five hours.
+  const figures = await read($, context)
+  const start = figures?.fiveHourResetMs ? figures.fiveHourResetMs - 5 * 3_600_000 : undefined
+  const doc = await helper($, ['cachestate', '--json', '--session', await $.session.id(), ...(transcript ? ['--transcript', transcript] : []), ...(start ? ['--window-start-ms', String(start)] : [])])
   const now = await $.clock.now()
   if (now - tipAt >= TIP_EVERY_MS) {
     tipAt = now
@@ -92,7 +101,7 @@ async function load($: Engine): Promise<void> {
     ? { at: now, url: base ? `${base[1].replace('127.0.0.1', 'localhost')}/dashboard/` : '', tip: tipStale, doc }
     : null
   // Redraw only when what the band says changes: the words, not the seconds.
-  const sig = signature(view(snap, now))
+  const sig = signature(view(snap, now)) + (typeof doc?.notice === 'string' ? doc.notice : '') // a notice with no data is a change too
   if (sig === seen) return
   seen = sig
   await update($, snapshot, () => snap)
@@ -120,6 +129,24 @@ async function pingNow($: Engine): Promise<string> {
     await update($, lastPing, () => text)
     seen = ''
     await refresh($)
+  }
+}
+
+let lastRotate = -1
+
+/** Redraw the band's clock row once a second while it shows a clock, and the command row when it rotates. */
+async function ticked($: Engine): Promise<void> {
+  try {
+    if (await read($, isHidden)) return // a hidden band draws nothing: no redraw to ask for
+    const now = await $.clock.now()
+    const v = view(await read($, snapshot), now)
+    const rot = Math.floor(now / ROTATE_MS)
+    if ((v && cacheClock(v.main) !== undefined) || rot !== lastRotate) {
+      lastRotate = rot
+      await update($, tick, n => n + 1)
+    }
+  } catch {
+    // a missed tick is a clock one second behind
   }
 }
 
@@ -153,6 +180,47 @@ function state(t: ThreadView): { glyph: string; color?: string; dim: boolean; ma
   return { glyph: '●', color: 'success', dim: false, mark: '' }
 }
 
+/** The engine's figures the band draws: the context window, and on a subscription the 5-hour limit (the status line's
+ * `rate_limits.five_hour`). An ended window is left out, as the status line left it out. */
+function engineFigures(c: { tokens?: number; window: number }, limits: readonly { kind: string; percentUsed: number; resetsAt?: string }[], now: number) {
+  const five = limits.find(l => l.kind === 'five_hour')
+  const reset = five?.resetsAt ? Date.parse(five.resetsAt) : NaN
+  const live = five !== undefined && (Number.isNaN(reset) || reset > now)
+  return { tokens: c.tokens, window: c.window, fiveHour: live ? five.percentUsed : undefined, fiveHourResetMs: live && !Number.isNaN(reset) ? reset : undefined }
+}
+
+/** The status line's row, from the same figures and with the same rules, shortened to fit `cols` in the status line's
+ * order: the subagents phrase, then the `session` label, then the bars (the clock and the percentages stay). */
+function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour?: number } | null, cols: number) {
+  // A subscription pays in limit, not dollars: the 5-hour window's share and saved tokens replace the money.
+  const limit = engine?.fiveHour !== undefined ? { pct: `${Math.round(engine.fiveHour)}%`, saved: v.windowSaved } : undefined
+  const save = limit ? undefined : moneyPair(v.mainSaved, v.mainBaseline) ?? (v.mainSaved === undefined ? moneyPair(v.saved, v.baseline) : undefined)
+  const subs = v.others > 0 ? moneyPair(v.othersSaved, v.othersBaseline) : undefined
+  const pings = v.pingsSaved !== undefined && v.pingsSaved >= 0.005 ? usd(v.pingsSaved) : undefined
+  const cache = cacheClock(v.main)
+  const n = ctxNumbers(v, engine ?? undefined)
+  const ctx = n ? ctxBar(n.used, n.window) : undefined
+  const update = v.update
+  if (!save && !limit && !cache && !ctx && !update) return undefined
+  const room = cols - 4 // the band's padding and the terminal's margin, as the status line's width
+  const len = (o: { label: boolean; subs: boolean; wide: boolean }) =>
+    (save ? 6 + save.saved.length + 4 + save.of.length + (o.label ? 8 : 0) + (o.subs && subs ? 9 + subs.saved.length + 4 + subs.of.length + 10 : 0) + (pings ? 3 + pings.length + 6 : 0) : 0) +
+    (cache ? 3 + (cache.isCold ? 13 + cache.time.length : 8 + (o.wide ? cache.bar.length + 1 : 0) + cache.time.length + (cache.ping ? 2 : 0)) : 0) +
+    (ctx ? 3 + 4 + (o.wide ? ctx.bar.length + 1 : 0) + ctx.pct.length + (o.wide && ctx.isNear ? 15 : 0) : 0) +
+    (v.isStale ? 2 : 0) +
+    (limit ? 3 + limit.pct.length + (o.label && limit.saved ? 3 + limit.saved.length : 0) : 0) +
+    (update && o.label ? update.length + 3 : 0)
+  for (const o of [
+    { label: true, subs: true, wide: true },
+    { label: true, subs: false, wide: true },
+    { label: false, subs: false, wide: true },
+    { label: false, subs: false, wide: false },
+  ]) {
+    if (len(o) <= room) return { save, subs: o.subs ? subs : undefined, label: o.label, pings, cache, ctx, wide: o.wide, update: o.label ? update : undefined, limit: limit && { pct: limit.pct, saved: o.label ? limit.saved : undefined } }
+  }
+  return { save, subs: undefined, label: false, pings: undefined, cache, ctx, wide: false, update: undefined, limit: limit && { pct: limit.pct, saved: undefined } }
+}
+
 export const register: Register = on => {
   // The envelope of the classic hooks carries the transcript path; sub-agent names live beside it.
   on('classic.SessionStart', ($, e, next) => {
@@ -178,9 +246,29 @@ export const register: Register = on => {
     } catch {
       // the stored choices are a convenience
     }
+    try {
+      const u = await $.session.usage()
+      const at = await $.clock.now()
+      await update($, context, () => engineFigures(u.context, u.rateLimits, at))
+    } catch {
+      // the engine's figures arrive with the first session.measure
+    }
     void refreshSoon($)
     $.clock.every(POLL_MS, () => void refresh($))
+    // The status line redrew every second, so its cache clock counted. One tick a second redraws the band's clock row;
+    // nothing is read, and nothing redraws while no clock is shown. The command row moves on with the same tick.
+    $.clock.every(1000, () => void ticked($))
     return started
+  })
+
+  // The engine's own context figures, pushed after each turn: the `ctx` bar's tokens and window (the status line's
+  // `context_window` stdin), so the bar needs no request.
+  on('session.measure', async ($, e, next) => {
+    if (e.changed.includes('context') || e.changed.includes('rateLimits')) {
+      const at = await $.clock.now()
+      await update($, context, () => engineFigures(e.context, e.rateLimits, at))
+    }
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -207,16 +295,36 @@ export const register: Register = on => {
     const snap = await read($, snapshot)
     const now = await $.clock.now()
     const v = view(snap, now)
-    if (e.props.hasSurvey || !v || (await read($, isHidden))) return next(e)
+    if (e.props.hasSurvey || (await read($, isHidden))) return next(e)
+    if (!v) {
+      // The status line's notices (`cg ✕ proxy offline`): nothing was ever read, and the server said why.
+      const notice = snap?.doc?.notice
+      if (typeof notice !== 'string' || notice === '') return next(e)
+      const { Box, Text } = $.ui.resolve(e)
+      return (
+        <Box paddingX={1} marginTop={1}>
+          <Text dimColor>{notice}</Text>
+        </Box>
+      )
+    }
 
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     const busy = await read($, isPinging)
     const agentsOff = await read($, isAgentsOff)
+    await read($, tick) // the clock row counts once a second
     const m = v.main
     const rows = e.props.maxRows
-    const narrow = (e.props.bodyColumns ?? 100) < 80 // row 1 must fit one line with `hide` at 60 columns
+    const cols = e.props.bodyColumns ?? 100
+    const narrow = cols < 80 // row 1 must fit one line with `hide` at 60 columns
     const tip = weeklyTip(v.tip)
     const chips = v.subs.slice(0, AGENT_CHIPS)
+    const status = statusRow(v, await read($, context), cols)
+    const cmd = rotatingTip(now)
+    // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
+    // tip. A row is drawn while the band has a row more than it uses.
+    const showStatus = status !== undefined && rows > 2
+    const showAgents = chips.length > 0 && !agentsOff && rows > 2 + (showStatus ? 1 : 0)
+    const showTip = rows > 2 + (showStatus ? 1 : 0) + (showAgents ? 1 : 0)
 
     return (
       <Box flexDirection="column" paddingX={1} marginTop={1}>
@@ -242,13 +350,91 @@ export const register: Register = on => {
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>
           )}
-          {m.isWarm && v.pingable === false && shortReason(v.pingReason) !== undefined && (
-            <Text dimColor>{'  '}ping off{narrow ? '' : `: ${shortReason(v.pingReason)}`}</Text>
-          )}
+          {m.isWarm && v.pingable === false && shortReason(v.pingReason) !== undefined && <Text dimColor>{'  '}ping off{narrow ? '' : `: ${shortReason(v.pingReason)}`}</Text>}
           <Text>{'  '}</Text>
           <Button key="hide" label="hide" plain dimColor onPress={() => setHidden($, true)} />
+          {v.url !== '' && (
+            // Last, in its own box: a terminal without OSC 8 prints the address after the label, and then the whole
+            // link wraps to a line of its own instead of splitting row 1.
+            <Box>
+              <Text>{'  '}</Text>
+              <Link href={v.url} label={narrow ? 'dash ↗' : 'dashboard ↗'} />
+            </Box>
+          )}
         </Box>
-        {chips.length > 0 && rows > 2 && !agentsOff && (
+        {showStatus && status && (
+          <Box flexWrap="wrap">
+            {status.update && (
+              <Text>
+                <Text color="success">{status.update}</Text>
+                {(status.save || status.limit || status.cache || status.ctx) && <Text dimColor> │ </Text>}
+              </Text>
+            )}
+            {status.limit && (
+              <Text>
+                <Text dimColor>5h </Text>
+                <Text>{status.limit.pct}</Text>
+                {status.limit.saved && <Text dimColor> · {status.limit.saved}</Text>}
+              </Text>
+            )}
+            {status.save && (
+              <Text>
+                <Text color="success">saved {status.save.saved}</Text>
+                <Text dimColor> of </Text>
+                <Text>{status.save.of}</Text>
+                {status.label && <Text dimColor> session</Text>}
+                {status.subs && (
+                  <Text>
+                    <Text dimColor> · </Text>
+                    <Text color="success">saved {status.subs.saved}</Text>
+                    <Text dimColor> of </Text>
+                    <Text>{status.subs.of}</Text>
+                    <Text dimColor> subagents</Text>
+                  </Text>
+                )}
+                {status.pings && <Text color="cyan"> ↻ {status.pings} pings</Text>}
+              </Text>
+            )}
+            {(status.save || status.limit) && status.cache && <Text dimColor> │ </Text>}
+            {status.cache &&
+              (status.cache.isCold ? (
+                <Text dimColor>cache ○ cold {status.cache.time}</Text>
+              ) : (
+                <Text>
+                  <Text dimColor>cache </Text>
+                  <Text color={status.cache.color}>{status.cache.glyph} </Text>
+                  {status.wide && (
+                    <Text>
+                      <Text color={status.cache.color}>{status.cache.bar.replace(/░+$/, '')}</Text>
+                      <Text dimColor>{status.cache.bar.match(/░+$/)?.[0] ?? ''}</Text>
+                      <Text> </Text>
+                    </Text>
+                  )}
+                  <Text color={status.cache.color}>
+                    {status.cache.time}
+                    {status.cache.ping ? ' ↻' : ''}
+                  </Text>
+                </Text>
+              ))}
+            {(status.save || status.limit || status.cache) && status.ctx && <Text dimColor> │ </Text>}
+            {status.ctx && (
+              <Text>
+                <Text dimColor>ctx </Text>
+                {status.wide && (
+                  <Text>
+                    <Text color={status.ctx.color}>{status.ctx.bar.replace(/░+$/, '')}</Text>
+                    <Text dimColor>{status.ctx.bar.match(/░+$/)?.[0] ?? ''}</Text>
+                    <Text> </Text>
+                  </Text>
+                )}
+                <Text color={status.ctx.color}>{status.ctx.pct}</Text>
+                {status.ctx.isNear && status.wide && <Text color="error"> ⚠ rewrite near</Text>}
+              </Text>
+            )}
+            {v.isStale && <Text dimColor> ⏳</Text>}
+          </Box>
+        )}
+        {showAgents && (
           <Box flexWrap="wrap" columnGap={2}>
             <Text dimColor>{'└'} agents</Text>
             {chips.map(t => {
@@ -263,11 +449,16 @@ export const register: Register = on => {
             {v.subs.length > chips.length && <Text dimColor>+{v.subs.length - chips.length}</Text>}
           </Box>
         )}
-        {tip && rows > 3 && (
-          <Text dimColor>
-            tip: <Text color="suggestion">{tip}</Text>
-          </Text>
-        )}
+        {showTip &&
+          (tip ? (
+            <Text dimColor>
+              tip: <Text color="suggestion">{tip}</Text>
+            </Text>
+          ) : (
+            <Text dimColor wrap="truncate-end">
+              try <Text color="suggestion">{cmd.cmd}</Text> — {cmd.why}
+            </Text>
+          ))}
       </Box>
     )
   })
@@ -298,7 +489,7 @@ export const register: Register = on => {
           {v.url !== '' && <Link href={v.url} label="open dashboard ↗" />}
           {v.saved !== undefined && v.baseline !== undefined && v.baseline >= 0.005 && (
             <Text>
-              <Text color="success">saved {usd(v.saved)}</Text>
+              <Text color="success">saved {usd(Math.max(0, v.saved))}</Text>
               <Text dimColor> of {usd(v.baseline)} this session</Text>
             </Text>
           )}

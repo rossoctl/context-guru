@@ -326,3 +326,110 @@ func TestRepointLeavesAnotherPluginsScriptAlone(t *testing.T) {
 		})
 	}
 }
+
+// THE STATUS LINE MOVED INTO THE MOD (0.6.1). A line an install wrote by default (0.4.x to 0.6.0, no
+// `statusline_asked` record) is removed at the next SessionStart, once, with one line saying where it went;
+// unrelated keys stay. The first SessionStart of an older plugin wrote it; this simulates that by dropping
+// the record the 0.6.1 writer adds.
+func TestSessionStartRetiresTheDefaultStatusLine(t *testing.T) {
+	e := newRepointEnv(t)
+	v := e.version("0.6.1")
+	e.install(v, e.userFile(), "", true)
+	data := readJSON(t, e.userFile())
+	meta, _ := data["$context-guru"].(map[string]any)
+	delete(meta, "statusline_asked") // what 0.6.0's default install left
+	data["theme"] = "dark"
+	writeJSON(t, e.userFile(), data)
+
+	out := e.sessionStart(v)
+	if !strings.Contains(out, "moved into the Context Guru band") {
+		t.Errorf("session start said %q, want one line naming the band", out)
+	}
+	got := readJSON(t, e.userFile())
+	if got["statusLine"] != nil {
+		t.Errorf("statusLine = %v, want removed", got["statusLine"])
+	}
+	if got["theme"] != "dark" {
+		t.Errorf("the migration lost an unrelated key: %v", got)
+	}
+	if out := e.sessionStart(v); strings.Contains(out, "status line") {
+		t.Errorf("second session start said %q, want nothing", out)
+	}
+}
+
+// A line the user asked for (`/context-guru:statusline`, `install.sh --statusline`) stays, and is still re-pointed.
+func TestSessionStartKeepsAStatusLineTheUserAskedFor(t *testing.T) {
+	e := newRepointEnv(t)
+	e.install(e.version("0.6.1"), e.userFile(), "", true)
+	v2 := e.version("0.6.2")
+	if out := e.sessionStart(v2); strings.Contains(out, "moved into") {
+		t.Errorf("session start retired a line the user asked for: %q", out)
+	}
+	cmd, _, _ := statusLineOf(t, e.userFile())
+	if cmd != quoted(v2) {
+		t.Errorf("statusLine.command = %q, want it re-pointed at 0.6.2", cmd)
+	}
+}
+
+// The migration answers from our record only: a hand-written line with no record is the user's.
+func TestSessionStartNeverRetiresAForeignStatusLine(t *testing.T) {
+	e := newRepointEnv(t)
+	v := e.version("0.6.1")
+	theirs := map[string]any{"type": "command", "command": quoted(v)}
+	writeJSON(t, e.userFile(), map[string]any{"statusLine": theirs})
+	e.sessionStart(v)
+	if got := readJSON(t, e.userFile())["statusLine"]; got == nil {
+		t.Error("the migration removed a status line with no ownership record")
+	}
+}
+
+// Before 0.6.1 nothing recorded whether the user asked for a line, so only the EXACT default form is retired. A line
+// with flags (a layout the user picked) or a tuned refreshInterval was chosen: it stays, and is marked so it is never
+// looked at again. The retire takes a backup first, as `off` does.
+func TestSessionStartKeepsACustomisedPre061StatusLine(t *testing.T) {
+	for name, edit := range map[string]func(sl map[string]any){
+		"flags":           func(sl map[string]any) { sl["command"] = sl["command"].(string) + " --layout=detailed --hide=tools" },
+		"refreshInterval": func(sl map[string]any) { sl["refreshInterval"] = float64(5) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newRepointEnv(t)
+			v := e.version("0.6.1")
+			e.install(v, e.userFile(), "", true)
+			data := readJSON(t, e.userFile())
+			meta, _ := data["$context-guru"].(map[string]any)
+			sl, _ := data["statusLine"].(map[string]any)
+			delete(meta, "statusline_asked")
+			edit(sl)
+			meta["installed_statusline"] = sl["command"]
+			writeJSON(t, e.userFile(), data)
+
+			if out := e.sessionStart(v); strings.Contains(out, "moved into") {
+				t.Errorf("a customised line was retired: %q", out)
+			}
+			got := readJSON(t, e.userFile())
+			if got["statusLine"] == nil {
+				t.Fatal("the customised statusLine was removed")
+			}
+			if m, _ := got["$context-guru"].(map[string]any); m["statusline_asked"] != true {
+				t.Errorf("the kept line was not marked as asked for: %v", m)
+			}
+		})
+	}
+}
+
+func TestRetiringTheDefaultStatusLineTakesABackup(t *testing.T) {
+	e := newRepointEnv(t)
+	v := e.version("0.6.1")
+	e.install(v, e.userFile(), "", true)
+	data := readJSON(t, e.userFile())
+	delete(data["$context-guru"].(map[string]any), "statusline_asked")
+	writeJSON(t, e.userFile(), data)
+	e.sessionStart(v)
+	backups, err := filepath.Glob(filepath.Join(e.home, ".claude", "context-guru-settings-json", "settings.context-guru-backup-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) == 0 {
+		t.Error("the retire removed a statusLine with no backup to restore it from")
+	}
+}
