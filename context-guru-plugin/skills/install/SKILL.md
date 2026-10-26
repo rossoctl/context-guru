@@ -191,10 +191,11 @@ write routing while no proxy answers.
   config at that path we did not write). The proxy is fine; mention it and move on.
 - `statusline=on` — also installed; mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `skipped` is not an install failure.
 - `history_import=done` — Claude Code's history from before this install was imported once, so on day one
-  Cleanup can tell imported projects from measured ones, and a skill already used before install is not
-  reported as unused; quote `history_import_summary=`. It records what was used and when, not what unused
-  tools cost (only the proxy sees that, from now on). `already_done`/`skipped` need no mention. `failed` is
-  not an install failure: give `history_import_error=` and offer `history_import_retry=` verbatim.
+  Cleanup can tell imported projects from measured ones, and the removal advice warns before it lists a
+  skill that was used before install; quote `history_import_summary=`. It records what was used and
+  when, not what unused tools cost (only the proxy sees that, from now on). `already_done`/`skipped`
+  need no mention. `failed` is not an install failure: give `history_import_error=` and offer
+  `history_import_retry=` verbatim.
 
 ## 4. Then tell them
 
