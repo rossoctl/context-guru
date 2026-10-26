@@ -145,13 +145,13 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 			}
 			valid := true
 			for _, original := range span.Array() {
-				if !original.IsObject() || original.Get("role").String() == "" && original.Get("type").String() == "" {
+				if !responsesInputItem(original) {
 					valid = false
 					break
 				}
 			}
 			if !valid {
-				continue
+				continue // not wire input items: answer with the flattened string instead
 			}
 			for i, item := range items.Array() {
 				content := item.Get("content").String()
@@ -260,4 +260,23 @@ const (
 // isSummaryText reports whether content is a summarizer's spliced summary, from either summarizer.
 func isSummaryText(content string) bool {
 	return strings.HasPrefix(content, summaryHeader) || strings.HasPrefix(content, cacheAwareSummaryHeader)
+}
+
+// responsesInputItem reports whether a stashed element can go back into a Responses `input` array
+// as it is. summarize stashes the wire items it replaced, which always can. cache_aware_summarizer
+// stashes NORMALIZED chat messages, whose tool exchanges are a role=tool message and an assistant
+// message carrying tool_calls: spliced into `input` those make the Responses API return 400, so such
+// a stash is answered as a flattened string instead (#727 review, round 3).
+func responsesInputItem(v gjson.Result) bool {
+	if !v.IsObject() {
+		return false
+	}
+	switch role := v.Get("role").String(); role {
+	case "":
+		return v.Get("type").String() != ""
+	case "user", "assistant", "system", "developer":
+		return !v.Get("tool_calls").Exists() && !v.Get("tool_call_id").Exists()
+	default:
+		return false
+	}
 }

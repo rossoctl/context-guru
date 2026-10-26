@@ -83,5 +83,8 @@ func deferralPending(key string) bool {
 	warmDeferredMu.Lock()
 	_, warm := warmDeferred[key]
 	warmDeferredMu.Unlock()
-	return cold || warm
+	dispatchingMu.Lock()
+	moving := dispatching[key] > 0
+	dispatchingMu.Unlock()
+	return cold || warm || moving
 }

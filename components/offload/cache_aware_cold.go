@@ -188,8 +188,11 @@ func (s *CacheAwareSummarizer) deferWarm(conv string, d *coldDeferral) {
 		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
 		return
 	}
-	if prev != nil && prev.timer != nil {
-		prev.timer.Stop()
+	if prev != nil {
+		markDispatching(conv) // the replaced one leaves the registry now and is started below
+		if prev.timer != nil {
+			prev.timer.Stop()
+		}
 	}
 	d.timer = time.AfterFunc(coldDeferralFallback, func() { s.resolveWarmFallback(conv) })
 	warmDeferred[conv] = d
@@ -198,9 +201,36 @@ func (s *CacheAwareSummarizer) deferWarm(conv string, d *coldDeferral) {
 	if prev != nil {
 		atomic.AddInt64(&cacheAwareWarmDeferredReplaced, 1)
 		dispatchDeferred(prev, &cacheAwareWarmDeferredRefused)
+		doneDispatching(conv)
 	}
 }
 
+// dispatching counts, per thread key, the deferrals that have left a registry but whose
+// startAsyncSummary has not returned yet. A deferral is marked here BEFORE it leaves its registry
+// (under that registry's lock), so there is no moment when it is neither registered nor in flight;
+// WaitForSummaryForTest reads it, and a test that waits right after a request therefore cannot see
+// "nothing pending" while a dispatch is about to start.
+// betweenTakeAndStartForTest, set only by tests, runs after the hook has taken a warm deferral and
+// before it is started: the window a test waiting on the thread must still see as pending.
+var betweenTakeAndStartForTest func()
+
+var (
+	dispatchingMu sync.Mutex
+	dispatching   = map[string]int{}
+)
+
+func markDispatching(conv string) { dispatchingMu.Lock(); dispatching[conv]++; dispatchingMu.Unlock() }
+
+func doneDispatching(conv string) {
+	dispatchingMu.Lock()
+	if dispatching[conv]--; dispatching[conv] <= 0 {
+		delete(dispatching, conv)
+	}
+	dispatchingMu.Unlock()
+}
+
+// takeWarmDeferral removes and returns the thread's pending warm deferral, already marked as
+// dispatching; the caller must call doneDispatching(conv) once it has been started.
 func takeWarmDeferral(conv string) *coldDeferral {
 	warmDeferredMu.Lock()
 	defer warmDeferredMu.Unlock()
@@ -208,6 +238,7 @@ func takeWarmDeferral(conv string) *coldDeferral {
 	if !ok {
 		return nil
 	}
+	markDispatching(conv)
 	delete(warmDeferred, conv)
 	if d.timer != nil {
 		d.timer.Stop()
@@ -219,6 +250,7 @@ func (s *CacheAwareSummarizer) resolveWarmFallback(conv string) {
 	if d := takeWarmDeferral(conv); d != nil {
 		atomic.AddInt64(&cacheAwareWarmDeferredFallback, 1)
 		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
+		doneDispatching(conv)
 	}
 }
 
@@ -247,6 +279,7 @@ func takeColdDeferral(conv string) *coldDeferral {
 	if !ok {
 		return nil
 	}
+	markDispatching(conv)
 	delete(coldDeferred, conv)
 	if d.timer != nil {
 		d.timer.Stop()
@@ -262,6 +295,7 @@ func (s *CacheAwareSummarizer) resolveFallback(conv string) {
 	}
 	atomic.AddInt64(&cacheAwareColdDeferredFallbackFired, 1)
 	d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
+	doneDispatching(conv)
 }
 
 // ResolveDeferredCacheAwareSummary dispatches a summary held for the triggering turn's own forwarded
@@ -291,9 +325,14 @@ func ResolveDeferredCacheAwareSummary(session, threadID string) {
 	if d := takeColdDeferral(key); d != nil {
 		atomic.AddInt64(&cacheAwareColdDeferredResolved, 1)
 		d.s.startAsyncSummary(d.ctx, d.call, d.path, d.trigger, d.reserved, d.span, d.coveredCount)
+		doneDispatching(key)
 	}
 	if d := takeWarmDeferral(key); d != nil {
 		atomic.AddInt64(&cacheAwareWarmDeferredResolved, 1)
+		if betweenTakeAndStartForTest != nil {
+			betweenTakeAndStartForTest()
+		}
 		dispatchDeferred(d, &cacheAwareWarmDeferredRefused)
+		doneDispatching(key)
 	}
 }

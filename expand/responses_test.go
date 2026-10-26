@@ -1,6 +1,7 @@
 package expand
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -121,3 +122,31 @@ func TestResponsesSummaryExpandRestoresImageAsImage(t *testing.T) {
 		t.Fatalf("multimodal original was not restored in its native place: %s", next)
 	}
 }
+
+// #727 review, round 3. A cache_aware_summarizer stash holds NORMALIZED chat messages. When its span
+// held a tool exchange, those are a role=tool message and an assistant message with tool_calls,
+// which are not Responses input items: restored in place they make the Responses API return 400.
+// Such a stash must be answered as the flattened string, and the request must stay valid.
+func TestResponsesExpandOfACacheAwareToolStashStaysValid(t *testing.T) {
+	summary := "=== Compacted Context (cache-aware summary) ===\nfacts\n" + Marker("HASH")
+	body := []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"task"},{"role":"user","content":` +
+		jsonString(summary) + `},{"role":"user","content":"continue"}],"tools":[{"type":"function","name":"` + ToolName + `","parameters":{"type":"object"}}]}`)
+	resp := []byte(`{"output":[{"type":"function_call","call_id":"c1","name":"` + ToolName + `","arguments":"{\"id\":\"HASH\"}"}]}`)
+	stash := `[{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"read","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"t1","content":"tool output"}]`
+	next, ok := Continuation("responses", body, resp, map[string]string{"c1": stash})
+	if !ok {
+		t.Fatal("continuation failed")
+	}
+	gjson.GetBytes(next, "input").ForEach(func(_, item gjson.Result) bool {
+		if r := item.Get("role").String(); r == "tool" || item.Get("tool_calls").Exists() {
+			t.Fatalf("a normalized tool message was spliced into the Responses input: %s", item.Raw)
+		}
+		return true
+	})
+	if got := gjson.GetBytes(next, "input.#(type==\"function_call_output\").output").String(); got != stash {
+		t.Fatalf("the stash did not travel as the flattened answer: %q", got)
+	}
+}
+
+func jsonString(s string) string { b, _ := json.Marshal(s); return string(b) }
