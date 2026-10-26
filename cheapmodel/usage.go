@@ -8,9 +8,11 @@ import (
 )
 
 // Usage tracks cumulative token usage of the cheap (config-source) model across
-// ALL NeedsModel component calls in this process — extract_llm, extract_llm_sweep,
-// summarize and agentdiet all land in these totals, so the global figure is every
-// cheap-model call in the process, not one component's cost. Per-component
+// every component that calls a model in this process — extract_llm, extract_llm_sweep,
+// summarize, cache_aware_summarizer and agentdiet all land in these totals, so the
+// global figure is every cheap-model call in the process, not one component's cost.
+// (Components that call a model, not NeedsModel implementors: the extract pair goes
+// through components.Model without implementing NeedsModel.) Per-component
 // attribution exists since #178: each component prices its own calls from
 // ModelCall.CostUSD at the rates of the model it addressed (metrics.RecordExtractionSpend).
 // Usage() survives as /stats' labelled fallback for when no component priced anything
