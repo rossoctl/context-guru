@@ -442,7 +442,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 		}
 		if s, ok := suggest(st, win[statKey{st.Kind, st.Name}]); ok {
 			out.Suggestions = append(out.Suggestions, s)
-		} else if st.SessionsUsed == 0 && st.Tokens > 0 {
+		} else if st.SessionsUsed == 0 && st.Calls == 0 && st.Tokens > 0 { // never used, below the bar
 			out.Withheld++
 		}
 	}
@@ -525,7 +525,9 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	}
 	// Positive, sufficient observation, and every clause is required.
 	span := time.Duration(w.last-w.first) * time.Millisecond
-	if st.SessionsUsed > 0 || st.Tokens <= 0 ||
+	// Calls as well as SessionsUsed: a tool called in a session with no declaration row for it has
+	// SessionsUsed 0 and was still used, and suggesting its removal is the worst advice this gives.
+	if st.SessionsUsed > 0 || st.Calls > 0 || st.Tokens <= 0 ||
 		w.sessions < suggestMinSessions || span < suggestMinSpan {
 		return Suggestion{}, false
 	}

@@ -572,7 +572,7 @@ function shortSessionsDominate(rep) {
  */
 function renderUnused(host, rep) {
   const rows = rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0
       && !t.builtin && t.kind !== 'server_tool');
   const groups = groupRemovable(rows);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
@@ -1253,13 +1253,13 @@ function toolTable(host, rep) {
     return;
   }
   for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used)
-        : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never')
+        : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       // Every row, used or not. The actionable list above covers the never-invoked ones; a reader
@@ -1375,15 +1375,15 @@ function skillsPanel(host, rep) {
   const body = el('tbody');
   table.appendChild(body);
   for (const t of s.skills) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       // The switch, on EVERY skill and not only the never-invoked ones. A skill the reader used
       // once and does not want to keep paying for is exactly the case the actionable list above
       // cannot reach, and editing a config file by hand was the only route to it.
       el('td', {}, excludeToggle(t)),
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       el('td', {}, removalDetails(t, 'Command'))));
@@ -1640,8 +1640,8 @@ function renderBuiltins(host, rep) {
       el('td', {}, kindPill(t)),
       numTd(t.tokens),
       el('td', { class: 'num', text: pct(t.share_pct, 1) }),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       // FOLDED, unlike every other command on this page, and that asymmetry is the point. The
       // requirement for this section is that it be visible and deliberately not easy to act on;
       // twenty-two open copy-boxes reading `claude --disallowedTools "Bash"` is the opposite of
@@ -2318,7 +2318,7 @@ function renderTools() {
 /** removableRows are the never-called, removable MCP tools and skills: the one ranking this tab and the Overview share. */
 function removableRows(rep) {
   return rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
 }
 
 /** invSection is a collapsed `Details` block: one sentence of what it is, then the content. */

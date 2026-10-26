@@ -923,10 +923,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
-		calls := usedIn[dr.session][k]
-		if calls > 0 {
+		// Calls is set after this loop, over every session in scope; here only the per-session facts.
+		if usedIn[dr.session][k] > 0 {
 			st.SessionsUsed++
-			st.Calls += calls
 			continue
 		}
 		// UnusedReads and UnusedUSD are computed for every row, aside included: the row-level
@@ -959,6 +958,20 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if !aside && !skillEntry { // same reason as declTok above
 			unusedTok[dr.session] += dr.tokens
 		}
+	}
+	// Calls count every call in scope, the same set lastUsedOf reads. The loop above saw a call only
+	// in a session that also declared the tool, so a call made where the tool had no declaration row
+	// (deferred, or a session that began before the proxy) set last_used and left calls at 0, and
+	// calls 0 files a tool as never used. SessionsUsed and the unused figures stay per session: a
+	// session that carried the tool without calling it still paid for it.
+	allCalls := map[statKey]int{}
+	for _, m := range usedIn {
+		for k, n := range m {
+			allCalls[k] += n
+		}
+	}
+	for k, st := range stats {
+		st.Calls = allCalls[k]
 	}
 
 	// Coverage, and the honest denominator: only captured sessions can say anything about
@@ -1043,7 +1056,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if st.Kind == KindSkill {
 			rep.Skills.Skills = append(rep.Skills.Skills, *st)
 			rep.Skills.Declared++
-			if st.SessionsUsed > 0 {
+			if st.SessionsUsed > 0 || st.Calls > 0 { // the verdict's own test of "invoked"
 				rep.Skills.Invoked++
 				rep.Skills.Calls += st.Calls
 			}
@@ -1174,7 +1187,7 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		if !t.CarryPriced {
 			s.CarryPriced = false
 		}
-		if t.SessionsUsed > 0 {
+		if t.SessionsUsed > 0 || t.Calls > 0 { // the verdict's own test of "invoked"
 			s.ToolsUsed++
 		}
 		if t.SessionsDeclared > s.SessionsDeclared {

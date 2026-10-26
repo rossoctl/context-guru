@@ -423,6 +423,11 @@ func addChild(o *InsightsOwner, r ToolStat) {
 // line traces to a measurement.
 func verdictFor(r ToolStat, scope string, invoked, qualified bool) (string, string) {
 	switch {
+	case invoked && r.SessionsUsed == 0:
+		// Called, but only in sessions that did not declare it (deferred, or begun before the
+		// proxy): the session count is 0 and would be no evidence, so quote the calls.
+		return VerdictKeep, "called " + plural(r.Calls, "time") +
+			", in sessions that did not declare it — it earns the weight it carries"
 	case invoked:
 		// Kept because it EARNED its place, which is a different fact from a built-in's.
 		return VerdictKeep, "invoked in " + plural(r.SessionsUsed, "session") +
