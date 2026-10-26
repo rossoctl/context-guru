@@ -1355,9 +1355,13 @@ type KeepAliveCalc struct {
 
 // KeepAliveCalc replays the account's own gaps against the K ladder at one idle interval.
 //
-// Everything is priced from the ROW'S OWN MODEL rates, per the operator's price list. The one
-// number that is not the account's own is the prefix, which the caller supplies — because
+// Pricing rests on TWO caller-supplied representatives, not per-row values: the prefix and
+// the model. One modelinfo.Price is resolved from the model argument up front and reused for
+// every row and every K, so an account that runs several models is priced at its
+// representative's rates, not each row's own. The prefix is supplied for the same reason:
 // per-ping cost is bimodal (p50 $0.0004, p99 $0.2275) and there is no honest average of it.
+// The rates themselves are the operator's price list; a model missing from it leaves every
+// dollar field omitted (Priced above).
 func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model string,
 	price func(string) (modelinfo.Price, bool), currentPings int) (*KeepAliveCalc, error) {
 	if idleSeconds <= 0 {
