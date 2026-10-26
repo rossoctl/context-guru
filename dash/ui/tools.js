@@ -929,8 +929,10 @@ function removalGroup(g, rep) {
   // TOOL only: a reader who had decided to drop a nineteen-tool server had to tick nineteen
   // boxes, each one a separate write, each one its own prefix rebuild — which is the one thing
   // the reversibility note tells them not to do.
+  // deferred: one deferred tool makes the server unfilterable, as on the server side.
   const srv = many && g.sub === 'MCP server'
-    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens } : null;
+    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens,
+      deferred: g.items.some((t) => t.deferred) } : null;
   const head = el('div', { class: 'inv-group-head' },
     el('div', { class: 'inv-group-id' },
       srv ? excludeToggle(srv) : null,
@@ -1423,6 +1425,10 @@ const SKILL_SWITCH_REASON = 'This switch is inert on a skill row for now. The se
   + 'than the one skill it names. The listing\'s totals are unaffected. Use the settings snippet '
   + 'at the top of the page, or the command on this row — both edit your own configuration and '
   + 'neither goes through that parser.';
+// A deferred MCP tool is a name in a message, not a `tools` element, and the proxy filter removes
+// only elements: switching it off would save nothing.
+const DEFERRED_SWITCH_REASON = 'Claude Code sends this tool as a deferred name, which the proxy '
+  + 'filter cannot remove. Use the command on this row instead.';
 
 /**
  * excludeToggle is the one-click opt-out, extracted so a table row and a card row share it.
@@ -1438,10 +1444,11 @@ function excludeToggle(t) {
   // and a built-in cannot be dropped from here at all, and a skill cannot be dropped SAFELY until
   // the parser can name one (SKILL_SWITCH_SAFE).
   const gated = t.kind === 'skill' && !SKILL_SWITCH_SAFE;
-  const fixed = t.kind === 'server_tool' || t.builtin || gated;
+  const fixed = t.kind === 'server_tool' || t.builtin || gated || t.deferred;
   const cb = el('input', {
     type: 'checkbox', 'data-testid': 'inv-toggle-' + key, id: 'inv-cb-' + key,
     title: gated ? SKILL_SWITCH_REASON
+      : t.deferred ? DEFERRED_SWITCH_REASON
       : fixed ? 'This one is not yours to drop from here.'
         : (tools.control ? 'Stop sending this declaration' : 'One-click opt-out is not enabled on '
           + 'this proxy — use the command beside this row'),

@@ -72,8 +72,11 @@ type AdaptToolsItem struct {
 	// Sufficient: declared in at least suggestMinSessions sessions spanning suggestMinSpan, the
 	// bar the declaration filter's own suggestions are held to.
 	Sufficient bool   `json:"sufficient"`
-	RemoveAs   string `json:"remove_as"` // the toolfilter `remove` entry
-	Suggest    string `json:"suggest"`   // the client-side change that stops sending it
+	RemoveAs   string `json:"remove_as"` // the toolfilter `remove` entry; "" when ClientOnly
+	// ClientOnly: a deferred MCP server or tool, which the proxy filter cannot remove. Listed with
+	// its client change and left out of every filter option.
+	ClientOnly bool   `json:"client_only,omitempty"`
+	Suggest    string `json:"suggest"` // the client-side change that stops sending it
 	// Remove is the same change for the shared /context-guru:adapt renderer, and LastUsedMS is
 	// always null: every item here is unused in the window.
 	Remove     string `json:"remove"`
@@ -693,6 +696,10 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 	if err != nil {
 		return nil, err
 	}
+	deferred, err := d.deferredNames(f, where, args)
+	if err != nil {
+		return nil, err
+	}
 	usedTool, usedServer, usedSkill := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, u := range uses {
 		usedTool[u.name] = true
@@ -715,6 +722,11 @@ func (d *DB) AdaptTools(f Filter, price func(string) (modelinfo.Price, bool), st
 			metaMu.Lock()
 			if meta[key] == nil {
 				meta[key] = it
+			}
+			// One deferred tool makes its whole item client-only: the filter cannot remove a server
+			// whose tools it cannot see.
+			if deferred[name] {
+				meta[key].RemoveAs, meta[key].ClientOnly = "", true
 			}
 			metaMu.Unlock()
 		}
@@ -768,10 +780,17 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	var allUSD, enoughUSD, enoughLow, enoughHigh float64
 	from := time.UnixMilli(out.Window.Since).UTC().Format("2006-01-02")
 	to := time.UnixMilli(out.Window.Until).UTC().Format("2006-01-02")
+	var clientOnly int
+	var clientOnlyUSD float64
 	for i := range out.Items {
 		it := &out.Items[i]
 		it.Remove = it.Suggest
 		it.Basis = fmt.Sprintf("declared in %d sessions, unused in the observed window %s to %s", it.Sessions, from, to)
+		if it.ClientOnly {
+			// The filter cannot remove it; the item still lists its client change.
+			clientOnly, clientOnlyUSD = clientOnly+1, clientOnlyUSD+it.USD
+			continue
+		}
 		all, allUSD = append(all, it.RemoveAs), allUSD+it.USD
 		if it.Sufficient {
 			enough, enoughUSD = append(enough, it.RemoveAs), enoughUSD+it.USD
@@ -813,6 +832,9 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.PaybackWeeks = &w
 	}
 	switch {
+	case len(all) == 0 && clientOnly > 0:
+		out.Summary = fmt.Sprintf("%d declared items were unused from %s to %s (%s). Claude Code sends them as deferred tools, which the proxy cannot filter: remove them in the client with the command on each item.",
+			clientOnly, from, to, usdText(clientOnlyUSD))
 	case len(all) == 0:
 		out.Summary = "Every MCP server, MCP tool and skill you declared was used in this window."
 	case len(enough) > 0 && enoughUSD <= out.RewriteUSD:

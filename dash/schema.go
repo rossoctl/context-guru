@@ -642,6 +642,12 @@ const additiveDDL2 = `
 -- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
 -- so on an existing database the column the index names does not exist yet.
 CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
+-- Deferred MCP rows (tool_declarations.deferred), for deferredNames on every inventory read and
+-- IsDeferredDecl on a filter write. Partial, so it holds only those rows and costs nothing on a
+-- database without them. Here for the same reason as idx_requests_project: it names a column
+-- addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
+  ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -747,6 +753,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
+	// 1 marks a deferred MCP tool (Decl.Deferred): read off the deferred-tools list, so the proxy
+	// filter cannot remove it. Old rows read 0, which is right: they came from `tools`.
+	{"tool_declarations", "deferred", "INTEGER NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	// Added with the gates/events split. Additive with a default, so an existing database keeps
 	// serving: pre-migration rows read as '' and the UI renders that as "unknown" rather than as

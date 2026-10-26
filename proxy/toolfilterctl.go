@@ -136,6 +136,21 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 			"agent rather than saving you anything, so a manager has to make that change")
 		return
 	}
+	// A deferred MCP tool is a name in a message, not a `tools` element, so the filter cannot
+	// remove it: storing the exclusion would save nothing and hide the item from the report.
+	// Fail closed when the lookup itself fails, for the same reason. An include is never refused.
+	if exclude && h.rec != nil {
+		deferred, err := h.rec.DB().WithContext(r.Context()).IsDeferredDecl(t.ID, name)
+		if err != nil {
+			ctlErr(w, http.StatusServiceUnavailable, "could not check whether this tool is deferred; try again")
+			return
+		}
+		if deferred {
+			ctlErr(w, http.StatusConflict, "Claude Code sends this as a deferred tool, which the proxy "+
+				"filter cannot remove; use the client command shown beside it instead")
+			return
+		}
+	}
 	if code, msg := h.updateRemoved(t, func(names []string) []string {
 		return withDecl(names, name, exclude)
 	}); code != 0 {
