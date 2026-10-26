@@ -360,6 +360,23 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 	return string(b), code, sentinel
 }
 
+// waitWritten polls until a background fake proxy has published `path` (its argv, or a sentinel),
+// and returns the content. start-proxy.sh returns on ITS own clock — the health budget — and under
+// load that can beat the fork of the fake that writes the file, so reading the file once races that
+// fork (#314). A fake that holds the port answers /healthz only after its write, which orders the
+// write before the script's return; the fakes that never answer give no such order, and theirs are
+// the files this must wait for. Returns ("", false) after ~10 s so the caller fails with its own
+// diagnosis of WHY nothing was launched.
+func waitWritten(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b), true
+		}
+	}
+	return "", false
+}
+
 // TestHookIsSilentAndInertWhereRoutingIsNotConfigured is the property that makes a user-scope
 // plugin acceptable at all.
 //
@@ -409,11 +426,12 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if code != 0 {
 				t.Errorf("exit %d; the hook must never fail a session", code)
 			}
-			_, started := os.Stat(sentinel)
 			if c.routed {
-				if started != nil {
+				// The sentinel is touched by the background fake, which under load can trail this
+				// script's return (#314) — so the control waits for it rather than reading once.
+				if _, ok := waitWritten(t, sentinel); !ok {
 					t.Errorf("the hook did NOT start a proxy in a routed project — so every "+
-						"silent row above proves nothing: %v\noutput:\n%s", started, out)
+						"silent row above proves nothing\noutput:\n%s", out)
 				}
 				if strings.TrimSpace(out) == "" {
 					t.Errorf("the hook said nothing in a routed project where the proxy never " +
@@ -424,7 +442,7 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if strings.TrimSpace(out) != "" {
 				t.Errorf("the hook printed output in an unrouted project: %q", out)
 			}
-			if started == nil {
+			if _, err := os.Stat(sentinel); err == nil {
 				t.Error("the hook started a proxy in a project that is not routed to it")
 			}
 		})
@@ -1793,12 +1811,17 @@ func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
 			} else if !strings.Contains(said, c.wantSaid) {
 				t.Errorf("did not report the discarded argument (want %q):\n%s", c.wantSaid, said)
 			}
-			launched, _ := os.ReadFile(argv)
+			// The fake never answers /healthz, so the script returns on its 1 s budget — which under
+			// load can beat the fake's fork. Wait for the file instead of reading it once (#314).
+			launched, ok := waitWritten(t, argv)
+			if !ok {
+				t.Fatalf("the proxy was never launched, so its argv says nothing:\n%s", out)
+			}
 			if c.wantUp == "" {
-				if strings.Contains(string(launched), "--anthropic-upstream") {
+				if strings.Contains(launched, "--anthropic-upstream") {
 					t.Errorf("an upstream reached argv from a malformed argument: %s", launched)
 				}
-			} else if !strings.Contains(string(launched), "--anthropic-upstream "+c.wantUp) {
+			} else if !strings.Contains(launched, "--anthropic-upstream "+c.wantUp) {
 				t.Errorf("argv missing the upstream: %s", launched)
 			}
 		})
@@ -1852,9 +1875,11 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 	}
 	t.Logf("output:\n%s", out)
 
-	// The positive: --bin was honoured, so the proxy actually started from that path.
-	launched, _ := os.ReadFile(argv)
-	if len(launched) == 0 {
+	// The positive: --bin was honoured, so the proxy actually started from that path. Waited for,
+	// not read once: the fake never answers /healthz, so the script's return does not order the
+	// fake's write (#314), and the absence of the file is itself the finding below.
+	launched, ok := waitWritten(t, argv)
+	if !ok {
 		t.Errorf("--bin was eaten as --upstream's rejected value, so the binary fell back to name "+
 			"resolution and nothing started. Output was:\n%s", out)
 	}
@@ -1867,7 +1892,7 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 		t.Errorf("the path after --bin was treated as a stray argument, which means --bin was "+
 			"consumed by the rejected --upstream:\n%s", out)
 	}
-	if strings.Contains(string(launched), "--anthropic-upstream") {
+	if strings.Contains(launched, "--anthropic-upstream") {
 		t.Errorf("an upstream reached argv from a rejected value: %s", launched)
 	}
 }
@@ -4299,8 +4324,13 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if err != nil {
 			t.Fatalf("must never fail a session: %v\n%s", err, out)
 		}
-		launched, _ := os.ReadFile(argv)
-		if !strings.Contains(string(launched), "--listen 127.0.0.1:"+port) {
+		// The fake never answers /healthz, so the script returns on its 1 s budget, which under load
+		// can beat the fake's write — wait for the file instead of reading it once (#314).
+		launched, ok := waitWritten(t, argv)
+		if !ok {
+			t.Fatalf("the proxy was never launched, so --port was never honoured:\n%s", out)
+		}
+		if !strings.Contains(launched, "--listen 127.0.0.1:"+port) {
 			t.Errorf("the proxy did not listen on the port passed as an argument: %s\n%s", launched, out)
 		}
 		// The pidfile is what uninstall uses, and it is named after the port — so a port that reached
