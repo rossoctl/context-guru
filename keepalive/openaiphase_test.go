@@ -64,7 +64,7 @@ func TestAPreExpirySubstituteTakesAnOpenAIPing(t *testing.T) {
 }
 
 // The default window follows the keeper's own slack; an operator's value is kept as set. On
-// Anthropic at the defaults nothing changes: 300 s - 270 s is inside the 60 s default.
+// Anthropic with a 270 s idle (as below) the slack is 300 s - 270 s = 30 s, inside the 60 s default.
 func TestTheSubstituteWindowCoversTheKeepersOwnSlack(t *testing.T) {
 	anthropic := substituteWindow(0, cacheLifetime(bschemas.Anthropic, false), 270*time.Second)
 	if anthropic != components.DefaultPreExpiry {
