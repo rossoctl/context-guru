@@ -434,6 +434,13 @@ type Ctx struct {
 	// the cached prefix changes, and the model reads the content from the inserted copy instead.
 	// Nil (the default, and whenever the anchor cannot be honoured) is today's behaviour.
 	Restored map[string]string
+	// CacheAnchorToolID is set by a component that SPLICED the transcript (cache_aware_summarizer,
+	// #723): the tool_call_id of the last tool_result it kept verbatim after the summary. The host's
+	// count-changing rebuild writes one cache_control breakpoint onto that block in the raw body,
+	// when the provider's 4-breakpoint cap leaves room. Without it, the history after a splice is
+	// text turns only, and a provider entry that ends at a text turn is never read by the next
+	// request, so every turn after a splice re-writes the whole kept history. "" = no anchor.
+	CacheAnchorToolID string
 	// AllowSummarySpan is supplied by a wire adapter when only some normalized
 	// spans can be rebuilt without dropping opaque provider state. Nil means the
 	// ordinary Chat/Anthropic adapter has no extra restriction.

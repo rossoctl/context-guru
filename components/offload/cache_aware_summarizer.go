@@ -677,6 +677,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
 		}
 		req.Input = out
+		c.CacheAnchorToolID = lastKeptToolResultID(out, headCount+1)
 		return keys, nil
 	}
 	// declineButReplayStale is every later decline's fallback: a checkpoint whose covered hash
@@ -692,6 +693,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 					rep.Irreversible = true
 				}
 				req.Input = out
+				c.CacheAnchorToolID = lastKeptToolResultID(out, headCount+1)
 				return keys, nil
 			}
 		}
@@ -731,6 +733,14 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		rep.Gate("cache_state_declined_" + phase.String())
 	}
 
+	// KEEP THE LAST TOOL EXCHANGE OUT OF A FRESH SPAN (#723). The provider never reads a cache entry
+	// that ends at a text turn on the next request; it reads one that ends at a tool_result. A splice
+	// that folded every tool exchange away left the kept history as text turns only, so every later
+	// turn re-wrote all of it (measured: read 12,939, write 2,029 on the turn after a splice). Kept
+	// verbatim, and marked by the host (CacheAnchorToolID), that exchange gives the next turn an
+	// entry to read (measured: read 21,563, write 98). The cut is frozen in the checkpoint's
+	// CoveredCount, so later turns keep the same exchange without recomputing it.
+	end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
 		rep.Gate("summary_span_below_min_tokens")
