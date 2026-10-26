@@ -37,7 +37,7 @@ function navFromSource() {
   }
   // The self-mounters declare their own group and position; splice them in the same way
   // mountTab does, so `after:` is exercised rather than assumed.
-  for (const f of ['tools.js', 'kvcache.js', 'campaigns.js']) {
+  for (const f of ['tools.js', 'insights.js', 'kvcache.js', 'campaigns.js']) {
     const call = read(f).match(/mountTab\(\{([\s\S]*?)\}\)/);
     assert.ok(call, `${f} no longer calls mountTab()`);
     const field = (k) => (call[1].match(new RegExp(k + ":\\s*'([a-z]+)'")) || [])[1];
@@ -79,7 +79,7 @@ function loadApp() {
   };
   const names = Object.keys(stub);
   const api = new Function(...names,
-    read('app.js') + '\n;return { parseURL, urlFor, resolveNav, navPath, state, DIMS, GROUP_OF };')(
+    read('app.js') + '\n;return { parseURL, urlFor, resolveNav, navPath, state, DIMS, GROUP_OF, REMOVED_VIEW };')(
     ...names.map((n) => stub[n]));
   api.at = (hash) => { loc.hash = hash; return api.parseURL(); };
   // urlFor reads `state`, so a round-trip is: parse a hash, adopt it, write it back.
@@ -99,8 +99,10 @@ for (const [view, group] of MOUNTED) app.GROUP_OF.set(view, group);
 const VIEWS = [...NAV.values()].flat().concat('overview');
 
 // ── 1. every view, by its bare legacy name and in canonical form ───────────
-test('all 16 views resolve from a bare #<view> and canonicalise to #/<group>/<view>', () => {
-  assert.equal(VIEWS.length, 16, 'the nav is no longer 16 views; update this table');
+// 17: 13 in index.html and 4 self-mounted (tools, insights, kvcache, campaigns). It read 16 while
+// this harness left insights.js (Cleanup) out, so Cleanup was never checked here.
+test('all 17 views resolve from a bare #<view> and canonicalise to #/<group>/<view>', () => {
+  assert.equal(VIEWS.length, 17, 'the nav is no longer 17 views; update this table');
   for (const v of VIEWS) {
     assert.equal(app.at('#' + v).view, v, `#${v} must still resolve to ${v}`);
     const canon = app.roundTrip('#' + v);
@@ -222,6 +224,11 @@ test('#/group/view, #/group alone, and a stale group segment', () => {
   assert.equal(app.at('#/savings/history').view, 'insights');
   assert.equal(app.at('#savings/history').view, 'insights');
   assert.equal(app.at('#history').view, 'insights');
+  // A removed view must send a bookmark to a view the nav really has; renaming Cleanup's view would
+  // otherwise turn every old History link into a blank page.
+  for (const [gone, to] of Object.entries(app.REMOVED_VIEW)) {
+    assert.ok(app.GROUP_OF.has(to), `removed view ${gone} points at ${to}, which the nav does not have`);
+  }
   // Filters ride along on both forms.
   assert.equal(app.at('#/savings/usage?model=m1').filter.model, 'm1');
 });
@@ -248,13 +255,13 @@ test('an unknown, empty or mis-cased hash resolves to overview', () => {
 test('the nav, the loaders and the view sections agree', () => {
   const html = read('index.html');
   for (const v of VIEWS) {
-    assert.ok(app.GROUP_OF.has(v) || ['tools', 'kvcache', 'campaigns'].includes(v),
+    assert.ok(app.GROUP_OF.has(v) || ['tools', 'insights', 'kvcache', 'campaigns'].includes(v),
       `${v} has no group`);
   }
   // A tab whose section is missing is a tab that switches to a blank page. The three
   // self-mounted sections are built in JS, so they are checked in their own files.
   for (const v of VIEWS) {
-    if (['tools', 'kvcache', 'campaigns'].includes(v)) continue;
+    if (['tools', 'insights', 'kvcache', 'campaigns'].includes(v)) continue;
     assert.ok(html.includes(`id="view-${v}"`), `no section for ${v}`);
     assert.ok(html.includes(`aria-labelledby="tab-${v}"`), `${v}'s panel names no tab`);
     assert.ok(html.includes(`aria-controls="view-${v}"`), `${v}'s tab controls no panel`);
