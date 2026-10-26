@@ -13,8 +13,15 @@ import (
 // projectAPI wires a real API over a store, so these go through the mounted route rather than
 // calling the handler directly — the scope decision lives in the route table, and a test that
 // bypasses it would not exercise it.
+//
+// The home is an EMPTY temp dir, not "": with "" the insights handler reads the runner's real
+// ~/.claude — it parses every transcript under projects (90 MB on a measured machine) and walks
+// the whole plugin cache — so the test's cost was a property of whatever machine ran it, and on
+// a loaded box under -race it went past the route's fixed 10 s handler timeout (#700). No test
+// here asserts on transcript or skill data, and an empty tree keeps the route's cost about the
+// store, which is its subject.
 func projectAPI(t *testing.T, db *DB) *http.ServeMux {
-	return projectAPIWithHome(t, db, "")
+	return projectAPIWithHome(t, db, t.TempDir())
 }
 
 // projectAPIWithHome is projectAPI pointed at a transcript tree the test controls, for the
