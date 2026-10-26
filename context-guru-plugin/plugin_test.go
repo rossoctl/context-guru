@@ -8,6 +8,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -335,9 +336,16 @@ func TestSettingsRefusesToRewriteABrokenFile(t *testing.T) {
 // CONTEXT_GURU_BIN points at a sentinel script: if the hook decides to launch a proxy, the
 // sentinel file appears. That is how "did it start something?" is asserted, rather than by
 // looking for a process.
+//
+// Bounded at one minute (#297): a start-proxy.sh that hangs (a stuck child holding the output
+// pipe, a port wedged by leftovers from an earlier killed run on the shared box) used to hang the
+// test binary until its own 10-minute timeout, ending the whole run with a panic and no result for
+// any test after this one. A deadline turns that into a fast failure with the output so far.
 func runStart(t *testing.T, env map[string]string) (out string, code int, startedSentinel string) {
 	t.Helper()
 	requireTool(t, "bash")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "started")
 	fake := filepath.Join(dir, "fake-proxy")
@@ -345,7 +353,7 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_BIN="+fake, "TMPDIR="+dir)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -543,7 +551,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	// Bounded (#297): this test once hung to the binary's own 10-minute timeout on the shared box,
+	// taking the whole run's result with it; a deadline turns that into a fast failure.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t),
 		"CLAUDE_PLUGIN_OPTION_PORT="+port,
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
@@ -557,8 +569,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 	if !strings.Contains(string(b), "proxy up on 127.0.0.1:"+port) {
 		t.Fatalf("the hook returned without reporting a healthy proxy:\n%s", b)
 	}
-	// The claim is that it returned only AFTER /healthz answered, so it must answer now.
-	resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+	// The claim is that it returned only AFTER /healthz answered, so it must answer now. Bounded
+	// (#297): an unbounded Get against a port left half-open by an earlier killed run hangs this
+	// test to the binary timeout; a short client timeout fails it with the connection state named.
+	probe := &http.Client{Timeout: 5 * time.Second}
+	resp, err := probe.Get("http://127.0.0.1:" + port + "/healthz")
 	if err != nil {
 		t.Fatalf("the hook reported the proxy up, but /healthz does not answer: %v", err)
 	}
