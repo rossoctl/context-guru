@@ -1,6 +1,6 @@
 package plugin
 
-// The dashboard skill opens the History and Cleanup tabs of THIS install's proxy.
+// The dashboard skill opens the Cleanup tab of THIS install's proxy.
 //
 // Executed rather than reviewed, like the other scripts here: the failures that matter are all
 // "it opened the wrong thing" or "it opened a dead page", and none is visible by reading.
@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -48,13 +49,14 @@ func runDashboard(t *testing.T, extra ...string) (out string, opened []string, c
 	return string(b), opened, code
 }
 
-// fakeDashboard serves /api/history so the liveness probe passes, and returns its port.
+// fakeDashboard serves /api/capture so the liveness probe passes, and returns its port. Only that
+// route: a probe of a removed route (/api/history) must fail here as it would on a real proxy.
 func fakeDashboard(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/history" {
+		if r.URL.Path == "/api/capture" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"installed_skills":0}`))
+			_, _ = w.Write([]byte(`{"mode":"active"}`))
 			return
 		}
 		http.NotFound(w, r)
@@ -67,19 +69,20 @@ func fakeDashboard(t *testing.T) string {
 	return port
 }
 
-// A live install: both tabs opened, on the RESOLVED port, and both URLs printed.
-func TestTheDashboardOpensBothTabsOnTheResolvedPort(t *testing.T) {
+// A live install: the Cleanup tab opened, on the RESOLVED port, and its URL printed. The History
+// tab is gone, so it is neither opened nor printed.
+func TestTheDashboardOpensCleanupOnTheResolvedPort(t *testing.T) {
 	port := fakeDashboard(t)
 	out, opened, code := runDashboard(t, "CONTEXT_GURU_DASHBOARD_PORT="+port)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	want := []string{
-		"http://127.0.0.1:" + port + "/dashboard/#savings/history",
-		"http://127.0.0.1:" + port + "/dashboard/#savings/insights",
-	}
+	want := []string{"http://127.0.0.1:" + port + "/dashboard/#savings/insights"}
 	if strings.Join(opened, "\n") != strings.Join(want, "\n") {
-		t.Errorf("opened %q; want exactly %q, History first", opened, want)
+		t.Errorf("opened %q; want exactly %q", opened, want)
+	}
+	if strings.Contains(out, "#savings/history") {
+		t.Errorf("output still links the removed History tab:\n%s", out)
 	}
 	// Printed as well as opened: over SSH or on a headless machine the open does nothing, and the
 	// URLs are then the only way in.
@@ -154,7 +157,7 @@ func TestTheDashboardCanPrintWithoutOpening(t *testing.T) {
 		lb, _ := os.ReadFile(log)
 		t.Errorf("--no-open opened %q anyway", strings.TrimSpace(string(lb)))
 	}
-	if !strings.Contains(string(b), "/dashboard/#savings/history") {
+	if !strings.Contains(string(b), "/dashboard/#savings/insights") {
 		t.Errorf("--no-open printed no URL:\n%s", b)
 	}
 }
@@ -169,14 +172,39 @@ func TestTheDashboardSkillIsLockedToItsScript(t *testing.T) {
 	if !strings.Contains(body, "allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dashboard.sh") {
 		t.Error("allowed-tools is not restricted to scripts/dashboard.sh")
 	}
-	// What each tab can and cannot claim. The tabs answer different questions over different spans,
-	// and a reader told nothing reads History's longer span as better evidence for money it does
-	// not have.
-	for _, want := range []string{"no money", "since", "copy"} {
+	// What the page can and cannot claim: Cleanup covers only the time since install, and removal
+	// is done by copying the command it builds -- nothing on the page runs it.
+	for _, want := range []string{"since", "copy"} {
 		if !strings.Contains(strings.ToLower(body), want) {
-			t.Errorf("SKILL.md never says %q. It has to tell the user History carries no money, "+
-				"Cleanup covers only the time since install, and that removal is done by copying "+
-				"the command Cleanup builds -- nothing on either page runs it", want)
+			t.Errorf("SKILL.md never says %q. It has to tell the user Cleanup covers only the time "+
+				"since install, and that removal is done by copying the command Cleanup builds", want)
+		}
+	}
+	if strings.Contains(body, "History") {
+		t.Error("SKILL.md still describes the removed History tab")
+	}
+}
+
+// No skill in either plugin may send the user to the removed History tab. The dashboard skill was
+// fixed with the tab; the install skill was missed and still said "History is not empty on day
+// one", so this walks every skill rather than naming one. It looks for the tab, not the word:
+// "your own history" (past traffic) is fine.
+func TestNoSkillMentionsTheRemovedHistoryTab(t *testing.T) {
+	tab := regexp.MustCompile(`\bHistory (is|tab|page|view|shows|says|covers|lists)\b|\*\*History\*\*|History —|savings/history|/api/history`)
+	var files []string
+	for _, root := range []string{"skills", filepath.Join("..", "codex-marketplace", "plugins", "context-guru", "skills")} {
+		m, err := filepath.Glob(filepath.Join(root, "*", "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, m...)
+	}
+	if len(files) < 10 {
+		t.Fatalf("found only %d skills; the glob no longer matches, update this test", len(files))
+	}
+	for _, f := range files {
+		if loc := tab.FindString(readFileString(t, f)); loc != "" {
+			t.Errorf("%s still names the removed History tab (%q)", f, loc)
 		}
 	}
 }

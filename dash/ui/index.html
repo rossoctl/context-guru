@@ -1050,9 +1050,6 @@
      cost and the rule it excepts. BEFORE insights.js, which reads the `echarts` global at mount. -->
 <script defer src="echarts.min.js"></script>
 <script defer src="insights.js"></script>
-<!-- The History view mounts itself the same way, AFTER insights.js because it mounts its tab
-     relative to that one (`after: 'insights'`), so the tab it anchors to has to exist first. -->
-<script defer src="history.js"></script>
 <!-- The KV-cache TTL view mounts itself the same way, from kvcache.js. -->
 <script defer src="kvcache.js"></script>
 <!-- Strategy campaigns mounts itself the same way, from campaigns.js — but unlike

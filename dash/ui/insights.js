@@ -523,10 +523,9 @@ function insRender() {
   const intro = el('div', { class: 'panel' },
     el('h2', { text: 'What your unused capabilities cost' }),
     /* The span, first: every figure here is priced from traffic this proxy measured, so it covers
-     * only the time since install. What was never used across the longer history is on History. */
+     * only the time since install. */
     el('p', { class: 'hint', text: 'Priced from traffic this proxy measured, so only the time '
-      + 'since context-guru was installed. To see what you never used across all your history, '
-      + 'including before install, open the History tab.' }),
+      + 'since context-guru was installed.' }),
     el('p', { text: 'Every figure on this page is WASTE: tokens sent in the system prompt of ' +
       'every request, for a tool, skill or MCP server that was never invoked in the sessions ' +
       'that carried it.' }),
@@ -561,10 +560,8 @@ function insRender() {
         + 'recovered from Claude Code\u2019s own history, from before this proxy was installed. '
         + 'This page prices what each request carried in its prompt, and only the proxy sees '
         + 'that, so it has no figures for them.' }),
-      el('p', { text: 'That does not mean nothing was wasted here. To see which installed skills '
-        + 'were never used across your whole history, including this project, '
-        + 'open the History tab. Traffic in this project from now on is measured and will '
-        + 'appear here.' })));
+      el('p', { text: 'That does not mean nothing was wasted here. '
+        + 'Traffic in this project from now on is measured and will appear here.' })));
     return;
   }
 
@@ -770,10 +767,9 @@ async function loadInsights() {
     if (insProjects === null) {
       insProjects = [];
       try {
-        /* MEASURED PROJECTS ONLY. Reported, of a project used only before the proxy existed: "it
-         * should only be in History and not on this page". This page prices what each request
-         * declared, which only the proxy sees, so such a project could only ever show an empty
-         * state. History lists every project, imported or not. */
+        /* MEASURED PROJECTS ONLY. This page prices what each request declared, which only the
+         * proxy sees, so a project used only before the proxy existed could only ever show an
+         * empty state. */
         const f = await api('facets', { measured: 1 });
         if (f && Array.isArray(f.project)) insProjects = f.project.filter(Boolean).sort();
       } catch (_) {

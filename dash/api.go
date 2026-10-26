@@ -87,11 +87,6 @@ type API struct {
 	// control -- without it the project rollup is reachable through the HTTP surface but not
 	// assertable there, and that rollup is exactly the behaviour that was silently missing.
 	home string
-	// historyCache covers GET /api/history, which reads the invocation table and the installed
-	// inventory off disk. Its own cache rather than sharing the insights one: the two answer
-	// different questions over different sources, so an invalidation that matters to one is
-	// usually noise to the other.
-	historyCache jsonCache
 	// routeCache backs cachedRoute: the response cache for the remaining heavy GET routes, keyed by
 	// path as well as by principal and query because it is shared between them.
 	routeCache jsonCache
@@ -822,7 +817,7 @@ func (a *API) routes() []route {
 	rs = append(rs, a.adaptRoutes()...)
 	rs = append(rs, a.compactEpisodeRoutes()...)
 	rs = append(rs, a.insightsRoutes()...)
-	return append(rs, a.historyRoutes()...)
+	return rs
 }
 
 // Mount registers every dashboard route on a mux under the given prefix

@@ -361,46 +361,6 @@ func NeverCalled(home string, called map[string]int) []string {
 // <plugin>:<name>, marketplace skills under the marketplace directory keyed bare. Built-in skills
 // have no file anywhere, which is why this cannot be a complete inventory and is not presented as
 // one — it answers "what did I install", not "what is in the prompt".
-// installedSkillOwners is the inventory with each skill's OWNER, which is the unit of removal.
-//
-// A plugin's skills come and go together, so thirty-one unused skills are not thirty-one
-// decisions -- measured on a real machine, they were three. The owner is on disk either way: a
-// plugin skill sits under the plugin's directory, a marketplace skill under the marketplace's.
-// An earlier version returned only names, so nineteen marketplace skills grouped under
-// "(standalone)" on the page and gave the reader nothing to act on.
-func installedSkillOwners(home string) map[string]string {
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return map[string]string{}
-		}
-		home = h
-	}
-	out := map[string]string{}
-	base := filepath.Join(home, ".claude", "plugins")
-	cache := filepath.Join(base, "cache")
-	for _, mkt := range dirNames(cache) {
-		for _, plug := range dirNames(filepath.Join(cache, mkt)) {
-			for _, ver := range dirNames(filepath.Join(cache, mkt, plug)) {
-				for _, name := range dirNames(filepath.Join(cache, mkt, plug, ver, "skills")) {
-					// The plugin owns it, not the marketplace it came from: `/plugin disable`
-					// operates on the plugin.
-					out[plug+":"+name] = plug
-				}
-			}
-		}
-	}
-	markets := filepath.Join(base, "marketplaces")
-	for _, mkt := range dirNames(markets) {
-		for _, name := range dirNames(filepath.Join(markets, mkt, "skills")) {
-			if _, ok := out[name]; !ok {
-				out[name] = mkt
-			}
-		}
-	}
-	return out
-}
-
 func installedSkills(home string) map[string]bool {
 	if home == "" {
 		h, err := os.UserHomeDir()
