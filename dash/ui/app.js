@@ -5016,10 +5016,14 @@ function navPath(view) {
  * so that branch is not a compatibility shim to be removed later — it is half the traffic.
  */
 const FIVE_PAGE_ALIAS = { home: 'overview', cache: 'keepalive' }; // #savings already opens the Savings group
+// Views that were removed, and the tab that now answers the same question. Matched as the LAST segment at
+// any depth, so both `#history` and `#/savings/history` land there instead of on the group's first tab.
+const REMOVED_VIEW = { history: 'insights' };
 function resolveNav(path) {
   const seg = String(path || '').split('/').filter(Boolean);
   const view = seg[seg.length - 1] || '';
   if (GROUP_OF.has(view)) return view;
+  if (REMOVED_VIEW[view]) return REMOVED_VIEW[view];
   // Links to the short-lived five-page home (#home, #cache; #savings, #tools and #sessions already resolve) land on the nearest tab.
   if (seg.length === 1 && FIVE_PAGE_ALIAS[seg[0]]) return FIVE_PAGE_ALIAS[seg[0]];
   // Only a group name survived (`#/admin`, or `#/savings/typo`): open its first tab.

@@ -218,6 +218,10 @@ test('#/group/view, #/group alone, and a stale group segment', () => {
   assert.equal(app.roundTrip('#/admin/campaigns'), '#/advanced/campaigns');
   // A group that survived and a view name that did not.
   assert.equal(app.at('#/savings/typo').view, 'keepalive');
+  // The removed History tab: an old bookmark lands on Cleanup, which answers the same question.
+  assert.equal(app.at('#/savings/history').view, 'insights');
+  assert.equal(app.at('#savings/history').view, 'insights');
+  assert.equal(app.at('#history').view, 'insights');
   // Filters ride along on both forms.
   assert.equal(app.at('#/savings/usage?model=m1').filter.model, 'm1');
 });

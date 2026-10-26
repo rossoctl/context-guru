@@ -1,6 +1,6 @@
 package plugin
 
-// The dashboard skill opens the History and Cleanup tabs of THIS install's proxy.
+// The dashboard skill opens the Cleanup tab of THIS install's proxy.
 //
 // Executed rather than reviewed, like the other scripts here: the failures that matter are all
 // "it opened the wrong thing" or "it opened a dead page", and none is visible by reading.
