@@ -385,3 +385,45 @@ for a plain removal of new or cached-and-read content, the two rules give the sa
   question about the spec.
 - **No production traffic was used.** Whether any of these situations occurs, and how often, is not
   known from this report.
+
+## 10. Independent review by four models
+
+Four models on the LiteLLM proxy each received this report and checked cases 1 to 5 from general
+knowledge and Anthropic's public prompt-caching documentation. They did not see `design.md` or any
+repo file. Each recomputed the figures and judged who is right in principle.
+
+Model substitutions: `aws/gpt-6-astra` was refused by the proxy (403, no access for the key), so
+`azure/gpt-6.1-sol` answered in its place. `aws/kimi-k2.5` is not on the proxy, so
+`azure/FW-Kimi-K3` answered. Each model ran once. The verdicts are opinions, not measurements.
+
+| Case | Opus 5.5 | Sonnet 5.5 | GPT-6.1-sol | Kimi K3 | Consensus |
+|---|---|---|---|---|---|
+| 1. Summary that breaks the cache | SPEC-RIGHT (high) | SPEC-RIGHT (high) | SPEC-RIGHT (high) | SPEC-RIGHT (high) | **Spec right, 4 of 4.** cg never charges the 3,500-token read-to-write break to the summary. |
+| 2. Edit inside the cached prefix | SPEC-RIGHT (high) | SPEC-RIGHT (med-high) | SPEC-RIGHT (med) | SPEC-RIGHT (med) | **Spec right, 4 of 4.** Cached content would have been read, so a write-rate price has the wrong sign. |
+| 3. Added tool declaration | SPEC-RIGHT (med) | SPEC-RIGHT (med) | SPEC-RIGHT (med) | DIFFERENT-QUESTION (med) | **Spec right, 3 of 4.** All agree the totals match and cg's clamp only hides a real cost. |
+| 4. Model change | DIFFERENT-QUESTION (med) | DIFFERENT-QUESTION (high) | DIFFERENT-QUESTION (high) | DIFFERENT-QUESTION (high) | **Different question, 4 of 4.** A router's switch is not a cg edit. |
+| 5. Effort change | DIFFERENT-QUESTION (med) | DIFFERENT-QUESTION (med) | UNDECIDABLE (med) | DIFFERENT-QUESTION (med) | **Different question, 3 of 4.** The cache break is plausible but the premise is unverified. |
+
+**Arithmetic.** All four confirmed every expected figure in sections 4 to 7 (16,750, −59,599.5,
+−53,977.5, 30,117, −36,800, −110,400) and cg's figures (28,825 and 74,812.5 on the changed lines).
+No model found an error in a total.
+
+**B\* (section 5, open question).** All four said the same: B\* is neither the client's literal
+breakpoints nor an unbounded "longest cached prefix". It is the end of the longest cached prefix
+that the request's own breakpoints could actually have hit: written earlier, not expired, and
+within the provider's lookback of about 20 blocks. For case 2 that makes B\* message 11, which
+supports the spec's expected figure and makes the literal reading in section 5 item 2 the wrong one.
+
+**Errors found in this report** (not in the totals):
+
+1. Case 1 (section 4) says the tail is 3,500 tokens. All four say it is **3,000**: 500 summary +
+   3,000 tail + 500 new = 4,000. The 3,500 in the break is summary plus tail.
+2. Case 2 says `coref` needs "about 11 more hot turns". Three models say **about 10** more, because
+   this turn's 5,985 is already netted in (59,599.5 ÷ 5,985 ≈ 10). Eleven counts this turn too.
+3. Case 4 (three models): the spec's −36,800 prices the break at the small model's rates, which
+   compares against a baseline that never existed. Against "stayed on the large model" the net is
+   −25,250, and that mixes the break with the rate difference. This sharpens open question 10.
+4. Section 1 counts case 3 among the five that differ, though its request totals agree. Two models
+   flagged the inconsistency. Only the per-component line differs.
+5. Case 5 (GPT-6.1-sol, Sonnet): the claim that `effort` renders ahead of the messages is not
+   established by public documentation. The documented case is a change to thinking parameters.
