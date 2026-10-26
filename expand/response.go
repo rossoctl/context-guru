@@ -155,7 +155,7 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 			}
 			for i, item := range items.Array() {
 				content := item.Get("content").String()
-				if role := item.Get("role").String(); (role == "user" || role == "assistant") && strings.HasPrefix(content, "=== History Summary ===") &&
+				if role := item.Get("role").String(); (role == "user" || role == "assistant") && isSummaryText(content) &&
 					strings.Contains(content, Marker(hash)) {
 					if _, duplicate := replacements[i]; duplicate {
 						return nil, false
@@ -248,4 +248,16 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 		}
 		return out, true
 	}
+}
+
+// The summary headers, mirrored from schema.SummaryHeader and schema.CacheAwareSummaryHeader (this
+// leaf package imports no context-guru package); TestSummaryHeadersMatchSchema pins them equal.
+const (
+	summaryHeader           = "=== History Summary ==="
+	cacheAwareSummaryHeader = "=== Compacted Context (cache-aware summary) ==="
+)
+
+// isSummaryText reports whether content is a summarizer's spliced summary, from either summarizer.
+func isSummaryText(content string) bool {
+	return strings.HasPrefix(content, summaryHeader) || strings.HasPrefix(content, cacheAwareSummaryHeader)
 }
