@@ -740,7 +740,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// verbatim, and marked by the host (CacheAnchorToolID), that exchange gives the next turn an
 	// entry to read (measured: read 21,563, write 98). The cut is frozen in the checkpoint's
 	// CoveredCount, so later turns keep the same exchange without recomputing it.
-	end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
+	// Only where the host can write the mark (#730): on OpenAI the exchange would stay unsummarized
+	// for nothing.
+	if !c.NoCacheBreakpoint {
+		end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
+	}
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
 		rep.Gate("summary_span_below_min_tokens")

@@ -1,7 +1,9 @@
 package offload
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 )
@@ -38,5 +40,43 @@ func TestRetreatPastLastToolExchange(t *testing.T) {
 	head := []bschemas.ChatMessage{u("task"), a("call"), tool("t"), a("done"), u("go")}
 	if got := retreatPastLastToolExchange(head, nil, 1, 3); got != 3 {
 		t.Fatalf("end = %d, want 3 unchanged when the exchange starts at the span start", got)
+	}
+}
+
+// #730. Where the host cannot write a breakpoint (OpenAI), the summary covers the last tool
+// exchange too. Where it can (Anthropic), the span still stops before that exchange.
+func TestSummarySpanRetreatsOnlyWhereABreakpointCanBeWritten(t *testing.T) {
+	covered := func(noBreakpoint bool) (got, retreated int) {
+		s := newCacheAware(t, caBaseCfg+"instruction_role: user\n")
+		s.modelClient = &capturingModel{out: "<summary>read the docs.</summary>"}
+		in := []bschemas.ChatMessage{caMsg(bschemas.ChatMessageRoleUser, "TASK: fix the handler")}
+		in = append(in, caToolPair("reading", "read", `{"p":"a"}`, "call_a", strings.Repeat("doc line\n", 40))...)
+		in = append(in, caFixture()[1:]...)
+		in = append(in, caToolPair("reading again", "read", `{"p":"b"}`, "call_b", strings.Repeat("doc line\n", 40))...)
+		in = append(in, caFixture()[1:]...)
+		_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+		retreated = retreatPastLastToolExchange(in, nil, start, end) - start
+		if retreated >= end-start {
+			t.Fatalf("fixture: the retreat must move the end (%d >= %d)", retreated, end-start)
+		}
+		c := caCtx("ca-730-" + map[bool]string{true: "openai", false: "anthropic"}[noBreakpoint])
+		c.NoCacheBreakpoint = noBreakpoint
+		caTurn(t, s, c, in)
+		if !WaitForSummaryForTest(convKey(c), 5*time.Second) {
+			t.Fatal("the commissioned summary never landed")
+		}
+		cp, ok := loadCheckpoint(c)
+		if !ok {
+			t.Fatal("no checkpoint was written")
+		}
+		return cp.CoveredCount, retreated
+	}
+	openai, retreated := covered(true)
+	if openai <= retreated {
+		t.Errorf("OpenAI summary covers %d messages, want more than the retreated %d", openai, retreated)
+	}
+	anthropic, _ := covered(false)
+	if anthropic != retreated {
+		t.Errorf("Anthropic summary covers %d messages, want the retreated %d", anthropic, retreated)
 	}
 }

@@ -60,7 +60,7 @@ func preExpiryFor(seconds int) time.Duration {
 // slack (the cache lifetime minus its idle period) plus two sweep ticks, because the keeper pings
 // exactly that far before expiry: a window narrower than that reads every ping as Warm, and a
 // pre_expiry substitute never takes one (#715, #717 review). On Anthropic at the defaults the slack
-// is 300 s - 270 s = 30 s, inside the 60 s default, so the window stays 60 s. On OpenAI it is
+// is 300 s - 240 s = 60 s, so the window is 60 s + 2 ticks = 64 s. On OpenAI it is
 // 30 min - 28 min = 120 s, so the window becomes 124 s.
 //
 // CAPPED at maxSubstituteWindow. The slack of a SHORT schedule is large — a 60 s idle on a

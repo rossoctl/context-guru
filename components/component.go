@@ -441,6 +441,11 @@ type Ctx struct {
 	// text turns only, and a provider entry that ends at a text turn is never read by the next
 	// request, so every turn after a splice re-writes the whole kept history. "" = no anchor.
 	CacheAnchorToolID string
+	// NoCacheBreakpoint is true when the backend takes no explicit cache breakpoint (OpenAI and
+	// Gemini shaped wires cache an implicit prefix). The host cannot write the CacheAnchorToolID
+	// mark there, so a summary span has no reason to stop before the last tool exchange (#730).
+	// False (the default) keeps the retreat.
+	NoCacheBreakpoint bool
 	// AllowSummarySpan is supplied by a wire adapter when only some normalized
 	// spans can be rebuilt without dropping opaque provider state. Nil means the
 	// ordinary Chat/Anthropic adapter has no extra restriction.

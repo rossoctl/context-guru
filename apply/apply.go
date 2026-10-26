@@ -664,19 +664,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	rawInput := make([]bschemas.ChatMessage, len(norm))
 	copy(rawInput, norm)
 	c := &components.Ctx{
-		Ctx:            ctx,
-		Session:        sessionID,
-		Thread:         tr.Thread.ID,
-		ThreadParent:   threadParent,
-		ThreadInherits: threadInherits,
-		DeclaresTools:  gjson.GetBytes(body, "tools.#").Int() > 0,
-		Store:          st,
-		RawInput:       rawInput,
-		WireGroup:      wireGroups(slots),
-		Model:          models,
-		Bypass:         bypass,
-		CtxWindow:      o.Window,
-		CtxWindowExact: o.WindowExact,
+		Ctx:               ctx,
+		Session:           sessionID,
+		Thread:            tr.Thread.ID,
+		ThreadParent:      threadParent,
+		ThreadInherits:    threadInherits,
+		DeclaresTools:     gjson.GetBytes(body, "tools.#").Int() > 0,
+		Store:             st,
+		RawInput:          rawInput,
+		WireGroup:         wireGroups(slots),
+		NoCacheBreakpoint: !explicitBreakpointProvider(provider),
+		Model:             models,
+		Bypass:            bypass,
+		CtxWindow:         o.Window,
+		CtxWindowExact:    o.WindowExact,
 		// C, the denominator the fill fraction actually belongs over — see
 		// components.Ctx.CompactionPoint.
 		CompactionPoint:       o.CompactionPoint,
