@@ -190,7 +190,7 @@ one you ran it in already has its environment. Start a new session.
 from `.claude/settings.local.json` to get working immediately.
 
 **Requests fail with a connection error.** The proxy isn't running and this project is routed.
-`/context-guru:status` will say so; the log is `${TMPDIR:-/tmp}/context-guru-proxy-<port>.log`.
+`/context-guru:status` will say so; the log is `$CONTEXT_GURU_STATE/proxy-<port>.log`.
 
 **"The proxy binary is not on PATH."** The installer puts it in `~/.local/bin`. Add that to your
 `PATH`.

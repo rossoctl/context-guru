@@ -3147,7 +3147,9 @@ func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
 		"--port", port, "--preset", "off"); code != 0 {
 		t.Fatalf("set: %d %v", code, f)
 	}
-	logPath := filepath.Join(dir, "context-guru-proxy-"+port+".log")
+	// The log now lives in the state directory start-proxy.sh itself resolves (#251), so the stale
+	// line is planted there: the test must forge what the run will actually read.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
 	stale := "level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"\n"
 	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
@@ -3166,6 +3168,44 @@ func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
 	cfg := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
 	if !strings.Contains(cfg, "keepalive_max_pings_1h: 2") {
 		t.Errorf("the keys were dropped on the strength of a stale line:\n%s", cfg)
+	}
+}
+
+// TestAFailureReportShowsOnlyThisRunsLogLines (#251). The log is append-only across starts, and the
+// failure report used to `tail -n 5` the whole file from TMPDIR — a location no state dir scoping
+// reaches — so a fresh failure with nothing written yet reported whatever an earlier run left, worst
+// case a previous SUCCESSFUL run's lines read as "the proxy is fine" during a failure.
+func TestAFailureReportShowsOnlyThisRunsLogLines(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	// The stale evidence an earlier run left behind, including the base URL that made #251 a
+	// disclosure and not just a misleading report.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
+	stale := "STALE LINE from a previous run, ANTHROPIC_BASE_URL=https://user:secret@gateway.corp.example/v1\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A proxy that exits at once: the failure report is the path under test, and nothing of this
+	// run's own is written to the log, which is exactly the state that used to print the stale tail.
+	bin := filepath.Join(dir, "fails-at-once")
+	if err := os.WriteFile(bin, []byte("#!/usr/bin/env bash\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if !strings.Contains(out, "the proxy did not come up") {
+		t.Fatalf("the failure report never ran, so this test asserted nothing:\n%s", out)
+	}
+	if strings.Contains(out, "STALE LINE") || strings.Contains(out, "gateway.corp.example") {
+		t.Errorf("the failure report showed an earlier run's lines as this run's evidence:\n%s", out)
+	}
+	// The report points at the log where this run actually writes it: the state directory, so
+	// CONTEXT_GURU_STATE isolates it (the TMPDIR pin above is the location it must NOT name).
+	if !strings.Contains(out, logPath) {
+		t.Errorf("the report does not name the state-dir log %s:\n%s", logPath, out)
+	}
+	if strings.Contains(out, filepath.Join(dir, "context-guru-proxy-"+port+".log")) {
+		t.Errorf("the report still names a TMPDIR log:\n%s", out)
 	}
 }
 
@@ -4361,8 +4401,11 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); err != nil {
 			t.Errorf("no pidfile for the configured port, so uninstall could not find this proxy: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
-			t.Errorf("the log is not named after the configured port: %v", err)
+		// The log is named after the port and scoped to the state directory, like the pidfile (#251):
+		// a log in TMPDIR is shared by every run on the machine, so a failure report can show
+		// another run's lines as this one's evidence.
+		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".log")); err != nil {
+			t.Errorf("the log is not in the state dir, named after the configured port: %v", err)
 		}
 	})
 
@@ -12367,7 +12410,9 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
 	}
-	log := filepath.Join(os.TempDir(), "context-guru-proxy-8841.log")
+	// The decline breadcrumb now lands in the state dir this fixture pins (#251), so that is where
+	// "declined" would be read from — and must not be.
+	log := filepath.Join(dir, "state", "proxy-8841.log")
 	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
 		t.Errorf("declined a project it is routed to: %s", b)
 	}

@@ -78,8 +78,8 @@ Report the combinations plainly, because they mean different things:
   state right after `/context-guru:install`, and it is not a fault.
 - **Set, proxy answering** — working. Go to step 2.
 - **Set, nothing answering** — this session's API requests are failing right now. Start it:
-  `"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"`, and if that does not work, read
-  `${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log`. If they want out immediately, that is
+  `"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"`, and if that does not work, read the proxy log in
+  the state directory, `$CONTEXT_GURU_STATE/proxy-${PORT}.log`. If they want out immediately, that is
   `/context-guru:uninstall`.
 - **Set to a base URL that is not ours** — say so and stop. Something else owns their routing.
 

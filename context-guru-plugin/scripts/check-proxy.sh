@@ -103,7 +103,10 @@ if [ -x "${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh" ]; then
   fi
 fi
 
-LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+# Where start-proxy.sh puts the log (#251): the state directory, not TMPDIR. Derived here rather
+# than asked of start-proxy.sh because this prints a recovery path for a human, typically when the
+# proxy is DOWN and there is nothing to query.
+LOG="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/proxy-${PORT}.log"
 STARTER="${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh"
 
 # The recovery command DELEGATES to start-proxy.sh instead of restating its command line.
