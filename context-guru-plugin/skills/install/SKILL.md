@@ -190,10 +190,6 @@ write routing while no proxy answers.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
 - `statusline=on` — also installed (only with `--statusline`); mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `off` is the default: say nothing. `skipped` is not an install failure.
-- `history_import=done` — Claude Code's history from before this install was imported once, so on day one
-  Cleanup can tell imported projects from measured ones; quote `history_import_summary=`. It records what was
-  used and when, not what unused tools cost (only the proxy sees that, from now on). `already_done`/`skipped`
-  need no mention. `failed` is not an install failure: give `history_import_error=` and offer `history_import_retry=` verbatim.
 
 ## 4. Then tell them
 

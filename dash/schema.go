@@ -27,6 +27,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -787,6 +788,52 @@ var additiveColumns = []struct{ table, column, ddl string }{
 // including the thousands of invocations imported from the user's own history -- which is the
 // data this whole surface exists to show.
 //
+// purgeImportedHistory deletes, ONCE, the rows the removed history import wrote (requests.source =
+// 'imported'). They mixed transcript spend into the totals, and the retention prune never removed
+// them. Run after additiveDDL2 on both paths, so trg_tool_inventory_gc exists. Recorded in meta, so
+// a later open skips the scan (about 60 ms on 500k rows, with no index on source).
+//
+// request_components cascades. trg_tool_inventory_gc removes a session's tool_declarations and
+// tool_uses when its LAST request goes, so an imported-only session is gone entirely. A session that
+// began before the proxy and continued through it keeps its measured rows, and the import's calls,
+// which were merged into the same tool_uses rows with no marker and cannot be told apart.
+func purgeImportedHistory(db *sql.DB) error {
+	var done string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'imported_history_purged'`).Scan(&done); err == nil {
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	return runImportedHistoryPurge(db)
+}
+
+// warnPurge logs a failed purge and lets Open go on. The purge is an optional cleanup: failing Open
+// for it would close the database, and the recorder would fall back to an in-memory dashboard that
+// records nothing to disk. No marker is written on failure, so the next open retries.
+func warnPurge(err error) {
+	if err != nil {
+		slog.Warn("dash: could not delete the old imported history; will retry on the next open", "err", err)
+	}
+}
+
+// runImportedHistoryPurge deletes the imported rows and writes the marker, in one transaction.
+func runImportedHistoryPurge(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	if _, err := tx.Exec(`DELETE FROM requests WHERE source = 'imported'`); err != nil {
+		return err
+	}
+	// OR IGNORE: two processes opening the same old database both read no marker; the second must
+	// not fail on the first one's.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('imported_history_purged', '1')`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Idempotent: migrations run on every open, so it probes for the column and returns if present.
 func migrateToolUsesProject(db *sql.DB) error {
 	var has bool
@@ -896,8 +943,11 @@ func migrate(db *sql.DB) error {
 		return &versionMismatch{have: have}
 	default:
 		// Already at this version: `ddl` is skipped, but the late additive phase still runs.
-		_, err = db.Exec(additiveDDL2)
-		return err
+		if _, err = db.Exec(additiveDDL2); err != nil {
+			return err
+		}
+		warnPurge(purgeImportedHistory(db))
+		return nil
 	}
 	if _, err := db.Exec(ddl); err != nil {
 		return err
@@ -905,6 +955,7 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(additiveDDL2); err != nil {
 		return err
 	}
+	warnPurge(purgeImportedHistory(db))
 	_, err = db.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)`, fmt.Sprint(schemaVersion))
 	return err
 }

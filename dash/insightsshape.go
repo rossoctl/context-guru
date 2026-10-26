@@ -177,16 +177,6 @@ type InsightsDoc struct {
 	RemovableTokens int     `json:"removable_tokens"`
 	RemovableUSD    float64 `json:"removable_usd"`
 	Basis           string  `json:"basis"`
-	// Coverage says how much of this window the proxy actually watched, and is present only when
-	// some of it was imported rather than measured.
-	//
-	// WHY A REPORT HAS TO CARRY THIS. An imported row knows what a request cost and not what it
-	// declared, so an imported day has no observed carriage at all. The waste figures are
-	// computed from the measured part only — which is correct, and silently misleading: a reader
-	// who sees the request count triple while the waste figure holds still will conclude the
-	// extra history was cheap. It was not; it was unwatched. Stating the split is what makes that
-	// inference impossible.
-	Coverage *InsightsCoverage `json:"coverage,omitempty"`
 	// Project is the folder this document describes, or "" for every project pooled. Echoed back
 	// rather than left to the caller to remember: every figure below means something different
 	// depending on it, and a narrowed document that looks identical to a pooled one is the
@@ -197,16 +187,6 @@ type InsightsDoc struct {
 	// of the axis on every row would be the same array sixty-eight times.
 	Timeline     *ToolTimeline `json:"timeline,omitempty"`
 	SelfExcluded SelfExclusion `json:"self_excluded"`
-}
-
-// InsightsCoverage is the measured/imported split of a window.
-type InsightsCoverage struct {
-	MeasuredRequests int64 `json:"measured_requests"`
-	ImportedRequests int64 `json:"imported_requests"`
-	// ImportedDays is how many distinct days have imported rows, which is the figure a reader can
-	// act on: "nine days of this window were never watched" is checkable against their memory in
-	// a way a request count is not.
-	ImportedDays int `json:"imported_days"`
 }
 
 // InsightsOptions carries what shaping cannot derive from the inventory itself.
@@ -223,10 +203,6 @@ type InsightsOptions struct {
 	// BASIS rather than any arithmetic — the rows are already scoped by the caller's filter — so
 	// that a narrowed document says so instead of looking like an all-projects one.
 	Project string
-	// Coverage, when the window holds imported rows. Supplied rather than derived here, because
-	// an inventory row carries no source at all: the split is a property of the REQUESTS in the
-	// window, which only the caller's query can see.
-	Coverage *InsightsCoverage
 	// ProjectNone says the rows are the UNATTRIBUTED ones — requests that stated no directory,
 	// plus every row written before the column existed. A separate flag for the same reason the
 	// Filter needs one: the project being reported on is "", which as a value is indistinguishable
@@ -248,16 +224,6 @@ func ShapeInsights(rep *ToolReport, opt InsightsOptions) *InsightsDoc {
 		doc.Basis = "measured over the window, across requests that named no project"
 	case opt.Project != "":
 		doc.Basis = "measured over the window, in this project only"
-	}
-	/* AND WHETHER THE WINDOW WAS WATCHED AT ALL. An imported day contributes its spend and no
-	 * carriage, so every waste figure below describes the measured part only. Appended rather
-	 * than replacing the scope clause: both facts matter, and a reader needs to know which
-	 * project AND which days. */
-	if c := opt.Coverage; c != nil && c.ImportedRequests > 0 {
-		doc.Coverage = c
-		doc.Basis += "; " + plural(c.ImportedDays, "day") + " of it imported from Claude Code's " +
-			"own history, where what was CARRIED was never observed — so the figures below " +
-			"describe the " + plural(int(c.MeasuredRequests), "request") + " this proxy measured"
 	}
 	if rep == nil {
 		return doc

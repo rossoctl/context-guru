@@ -65,7 +65,10 @@ func main() {
 	// installer runs has to live in it. Only an exact first argument dispatches; every flag form
 	// (`-listen`, `--version`) still reaches the proxy's own parsing below.
 	if len(os.Args) > 1 && os.Args[1] == "import-history" {
-		os.Exit(dash.RunImportHistory(os.Args[2:], os.Stdout, os.Stderr))
+		// Removed: the history import is gone. Kept as a no-op that exits 0, because an older
+		// install.sh still runs it, and without this the name would fall through and start serving.
+		fmt.Fprintln(os.Stdout, "import-history was removed; it does nothing now")
+		os.Exit(0)
 	}
 	var (
 		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
