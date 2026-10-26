@@ -1074,9 +1074,20 @@ def _read_meta(path: str) -> dict | None:
     return meta if isinstance(meta, dict) else None
 
 
+# The type Claude Code gives a sub-agent launched with no type of its own. Many run at once, all with this one
+# label, so the band could not tell them apart; the agents list shows each one's description instead.
+DEFAULT_AGENT_TYPE = "general-purpose"
+
+
 def _meta_label(meta: dict | None) -> str:
-    return next((v for v in (meta.get("name"), meta.get("agentType")) if isinstance(v, str) and v), "") \
-        if meta else ""
+    """The name Claude Code's agents list shows: a teammate's `name`, else the agent's type. A `general-purpose`
+    agent is named by its `description` (the few words its caller gave it), as the agents list names it."""
+    if not meta:
+        return ""
+    desc = meta.get("description")
+    if meta.get("agentType") == DEFAULT_AGENT_TYPE and isinstance(desc, str) and desc.strip() and not meta.get("name"):
+        return " ".join(desc.split())
+    return next((v for v in (meta.get("name"), meta.get("agentType")) if isinstance(v, str) and v), "")
 
 
 def _agent_names(payload: dict, ids: list[str]) -> dict[str, str]:

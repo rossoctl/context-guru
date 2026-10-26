@@ -798,3 +798,14 @@ test('the redraw check sees a moved clock even when every word and figure is the
   expect(at(NOW - 59_000)!.main.left).toBe(at(NOW - 41_000)!.main.left)
   expect(signature(at(NOW - 59_000))).not.toBe(signature(at(NOW - 41_000)))
 })
+
+test('a long agent name (a general-purpose agent named by its description) is cut to 24 characters with …', async ($, on) => {
+  docOverride = d => ({ ...d, threads: d.threads.map((t: any) => (t.id === 'a:explorer1' ? { ...t, name: 'Strict main-track reviewer, rewrite round 4' } : t)) })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n').find(l => l.startsWith('└ agents'))!
+  expect(row).toMatch(/● Strict main-track revie… 5m/) // 23 characters and `…`
+  expect(row).not.toMatch(/rewrite round 4/)
+  await ui.unmount()
+})
