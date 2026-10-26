@@ -632,6 +632,12 @@ const additiveDDL2 = `
 -- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
 -- so on an existing database the column the index names does not exist yet.
 CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
+-- Deferred MCP rows (tool_declarations.deferred), for deferredNames on every inventory read and
+-- IsDeferredDecl on a filter write. Partial, so it holds only those rows and costs nothing on a
+-- database without them. Here for the same reason as idx_requests_project: it names a column
+-- addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
+  ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
