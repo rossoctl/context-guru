@@ -433,9 +433,15 @@ var presets = map[string][]string{
 	// request, and no model is called. The loudest objection to putting a proxy on the
 	// wire — "you are editing my agent's context" — does not apply to it.
 	//
-	// It is also the best-evidenced single component in the repo: -34.1% cost and 0% ->
-	// 96.7% prefix-cache hit in an isolated A/B (docs/results/context-guru.md), which is
-	// why the funnel leads with the cache rather than the offloaders.
+	// It is also the best-evidenced single component in the repo, and the evidence is NARROW:
+	// -34.1% mean cost is one Terminal-Bench task (fix-code-vulnerability) measured three times
+	// on Claude Code CLI traffic at Sonnet 5 rates, and 0% -> 96.7% prefix-cache hit is the
+	// two-session A/B beside it (docs/components/caching.md). The figure does not transfer:
+	// Agent-SDK traffic carries no volatile-tail marker, so cachesplit acted=0 on all of it
+	// (docs/results/terminal-bench-comparison.md), and this service's own interactive window
+	// credited the split $0.03 (docs/results/measured-2026-08.md). The funnel still leads with
+	// the cache because its claim is verifiable by reading one line, not because it is the
+	// biggest lever.
 	//
 	// Deliberately NOT `safe` (format -> textclean -> searchfold -> cachesplit): those are
 	// lossless in meaning but they still rewrite the JSON, so "we do not touch your
