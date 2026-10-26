@@ -43,6 +43,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"hash/maphash"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -446,6 +447,9 @@ func skillDecls(text string) []Decl {
 // the set until the session ends.
 const deferredHeader = "The following deferred tools are now available via ToolSearch."
 
+// deferredTagEnds are the escaped-body spellings of a newline then `</system-reminder>`.
+var deferredTagEnds = [][]byte{[]byte(`\n` + reminderEnd), []byte(`\n\u003c/system-reminder\u003e`)}
+
 // deferredPlaceholder is the stub tools element that keeps deferred loading on.
 const deferredPlaceholder = "DeferredToolPlaceholder"
 
@@ -463,8 +467,19 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 		}
 		rest = rest[i:]
 		end := len(rest)
-		if j := bytes.Index(rest, []byte(`\n\n`)); j >= 0 {
-			end = j
+		for _, blank := range [][]byte{[]byte(`\n\n`), []byte(`\r\n\r\n`)} {
+			if j := bytes.Index(rest, blank); j >= 0 && j < end {
+				end = j
+			}
+		}
+		// appendDeferred also stops at a `</system-reminder>` line; end here too, or text after a
+		// closing tag that follows the last name (a date, another reminder) churns the digest. Both
+		// JSON spellings: Claude Code writes the tag literally, an encoder that escapes HTML (Go's
+		// does) writes `\u003c/system-reminder\u003e`.
+		for _, tag := range deferredTagEnds {
+			if j := bytes.Index(rest, tag); j >= 0 && j < end {
+				end = j
+			}
 		}
 		if j := stringEnd(rest); j < end {
 			end = j
@@ -508,7 +523,10 @@ func stringEnd(b []byte) int {
 //     tool name. One line that is not voids that whole list.
 //
 // Each list's measured tokens are split equally over every name in it, so an MCP tool is
-// charged its share and the built-in names keep theirs off the page, as before.
+// charged its share and the built-in names keep theirs off the page, as before. The shares are
+// APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
+// name costs a little more than a short one. Removing a tool gives back its own line, not the
+// header, so an equal share of the whole is a fair bound, not an exact figure.
 func deferredDecls(body []byte) []Decl {
 	var out []Decl
 	seen := map[string]bool{}
@@ -558,6 +576,7 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 			if k := strings.IndexByte(line, '\n'); k >= 0 {
 				line, next = line[:k], pos+k+1
 			}
+			line = strings.TrimSuffix(line, "\r") // a CRLF client: the name must not fail isToolName
 			if line == "" || line == reminderEnd {
 				break
 			}
@@ -569,6 +588,10 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 			end, pos = pos+len(line), next
 		}
 		if !ok || len(names) == 0 {
+			// Counts only, never the text: a voided list can be a user quoting the header. Logged so
+			// a format change shows up here rather than as "0 MCP servers" on the page.
+			slog.Debug("dash: ignored a deferred-tools list that did not parse",
+				"names_before_bad_line", len(names), "bad_line", !ok)
 			continue
 		}
 		total := tokens.Count(text[start:end])

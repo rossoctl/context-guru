@@ -589,12 +589,20 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	return rep, nil
 }
 
+// newerPlainRow is a correlated subquery over `d`: a `tools` row for the same tenant and name that is
+// newer than this deferred one. The flag follows the client the tenant uses NOW: a tool deferred
+// earlier and since sent as a real `tools` element is filterable again. A loaded deferred tool writes
+// no plain row (mergeDeferred keeps its list row), so it stays deferred.
+const newerPlainRow = `SELECT 1 FROM tool_declarations p WHERE p.tenant_id = d.tenant_id
+		  AND p.name = d.name AND p.deferred = 0 AND p.ts > d.ts`
+
 // deferredNames is the set of MCP tool names any session in scope carried as deferred
 // (Decl.Deferred). Its own query, so the report's inventory read keeps its covering index
 // (idx_tooldecl_inventory); only deferred rows match, so it is empty on older data.
 func (d *DB) deferredNames(f Filter, where string, args []any) (map[string]bool, error) {
 	q := `SELECT DISTINCT d.name FROM tool_declarations d WHERE d.deferred = 1 AND d.session_id IN
-		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
+		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)
+		  AND NOT EXISTS (` + newerPlainRow + `)`
 	a := append([]any{}, args...)
 	if !f.TenantAll {
 		q += ` AND d.tenant_id = ?`
@@ -1589,6 +1597,7 @@ func (d *DB) IsDeferredDecl(tenant, name string) (bool, error) {
 	}
 	var n int
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT 1 FROM tool_declarations d
-		WHERE d.tenant_id = ? AND d.deferred = 1 AND `+q+` LIMIT 1)`, tenant, arg).Scan(&n)
+		WHERE d.tenant_id = ? AND d.deferred = 1 AND `+q+` AND NOT EXISTS (`+newerPlainRow+`) LIMIT 1)`,
+		tenant, arg).Scan(&n)
 	return n > 0, err
 }

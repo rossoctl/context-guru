@@ -316,3 +316,102 @@ func BenchmarkScanInventoryDeferred(b *testing.B) {
 		})
 	}
 }
+
+// The digest covers what the parser reads and nothing after it. A list wrapped in
+// <system-reminder> with the closing tag right after the last name, then more text in the same
+// block, used to put that text in the digest too: changing only the date gave a new digest, a cold
+// parse and a new declaration set.
+func TestDeferredDigestStopsAtTheClosingTag(t *testing.T) {
+	list := strings.TrimSuffix(deferredFixture(t, "deferred-reminder-delta1-2mcp.txt"), "\n")
+	block := func(date string) string {
+		return "<system-reminder>\n" + list + "\n</system-reminder>\n<system-reminder>Today's date is " +
+			date + ".</system-reminder>"
+	}
+	tools := []string{placeholderTool(t)}
+
+	a := ScanInventory("anthropic", deferredBody(t, tools, []string{block("2026-10-25")}, nil))
+	b := ScanInventory("anthropic", deferredBody(t, tools, []string{block("2026-10-26")}, nil))
+
+	if a.Digest != b.Digest {
+		t.Errorf("changing only the text after </system-reminder> changed the digest: %s -> %s", a.Digest, b.Digest)
+	}
+	if got := mcpByServer(a.Decls); got["web-search"] != 2 {
+		t.Errorf("servers = %v, want web-search with 2 tools", got)
+	}
+}
+
+// Claude Code writes the tag literally in its JSON, not as \u003c…\u003e as Go's encoder does. The
+// digest must stop at it in that spelling too. The body is built as raw JSON, as a client sends it.
+func TestDeferredDigestStopsAtALiteralClosingTag(t *testing.T) {
+	list := strings.TrimSuffix(deferredFixture(t, "deferred-reminder-delta1-2mcp.txt"), "\n")
+	enc, err := json.Marshal(list) // a JSON string; escape only what JSON needs, as Claude Code does
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := strings.NewReplacer(`\u003c`, "<", `\u003e`, ">").Replace(string(enc[1 : len(enc)-1]))
+	raw := func(date string) []byte {
+		text := `<system-reminder>\n` + inner + `\n</system-reminder>\n<system-reminder>Today's date is ` +
+			date + `.</system-reminder>`
+		return []byte(`{"tools":[` + placeholderTool(t) + `],"model":"claude","messages":[{"role":"user",` +
+			`"content":[{"type":"text","text":"` + text + `"}]}]}`)
+	}
+	if !strings.Contains(string(raw("x")), `\n</system-reminder>`) {
+		t.Fatal("the body does not carry the literal tag; the test proves nothing")
+	}
+
+	a, b := ScanInventory("anthropic", raw("2026-10-25")), ScanInventory("anthropic", raw("2026-10-26"))
+
+	if a.Digest != b.Digest {
+		t.Errorf("a date after a literal </system-reminder> changed the digest: %s -> %s", a.Digest, b.Digest)
+	}
+	if got := mcpByServer(a.Decls); got["web-search"] != 2 {
+		t.Errorf("servers = %v, want web-search with 2 tools (the raw body did not parse)", got)
+	}
+}
+
+// A client that sends CRLF line endings must not lose the whole list: every name line would end in
+// \r, fail isToolName, and void the list with no signal ("0 MCP servers" again).
+func TestDeferredListWithCRLFLineEndings(t *testing.T) {
+	crlf := strings.ReplaceAll(deferredFixture(t, "deferred-reminder-delta1-2mcp.txt"), "\n", "\r\n")
+
+	inv := ScanInventory("anthropic", deferredBody(t, []string{placeholderTool(t)}, []string{crlf}, nil))
+
+	if got := mcpByServer(inv.Decls); got["web-search"] != 2 {
+		t.Errorf("servers = %v, want web-search with 2 tools", got)
+	}
+}
+
+// KNOWN GAP, pinned so it is visible rather than silent (#728 review). Claude Code also sends
+// removals, in wording not captured yet, so the set is everything ADDED: a server removed mid-session
+// stays declared until the session ends, and the report keeps offering `claude mcp remove` for it.
+// When the removal wording is captured, this test changes to expect the server gone.
+//
+// Compaction is the other side: if a client stops resending an old list, the set shrinks and the
+// digest changes. That is a correct new declaration set, not churn, and it only ever under-reports.
+func TestDeferredRemovalIsNotYetSubtracted(t *testing.T) {
+	added := deferredFixture(t, "deferred-reminder-delta1-2mcp.txt")
+	// A later reminder in a wording this parser does not know (a placeholder for the removal form).
+	removed := "The following deferred tools are no longer available:\nmcp__web-search__WebSearch\n\n"
+
+	inv := ScanInventory("anthropic", deferredBody(t, []string{placeholderTool(t)}, []string{added, removed}, nil))
+
+	if got := mcpByServer(inv.Decls); got["web-search"] != 2 {
+		t.Errorf("servers = %v; this pins today's behaviour (removals are not subtracted): want web-search 2", got)
+	}
+}
+
+// The model may repeat the list in its own reply. That is not Claude Code declaring tools: only a
+// user or system message's own text counts.
+func TestDeferredListInAnAssistantMessageIsIgnored(t *testing.T) {
+	m, _ := json.Marshal(map[string]any{"model": "claude", "messages": []any{
+		map[string]any{"role": "user", "content": "go"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": deferredFixture(t, "deferred-reminder-full-39mcp.txt")},
+		}},
+	}})
+	body := []byte(`{"tools":[` + tool("Bash", "b") + `],` + string(m)[1:])
+
+	if got := mcpByServer(ScanInventory("anthropic", body).Decls); len(got) != 0 {
+		t.Errorf("an assistant message declared MCP rows %v", got)
+	}
+}

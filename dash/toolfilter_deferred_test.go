@@ -190,3 +190,92 @@ func TestAdaptToolsSummaryWhenOnlyDeferredItemsAreUnused(t *testing.T) {
 		t.Errorf("a client-only report recommends a filter: best=%s rec=%+v options=%+v", doc.Best, doc.Recommendation, doc.Options)
 	}
 }
+
+// The flag follows the client the tenant uses NOW. A tool deferred in an older session and then sent
+// as a real `tools` element (an older Claude Code, or a client without deferral) is filterable again;
+// matching any deferred row ever seen kept it client-only forever.
+func TestTheDeferredFlagClearsWhenTheToolIsSentInToolsAgain(t *testing.T) {
+	db := openTestDB(t)
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	var evs []*Event
+	for i, s := range []string{"old", "new", "keep"} {
+		e := mkEvent(day(i), s, "opus", 100, 100)
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "d"+s
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.write([]invMsg{
+		// old: both tools deferred.
+		{tenant: "t1", session: "old", ts: day(0), inv: &Inventory{Digest: "dold", Decls: []Decl{
+			{Kind: KindMCPTool, Name: "mcp__srv__a", Server: "srv", Tokens: 10, Deferred: true},
+			{Kind: KindMCPTool, Name: "mcp__srv__b", Server: "srv", Tokens: 10, Deferred: true}}}},
+		// new: a is now a real tools element; b is still deferred.
+		{tenant: "t1", session: "new", ts: day(1), inv: &Inventory{Digest: "dnew", Decls: []Decl{
+			{Kind: KindMCPTool, Name: "mcp__srv__a", Server: "srv", Tokens: 400},
+			{Kind: KindMCPTool, Name: "mcp__srv__b", Server: "srv", Tokens: 10, Deferred: true}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name string
+		want bool
+	}{{"mcp__srv__a", false}, {"mcp__srv__b", true}, {"mcp__srv", true}} {
+		got, err := db.IsDeferredDecl("t1", c.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("IsDeferredDecl(%s) = %v, want %v", c.name, got, c.want)
+		}
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, adaptPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range rep.Tools {
+		if want := st.Name == "mcp__srv__b"; st.Deferred != want {
+			t.Errorf("%s deferred = %v, want %v", st.Name, st.Deferred, want)
+		}
+	}
+}
+
+// An existing database gains the deferred column on open, its rows read 0 (they came from `tools`),
+// and the partial index is created. The other tests only open fresh databases.
+func TestAnExistingDatabaseGainsTheDeferredColumn(t *testing.T) {
+	path := t.TempDir() + "/d.db"
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.sql.Exec(`DROP INDEX IF EXISTS idx_tooldecl_deferred`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.sql.Exec(`ALTER TABLE tool_declarations DROP COLUMN deferred`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.sql.Exec(`INSERT INTO tool_declarations(tenant_id, session_id, digest, kind, name, server, tokens, ts)
+		VALUES ('t1','s1','d','mcp_tool','mcp__srv__a','srv',400,1)`); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	up, err := Open(path)
+	if err != nil {
+		t.Fatalf("an existing database did not open after the deferred migration: %v", err)
+	}
+	defer up.Close()
+
+	var deferred, idx int
+	if err := up.sql.QueryRow(`SELECT deferred FROM tool_declarations WHERE name = 'mcp__srv__a'`).Scan(&deferred); err != nil {
+		t.Fatalf("the old row is unreadable after the migration: %v", err)
+	}
+	if err := up.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_tooldecl_deferred'`).Scan(&idx); err != nil {
+		t.Fatal(err)
+	}
+	if deferred != 0 || idx != 1 {
+		t.Errorf("deferred=%d index=%d, want the old row at 0 and the partial index created", deferred, idx)
+	}
+}
