@@ -929,8 +929,10 @@ function removalGroup(g, rep) {
   // TOOL only: a reader who had decided to drop a nineteen-tool server had to tick nineteen
   // boxes, each one a separate write, each one its own prefix rebuild — which is the one thing
   // the reversibility note tells them not to do.
+  // deferred: one deferred tool makes the server unfilterable, as on the server side.
   const srv = many && g.sub === 'MCP server'
-    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens } : null;
+    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens,
+      deferred: g.items.some((t) => t.deferred) } : null;
   const head = el('div', { class: 'inv-group-head' },
     el('div', { class: 'inv-group-id' },
       srv ? excludeToggle(srv) : null,

@@ -780,12 +780,16 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 	var allUSD, enoughUSD, enoughLow, enoughHigh float64
 	from := time.UnixMilli(out.Window.Since).UTC().Format("2006-01-02")
 	to := time.UnixMilli(out.Window.Until).UTC().Format("2006-01-02")
+	var clientOnly int
+	var clientOnlyUSD float64
 	for i := range out.Items {
 		it := &out.Items[i]
 		it.Remove = it.Suggest
 		it.Basis = fmt.Sprintf("declared in %d sessions, unused in the observed window %s to %s", it.Sessions, from, to)
 		if it.ClientOnly {
-			continue // the filter cannot remove it; the item still lists its client change
+			// The filter cannot remove it; the item still lists its client change.
+			clientOnly, clientOnlyUSD = clientOnly+1, clientOnlyUSD+it.USD
+			continue
 		}
 		all, allUSD = append(all, it.RemoveAs), allUSD+it.USD
 		if it.Sufficient {
@@ -828,6 +832,9 @@ func (out *AdaptToolsDoc) finish(state ToolFilterState) {
 		out.PaybackWeeks = &w
 	}
 	switch {
+	case len(all) == 0 && clientOnly > 0:
+		out.Summary = fmt.Sprintf("%d declared items were unused from %s to %s (%s). Claude Code sends them as deferred tools, which the proxy cannot filter: remove them in the client with the command on each item.",
+			clientOnly, from, to, usdText(clientOnlyUSD))
 	case len(all) == 0:
 		out.Summary = "Every MCP server, MCP tool and skill you declared was used in this window."
 	case len(enough) > 0 && enoughUSD <= out.RewriteUSD:

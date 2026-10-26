@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -1573,4 +1574,21 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		out = out[:25]
 	}
 	return out, nil
+}
+
+// IsDeferredDecl reports whether tenant has carried name as a deferred MCP tool: the exact tool,
+// or, for the whole-server form `mcp__<server>`, any tool of that server.
+func (d *DB) IsDeferredDecl(tenant, name string) (bool, error) {
+	q, arg := `d.name = ?`, name
+	if _, _, ok := SplitMCPName(name); !ok {
+		server := strings.TrimPrefix(name, "mcp__")
+		if server == name || server == "" {
+			return false, nil // not an MCP name: nothing deferred to find
+		}
+		q, arg = `d.server = ?`, server
+	}
+	var n int
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT 1 FROM tool_declarations d
+		WHERE d.tenant_id = ? AND d.deferred = 1 AND `+q+` LIMIT 1)`, tenant, arg).Scan(&n)
+	return n > 0, err
 }

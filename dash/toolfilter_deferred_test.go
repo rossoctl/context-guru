@@ -32,6 +32,9 @@ func seedDeferred(t *testing.T) *DB {
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
 	}
+	msgs = append(msgs, invMsg{tenant: "t2", session: "other", ts: day(0), inv: &Inventory{Digest: "o", Decls: []Decl{
+		{Kind: KindMCPTool, Name: "mcp__dfr__a", Server: "dfr", Tokens: 10},
+	}}})
 	if err := w.write(msgs); err != nil {
 		t.Fatal(err)
 	}
@@ -135,5 +138,55 @@ func TestToolReportMarksDeferredRows(t *testing.T) {
 	if !by["mcp__dfr__a"].Deferred || by["mcp__arr__b"].Deferred {
 		t.Errorf("deferred flags: dfr=%v arr=%v, want true and false",
 			by["mcp__dfr__a"].Deferred, by["mcp__arr__b"].Deferred)
+	}
+}
+
+// The proxy refuses a filter write for a deferred tool or server, so a hand-made POST cannot
+// do what the page no longer offers. The lookup is per tenant and needs no window.
+func TestIsDeferredDecl(t *testing.T) {
+	db := seedDeferred(t)
+
+	for _, c := range []struct {
+		tenant, name string
+		want         bool
+	}{
+		{"t1", "mcp__dfr__a", true},
+		{"t1", "mcp__dfr", true}, // the whole-server form
+		{"t1", "mcp__arr__b", false},
+		{"t1", "mcp__arr", false},
+		{"t2", "mcp__dfr__a", false}, // another tenant's rows say nothing about this one
+		{"t1", "Read", false},
+	} {
+		got, err := db.IsDeferredDecl(c.tenant, c.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("IsDeferredDecl(%s, %s) = %v, want %v", c.tenant, c.name, got, c.want)
+		}
+	}
+}
+
+// Every unused MCP tool on Claude Code 2.1.310 is deferred. Then no item is filterable, and the
+// summary must not say that everything was used while it lists the unused items.
+func TestAdaptToolsSummaryWhenOnlyDeferredItemsAreUnused(t *testing.T) {
+	doc := &AdaptToolsDoc{Window: AdaptToolsWindow{Since: day(0), Until: day(30)}, Items: []AdaptToolsItem{
+		{Kind: KindMCPServer, Name: "playwright", ClientOnly: true, USD: 4, Sufficient: true,
+			Suggest: "claude mcp remove playwright"},
+		{Kind: KindMCPServer, Name: "memory", ClientOnly: true, USD: 1, Suggest: "claude mcp remove memory"},
+	}}
+
+	doc.finish(ToolFilterState{})
+
+	if strings.Contains(doc.Summary, "was used") {
+		t.Errorf("summary says everything was used while 2 items are unused: %q", doc.Summary)
+	}
+	for _, want := range []string{"2 declared items", "deferred", "command on each item"} {
+		if !strings.Contains(doc.Summary, want) {
+			t.Errorf("summary %q does not say %q", doc.Summary, want)
+		}
+	}
+	if doc.Best != "keep" || doc.Recommendation != nil || len(doc.Options) != 1 {
+		t.Errorf("a client-only report recommends a filter: best=%s rec=%+v options=%+v", doc.Best, doc.Recommendation, doc.Options)
 	}
 }
