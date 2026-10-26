@@ -23,6 +23,8 @@ func TestPrefixAskCacheOK(t *testing.T) {
 		{"read of zero", 0, 0, 25512, false, false, prefixAskReadZero},
 		{"read of zero, turn unknown", 0, 0, 0, false, false, prefixAskReadZero},
 		{"turn unknown, any read above 0 passes", 100, 5000, 0, false, true, ""},
+		{"typed prompt: question rewrites the text turn's tail, cap on", 25516, 300, 25516, true, true, ""},
+		{"typed prompt: a tail of a few hundred, cap off", 25516, 300, 25516, false, true, ""},
 		{"large write, cap off: not the rule", 25512, 12142, 25512, false, true, ""},
 		{"large write, cap on", 25512, 12142, 25512, true, false, prefixAskWriteOverCap},
 		{"small write, cap on", 25512, 53, 25512, true, true, ""},
@@ -31,13 +33,20 @@ func TestPrefixAskCacheOK(t *testing.T) {
 		{"write over 2 percent of a small prefix, cap on", 1000, 100, 1000, true, false, prefixAskWriteOverCap},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			old := prefixAskWriteCapOn
-			prefixAskWriteCapOn = tc.capOn
-			defer func() { prefixAskWriteCapOn = old }()
-			ok, reason := prefixAskCacheOK(components.PrefixUsage{CacheRead: tc.read, CacheWrite: tc.write}, tc.turn)
+			ok, reason := prefixAskJudge(components.PrefixUsage{CacheRead: tc.read, CacheWrite: tc.write}, tc.turn, tc.capOn)
 			if ok != tc.ok || reason != tc.reason {
 				t.Errorf("got (%v, %q), want (%v, %q)", ok, reason, tc.ok, tc.reason)
 			}
 		})
+	}
+}
+
+// The shipped switch is on, so the shipped decision applies the cap (#721).
+func TestPrefixAskCacheOKShipsWithTheCapOn(t *testing.T) {
+	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25512, CacheWrite: 12142}, 25512); ok || why != prefixAskWriteOverCap {
+		t.Fatalf("got (%v, %q), want the cap to refuse a 12,142 write", ok, why)
+	}
+	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: 300}, 25516); !ok {
+		t.Fatalf("a typed-prompt tail write of 300 was refused: %q", why)
 	}
 }

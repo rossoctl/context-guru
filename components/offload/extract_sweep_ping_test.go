@@ -1078,7 +1078,9 @@ func TestThePingGateJudgesTheReadAgainstTheLastTurn(t *testing.T) {
 		{"a tail write after a text turn is fine", 25516, 83, 25516, true, ""},
 		{"model switch: read far below the turn", 13440, 12000, 41886, false, "sweep_prefix_cache_read_below_turn"},
 		{"read of zero", 0, 0, 25512, false, "sweep_prefix_cache_read_ZERO"},
-		{"unknown turn read: only zero is refused", 13440, 12000, 0, true, ""},
+		{"typed prompt: a 300-token tail write passes", 25516, 300, 25516, true, ""},
+		{"large write is refused by the cap", 25512, 12142, 25512, false, "sweep_prefix_cache_write"},
+		{"unknown turn read: read above 0 and a small write pass", 13440, 100, 0, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asker := pingAsker()
