@@ -3,12 +3,14 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
@@ -35,12 +37,18 @@ type capture struct {
 	provider  string
 	model     string
 	agent     string
+	project   string
 	start     time.Time
 	cgMs      float64
 	upstream  float64
 	status    int
 	expands   int
 	expandTok int
+	// The expands that restored a sweep marker, and what they returned. A subset of the two above.
+	sweepExpands   int
+	sweepExpandTok int
+	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
+	sweepFalseExp int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -63,6 +71,7 @@ type capture struct {
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread     string
+	agentComp  bool
 	inherits   string
 	hasInherit bool
 	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
@@ -165,6 +174,13 @@ func (c *capture) noteTrace(tr apply.Trace) {
 	}
 }
 
+// noteAgentCompaction records that this request is the agent's own compaction request.
+func (c *capture) noteAgentCompaction(v bool) {
+	if c != nil {
+		c.agentComp = v
+	}
+}
+
 // noteThread records which thread of the session this request belongs to.
 func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
@@ -194,6 +210,16 @@ func (c *capture) noteWaitBody(body []byte) {
 func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
+	}
+}
+
+// noteProject records the directory the agent was started in. Called once, from the chat handler,
+// with the PRISTINE inbound body — for the same reason noteMeta is: the pipeline may compact the
+// environment block out of the transcript it forwards, and reading the project from the rewritten
+// body would record "unattributed" on exactly the requests the pipeline acted on.
+func (c *capture) noteProject(p string) {
+	if c != nil {
+		c.project = p
 	}
 }
 
@@ -248,6 +274,21 @@ func (c *capture) noteInventory(provider string, body []byte) {
 // Breakpoint counts are NOT read here: the pipeline already counts them to respect the
 // provider's cap of four, and they reach the event on the trace for free (see FromTrace).
 func metaFromBody(body []byte) dash.Meta {
+	m := metaFromBodyRefs(body)
+	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
+	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
+	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
+	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
+	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
+	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
+	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
+	m.ThinkingMode = strings.Clone(m.ThinkingMode)
+	m.ToolChoice = strings.Clone(m.ToolChoice)
+	return m
+}
+
+// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
+func metaFromBodyRefs(body []byte) dash.Meta {
 	var m dash.Meta
 	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
 		switch k.Str {
@@ -355,6 +396,21 @@ func (c *capture) noteExpand(tokens int) {
 	}
 }
 
+// noteSweepExpand records that an expand call restored a sweep marker, so the dashboard can charge
+// it to the sweep (#404 point 7). It is in addition to noteExpand, which still counts the expand in
+// the totals. note.First is true only for the first expand of a drop, so a stale tool error repaired
+// on every later turn is one false drop and not many.
+func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
+	if c == nil || !note.Sweep {
+		return
+	}
+	c.sweepExpands++
+	c.sweepExpandTok += tokens
+	if note.First && !note.Overlap {
+		c.sweepFalseExp++
+	}
+}
+
 // finish builds the event and hands it off. Called once, after the response has
 // been written, so nothing here is on the client's critical path. usage may be
 // zero-valued with ok=false, in which case the row is marked partial and left
@@ -389,9 +445,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Status:   c.status,
 	}
 	e.Agent = dash.AgentFor(c.agent)
+	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
 	e.ThreadID = c.thread
+	e.AgentCompaction = c.agentComp
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
@@ -455,6 +513,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
+	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
@@ -504,11 +563,38 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
 	//
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known, lastWasSame := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
 	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
 	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
 	// reads as an expiry on a turn that came 8 s after the refresh.
-	e.AttributeCache(seenSession, seenModel, entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt),
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+	age := sinceMs
+	if known {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -574,10 +660,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	if c.inv != nil {
-		e.DeclDigest = c.inv.Digest
-	}
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
+	// e.Project rides along: invocations are recorded per folder, because one session works in
+	// several and a per-session folder cannot scope a per-project report.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }
 

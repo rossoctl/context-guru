@@ -27,13 +27,12 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
-	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
@@ -62,6 +61,12 @@ func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
 }
 
 func main() {
+	// SUBCOMMANDS, before any flag is defined: the release ships this one binary, so a one-off job the
+	// installer runs has to live in it. Only an exact first argument dispatches; every flag form
+	// (`-listen`, `--version`) still reaches the proxy's own parsing below.
+	if len(os.Args) > 1 && os.Args[1] == "import-history" {
+		os.Exit(dash.RunImportHistory(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	var (
 		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
 		// could not tell which port an instance held (the address reached it only through the
@@ -453,12 +458,10 @@ func main() {
 			}
 			return t.MaxRows
 		})
-		// A tenant's own configuration must never be able to spend the server's ambient
-		// provider credential: a `model:` block that names a model but no api_key would
-		// otherwise fall back to this process's ANTHROPIC_API_KEY / OPENAI_API_KEY. In
-		// hosted mode that is exactly the billing defect this deployment removes, so the
-		// fallback is switched off and such a block simply has no client (fail open).
-		offload.AllowEnvModelKey = false
+		// A tenant's own configuration can no longer carry a credential at all — the
+		// component model: block names only a source and a model id (components/offload/
+		// modelcfg.go) — so the billing defect this comment used to guard (a tenant's
+		// config spending the server's ambient provider credential) cannot occur.
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
 			"register_domains", *registerDomains, "manager", *managerEmail != "")
@@ -610,6 +613,7 @@ func main() {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		h.API().SetPingStates(h.KeepAlivePingStates)
 		// The configuration the adapt reports compare against: each account's in hosted mode, this
 		// proxy's own (with any applied override) otherwise.
 		h.API().SetAdaptCompactionConfig(h.DashAdaptConfig())
@@ -847,6 +851,11 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 		KeepAliveStrategyID: r.Strategy,
 	}
 	ev.SessionID, ev.ThreadID = r.Session, r.Thread
+	// A ping the user asked for stays a keepalive row (real spend, a real refresh) but is flagged,
+	// so no strategy ledger counts it; the write it avoided is stored beside its cost.
+	ev.ManualPing, ev.ManualSavedUSD = r.Manual, r.RewriteUSD
+	// The sweep's answer cost, on the ping row its question replaced (#404 point 9).
+	ev.SweepAnswerUSD = r.SweepAnswerUSD
 	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
 	ev.Agent = dash.AgentFor(r.Agent)
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead
@@ -1009,6 +1018,8 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 		Idle:             time.Duration(r.KeepAliveIdleSeconds) * time.Second,
 		OpenAIIdle:       time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
 		MaxPings:         r.KeepAliveMaxPings,
+		Idle1h:           time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
+		MaxPings1h:       r.KeepAliveMaxPings1h,
 		MaxUSDPerPing:    r.KeepAliveMaxUSDPerPing,
 		MinPrefixTokens:  r.KeepAliveMinPrefixTokens,
 		HeadTTL1h:        c.HeadTTL1h,
@@ -1275,7 +1286,7 @@ func modelWindows() modelinfo.Resolver {
 		return chain
 	}
 	url := strings.TrimSpace(os.Getenv("MODEL_INFO_URL"))
-	live := modelinfo.NewLiteLLM(url, nil, 0)
+	live := litellm.NewLiteLLM(url, nil, 0)
 	if url == "" {
 		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
 		// the embedded table remains the right answer and the chain keeps its fallback.
@@ -1314,22 +1325,26 @@ func modelWindows() modelinfo.Resolver {
 //	CHEAP_MODEL_BASE      upstream base URL (default: the matching provider default)
 //	CHEAP_MODEL_KEY       API key (default: ANTHROPIC_API_KEY / OPENAI_API_KEY)
 //	CHEAP_MODEL_AUTH      anthropic auth scheme: x-api-key (default) | bearer
-func cheapModelFromEnv() components.Model {
+func cheapModelFromEnv() *proxy.CheapModelConfig {
 	model := os.Getenv("CHEAP_MODEL")
 	if model == "" {
 		return nil
 	}
-	switch envOr("CHEAP_MODEL_PROVIDER", "anthropic") {
-	case "openai":
-		return cheapmodel.OpenAI{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey: envOr("CHEAP_MODEL_KEY", os.Getenv("OPENAI_API_KEY")),
-		}
-	default:
-		return cheapmodel.Anthropic{
-			BaseURL: os.Getenv("CHEAP_MODEL_BASE"), Model: model,
-			APIKey:     envOr("CHEAP_MODEL_KEY", os.Getenv("ANTHROPIC_API_KEY")),
-			AuthScheme: os.Getenv("CHEAP_MODEL_AUTH"),
-		}
+	provider := envOr("CHEAP_MODEL_PROVIDER", "anthropic")
+	key := os.Getenv("CHEAP_MODEL_KEY")
+	if provider == "openai" {
+		return &proxy.CheapModelConfig{Provider: "openai", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+			Model: model, APIKey: envOr0(key, os.Getenv("OPENAI_API_KEY"))}
 	}
+	return &proxy.CheapModelConfig{Provider: "anthropic", BaseURL: os.Getenv("CHEAP_MODEL_BASE"),
+		Model: model, APIKey: envOr0(key, os.Getenv("ANTHROPIC_API_KEY")), Auth: os.Getenv("CHEAP_MODEL_AUTH")}
+}
+
+// envOr0 is envOr for a value already read rather than an env var name, so cheapModelFromEnv does
+// not read CHEAP_MODEL_KEY twice.
+func envOr0(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }

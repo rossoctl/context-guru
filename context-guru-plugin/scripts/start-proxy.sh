@@ -324,6 +324,30 @@ case "${ANTHROPIC_BASE_URL:-}" in
 esac
 fi
 
+# --- (1a) the ping header on an install that predates it (#685) ----------------------------------
+# Manual pings (the Ping button) work only when the session sends `x-context-guru-ping: 1`. Only
+# install.sh wrote it, so an older install never has it. The header makes the server keep the latest
+# request and key in memory, so it is written only when settings.py can prove the install predates
+# --no-ping-header (then it prints the consent words). Otherwise settings.py prints a one-time note.
+# The grep keeps python3 off the common path: it runs only when a settings file holds our routing
+# record with no ping record at all. Fails open: any error is swallowed.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  for ph_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    ph_seen_="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/ping-header-note.json"
+    ph_real_=$(realpath "$ph_file_" 2>/dev/null) || ph_real_="$ph_file_"
+    if grep -qs '"installed_base_url"' "$ph_file_" 2>/dev/null \
+       && ! grep -qs '"installed_ping_header"\|"ping_header_opt_out"' "$ph_file_" 2>/dev/null \
+       && ! grep -qsF "\"$ph_real_\"" "$ph_seen_" 2>/dev/null; then
+      ph_out_=$(python3 "$HERE/settings.py" ensure-ping-header 2>/dev/null) || ph_out_=""
+      ph_note_=$(printf '%s\n' "$ph_out_" | sed -n 's/^note=//p' | head -1)
+      [ -n "$ph_note_" ] && note "$ph_note_"
+      break
+    fi
+  done
+fi
+
 # --- (1b) what configuration do we WANT, and what is running? ----------------------------
 # CONTEXT_GURU_STATE first, like settings.py, reset.sh and check-proxy.sh. S10 in review: this was the
 # ONE script that ignored it, which had two consequences. A user who relocates their state directory
@@ -764,7 +788,7 @@ compute_preset_and_strategy_notes() {
   # failure this plugin exists to avoid.
   PRESET_NOTE="$PRESET"
   # STRATEGY_NOTE is the NAME of the cache strategy in effect. Reported because a name is the only
-  # thing a user can say back to us: "put it back on 5-min-ping" has to be a sentence, not an
+  # thing a user can say back to us: "put it back on auto" has to be a sentence, not an
   # archaeology exercise over four tuning numbers. `none` is the absence of a config, so it is the
   # correct thing to report when there is no file - not "unknown", and not silence.
   #
@@ -855,6 +879,10 @@ attempt_launch() {
     return 0
   fi
 
+  # Where this attempt's output starts in $LOG. The log is append-only across starts, so a rejection
+  # logged by an EARLIER run must not be read as this run's (see the one-hour-key recovery below).
+  ATTEMPT_LOG_START=$(wc -c <"$LOG" 2>/dev/null | tr -d ' ') || ATTEMPT_LOG_START=0
+  : "${ATTEMPT_LOG_START:=0}"
   PRESET="$PRESET" \
     "${STARTER[@]}" "$BIN" \
     --listen "127.0.0.1:${PORT}" \
@@ -1018,6 +1046,27 @@ if [ -s "$LOG" ]; then
   rejected_preset=$(sed 's/\\//g' "$LOG" 2>/dev/null \
                        | grep -o 'unknown preset "[^"]*"' | tail -1 \
                        | sed -E 's/unknown preset "(.*)"/\1/')
+fi
+
+# The binary rejected a one-hour key (`keepalive_idle_seconds_1h`, `keepalive_max_pings_1h`). The
+# plugin updates through the marketplace and the binary does not, so a newer plugin can write a key an
+# older binary's strict loader has never heard of. Only a non-default value is ever written (see
+# settings.py ONE_HOUR_DEFAULTS), so this is the `2-ping` case; the recovery is the same shape as the
+# preset one: re-render WITHOUT the keys and retry once. The proxy then pings a 1-hour cache like a
+# 5-minute one, which is what that binary always did.
+if [ -s "$LOG" ] && tail -c "+$((${ATTEMPT_LOG_START:-0} + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then
+  note "the installed proxy (${HAVE}) does not know the one-hour keep-alive keys; starting without them."
+  note "a 1-hour cache is then pinged on the 5-minute schedule until you update the proxy (/context-guru:update)."
+  if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] \
+     && CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy sync \
+          --port "$PORT" --preset "$PRESET" --legacy-binary >/dev/null 2>&1; then
+    compute_preset_and_strategy_notes
+    if attempt_launch; then
+      exit 0
+    fi
+  else
+    note "could not rewrite keepalive-${PORT}.yaml without them (strategy sync failed)."
+  fi
 fi
 
 if [ -n "$rejected_preset" ] && [ "$PRESET" != off ]; then

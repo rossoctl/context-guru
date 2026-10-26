@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
@@ -143,10 +144,10 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 			}, "active campaign " + id, true
 		}
 	}
-	if !pol.on() {
+	if !pol.On() {
 		return func(int) (int, float64, bool) { return 0, 0, false }, "keep-alive off", true
 	}
-	gate, _ := predictorFor(pol.PredictorID)
+	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
 		if f.turn < 1 || f.prefix < int64(pol.MinPrefixTokens) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
@@ -205,13 +206,16 @@ func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// adaptLabels names each adapt arm. The ping spacing in the text comes from autoX, the spacing the
+// arms actually run at, so the text cannot drift from the default again (#719 review).
 var adaptLabels = map[string][2]string{
-	"never":   {"No pings", "never keep the cache warm"},
-	"default": {"Default keep-alive", "2 pings 270 s apart on prefixes >= 80K tokens, <= $0.50 a ping, none after a thread's first request, stopped by SessionEnd"},
-	"K1":      {"1 ping, every response", "one ping 270 s after every response"},
-	"K2":      {"2 pings, every response", "two pings 270 s apart after every response"},
-	"K3":      {"3 pings, every response", "three pings 270 s apart after every response"},
-	"auto":    {"Adapted: one plan for you", "the ping count learned from your history, shrunk toward everyone's"},
+	"never": {"No pings", "never keep the cache warm"},
+	"default": {"Default keep-alive", fmt.Sprintf("2 pings %d s apart on prefixes >= 80K tokens, <= $0.50 a ping, "+
+		"none after a thread's first request, stopped by SessionEnd", autoX)},
+	"K1":   {"1 ping, every response", fmt.Sprintf("one ping %d s after every response", autoX)},
+	"K2":   {"2 pings, every response", fmt.Sprintf("two pings %d s apart after every response", autoX)},
+	"K3":   {"3 pings, every response", fmt.Sprintf("three pings %d s apart after every response", autoX)},
+	"auto": {"Adapted: one plan for you", "the ping count learned from your history, shrunk toward everyone's"},
 }
 
 // adaptReport is the whole report; adaptCacheReport only does the I/O around it.
@@ -543,10 +547,11 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		"observed": map[string]any{"class": "observed", "bill_usd": r2(bill + led.PingUSD), "pings": led.Pings, "ping_usd": r2(led.PingUSD), "misses_avoided": led.MissesAvoided,
 			"saved_usd_ceiling": r2(led.SavedUSD), "net_usd": r2(led.NetUSD),
 			"note": "what the keep-alive actually did in this window (the dashboard's ledger); saved is a ceiling: another session with the same prefix could have kept the entry warm"},
-		"relative":   relative,
-		"gain":       gain,
-		"display_tz": tz,
-		"heatmap":    heatmap, "option_heatmaps": heatmaps, "heatmap_tz": tz,
+		"relative":        relative,
+		"gain":            gain,
+		"display_tz":      tz,
+		"display_tz_note": fmt.Sprintf("by_dow / by_hour spans are shown with the %s offset as of %s (the window end); across a daylight-saving change inside the window, earlier hours read one hour off. The rules themselves run on UTC.", tz, time.UnixMilli(until).In(loc).Format("2006-01-02")),
+		"heatmap":         heatmap, "option_heatmaps": heatmaps, "heatmap_tz": tz,
 		"to_date": map[string]any{"class": "observed", "since": since, "until": until, "saved_usd": r2(led.NetUSD), "saved_ceiling_usd": r2(led.SavedUSD),
 			"ping_usd": r2(led.PingUSD), "pings": led.Pings,
 			"label": "what your current keep-alive saved so far: the rewrites its pings avoided (a ceiling) minus what the pings cost, as billed"},

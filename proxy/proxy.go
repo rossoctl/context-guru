@@ -27,12 +27,12 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -75,10 +75,14 @@ type Options struct {
 	// (0 = defaultUpstreamHeaderTimeout). Deliberately NOT a whole-request timeout — see
 	// upstreamTransport for the 502s that cost.
 	UpstreamHeaderTimeout time.Duration
-	// CheapModel is the static "config"-source LLM client for NeedsModel
-	// components (nil = none). The "incoming"-source client is built per request
-	// from the route's upstream + the gateway's real key.
-	CheapModel components.Model
+	// StreamSilenceTimeout bounds how long a STREAMING upstream request may go without a single
+	// response byte after being written before it is resent once on a new connection
+	// (0 = streamSilenceTimeout). See upstreamsilence.go for the gateway behaviour it handles.
+	StreamSilenceTimeout time.Duration
+	// CheapModel is the static "config"-source LLM for NeedsModel components (nil = none): the
+	// operator's own endpoint and credential, pinned once at New. The "incoming"-source client
+	// is built per request from the route's upstream + the gateway's real key.
+	CheapModel *CheapModelConfig
 	// Windows resolves a model's context window (max input tokens) so fraction-based
 	// Trigger thresholds scale with the model. nil => window unknown (0), fractions
 	// ignored, absolutes apply. Built in main from internal/modelinfo.
@@ -211,6 +215,12 @@ type Handler struct {
 	agg    *metrics.Aggregator
 	opts   Options
 	client *http.Client
+	// dispatch is how every core call leaves this proxy (keep-alive pings, cheap-model calls).
+	// Use dispatcher(), which builds it.
+	dispatch *Dispatcher
+	// staticCheapModel is Options.CheapModel pinned on the Dispatcher at New — nil when
+	// unconfigured. staticModel() is the host-mode-aware accessor; this field is unconditional.
+	staticCheapModel components.Model
 	// sent holds the last body forwarded upstream per session, so a component can put a question to
 	// the request's own model with the bytes the provider's cache was populated from. See
 	// prefixask.go for the bounds and for what happens when one is hit.
@@ -321,8 +331,21 @@ func upstreamTransport(headerTimeout time.Duration) http.RoundTripper {
 	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = headerTimeout
+	// Keep a warm connection for every request that was in flight, not two. DefaultTransport's
+	// MaxIdleConnsPerHost is 2, so when a burst of N streams to one gateway finishes, N-2 healthy
+	// connections are closed on the spot and the next burst pays N-2 new TCP+TLS handshakes.
+	// Measured on contextguru2 (2026-10-18): 172 of 388 upstream connections were closed less than
+	// a second after their last response for exactly this reason, with up to 16 open at once.
+	// IdleConnTimeout stays at DefaultTransport's 90 s: shorter would only add handshakes, and the
+	// upstream that motivated upstreamsilence.go hangs fresh connections as often as reused ones.
+	t.MaxIdleConnsPerHost = upstreamIdleConnsPerHost
 	return t
 }
+
+// upstreamIdleConnsPerHost is the warm-connection pool per upstream host. Above the 16
+// simultaneous streams measured in production, and still bounded so an idle proxy holds a small,
+// fixed number of sockets.
+const upstreamIdleConnsPerHost = 32
 
 // defaultUpstreamHeaderTimeout is how long an upstream may take to say ANYTHING before we
 // treat it as gone. Generous on purpose: a non-streaming request generates its whole answer
@@ -349,6 +372,10 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache})
 	h.startAdaptOverride()
 	h.limiter = NewLimiter(opts.Limits)
+	h.dispatcher()
+	if opts.CheapModel != nil {
+		h.staticCheapModel = h.dispatch.pinCheapModel(*opts.CheapModel)
+	}
 	h.keeper = newKeeper(h)
 	h.keeper.start()
 	h.threads = thread.New()
@@ -362,6 +389,11 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	}
 	if h.rec != nil {
 		h.api = dash.NewAPI(h.rec)
+		// A write to an account or to the keep-alive strategies drops the cached dashboard reads that
+		// include that state, so a toggle shows on the next load and not after the stale window.
+		if reg := h.registry(); reg != nil {
+			reg.SetOnChange(h.api.InvalidateStateCaches)
+		}
 		// Publish the off-path pool's counters to the dashboard, the same layering /stats
 		// uses: the pool lives in `modes`, which sits above both `metrics` and `dash`, so
 		// the host is the only place that can join them. Read at serve time, not captured
@@ -448,6 +480,8 @@ func (h *Handler) Mux() *http.ServeMux {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
 		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
+		h.mountManualPing(m)
 	}
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
@@ -838,7 +872,8 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		return cheapmodel.Anthropic{BaseURL: up.base, Model: model, APIKey: key, AuthScheme: scheme, Client: h.client}
+		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
+		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
 		if key == "" {
 			key = h.serverKey(h.opts.OpenAIKey)
@@ -846,7 +881,8 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		return cheapmodel.OpenAI{BaseURL: up.base, Model: model, APIKey: key, Client: h.client}
+		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
 	}
 	return nil
 }
@@ -869,7 +905,7 @@ func (h *Handler) staticModel() components.Model {
 	if h.opts.Tenants != nil {
 		return nil
 	}
-	return h.opts.CheapModel
+	return h.staticCheapModel
 }
 
 // capturePath, when set (CONTEXT_GURU_CAPTURE), names a JSONL file the proxy
@@ -1101,34 +1137,54 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// C beside the window, resolved once for both the enforced and the observed path.
 		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
-		// The agent's OWN compaction request rides the same route. Bypass it exactly as the
-		// header does — compacting it destroys content the summary is supposed to carry
-		// verbatim, and the loss is unrecoverable once the summary replaces the transcript
-		// (see isAgentCompaction). Counted as a gate on a `bypass` pseudo-component so
-		// /stats shows components.bypass.gates.agent_compaction — a silent bypass is
-		// indistinguishable from a broken pipeline.
-		// Kept for thread identification too: the agent's own compaction request ends one
-		// prefix of a thread and the next request starts another (see thread.Tracker).
+		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
+		// header above bypasses. The request goes through the normal pipeline, like any other.
+		//
+		// Why: a bypass forwards the ORIGINAL history, but the provider cache holds the history
+		// context-guru REWROTE on the earlier turns. The prefix then differs early, and the
+		// provider writes the whole request to cache again. Measured on production traffic: a
+		// bypassed request missed the cache 31% of the time, an ordinary one 1.6%.
+		//
+		// The trade-off: the summary model now sees the rewritten history (shortened tool
+		// outputs, <<cg:HASH>> markers), not the full original. The Store still holds each
+		// original, and the expand tool stays on the request, so the model can recover one.
+		//
+		// The one exception is size. A compaction body over maxRequestBytes (32 MiB) is bypassed:
+		// the pipeline costs about 0.35 s and 140 MiB of allocation per MiB on the request path
+		// (40 MiB took 13.7 s), and a transcript that large would not keep a warm cache anyway.
+		//
+		// The detection is kept for four things: thread identification (the compaction ends one
+		// prefix of a thread), the larger body limit (readGatedBody), the dashboard row (the
+		// replay cap reads it), and the counter below, so /stats still shows how many
+		// compactions pass through. The counter is a report with Skipped set because the
+		// aggregator counts a report that is not skipped as a run that mutated the request, and
+		// this one mutates nothing.
 		agentCompaction := isAgentCompaction(body)
 		if !bypassed && agentCompaction {
-			bypassed = true
+			gate := "detected"
+			if int64(len(body)) > maxRequestBytes {
+				bypassed = true
+				gate = "oversize_bypass"
+			}
 			if h.agg != nil {
-				rep := components.Report{Component: "bypass", Skipped: true, Mode: tn.Mode}
-				rep.Gate("agent_compaction")
+				rep := components.Report{Component: "agent_compaction", Skipped: true, Mode: tn.Mode}
+				rep.Gate(gate)
 				h.agg.Component(rep)
 			}
-			// The gate name here is the SAME string /stats reports as
-			// components.bypass.gates.agent_compaction, so the log line and the metric
-			// cannot disagree about what happened.
-			lg.Debug("cg.bypass", "gate", "agent_compaction")
+			lg.Debug("cg.agent_compaction", "gate", gate)
 		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.
 		cp.noteMeta(metaFromBody(body))
+		// Which PROJECT this request belongs to — the directory the agent was started in, stated
+		// in the prompt. Off the pristine body too: a pipeline that compacts the environment
+		// block would otherwise make the project vanish on the requests it acted on.
+		cp.noteProject(apply.ProjectFor(provider, body))
 		// Which tools, MCP servers and skills the request DECLARED, and which its last turn
 		// called — off the same pristine body, memoized by declaration-set digest.
 		cp.noteInventory(string(provider), body)
@@ -1292,28 +1348,20 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped in observe mode: nothing was offloaded, so there is nothing to
 			// recover, and injecting a tool declaration would MODIFY the request — which is
 			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too, and this one DOES cost cache sometimes. The
-			// earlier claim here — that a bypassed request is a compaction whose prefix is its
-			// own, so skipping is free — is true for a real compaction and false for a false
-			// positive, and isAgentCompaction has a reachable one: it fires on any last turn
-			// with role "user" containing a compaction phrase (see isAgentCompaction), and in
-			// the Anthropic dialect a tool_result IS a user-role message. So a tool output that
-			// quotes one of those phrases — a session reading the docs page, or reading this
-			// file — makes an ordinary mid-conversation turn bypass, lose the expand tool, and
-			// flip the tools array against the very prefix it shares.
+			// Skipped on a bypassed request too: bypass promises a byte-identical forward, so
+			// nothing is injected. Only the x-context-guru-bypass header bypasses. An agent
+			// compaction request is not bypassed, so it gets the tool like every earlier turn
+			// of its thread. That keeps the tools array, which sits ahead of messages in the
+			// provider's cache hash, the same as on the previous turn.
 			//
-			// Measured on the dashboard: bypassed rows carry prefix_change at 26.7% against
-			// 1.44% for non-bypassed, an 18.6x enrichment, with zero cold_start and 22 of 30
-			// mid-session. n=30, so treat the RATE as indicative and the mechanism as
-			// established.
-			//
-			// Not fixed here, deliberately: the fix is to stop the detector matching a
-			// tool_result (require the phrase in a text block), which changes what bypass means
-			// for every caller of it, not just for this injection. That belongs in its own
-			// change with its own measurement — the check it needs is a phrase count in a
-			// capture against bypassed=1 rows. Injecting into a bypassed request instead is not
-			// the answer: bypass promises a byte-identical forward, and breaking that to save a
-			// prefix trades a documented guarantee for an unmeasured gain.
+			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
+			// tool, so both need a model that ignores it):
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
+			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
+			//   - Any dialect: if the model calls expand on every round, the client gets the raw
+			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
+			// compactionexpand_test.go pins both, so a change shows.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {
@@ -1435,8 +1483,8 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (isAgentCompaction — see agentcompaction.go for why that must be forwarded
-// untouched, never pipelined) and the standalone /compact endpoint, whose whole job is to
+// request (isAgentCompaction — see agentcompaction.go; it goes through the pipeline like any
+// other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
 // (maxKeepAliveBytes, keepalive.go).
@@ -1536,6 +1584,9 @@ func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *
 		// stale error on ten later turns is one recovery, not ten.
 		if !offload.KeptVerbatim(tn.Store, orig) {
 			cp.noteExpand(schema.TextTokens(orig))
+			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
+			// first-time rule as the line above: the repair runs again on every later turn.
+			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
 		}
 		offload.MarkKeptVerbatim(tn.Store, orig)
 	}
@@ -1975,6 +2026,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					h.agg.RecordExpand(back) // bounce: offload had to come back
 				}
 				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
+				// And, when the marker is one the sweep made, charged to the sweep (#404 point 7): the
+				// false-drop signal, and what comes off the sweep's credit.
+				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back, thread.Key(session, threadID)))
 			} else {
 				// Classified as well as counted: the response loop and the request-path repair
 				// both reach here, and an id this proxy could have minted with nothing behind it
@@ -2071,19 +2125,40 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 	if up.base == "" {
 		return nil, errNoUpstream
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
+	build := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.base+up.path, strings.NewReader(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		copyHeaders(req.Header, r.Header)
+		setUpstreamAuth(req.Header, up)
+		// We have to read this response ourselves (streamed usage-sniffing, keep-alive
+		// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
+		// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
+		// Accept-Encoding and auto-decompress resp.Body transparently, for both the
+		// client-forward path and the usage sniffer, which read the identical byte stream.
+		req.Header.Del("Accept-Encoding")
+		return req, nil
 	}
-	copyHeaders(req.Header, r.Header)
-	setUpstreamAuth(req.Header, up)
-	// We have to read this response ourselves (streamed usage-sniffing, keep-alive
-	// accounting), so do not let it arrive compressed — see proxy.go:482 for the same
-	// pattern on the Bob-profile fetch. Dropping it lets http.Transport add its own
-	// Accept-Encoding and auto-decompress resp.Body transparently, for both the
-	// client-forward path and the usage sniffer, which read the identical byte stream.
-	req.Header.Del("Accept-Encoding")
-	return h.client.Do(req)
+	// A request the upstream accepted but never answered is resent once on a new connection: a
+	// streaming one after streamSilenceTimeout of silence instead of the ten-minute header
+	// timeout, and any one whose reused connection was closed before a byte came back instead of
+	// a 502. Non-streaming requests get no silence deadline — their headers arrive only once the
+	// answer is generated. See upstreamsilence.go.
+	silence := time.Duration(0)
+	if streamsRequest(body) {
+		silence = h.streamSilenceTimeout()
+	}
+	return doWithSilenceGuard(r.Context(), h.client, silence, build)
+}
+
+// streamSilenceTimeout is the silence guard's budget: Options.StreamSilenceTimeout, else the
+// measured default.
+func (h *Handler) streamSilenceTimeout() time.Duration {
+	if h.opts.StreamSilenceTimeout > 0 {
+		return h.opts.StreamSilenceTimeout
+	}
+	return streamSilenceTimeout
 }
 
 // setUpstreamAuth applies the route's credential decision to the FORWARDED request.
@@ -2275,6 +2350,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	caStarted, caCommitted, _, _ := offload.CacheAwareAsyncStats()
 	snap.CacheAwareSummarizerAsyncStarted, snap.CacheAwareSummarizerAsyncCommitted = caStarted, caCommitted
 	snap.CacheAwareSummarizerNoPrefix = offload.CacheAwareSummarizerNoPrefix()
+	snap.PrefixStashOversized = PrefixStashOversized()
+	snap.CacheAnchorWritten, snap.CacheAnchorNoSlot, snap.CacheAnchorNotFound = apply.CacheAnchorStats()
 	snap.CacheAwareSummarizerStalePrefix = offload.CacheAwareSummarizerStalePrefix()
 	snap.CacheAwareSummarizerPrefixAskUsed = offload.CacheAwareSummarizerPrefixAskUsed()
 	snap.CacheAwareSummarizerCacheReadTokens, snap.CacheAwareSummarizerCacheWriteTokens =
@@ -2348,7 +2425,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// lives in `proxy` because it acts between requests, so `metrics` cannot reach it. Only
 	// published once it has done something — a deployment where nobody opted in shows no
 	// field at all rather than a row of zeroes that reads as a broken feature.
-	if ka := h.keeper.Stats(); ka.Live > 0 || ka.Pings > 0 || ka.Skipped > 0 {
+	if ka := h.keeper.Stats(); ka.Live > 0 || ka.Pings > 0 || ka.Skipped > 0 || ka.SweepDrops != nil {
 		snap.KeepAlive = ka
 	}
 	// Off-path pool counters, same layering: the pool lives in `modes`, so `metrics` cannot

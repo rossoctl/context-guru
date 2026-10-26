@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -39,9 +40,9 @@ const (
 
 // Rewrite causes, ordered roughly by how avoidable they are.
 const (
-	CauseColdStart    = "cold_start"      // first request of the session for this model
+	CauseColdStart    = "cold_start"      // first request of the session
 	CauseIdleExpiry   = "idle_expiry"     // gap since the previous request exceeded the cache TTL
-	CauseNewThread    = "new_thread"      // same session, different tools/system (subagent or config change)
+	CauseNewThread    = "new_thread"      // same session, a thread not seen before (subagent, side request, other model, or config change)
 	CauseHistory      = "history_rewrite" // message count fell: compaction, rewind or edit
 	CausePrefixChange = "prefix_change"   // warm, longer history, still rewritten: tools/system/MCP changed
 )
@@ -166,22 +167,23 @@ type SpendExplain struct {
 type SpendLedger struct {
 	GrossSavedUSD float64 `json:"gross_saved_usd"` // sum(baseline - cost) over non-ping rows; MODELLED, session-accumulative
 	CGLLMUSD      float64 `json:"cg_llm_usd"`      // context-guru's own model calls (summariser)
-	PingUSD       float64 `json:"ping_usd"`        // keep-alive pings, billed to the caller
-	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled
+	PingUSD       float64 `json:"ping_usd"`        // the keeper's pings (autoPing; a manual ping is its own category), billed to the caller
+	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled; kaSaved over the agent rows the pings inside the window kept warm
 }
 
 type spendRow struct {
 	ts                               int64
-	session, model                   string
+	session, model, thread           string
 	tools, sysBlocks, messages       int
 	fresh, read, write, write1h, out int64
 	cost, baseline, cgllm, kaSaved   float64
-	keepalive                        bool
+	keepalive, manual                bool
 	complete                         bool
 }
 
 type threadKey struct {
 	session, model string
+	thread         string // requests.thread_id, "a:<agent>" only; "" for main and side requests
 	tools, sys     int
 }
 
@@ -257,10 +259,13 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		warm.Since -= ttl1h // earlier requests exist only to give the first counted request a past
 	}
 	cond, args := warm.where()
+	// kaSavedSince stops the credit's ping half at the counted window (f.Since, not the warm-up
+	// span): PingUSD below counts pings inside the window only, so a ping before it must not
+	// bring a saving in with no cost beside it (#678).
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
-		r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
-		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, r.keepalive_saved_usd, r.keepalive,
-		r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
+		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
+		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSavedSince("r.", f.Since)+`, r.keepalive,
+		r.manual_ping, r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +274,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	out := &SpendExplain{Rewrites: map[string]*RewriteCause{}}
 	rates := map[string]modelinfo.Price{}
 	threads := map[threadKey]*threadState{}
-	seen := map[[2]string]bool{}
+	seen := map[string]bool{} // sessions with any earlier request, whatever the model or thread
 	models := map[string]*SpendModel{}
 	sessions := map[string]*SpendSession{}
 	days := map[int64]*SpendDay{}
@@ -283,20 +288,26 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	}
 	for rows.Next() {
 		var r spendRow
-		var ka int
+		var ka, mp int
 		var acct string
-		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.messages,
+		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
 			&r.fresh, &r.read, &r.write, &r.write1h, &r.out, &r.cost, &r.baseline, &r.cgllm,
-			&r.kaSaved, &ka, &acct); err != nil {
+			&r.kaSaved, &ka, &mp, &acct); err != nil {
 			return nil, err
 		}
-		r.keepalive, r.complete = ka != 0, acct == AccountingComplete
+		r.keepalive, r.manual, r.complete = ka != 0, mp != 0, acct == AccountingComplete
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
-		tk := threadKey{r.session, r.model, r.tools, r.sysBlocks}
+		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
+		// keying on it would make every side request a new thread and hide real idle expiries.
+		th := ""
+		if strings.HasPrefix(r.thread, "a:") {
+			th = r.thread
+		}
+		tk := threadKey{r.session, r.model, th, r.tools, r.sysBlocks}
 		prev := threads[tk]
-		sk := [2]string{r.session, r.model}
+		sk := r.session
 		var cause string
 		var gap int64
 		isRewrite := r.complete && ctx >= rewriteMinCtx && float64(r.write) >= rewriteFrac*float64(ctx)
@@ -328,9 +339,14 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		out.USD.add(u)
 		out.Ledger.CGLLMUSD += r.cgllm
 		if r.keepalive {
-			out.Ledger.PingUSD += r.cost
-			out.Ledger.PingSavedUSD += r.kaSaved
+			// The autoPing rule (dash/manualping.go): a manual ping is the user's own spend,
+			// booked under manual_saved_usd by every other ledger, not the keeper's.
+			if !r.manual {
+				out.Ledger.PingUSD += r.cost
+			}
 		} else {
+			// The ping's saving is credited to the agent row it rescued, never to the ping itself.
+			out.Ledger.PingSavedUSD += r.kaSaved
 			out.Ledger.GrossSavedUSD += r.baseline - r.cost
 		}
 		m := models[r.model]

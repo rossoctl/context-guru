@@ -365,9 +365,8 @@ func TestCreditIsSplitByTheCacheVerdictOfTheTurnThatEarnedIt(t *testing.T) {
 			"rate — a live entry would have SERVED the removed span, not rewritten it)",
 			e.ReadCreditUSD, want)
 	}
-	if want := 200_000 * readRate; offUSD(e.OtherCreditUSD, want) {
-		t.Errorf("other credit = %v, want %v (the cold_start turn, at the read rate)",
-			e.OtherCreditUSD, want)
+	if offUSD(e.OtherCreditUSD, 0) {
+		t.Errorf("other credit = %v, want 0 (a cold_start turn is never credit, #611)", e.OtherCreditUSD)
 	}
 	// And the read bucket must NOT be at the write rate — the defect a live review measured, which
 	// inverted the panel's sign. Stated as its own assertion so it cannot be lost in a total.
@@ -377,7 +376,7 @@ func TestCreditIsSplitByTheCacheVerdictOfTheTurnThatEarnedIt(t *testing.T) {
 			"only to the lapsed-entry bucket", e.ReadCreditUSD)
 	}
 	// The prefix_change turn's 800k must be nowhere.
-	want := 400_000*writeRate + 400_000*readRate + 200_000*readRate
+	want := 400_000*writeRate + 400_000*readRate
 	if total := e.ColdCreditUSD + e.ReadCreditUSD + e.OtherCreditUSD; offUSD(total, want) {
 		t.Errorf("credited %v in total, want %v — a prefix_change turn's saving must not be "+
 			"credited to this component, which caused the change", total, want)
@@ -1346,5 +1345,45 @@ func TestAReplayOnTheCommissioningTurnIsNotAFirstRemoval(t *testing.T) {
 					out.Ledger.PastSpanUSD, want)
 			}
 		})
+	}
+}
+
+// An unexplained miss (unknown) is not credit and not "other": it goes to the same excluded
+// bucket as prefix_change (issue #600). It also stays a debit, like prefix_change.
+func TestAnUnexplainedMissIsNotSummarizeCredit(t *testing.T) {
+	out := walk([]compactRow{
+		row(1, 1_000, fresh, miss(CacheHit), wrote(5_000)),
+		row(2, 10_000, saved(100_000), miss(CacheUnknown), wrote(50_000)),
+		row(3, testSpan, saved(100_000), miss(CacheHit)),
+	}, exactWindow, testPrice)
+	e := only(t, out)
+	if offUSD(e.OtherCreditUSD, 0) || offUSD(e.ColdCreditUSD, 0) {
+		t.Errorf("unknown must be credited nowhere: other=%v cold=%v", e.OtherCreditUSD, e.ColdCreditUSD)
+	}
+	if want := 100_000 * readRate; offUSD(out.Ledger.PrefixChangeUSD, want) {
+		t.Errorf("excluded bucket = %v, want %v", out.Ledger.PrefixChangeUSD, want)
+	}
+	if want := 100_000 * readRate; offUSD(out.Ledger.CountedUSD(), want) {
+		t.Errorf("counted = %v, want %v (only the hit turn)", out.Ledger.CountedUSD(), want)
+	}
+	if want := (5_000 + 50_000) * writeRate; offUSD(e.InvalidationDebitUSD, want) {
+		t.Errorf("invalidation debit = %v, want %v", e.InvalidationDebitUSD, want)
+	}
+}
+
+// Issue #611. A cold_start replay turn inside the span is credited nowhere. It sits in the
+// excluded bucket with prefix_change and unknown.
+func TestAColdStartReplayInsideTheSpanIsNeverCredit(t *testing.T) {
+	out := walk([]compactRow{
+		row(1, 1_000, fresh),
+		row(2, 10_000, saved(100_000), miss(CacheColdStart)),
+		row(3, testSpan, saved(100_000), miss(CacheHit)),
+	}, exactWindow, testPrice)
+	e := only(t, out)
+	if offUSD(e.OtherCreditUSD, 0) || offUSD(e.ColdCreditUSD, 0) {
+		t.Errorf("a cold_start turn was credited: other=%v cold=%v", e.OtherCreditUSD, e.ColdCreditUSD)
+	}
+	if want := 100_000 * readRate; offUSD(out.Ledger.PrefixChangeUSD, want) || offUSD(e.ReadCreditUSD, want) {
+		t.Errorf("excluded = %v, read = %v, want %v each", out.Ledger.PrefixChangeUSD, e.ReadCreditUSD, want)
 	}
 }

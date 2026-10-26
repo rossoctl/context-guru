@@ -280,6 +280,9 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	if rep["display_tz"] != tenant.DefaultStrategyTZ {
 		t.Errorf("display_tz %v", rep["display_tz"])
 	}
+	if note, _ := rep["display_tz_note"].(string); !strings.Contains(note, "offset as of "+time.Now().In(func() *time.Location { l, _ := time.LoadLocation(tenant.DefaultStrategyTZ); return l }()).Format("2006-01-02")) {
+		t.Errorf("display_tz_note %q does not name the offset's date", note)
+	}
 	for _, o := range rep["options"].([]any) {
 		o := o.(map[string]any)
 		if o["id"] == "by_hour" && (o["plan"] == nil || strings.Contains(fmt.Sprint(o["label"], o["plan"]), "UTC:")) {
@@ -813,6 +816,17 @@ func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
 	for i := 0; i < adaptReportBurst; i++ {
 		if w, _ := f.do(t, http.MethodGet, "/api/adapt/cache?days=1", "", jar); w.Code != http.StatusOK {
 			t.Fatalf("report %d after the busy answers = %d: the busy answers spent the budget", i+1, w.Code)
+		}
+	}
+}
+
+// #719 review: the adapt arms' text named "270 s" after the default moved to 240 s. The number
+// now comes from autoX; this pins every spaced arm's text to it, so it cannot drift again.
+func TestAdaptLabelsStateTheSpacingTheArmsRunAt(t *testing.T) {
+	want := fmt.Sprintf("%d s", autoX)
+	for _, id := range []string{"default", "K1", "K2", "K3"} {
+		if d := adaptLabels[id][1]; !strings.Contains(d, want) {
+			t.Errorf("adapt arm %s says %q, want it to name the %s spacing the arms run at", id, d, want)
 		}
 	}
 }

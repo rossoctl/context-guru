@@ -285,12 +285,13 @@ func rebuildResponsesCountChanged(body []byte, norm []bschemas.ChatMessage, slot
 	if len(out) > len(norm) || len(out) <= start {
 		return body, false
 	}
-	// Only summarize currently changes count, and its wrapper identifies the
-	// inserted message without relying on retained text staying unchanged.
+	// A summarizer's header identifies the inserted message without relying on
+	// retained text staying unchanged. The same test as the equal-count gate
+	// (isSummaryHeader), so the gate never sends a splice here that cannot be found.
 	head := -1
 	for i := start; i < len(out); i++ {
 		text := schema.MessageText(out[i])
-		if strings.HasPrefix(text, "=== History Summary ===") {
+		if isSummaryHeader(text) {
 			if head >= 0 {
 				return body, false
 			}
@@ -583,8 +584,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		CtxWindow: o.Window, CtxWindowExact: o.WindowExact, CompactionPoint: o.CompactionPoint,
 		CompactionPointSource: o.CompactionPointSource, ModelName: gjson.GetBytes(o.Body, "model").String(),
 		Mode: mode, CacheAware: cacheAware, MaxCachedIdx: maxCachedIdx, IdleMs: idleMs,
-		PrefixAsk:  o.PrefixAsk,
-		CacheTTLMs: ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
+		PrefixAsk:    o.PrefixAsk,
+		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
+		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
 		PrevBilledInput: prevBilledInput(st, res.Session), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)

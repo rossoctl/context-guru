@@ -3,8 +3,8 @@ package offload
 import (
 	"sync"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
 
 // The economic gate. extract_llm is the only component that SPENDS money to SAVE money,

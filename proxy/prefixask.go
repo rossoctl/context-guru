@@ -3,12 +3,13 @@ package proxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
 
 // PREFIX ASKS — putting a question to the request's own model with the previous turn's SENT body as
@@ -38,8 +39,18 @@ import (
 // The other reason it was off — that it holds request bodies in memory — is a bound to state, not a
 // reason to disable. See the caps below and what happens when they are hit.
 
-// Bounds on the stash. These are deliberately small: the stash exists to serve the NEXT turn of an
-// ACTIVE session, so retention beyond that is pure memory cost.
+// Bounds on the stash. The stash exists to serve the NEXT turn of an ACTIVE session, so retention
+// beyond that is pure memory cost.
+//
+// maxSentBody MUST HOLD A FULL-WINDOW BODY. A 1M-token window is about 4 MB of request JSON, and the
+// summarizer's own trigger fires at 90% of it. At the old 1.5 MB cap no thread above about 375k
+// text tokens was ever stashed, so every summary on a 1M-window Anthropic model ended as
+// ErrNoPrefix (#703: 30 of 30). 8 MB leaves twice that room.
+//
+// WORST CASE: one entry holds 2 bodies (forwarded and preBody) of up to 8 MB each, so 16 MB, and
+// maxSentBytes caps the whole stash at 320 MB. Most installs are a local proxy serving one person,
+// where that bound is rarely approached. A shared proxy serving many people is the case to monitor
+// (#704).
 //
 // WHAT HAPPENS WHEN A BOUND IS HIT, since "bounded" on its own says nothing about the failure:
 //
@@ -52,12 +63,12 @@ import (
 //     thread), so a wholesale drop would regularly throw away the main thread's body — the one the
 //     next prefix ask needs. Dropping the oldest keeps the active threads.
 //
-// The entry bound counts THREADS. 256 entries is still bounded in bytes by maxSentBytes (~96 MB),
+// The entry bound counts THREADS. 256 entries is still bounded in bytes by maxSentBytes (320 MB),
 // which is the outer bound and why it is stated explicitly rather than left to be multiplied out.
 const (
 	maxSentSessions = 256
-	maxSentBody     = 1_500_000
-	maxSentBytes    = 96_000_000
+	maxSentBody     = 8_000_000
+	maxSentBytes    = 320_000_000
 )
 
 // sentEntry is one session's stashed state, plus what it takes to answer
@@ -98,13 +109,25 @@ type sentEntry struct {
 // request replaced the main thread's body, so a prefix ask on the main thread failed its coverage
 // check (ErrStalePrefix) or answered from the wrong conversation.
 type sentStash struct {
-	mu    sync.Mutex
-	m     map[string]sentEntry
-	bytes int
-	seq   uint64
+	// afterEntryRead, set only by tests, runs in snapshotCovering right after the entry is read, so a
+	// test can replace the stash at the exact point a second read would have gone wrong.
+	afterEntryRead func()
+	mu             sync.Mutex
+	m              map[string]sentEntry
+	bytes          int
+	seq            uint64
 }
 
 func newSentStash() *sentStash { return &sentStash{m: map[string]sentEntry{}} }
+
+// sentStashOversized counts bodies put refused for being over maxSentBody. Each one leaves that
+// thread with nothing stashed, so its next prefix ask returns ErrNoPrefix. Without this count that
+// looks the same in /stats as a session's ordinary first turn (#703: a 900k-token thread was never
+// stashed, and 30 of 30 summaries failed as no_prefix).
+var sentStashOversized atomic.Int64
+
+// PrefixStashOversized returns sentStashOversized for /stats.
+func PrefixStashOversized() int64 { return sentStashOversized.Load() }
 
 // put records this session's forwarded body AND the pre-pipeline body it was built from,
 // replacing any previous entry.
@@ -132,6 +155,7 @@ func (s *sentStash) put(session string, provider bschemas.ModelProvider, preBody
 		return
 	}
 	if len(forwarded) > maxSentBody || len(preBody) > maxSentBody {
+		sentStashOversized.Add(1)
 		s.mu.Lock()
 		if old, ok := s.m[session]; ok {
 			s.bytes -= len(old.forwarded) + len(old.preBody)
@@ -205,6 +229,54 @@ func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
 		return false
 	}
 	return components.SpanHash(norm[:count]) == hash
+}
+
+// snapshotCovering returns the stashed forwarded body for session if the stashed PRE-pipeline body
+// covers the first count normalized messages hashed to hash, from ONE read of the entry: the
+// returned body is the one that was checked. A missing session is components.ErrNoPrefix, a
+// present one that falls short components.ErrStalePrefix.
+func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]byte, error) {
+	if s == nil || session == "" {
+		return nil, components.ErrNoPrefix
+	}
+	s.mu.Lock()
+	e, ok := s.m[session]
+	s.mu.Unlock()
+	if s.afterEntryRead != nil {
+		s.afterEntryRead()
+	}
+	if !ok || len(e.forwarded) == 0 {
+		return nil, components.ErrNoPrefix
+	}
+	// e's slices are never mutated after put (a replacement installs new ones), so reading them
+	// outside the lock is safe and is the same entry that was just selected.
+	if count >= 0 {
+		norm := apply.NormalizeMessages(e.provider, e.preBody)
+		if count > len(norm) || components.SpanHash(norm[:count]) != hash {
+			return nil, components.ErrStalePrefix
+		}
+	}
+	return e.forwarded, nil
+}
+
+// AskCovered implements components.PrefixCoveredAsker: coverage check and ask on one snapshot.
+func (p prefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
+// AskCovered implements components.PrefixCoveredAsker for the Responses route.
+func (p responsesPrefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixedResponses(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
 }
 
 // prefixAsker is the components.PrefixAsker the pipeline receives. Created per request and holds no

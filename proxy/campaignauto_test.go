@@ -243,7 +243,7 @@ func TestAutoPlansNeverPingLaterThanTheConfiguredInterval(t *testing.T) {
 			}
 		}
 	}
-	// the campaign sets the count; the spacing stays the tenant's interval (60 s stays 60 s, as without a campaign), the shipped 270 s if none
+	// the campaign sets the count; the spacing stays the tenant's interval (60 s stays 60 s, as without a campaign), the shipped 240 s if none
 	for _, conf := range []time.Duration{0, 60 * time.Second, 240 * time.Second, 270 * time.Second} {
 		want := conf
 		if conf == 0 {

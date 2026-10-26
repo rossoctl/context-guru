@@ -108,9 +108,10 @@ type Summarize struct {
 	resummarizeTokens int
 	includeToolCalls  bool
 	modelSource       string
-	modelClient       components.Model // config-pinned client (model: block), or nil
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
 	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
 	// 0 = defaultSummaryWait. See summarize_async.go.
 	summaryWaitSeconds int
@@ -150,7 +151,7 @@ type summarizeConfig struct {
 
 func newSummarize(raw []byte) (components.Component, error) {
 	cfg := summarizeConfig{SummaryLevel: "regular", KeepFirst: 1, KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("summarize", raw, &cfg); err != nil {
 		return nil, err
 	}
 	// Refused rather than clamped: a negative keep_first is a typo, and silently reading it as 0
@@ -170,7 +171,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 	return &Summarize{
 		level: cfg.SummaryLevel, keepFirst: cfg.KeepFirst, customPrompt: cfg.CustomPrompt, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
+		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, trigger: cfg.Trigger,
 		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
 }
@@ -266,6 +267,9 @@ const (
 	// is filed by the goroutine that commits it. Two names because a started-and-lost call is a
 	// real outcome that must not read as a delivered summary.
 	EventSummaryStarted = "summary_started"
+	// EventSummaryDeferredToStash marks a cache_aware_summarizer prefix-ask commission held until
+	// the host has stashed this turn's body, then started from the host's hook (#722).
+	EventSummaryDeferredToStash = "summary_deferred_to_stash"
 	// EventAwaitedCheckpoint marks a turn that WAITED for a summary an earlier turn started and
 	// then spliced it. Distinct from EventReusedCheckpoint because this one cost latency: it is
 	// the turn that paid for the async design, and the pair (awaited, summary_wait_timeout) is
@@ -403,11 +407,9 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	phase := c.CachePhase(s.trigger.PreExpiry())
 	phased := s.trigger.CacheAllows(c, phase)
 	if !phased {
-		// NOT extract_llm_sweep's `not_in_pre_expiry_window`, deliberately. That component has
-		// exactly one permitted state, so a name asserting which one is always true of it. This
-		// trigger's state is CONFIGURED, and a deployment running `cache_state: cold` reading
-		// "not in the pre-expiry window" off /stats would be told something false about its own
-		// configuration. The phase it actually saw is appended, because "the cache state declined"
+		// The gate name carries the phase, because this trigger's state is CONFIGURED: a deployment
+		// running `cache_state: cold` reading a fixed "not in the pre-expiry window" off /stats would
+		// be told something false about its own configuration. The phase it actually saw is appended, because "the cache state declined"
 		// without saying which state is the sort of counter that can tell you THAT something
 		// happened and never why.
 		rep.Gate("cache_state_declined_" + phase.String())
@@ -450,7 +452,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		return reusedKeys, nil
 	}
 
-	model := s.modelClient // config-pinned client wins
+	model := s.modelClient // test-injection seam; nil in production
 	if model == nil {
 		model = c.Model.For(s.modelSource)
 	}
@@ -995,7 +997,7 @@ var summaryMarkerRe = regexp.MustCompile(
 
 func summaryWrapper(summary, key string, mode markerMode) string {
 	summary = sanitizeSummary(summary)
-	body := "=== History Summary ===\n" +
+	body := schema.SummaryHeader + "\n" +
 		"The earlier trajectory is summarized below.\n\n" +
 		summary + "\n\n" +
 		"Use this summary as the older context, and use the following messages as the most recent context. " +

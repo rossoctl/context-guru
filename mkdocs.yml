@@ -88,6 +88,7 @@ validation:
 exclude_docs: |
   superpowers/
   proposals/
+  plans/
 
 # Nav mirrors how people arrive: install it the easy way and see what it saves
 # (Get started) → run it yourself instead of the plugin (Advanced /
@@ -124,6 +125,7 @@ nav:
   - Concepts:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
+      - Data dependence & storage off: data-dependence.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md

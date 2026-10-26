@@ -594,3 +594,78 @@ func TestHeadlineSaysCapNotAppliedWithoutAPriceTable(t *testing.T) {
 		})
 	}
 }
+
+// The agent's own compaction request is no longer bypassed. A row flagged AgentCompaction alone
+// closes the cap, exactly as the bypassed row of an older proxy does.
+func TestReplayCapEndsAtAnAgentCompactionRowThatIsNotBypassed(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		bypassed, agent bool
+	}{
+		{"new row: agent_compaction only", false, true},
+		{"old row: bypassed only", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compaction := capTestRow(3, 130_000, 0, 130_000, "", 0)
+			compaction.Bypassed, compaction.AgentCompaction = tc.bypassed, tc.agent
+			rows := []capRow{
+				capTestRow(1, 100_000, 10_000, 100_000, "searchfold", 1),
+				capTestRow(2, 120_000, 10_000, 120_000, "searchfold", 1),
+				compaction,
+				capTestRow(4, 30_000, 10_000, 30_000, "searchfold", 1), // the client compacted
+				capTestRow(5, 40_000, 10_000, 40_000, "searchfold", 1),
+			}
+			l := walkReplayCap(rows, fixedWindow(1_000_000))
+			c := l.ByComponent["searchfold"]
+			nearEq(t, "counted", c.CountedUSD, 2)
+			nearEq(t, "past real", c.PastClientCompact, 2)
+			if l.ClosedClientCompaction != 1 {
+				t.Errorf("closed by client compaction = %d, want 1", l.ClosedClientCompaction)
+			}
+		})
+	}
+	// Control: no flag on the compaction row, the cap stays open and credit is not cut.
+	rows := []capRow{
+		capTestRow(1, 100_000, 10_000, 100_000, "searchfold", 1),
+		capTestRow(3, 130_000, 0, 130_000, "", 0),
+		capTestRow(4, 30_000, 10_000, 30_000, "searchfold", 1),
+	}
+	if l := walkReplayCap(rows, fixedWindow(1_000_000)); l.ClosedClientCompaction != 0 {
+		t.Errorf("an unflagged row closed the cap: %d", l.ClosedClientCompaction)
+	}
+}
+
+// Through SQL: the flag is stored on the row and read back by the cap query, so a compaction row
+// with bypassed = 0 and agent_compaction = 1 closes the cap.
+func TestReplayLedgerThroughSQLReadsAgentCompaction(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, before, after int, comp, agent bool) *Event {
+		e := mkEvent(ts, "s", "m1", before, after)
+		e.TenantID = "t1"
+		e.FreshInput, e.CacheRead = 1_000, int64(before)
+		e.CacheMissReason = CacheHit
+		e.TokenAccounting = AccountingComplete
+		e.AgentCompaction = agent
+		if comp {
+			e.Components = []CompRow{{Component: "searchfold", Kind: "offload", Acted: true, Mutated: true,
+				SavedGross: before - after, SavedUSD: 1}}
+		}
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk(DayMs+1, 100_000, 90_000, true, false),
+		mk(DayMs+2, 120_000, 110_000, true, false),
+		mk(DayMs+3, 130_000, 130_000, false, true), // the compaction request: not bypassed
+		mk(DayMs+4, 30_000, 20_000, true, false),   // the client compacted
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.ReplayLedgerFor(Filter{TenantAll: true}, testWindows{}, handPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.ClosedClientCompaction != 1 {
+		t.Fatalf("closed by client compaction = %d, want 1 (the agent_compaction column was not read)", l.ClosedClientCompaction)
+	}
+	nearEq(t, "past real", l.ByComponent["searchfold"].PastClientCompact, 1)
+}

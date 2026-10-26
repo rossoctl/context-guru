@@ -33,6 +33,39 @@ const (
 	CacheUnknown      = "unknown"
 )
 
+// Cache-miss causes (requests.cache_miss_cause). cache_miss_reason keeps its five values for
+// old readers. The cause says WHAT changed, and it comes from a comparison with the previous
+// request of the same thread (see PrefixFacts), never from a guess. Only the first cause that
+// applies is stored, in this order.
+const (
+	// CauseModelChanged: the thread switched model. Each model has its own cache.
+	CauseModelChanged = "model_changed"
+	// CauseCompactionAfterRewrite: the agent sent an unmodified request (bypass) after
+	// context-guru had rewritten earlier turns of the thread. The cache holds the rewritten
+	// history. The bypass forwards the original, so the prefix differs.
+	CauseCompactionAfterRewrite = "compaction_after_rewrite"
+	// CauseBypassFlip: bypass turned on or off with no earlier rewrite to explain it.
+	CauseBypassFlip = "bypass_flip"
+	// CauseToolsChanged: the tool declarations differ (digest, or count when no digest).
+	CauseToolsChanged = "tools_changed"
+	// CauseSystemChanged: the system prompt differs (hash, or block count when no hash).
+	CauseSystemChanged = "system_changed"
+	// CauseEffortChanged: reasoning effort, thinking mode or thinking budget differs.
+	CauseEffortChanged = "effort_changed"
+	// CauseConcurrent: nothing measured changed and the previous request began less than
+	// concurrentGapMs ago. A cache entry is readable only after the first response starts,
+	// so parallel sub-agent requests miss. The reason is "unknown", not "prefix_change".
+	CauseConcurrent = "concurrent"
+	// CauseFirstOnModel: no successful earlier request of the thread ran this model, and the
+	// request is short or an earlier one failed. It is not stored as a cause: the reason is
+	// cold_start. ObservePrefix returns it so AttributeCache agrees with the thread facts.
+	CauseFirstOnModel = "first_on_model"
+)
+
+// concurrentGapMs is the gap below which an unexplained miss reads as concurrent. Time to
+// first byte on these models is a few seconds, and the cache entry exists only after it.
+const concurrentGapMs = 5000
+
 // "Why didn't you compact this?" — a first-class reason bucket, not an absence of
 // data. An empty string means we DID compact.
 const (
@@ -169,14 +202,36 @@ type Event struct {
 	BilledTokenFactorMeasured bool   `json:"billed_token_factor_measured"`
 	Provider                  string `json:"provider"`
 	Agent                     string `json:"agent"`
-	Preset                    string `json:"preset"`
-	Mode                      string `json:"mode"`
-	Route                     string `json:"route"`
-	Status                    int    `json:"status"`
+	// Source says how this row came to exist: "" for a request the proxy MEASURED as it passed,
+	// SourceImported for one recovered from a Claude Code transcript after the fact.
+	//
+	// The two can answer different questions and the difference is not recoverable from anything
+	// else on the row. A measured row saw the request, so it knows what was declared on it and
+	// can say "you carried this and never called it". An imported row knows only what the
+	// provider billed, because a transcript does not record the declaration list — so it can
+	// report spend and must never produce a waste verdict.
+	//
+	// "" rather than a word for measured, because every row written before this column existed
+	// is measured and cannot be back-filled.
+	Source string `json:"source,omitempty"`
+	// Project is the directory the agent was started in — what a user means by "project". Read
+	// from the request body, since nothing else in a request identifies one: the session id is a
+	// hash of the conversation head, and one session can span directories (measured: 8 of 48 do).
+	// "" means unattributed, which is what a client that does not state a working directory gets.
+	Project string `json:"project,omitempty"`
+	Preset  string `json:"preset"`
+	Mode    string `json:"mode"`
+	Route   string `json:"route"`
+	Status  int    `json:"status"`
 
-	Bypassed   bool `json:"bypassed"`
-	CacheAware bool `json:"cache_aware"`
-	Messages   int  `json:"messages"`
+	Bypassed bool `json:"bypassed"`
+	// AgentCompaction marks the agent's own compaction request. It is usually not bypassed, but it
+	// can be: a request with the bypass header, or a body over the size ceiling, carries both
+	// flags. The replay cap reads either one as the evidence that a drop in tokens_before is the
+	// client compacting.
+	AgentCompaction bool `json:"agent_compaction"`
+	CacheAware      bool `json:"cache_aware"`
+	Messages        int  `json:"messages"`
 
 	TokensBefore    int `json:"tokens_before"`
 	TokensAfter     int `json:"tokens_after"`
@@ -309,6 +364,13 @@ type Event struct {
 	// keepalive_strategy_id column — so a row from before this feature existed is
 	// distinguishable from one deliberately attributed to nothing.
 	KeepAliveStrategyID string `json:"keepalive_strategy_id,omitempty"`
+	// ManualPing marks a keep-alive row the USER asked for (POST /api/me/cache/ping). It stays a
+	// KeepAlive row — real spend, a real refresh of the provider's entry — and carries strategy id
+	// "manual"; this flag is what every strategy ledger filters on, so a button press never lands
+	// in a strategy's net. ManualSavedUSD is the cache write it avoided (gross; 0 when the ping
+	// read nothing). Its cost is CostUSD, as for any ping.
+	ManualPing     bool    `json:"manual_ping,omitempty"`
+	ManualSavedUSD float64 `json:"manual_saved_usd,omitempty"`
 	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
 	// Not persisted — AttributeCache already turns it into cache_miss_reason — but the
 	// keep-alive credit needs the raw number: the whole claim is that the gap exceeded the
@@ -321,10 +383,28 @@ type Event struct {
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
 	Reverts      int `json:"reverts"`
+	// SweepExpands and SweepExpandTokens are the part of Expands and ExpandTokens that restored a
+	// marker the extract_llm_sweep made (#404 point 7). The sweep's credit has them taken off; the
+	// totals above still carry them, so SavedAdjusted is unchanged.
+	SweepExpands      int `json:"sweep_expands"`
+	SweepExpandTokens int `json:"sweep_expand_tokens"`
+	// SweepFalseExpands is how many drops were expanded back for the FIRST time on this request and
+	// were not already counted as referenced: the expand half of the false-drop count, exact per drop.
+	SweepFalseExpands int `json:"sweep_false_expands"`
+	// SweepAnswerUSD is, on a keep-alive ping row the sweep's question replaced, what the answer cost
+	// beyond the read the ping would have paid anyway (#404 point 9). Booked once, on the ping row, as
+	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
+	// column so the sweep's credit and its answer cost are never one number.
+	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
 
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
+	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
+	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
+	CacheMissCause string `json:"cache_miss_cause,omitempty"`
+	// SystemHash is the system prompt's hash, for the prefix comparison only. Not persisted.
+	SystemHash string `json:"-"`
 
 	// Meta is the request's own knobs, embedded so the JSON stays flat.
 	Meta
@@ -449,6 +529,9 @@ func (m *Meta) redact() {
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
 	e.Meta.redact()
+	// The launch directory is client-chosen; sanitise the field itself so the feed and the
+	// inventory writer see what the requests table stores.
+	e.Project = ProjectPath(e.Project)
 	for i := range e.Content {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)
@@ -957,7 +1040,7 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
 		return 0 // a ping never credits itself
 	}
-	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model) {
+	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model, e.CacheTTL) {
 		return 0
 	}
 	if e.CacheWrite >= e.CacheRead {
@@ -978,12 +1061,20 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 	return float64(n) * delta
 }
 
-func keepaliveCreditFloorMs(provider, model string) int64 {
+// keepaliveCreditFloorMs is how long a gap must be before a ping can take credit for the return:
+// the cache lifetime of the thread. cacheTTL is the tier the returning request ASKED for, which
+// for a given client is constant across a session (Claude Code asks 1h on a subscription for every
+// request). A 1-hour thread is pinged at 59 min, so crediting any gap over 5 minutes would claim
+// returns the entry survived on its own.
+func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
 	if provider == string(bschemas.OpenAI) {
 		if !modelinfo.GPT56OrLater(model) {
 			return 1<<63 - 1 // no known lifetime means no defensible credit
 		}
 		return apply.OpenAIMinimumCacheTTL.Milliseconds()
+	}
+	if cacheTTL == apply.TTLEphemeral1h {
+		return providerCacheTTL1hMs
 	}
 	return providerCacheTTLMs
 }
@@ -992,22 +1083,13 @@ func keepaliveCreditFloorMs(provider, model string) int64 {
 // keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
 // be used as proof that an entry has expired.
 //
-// IT IS NOT THE ONLY TIER, and keepaliveSavedUSD's use of it above is wrong for the other one.
-// A row that wrote at the ONE-HOUR tier (requests.cache_write_1h) keeps its entry for an hour, so
-// a nine-minute gap did not outlive anything and the entry survived without help — but the gate
-// reads `SinceLastMs <= providerCacheTTLMs` and credits it. Inert today: 0 of 105 credited rows on
-// a 133,064-row production corpus have cache_write_1h > 0, and the gateway grants 1h on
-// aws/claude-haiku-4-5 while refusing it on aws/claude-sonnet-5.
-//
-// Not fixed here because the predicate does not exist yet. The 1h tier is recorded on the row
-// that WROTE the entry, not on the row being credited, and the grant can change mid-session — so
-// "is this a 1h entry" is a walk back through the session to whichever row created the prefix,
-// not a column. Anything written before that walk exists encodes a guess about which row's tier
-// counts, and a test on invented rows would certify the guess rather than check it. This is a
-// sign saying the floor is missing, not a fix.
-//
-// dash.kaSaved corrects a different defect in the same credit and does not touch this one.
+// The one-hour tier has its own constant, providerCacheTTL1hMs: a thread whose requests ask the 1h
+// tier is pinged at 59 minutes, so both the write-side floor above and kaSaved's reachability window
+// in keepalive.go use it for rows whose cache_ttl is ephemeral_1h.
 const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
+
+// providerCacheTTL1hMs is the one-hour tier's lifetime.
+const providerCacheTTL1hMs int64 = int64(time.Hour / time.Millisecond)
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a
@@ -1093,18 +1175,28 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 // first of either is a COLD START, which is not a failure and must never be
 // reported as a bust (headroom's model-aware rule). TTL wins ties: a prefix that
 // changed after the entry had already expired was not the cause.
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, prefixChanged bool) {
+//
+// cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
+// "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string) {
 	switch {
 	case e.CacheRead > 0:
 		e.CacheMissReason = CacheHit
-	case !seenSession || !seenModel:
+	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart
 	case ttlMs > 0 && sinceLastMs > ttlMs:
 		e.CacheMissReason = CacheTTLExpiry
-	case prefixChanged:
-		e.CachePrefixChangeReason()
-	default:
+	case cause == "":
 		e.CacheMissReason = CacheUnknown
+	case cause == CauseConcurrent:
+		e.CacheMissReason, e.CacheMissCause = CacheUnknown, cause
+	case e.CacheWrite <= 0:
+		// Nothing was written, so no prefix was re-created: a changed prefix would have
+		// written it. A failed request or one with no usage lands here.
+		e.CacheMissReason = CacheUnknown
+	default:
+		e.CachePrefixChangeReason()
+		e.CacheMissCause = cause
 	}
 }
 

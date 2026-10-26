@@ -57,15 +57,42 @@ configuration document:
 ```yaml
 cache:
   keepalive: true
-  keepalive_idle_seconds: 270          # X — must be under 300
+  keepalive_idle_seconds: 240          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
   keepalive_min_prefix_tokens: 80000   # the gate
   keepalive_max_usd_per_ping: 0.50
+  keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
+  keepalive_max_pings_1h: 1            # K for a 1-hour cache
 ```
 
-The 270-second Anthropic interval is chosen for robustness to where the cache cliff sits (it ties
-280 on the full replay window; counterfactual, see #435), not as a measured optimum; the 1680-second
+### Each session follows its own cache lifetime
+
+The proxy reads the lifetime from the traffic, per session (per thread). It does not use one
+proxy-wide setting.
+
+- A thread is a **1-hour** thread when every cache breakpoint in its request asks `ttl: "1h"` **and**
+  the response billed the 1-hour tier (`ephemeral_1h_input_tokens` equals the whole cache write). A
+  turn that only reads the cache bills no write, so it keeps the thread's last billed tier.
+- The billed tier decides. A gateway can downgrade a requested `1h` to `5m` (#330), and the proxy then
+  uses the 5-minute schedule.
+- Anything else is a **5-minute** thread. That includes a mixed request (1-hour head, 5-minute tail).
+
+| Cache lifetime | `auto` (default) | `1-ping` | `2-ping` |
+|---|---|---|---|
+| 5 minutes | first ping at 240 s, at most 2 | 1 ping at 240 s | same as `auto` |
+| 1 hour | 1 ping at 59 minutes | 1 ping at 59 minutes | 2 pings, 59 minutes apart |
+
+One proxy can serve a 1-hour subscription session and a 5-minute subagent or API-key session at once.
+Each follows its own row. The 59-minute time is one constant, `AnthropicDefaultKeepAliveIdle1h` in
+`internal/modelinfo/cachefrac.go`, or `keepalive_idle_seconds_1h` in the config. The credential hold for
+a 1-hour thread is `(K+1) x 59 min`: 118 min at K=1, and at most 236 min, because `keepalive_max_pings_1h` is capped at 3. A 5-minute thread holds about 12 min. An armed session override does not change a 1-hour thread's schedule; it enables the session and sets its prefix floor. If the installed proxy binary is older than the plugin and rejects the `_1h` keys, `start-proxy.sh` re-renders the config without them and a 1-hour cache is pinged on the 5-minute schedule until the proxy is updated. The re-render is tied to the installed proxy version, so the keys come back after an update.
+
+The 240-second Anthropic interval leaves room for a ping and its whole 60-second timeout inside the
+5-minute cache: 240 + 60 = 300 s. On a live proxy, 92 of 95 failed pings were 60-second timeouts, and at
+the earlier 270 s a ping that timed out came back after the cache had expired (#707). 240 s lowers that
+risk; it does not remove it, because a ping that runs to its timeout still leaves no time to retry. It is
+being measured (#716). The earlier 270 s was chosen for robustness to where the cache cliff sits (#435); the 1680-second
 OpenAI interval is a safety margin below the documented minimum, not an
 optimized value from a production replay. Replayed through the shipped
 decision function over the production window, the earlier gated policy (X=280, K=2, 20k floor; replaced by the defaults above, #435) nets **+$125.08**
@@ -187,7 +214,7 @@ message history — held for the length of the idle gap. This is deliberately *n
 the transcript-storage consent, which is a different promise about a different thing: that
 one governs writing content to **disk**, where a manager can read it and a retention window
 applies. This is memory only, masked, overwritten on release, never persisted, and gone
-within about 14 minutes. It cannot be reduced further — the prefix hash covers the whole
+within about 12 minutes. It cannot be reduced further — the prefix hash covers the whole
 `tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
 cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
 
@@ -196,7 +223,7 @@ of a request:
 
 | control | what it does |
 |---|---|
-| **Hard deadline** | released at `(K+1) × X` ≈ 14 min regardless of traffic. |
+| **Hard deadline** | released at `(K+1) × X` ≈ 12 min regardless of traffic. |
 | **Eager release** | dropped the moment the next request arrives, the gate refuses, or the process shuts down — whichever comes first. |
 | **Zeroized** | the bytes are overwritten, not just dereferenced. |
 | **Masked at rest** | the credential and the body are XORed under a random per-process key, so a leaked snapshot doesn't leak a working credential or a readable transcript. |

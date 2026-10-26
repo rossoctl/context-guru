@@ -178,7 +178,7 @@ Read the proxy's own request log (`grep cg.request`) rather than trusting a summ
 
 ## Step 5 — verify keep-alive for real (the part that's easy to get wrong)
 
-The 5-min-ping cache strategy isn't exercised by the standalone binary unless you hand it the same
+The `auto` cache strategy isn't exercised by the standalone binary unless you hand it the same
 kind of config the plugin would otherwise generate:
 
 ```sh
@@ -186,7 +186,7 @@ cat > "$SANDBOX/state/keepalive.yaml" <<'EOF'
 preset: cache
 cache:
   keepalive: true
-  keepalive_idle_seconds: 270
+  keepalive_idle_seconds: 240
   keepalive_max_pings: 2
   keepalive_max_usd_per_ping: 0.50
   keepalive_min_prefix_tokens: 1000
@@ -202,7 +202,7 @@ EOF
 > 1. Turn 1 (cold write).
 > 2. Turn 2, immediately, same session (`--continue`) — this is what makes the entry live
 >    (`keepalive.live_sessions` becomes `1`).
-> 3. **Now** wait out the real idle window (`keepalive_idle_seconds`, 270s by default) — there is
+> 3. **Now** wait out the real idle window (`keepalive_idle_seconds`, 240s by default) — there is
 >    no shortcut; this really does take ~5 real minutes. Poll `/stats` rather than a fixed sleep:
 >
 >    ```sh
@@ -237,7 +237,7 @@ env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
   CONTEXT_GURU_PORT_BASE=8920 \
   CLAUDE_CONFIG_DIR="$SANDBOX/claude-home" \
   bash context-guru-plugin/scripts/install.sh --route --scope project \
-    --cache-strategy 5-min-ping --upstream https://api.anthropic.com \
+    --cache-strategy auto --upstream https://api.anthropic.com \
     --i-consent-to-traffic-interception
 ```
 

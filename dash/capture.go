@@ -23,7 +23,8 @@ type Options struct {
 	RetentionAge   time.Duration
 	RetentionBytes int64
 	// CaptureContent enables the before/after content capture the diff view needs.
-	// Opt-OUT: it is the headline feature, so it defaults on. ContentCap bounds each
+	// Opt-IN: the zero value is off, and so is --dashboard-content, because capture writes
+	// arbitrary agent output to disk through a best-effort redactor. ContentCap bounds each
 	// captured blob (default 16 KiB); ContentMaxPerRequest bounds how many
 	// rewritten messages are captured per request (default 24).
 	CaptureContent       bool
@@ -104,7 +105,8 @@ type Options struct {
 	// loudly what was lost.
 	ArchiveRequired bool
 	// LifecycleSignals records the per-request lifecycle signals into request_lifecycle
-	// (dash/lifecycle.go). Off by default.
+	// (dash/lifecycle.go). The zero value is off, but --dashboard-lifecycle-signals defaults
+	// to on: the rows hold only counts and sizes, never content.
 	LifecycleSignals bool
 }
 
@@ -176,12 +178,18 @@ type Recorder struct {
 	// sync mode. A func rather than a value so the counters are read at serve time.
 	observeQueue atomic.Pointer[func() QueueStats]
 
+	// startMu orders a goroutine started on first use (the inventory writer) against Close: it is
+	// added to wg only while the recorder is open, so Close's wg.Wait covers it and never races an Add.
+	startMu sync.Mutex
+	closed  bool
+
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	life      *lifecycle        // nil unless Options.LifecycleSignals
-	lastSeen  map[string]int64  // thread.Key(session, thread) -> epoch ms of previous request
-	lastTail  map[string]uint64 // thread.Key(session, thread) -> previous request's volatile-tail hash
+	life      *lifecycle             // nil unless Options.LifecycleSignals
+	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
+	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
+	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -197,6 +205,10 @@ type Recorder struct {
 	queuedCountBytes atomic.Int64
 	// countsDropped counts rows whose token count was skipped because the queue was full.
 	countsDropped atomic.Int64
+	// migrationsDone is closed when the one-time background migrations have finished or been
+	// stopped. They read and write the requests table, so a test that measures the WAL waits for
+	// it first.
+	migrationsDone chan struct{}
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
@@ -225,10 +237,13 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
+		lastFacts: map[string]PrefixFacts{},
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
 		counts:    make(chan countJob, countQueue),
+
+		migrationsDone: make(chan struct{}),
 	}
 	if opts.LifecycleSignals {
 		r.life = newLifecycle()
@@ -270,6 +285,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 // both at once still finishes well inside the time a single one used to take alone.
 func (r *Recorder) backgroundMigrations() {
 	defer r.wg.Done()
+	defer close(r.migrationsDone)
 	r.dedupeLoop()
 	r.keepAliveStrategyBackfillLoop()
 }
@@ -325,10 +341,26 @@ func (r *Recorder) Record(e *Event) {
 }
 
 // Close stops the writer after draining what is already queued.
+// startInBackground runs fn on its own goroutine counted in r.wg, so Close waits for it, unless the
+// recorder is already closing, in which case it starts nothing and returns false.
+func (r *Recorder) startInBackground(fn func()) bool {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if r.closed {
+		return false
+	}
+	r.wg.Add(1)
+	go func() { defer r.wg.Done(); fn() }()
+	return true
+}
+
 func (r *Recorder) Close() error {
 	if r == nil {
 		return nil
 	}
+	r.startMu.Lock()
+	r.closed = true
+	r.startMu.Unlock()
 	close(r.done)
 	r.wg.Wait()
 	r.hub.Close()
@@ -613,8 +645,15 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 			delete(r.lastTail, k)
 		}
 	}
+	// lastFacts holds two entries per thread and model; they age out by their own request time.
+	for k, f := range r.lastFacts {
+		if now-f.TS > staleSession {
+			delete(r.lastFacts, k)
+		}
+	}
 	if len(r.lastSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
+		r.lastFacts = map[string]PrefixFacts{}
 	}
 }
 

@@ -60,7 +60,7 @@ const (
 	maxOverridePings = 11
 	// maxOverrideHold is the operator's ceiling on the CREDENTIAL HOLD an override may buy.
 	// The hard deadline is (K+1)x X (see kaEntry.timer), and the Settings copy promises "up to
-	// about 14 minutes" at the shipped defaults — an override changes that number, so the arm
+	// about 12 minutes" at the shipped defaults — an override changes that number, so the arm
 	// dialog states the computed hold.
 	//
 	// It is CURRENTLY UNREACHABLE, and saying so is more useful than implying an independent
@@ -174,7 +174,7 @@ func validOverride(session string, idle time.Duration, pings, minPrefix int,
 // override is armed for it.
 //
 // The ONE hook this feature has in the request path, called from record. Everything downstream
-// — pol.on(), pingable(), the hard deadline, the per-ping cost guard, the kill switch, the
+// — pol.On(), pingable(), the hard deadline, the per-ping cost guard, the kill switch, the
 // no-audit-sink refusal — reads the returned policy and is otherwise untouched.
 func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePolicy {
 	o, ok := k.activeOverride(tenantID, session)
@@ -184,6 +184,15 @@ func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePol
 	pol.KeepAlive = true
 	pol.Idle, pol.MaxPings = o.pol.Idle, o.pol.MaxPings
 	pol.MinPrefixTokens = o.pol.MinPrefixTokens
+	// The override's ping count bounds a 1-hour thread too, but only downward: its 60-290 s band
+	// cannot express an hour, so the 1-hour timing stays the account's, and the hold the person was
+	// shown is then (K+1) x 59 min at most. 0 means the proxy default, which is resolved here so
+	// that the minimum is taken against a real number.
+	k1h := pol.MaxPings1h
+	if k1h <= 0 {
+		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	pol.MaxPings1h = min(k1h, o.pol.MaxPings)
 	return pol
 }
 

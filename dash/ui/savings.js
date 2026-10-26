@@ -13,7 +13,10 @@ function savedParts(o) {
   const cache = keepalive + reorder;
   const compaction = o.net_saved_usd || 0;
   const filter = o.decl_filter_usd || 0;
-  return { cache, keepalive, reorder, compaction, filter, total: cache + compaction + filter, serverTotal: o.total_saved_usd || 0 };
+  // The user's own Ping presses. saved_usd is already net of what the pings cost, and the server adds it to
+  // total_saved_usd as its own addend, outside the cache strategy.
+  const manual = (o.manual_pings && o.manual_pings.saved_usd) || 0;
+  return { cache, keepalive, reorder, compaction, filter, manual, total: cache + compaction + filter + manual, serverTotal: o.total_saved_usd || 0 };
 }
 
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.

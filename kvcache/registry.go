@@ -3,6 +3,7 @@ package kvcache
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -62,6 +63,12 @@ const (
 	// PingCapper.
 	StrategyKeepAlive5mOnce = "keepalive-5m-once"
 	StrategyKeepAlive1hOnce = "keepalive-1h-once"
+
+	// StrategyKeepAlive5mPingsPrefix names the 5-minute keep-alive arm with an exact ping budget per
+	// idle span: "keepalive-5m-x1" .. "keepalive-5m-x11" (see KeepAlive5mPings). The flat arms above
+	// fix the budget at 1 (once) or at the window's MaxPings; a per-cell sweep needs every count in
+	// between, because the measured best count differs by account and hour.
+	StrategyKeepAlive5mPingsPrefix = "keepalive-5m-x"
 	// StrategyExtend1h writes at the cheap tier and extends to an hour only when a
 	// conversation actually goes quiet.
 	StrategyExtend1h   = "keepalive-5m-to-1h"
@@ -90,6 +97,7 @@ var registry = []StrategySpec{
 	{Name: StrategyFixed1h, Description: Fixed1h().Describe()},
 	{Name: StrategyKeepAlive5m, Description: KeepAlive5m().Describe()},
 	{Name: StrategyKeepAlive5mOnce, Description: KeepAlive5mOnce().Describe()},
+	// keepalive-5m-x1 .. -x11 are appended by init below, in this position.
 	{Name: StrategyKeepAlive1h, Description: KeepAlive1h().Describe()},
 	{Name: StrategyKeepAlive1hOnce, Description: KeepAlive1hOnce().Describe()},
 	{Name: StrategyExtend1h, Description: Extend1h{}.Describe()},
@@ -107,6 +115,20 @@ var registry = []StrategySpec{
 		"is scored through.", NeedsDataset: true},
 	{Name: StrategyOptimal, Description: "The cheapest action sequence that exists, computed " +
 		"exactly. Reads the true next-request time.", Unreachable: true, NeedsDataset: true},
+}
+
+func init() {
+	at := 0
+	for i, sp := range registry {
+		if sp.Name == StrategyKeepAlive5mOnce {
+			at = i + 1
+		}
+	}
+	ks := make([]StrategySpec, 0, MaxKeepAlivePings)
+	for k := 1; k <= MaxKeepAlivePings; k++ {
+		ks = append(ks, StrategySpec{Name: KeepAlive5mPings(k).Name(), Description: KeepAlive5mPings(k).Describe()})
+	}
+	registry = append(registry[:at], append(ks, registry[at:]...)...)
 }
 
 // Registry lists every arm, in presentation order. A copy, so a caller cannot reorder it.
@@ -157,6 +179,11 @@ func NewStrategy(name string, reqs []*Request, cfg Config) (Strategy, error) {
 		return NewKeepAliveBudget(cfg), nil
 	case StrategyOptimal:
 		return NewOptimal(reqs, cfg), nil
+	}
+	if k, ok := KeepAlivePingsOf(name); ok {
+		return KeepAlive5mPings(k), nil
+	}
+	switch name {
 	case StrategyReplay:
 		return nil, fmt.Errorf("kvcache: %q carries its own action list; build it with "+
 			"NewReplay", name)
@@ -180,6 +207,30 @@ type KeepAlive struct {
 	// the entry once and then letting it lapse rather than pinging it for as long as
 	// cfg.MaxPings allows. See PingCap.
 	Once bool
+	// Pings, when > 0, caps this arm's own schedule at exactly that many keep-alives per idle span.
+	// It generalises Once (Pings 1 is the same schedule) and is what KeepAlive5mPings sets.
+	Pings int
+}
+
+// MaxKeepAlivePings is the largest per-span budget a K-ping arm is registered for. It matches the
+// live strategy bound (proxy's maxOverridePings), so every registered arm can be enforced.
+const MaxKeepAlivePings = 11
+
+// KeepAlive5mPings is the 5-minute keep-alive arm with exactly k pings per idle span.
+func KeepAlive5mPings(k int) KeepAlive { return KeepAlive{TTL: TTL5m, Pings: k} }
+
+// KeepAlivePingsOf reports k for an arm named StrategyKeepAlive5mPingsPrefix + k, 1 <= k <=
+// MaxKeepAlivePings.
+func KeepAlivePingsOf(name string) (int, bool) {
+	rest, ok := strings.CutPrefix(name, StrategyKeepAlive5mPingsPrefix)
+	if !ok {
+		return 0, false
+	}
+	k, err := strconv.Atoi(rest)
+	if err != nil || k < 1 || k > MaxKeepAlivePings || strconv.Itoa(k) != rest {
+		return 0, false
+	}
+	return k, true
 }
 
 // KeepAlive5m and KeepAlive1h are the two shipped keep-alive arms.
@@ -193,6 +244,9 @@ func KeepAlive5mOnce() KeepAlive { return KeepAlive{TTL: TTL5m, Once: true} }
 func KeepAlive1hOnce() KeepAlive { return KeepAlive{TTL: TTL1h, Once: true} }
 
 func (k KeepAlive) Name() string {
+	if k.Pings > 0 && k.TTL == TTL5m {
+		return StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k.Pings)
+	}
 	if k.Once {
 		return "keepalive-" + k.TTL.Label() + "-once"
 	}
@@ -207,6 +261,9 @@ func (k KeepAlive) Decide(Observation) Action {
 
 // PingCap implements PingCapper: 1 when Once is set, 0 (no cap of its own) otherwise.
 func (k KeepAlive) PingCap() int {
+	if k.Pings > 0 {
+		return k.Pings
+	}
 	if k.Once {
 		return 1
 	}
@@ -217,6 +274,9 @@ func (k KeepAlive) Describe() string {
 	suffix := ""
 	if k.Once {
 		suffix = " Capped to a single keep-alive per idle span, then lets the entry lapse."
+	}
+	if k.Pings > 0 {
+		suffix = fmt.Sprintf(" Capped to %d keep-alive(s) per idle span, then lets the entry lapse.", k.Pings)
 	}
 	if k.TTL == TTL1h {
 		return "Hold every prefix at the 1-hour tier and refresh it with keep-alives while " +
@@ -275,6 +335,12 @@ func (StopReasonGated) Decide(o Observation) Action {
 	}
 	return ActionWrite5m
 }
+
+// PingCap implements PingCapper: the gate pings at most DefaultMaxPings times per span, the budget its
+// live strategy runs (proxy's campaignDefaultMaxPings). Without it a replay with a raised
+// Config.MaxPings — a sweep that also scores many-ping arms — would score the gate at a budget it
+// never runs with.
+func (StopReasonGated) PingCap() int { return DefaultMaxPings }
 
 func (StopReasonGated) Describe() string {
 	return "Write the five-minute tier on every request, but only keep-alive-ping while " +
@@ -406,6 +472,12 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 	cfg = cfg.withDefaults(reqs)
 	byConv := map[Conversation][]*Request{}
 	for _, r := range reqs {
+		// A no-op row is not a step. Simulate never bills it and never lets it touch the entry, so
+		// a trajectory that kept it planned around a turn that does not exist — and a plain
+		// keep-alive then beat this "ceiling" on real traffic.
+		if r.noOp() {
+			continue
+		}
 		byConv[r.Key()] = append(byConv[r.Key()], r)
 	}
 	keys := make([]Conversation, 0, len(byConv))
@@ -524,7 +596,7 @@ func stepCost(prev *Request, prevAction Action, row *Request, action Action, cfg
 		pingCost, expires = span.cost, span.expires
 	}
 	alive := tokens > 0 && row.TS < expires
-	hit := alive && row.MissReason != "prefix_change" && row.MissReason != "cold_start"
+	hit := alive && !ForcedMiss(row.MissReason)
 	var reusable int64
 	if hit {
 		reusable = tokens

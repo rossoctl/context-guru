@@ -319,6 +319,10 @@ async function api(path, extra) {
     try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) { /* not json */ }
     const e = new Error(msg); e.status = res.status; throw e;
   }
+  // The server may answer from a cache that is up to ten minutes old (stale-while-revalidate) and
+  // says how old in the Age header. Keep it per endpoint so a page can show the age of its DATA.
+  const age = Number(res.headers.get('Age')) || 0;
+  (state.ageMs ||= {})[path] = age * 1000;
   return res.json();
 }
 
@@ -1561,7 +1565,9 @@ async function loadOverview(opts = {}) {
     const lean = await api('stats', { lean: 1 });
     state.overview = lean;
     state.overviewFull = false;
-    state.loadedAt = Date.now();
+    // "Updated N ago" is the age of the DATA: a body served from the server's stale cache is older
+    // than the moment it arrived (see the Age header read in api()).
+    state.loadedAt = Date.now() - ((state.ageMs && state.ageMs.stats) || 0);
     if (state.dirty === wasDirty) {
       state.dirty = false;
       $('#refresh-now').classList.remove('has-new');
@@ -1576,6 +1582,13 @@ async function loadOverview(opts = {}) {
     const o = await api('stats');
     state.overview = o;
     state.overviewFull = true;
+    // Past the 30 s freshness window the server is recomputing behind a stale answer, so look again once,
+    // shortly, and the page converges on current figures unasked.
+    const dataAge = (state.ageMs && state.ageMs.stats) || 0;
+    state.loadedAt = Date.now() - dataAge;
+    if (dataAge > 45000 && !state.staleRetry) {
+      state.staleRetry = setTimeout(() => { state.staleRetry = 0; if (state.view === 'overview') loadOverview(); }, 10000);
+    }
     renderSavedLedger(o, state.keepAliveLedger, false);
     if ($('#overview-diagnostics').open) renderDiagnostics();
     else state.diagStale = true;
@@ -1639,7 +1652,7 @@ function strategyName() {
   const t = account && account.tenant;
   if (!t || t.role === 'manager') return '';
   const c = (t.effective_config && t.effective_config.cache) || {};
-  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 270) + ' s idle' : 'off';
+  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 240) + ' s idle' : 'off';
 }
 async function loadOverviewIdentity() {
   try {
@@ -1675,6 +1688,7 @@ function renderSavedLedger(o, ka, partial) {
     ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
   const kaRan = o.keepalive_pings > 0 || o.keepalive_net_usd;
   const filterRan = o.decl_filter_requests > 0;
+  const manualRan = !!(o.manual_pings && o.manual_pings.count > 0);
   const parts = savedParts(o);
   const levers = [
     {
@@ -1702,6 +1716,15 @@ function renderSavedLedger(o, ka, partial) {
       extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
       kind: 'Estimated', note: 'saved when tools are left out of the prompt',
     },
+    // The Ping button. Its own row and not a part of the cache strategy: a person pressed it, the strategy did not decide it.
+    // Hidden until a ping has been pressed, so a user who never uses the button sees no empty row.
+    ...(manualRan ? [{
+      id: 'manual', tid: 'saved-manual', name: 'Manual pings', href: '#/keepalive', more: 'Cache strategy tab',
+      what: 'Cache rewrites avoided because you pressed Ping to keep a warm cache warm.',
+      ran: true, usd: parts.manual, tok: null,
+      extra: num(o.manual_pings.count) + (o.manual_pings.count === 1 ? ' ping' : ' pings') + ' cost ' + usd(o.manual_pings.ping_usd),
+      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.manual_pings.ping_usd) + '. May overlap the cache strategy when its automatic pings are on.',
+    }] : []),
   ];
   const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },
     el('span'), el('span', { text: 'Money' }), el('span', { text: 'Tokens' }));
@@ -1747,12 +1770,14 @@ function renderSavedLedger(o, ka, partial) {
     // Two parts, never one blended figure: the preset and filter savings are estimates, the cache strategy
     // part is an upper bound, and the Cache strategy tab may say it does not pay off.
     const est = parts.compaction + parts.filter;
+    // Manual pings join the cache part: both are cache rewrites avoided, and both are bounds, not measurements.
+    const cacheAll = parts.cache + parts.manual;
     host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
       el('span', { text: 'Together' }),
       el('span', {}, el('strong', { text: usd(est) }), el('span', { class: 'lv-of', text: ' estimated saved' })),
-      parts.cache >= 0
-        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(parts.cache) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy (an upper bound)' }))
-        : el('span', {}, el('strong', { class: 'bound', text: usd(parts.cache) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
+      cacheAll >= 0
+        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(cacheAll) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy' + (parts.manual ? ' and manual pings' : '') + ' (an upper bound)' }))
+        : el('span', {}, el('strong', { class: 'bound', text: usd(cacheAll) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
       el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent' })));
   }
   const note = $('#ov-saved-note');
@@ -2079,6 +2104,27 @@ function syncDimPicker(dims) {
  * for no gain a reader can use. They stay labelled and on separate lines, so a success is never
  * mistaken for a refusal — which is the whole point of having split them.
  */
+/**
+ * The sweep's quality and money, beside its activity (#404). Only the sweep's row carries the fields.
+ * The FALSE-DROP RATE is the number to pull the sweep from xhigh on: drops a later turn used without
+ * expanding them, plus drops the agent expanded back, over the drops applied. The expand charge is
+ * already taken off the credit and the net; the answer cost is its own figure and is NOT taken off a
+ * second time (the net already carries the model spend).
+ */
+function sweepQualityLine(c) {
+  if (!c || !c.sweep_applied) return null;
+  const rate = (c.sweep_false_drop_rate || 0) * 100;
+  return el('div', {
+    class: rate >= 15 ? 'warn-text' : 'did',
+    title: 'Drops applied: ' + num(c.sweep_applied) + '. Needed again: ' + num(c.sweep_false_drops)
+      + ' (a later turn used them, or the agent expanded them back). Expands: ' + num(c.sweep_expands)
+      + ' (' + compact(c.sweep_expand_tokens) + ' tok), charged to the sweep: ' + usd(c.sweep_expand_charge_usd || 0)
+      + ', already off the saving. Answer cost: ' + usd(c.sweep_answer_usd || 0)
+      + ', booked once on the ping row the question replaced.',
+    text: 'false drops ' + rate.toFixed(1) + '% (' + num(c.sweep_false_drops) + ' of ' + num(c.sweep_applied) + ')',
+  });
+}
+
 function activitySummary(gates, events) {
   const parts = [];
   const add = (label, m, cls) => {
@@ -2116,7 +2162,7 @@ const STEP_INFO = {
   dedup: ['Duplicate remover', 'drops text the prompt already contains'],
   extract: ['Content extractor', 'keeps the relevant part of long tool output'],
   extract_llm: ['Model-based extractor', 'asks a cheap model to keep only what matters in long output'],
-  extract_llm_sweep: ['Old-output sweep', 'has a cheap model shrink old outputs after the cache has gone cold'],
+  extract_llm_sweep: ['Old-output sweep', 'asks the model which old outputs are spent, and removes them on the next request after the cache went cold'],
   failed_run: ['Failed-run trimmer', 'shortens output from commands that failed'],
   format: ['Format compactor', 'rewrites JSON and similar text in a shorter form'],
   linecap: ['Line limiter', 'caps very long lines and outputs'],
@@ -2144,6 +2190,8 @@ const REASON_TEXT = {
   no_model: 'no model known', not_json_shaped: 'not JSON', marker_present: 'already marked',
   empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
   sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
+  sweep_applied_cold: 'dropped on a cold request', sweep_applied_changed_prefix: 'dropped after a changed prefix',
+  sweep_false_ref: 'dropped, then used by a later turn', sweep_apply_declined: 'drop refused (kept in full)',
   sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
   over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',
   non_text_blocks: 'not plain text', no_repeated_prefix: 'no repeated start',
@@ -2572,7 +2620,7 @@ async function loadComponents() {
         // Beside the act rate, not twenty columns to its right. This is the cell that makes a
         // 0.0% act rate falsifiable (docs/dashboard.md), and at 1600px wide it sat at x=2087
         // in a 2628px table — off-screen for the reader who needs it most.
-        el('td', {}, activitySummary(c.gates, c.events)),
+        el('td', {}, activitySummary(c.gates, c.events), sweepQualityLine(c)),
         el('td', { class: 'num', text: num(c.reverted) }),
         // An unkeyed component's `unique` is identically its `gross`, so the cell is marked:
         // without it the column reads as "this component never repeated a removal", which is a
@@ -4403,6 +4451,9 @@ const loaders = {
   sessions: loadSessions,
   requests: loadRequests, config: loadConfig,
   keepalive: loadKeepAlive,
+  // Registered by insights.js, which mounts its own tab; named here because `loaders` is the
+  // single map the router consults and a view absent from it renders an empty section forever.
+  insights: () => (typeof loadInsights === 'function' ? loadInsights() : undefined),
 };
 
 // ── nav: two levels, five groups ───────────────────────────────────────────
@@ -4965,10 +5016,14 @@ function navPath(view) {
  * so that branch is not a compatibility shim to be removed later — it is half the traffic.
  */
 const FIVE_PAGE_ALIAS = { home: 'overview', cache: 'keepalive' }; // #savings already opens the Savings group
+// Views that were removed, and the tab that now answers the same question. Matched as the LAST segment at
+// any depth, so both `#history` and `#/savings/history` land there instead of on the group's first tab.
+const REMOVED_VIEW = { history: 'insights' };
 function resolveNav(path) {
   const seg = String(path || '').split('/').filter(Boolean);
   const view = seg[seg.length - 1] || '';
   if (GROUP_OF.has(view)) return view;
+  if (REMOVED_VIEW[view]) return REMOVED_VIEW[view];
   // Links to the short-lived five-page home (#home, #cache; #savings, #tools and #sessions already resolve) land on the nearest tab.
   if (seg.length === 1 && FIVE_PAGE_ALIAS[seg[0]]) return FIVE_PAGE_ALIAS[seg[0]];
   // Only a group name survived (`#/admin`, or `#/savings/typo`): open its first tab.
@@ -6425,7 +6480,7 @@ function loadSettings() {
       el('p', { class: 'hint' },
         'Sends tiny requests while you are idle so the provider keeps your prompt cached, '
         + 'which is cheaper than rebuilding it. After '
-        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 270)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 240)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' pings. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
         'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
@@ -6436,7 +6491,8 @@ function loadSettings() {
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
         + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
         + 'request \u2014 which includes its conversation content \u2014 for the length of the '
-        + 'idle gap, up to about 14 minutes, because a request sent between your requests has '
+        + 'idle gap: up to about 12 minutes on a 5-minute cache, and about 2 hours (at most 4 hours) '
+        + 'on a 1-hour cache, because a request sent between your requests has '
         + 'nothing else to authenticate or replay. That is separate from the transcript-storage '
         + 'consent below, which is about writing content to DISK; this is held in memory, '
         + 'masked, overwritten on release, and never persisted. '
@@ -7773,7 +7829,7 @@ function buildStrategyForm(form) {
   $('#strategy-form-title').textContent = 'New strategy';
 
   const name = el('input', { type: 'text', id: 'sf-name', maxlength: '64', required: 'required' });
-  const idle = el('input', { type: 'number', id: 'sf-idle', value: '270', min: '1' });
+  const idle = el('input', { type: 'number', id: 'sf-idle', value: '240', min: '1' });
   const pings = el('input', { type: 'number', id: 'sf-pings', value: '1', min: '1' });
   const prefix = el('input', { type: 'number', id: 'sf-prefix', value: '80000', min: '0' });
   const usdCap = el('input', { type: 'number', id: 'sf-usd', value: '0', min: '0', step: '0.01' });
@@ -8803,8 +8859,8 @@ function renderKADecision(o, rec) {
     big = wouldCost ? 'Below $0' : 'Not enough data';
     cls = wouldCost ? 'bad' : '';
     sentence = rec.refused + '.';
-    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 270 s idle, 2 pings.'
-      : 'Use the default for now: 270 s idle, 2 pings.';
+    setting = wouldCost ? 'Leave your cache strategy off. If you turn one on anyway, use the default: 240 s idle, 2 pings.'
+      : 'Use the default for now: 240 s idle, 2 pings.';
   } else {
     const mid = (rec.lo_usd + rec.hi_usd) / 2;
     verdict = mid < 0 ? 'No, it would cost you money' : 'Yes, it should pay for itself';
@@ -9030,12 +9086,16 @@ function renderKASessions() {
 async function armSession(s) {
   // The credential hold is stated BEFORE the act, not after it. (K+1)×X is arithmetic on the two
   // integers the reader just chose — not money, so computing it here breaks no rule — and it is
-  // the number the Settings copy promises ("up to about 14 minutes"), which an override changes.
+  // the number the Settings copy promises ("up to about 12 minutes" on a 5-minute cache), which an
+  // override changes. A 1-hour thread follows the account's 1-hour schedule instead; see below.
   // The worst-case SPEND comes back from the server, which owns every dollar on this page.
   const hold = ((kaState.k + 1) * kaState.x) / 60;
   const hours = prompt('Keep this session warm for how many hours?\n\n'
     + `For Anthropic, ${kaState.x}s idle and ${kaState.k} pings can hold your credential for `
-    + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X). For GPT-5.6+ Responses, `
+    + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X) on a 5-minute cache; a session on a `
+    + `1-hour cache is pinged 59 minutes apart, at most ${Math.min(kaState.k, 3)} time(s) (your ping count, capped at 3), `
+    + `so it is held for up to ${(Math.min(kaState.k, 3) + 1) * 59} minutes. `
+    + 'For GPT-5.6+ Responses, '
     + 'the account OpenAI cadence applies (at most 28 minutes), pings are capped to keep ' +
       'credential hold within 60 minutes. Between 0.25 and 12 hours, and it '
     + 'is cleared if the service restarts.', '1');
@@ -9220,7 +9280,9 @@ async function loadKAArmed() {
   kaState.armed = out.armed || [];
   host.appendChild(el('p', { class: 'hint' },
     `At most ${out.max_hours} hours per session, and ${out.max_hold_minutes} minutes is the `
-    + 'ceiling on how long your credential may be held between pings. ',
+    + 'ceiling on how long your credential may be held between pings on a 5-minute cache. '
+    + `A 1-hour cache keeps the account's 59-minute timing; the override's ping count applies to it `
+    + `(at most 3), so it is held for up to ${out.max_hold_minutes_1h} minutes. `,
     el('strong', {}, 'Armed sessions are cleared if the service restarts'),
     ' — an authorization to spend that silently outlived a restart would be worse than one '
     + 'that does not. The arm itself is in your audit log permanently.'));
@@ -9512,7 +9574,7 @@ async function loadKARecommend() {
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
-        + 'Use the default (270 s idle, 2 pings) or arm a single session above and read your '
+        + 'Use the default (240 s idle, 2 pings) or arm a single session above and read your '
         + 'own ledger.')));
     return;
   }
@@ -9553,4 +9615,3 @@ async function loadKARecommend() {
     'Nothing is applied for you. One ping is never suggested: it covers 9.7 minutes of idle time where two ' +
     'cover 14.3. One ping is not a loss, just a smaller win. Compare the rows above on your own gaps.'));
 }
-

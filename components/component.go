@@ -243,6 +243,16 @@ type PrefixCoverage interface {
 	CoversSpan(session string, count int, hash string) bool
 }
 
+// PrefixCoveredAsker, when a PrefixAsker also implements it, checks coverage and asks on ONE
+// snapshot of the stash. PrefixCoverage.CoversSpan followed by Ask reads the stash twice: when the
+// call runs detached, the thread's next request can replace the stashed body between the two
+// reads, and the ask then goes out over a body the check never approved. AskCovered returns
+// ErrStalePrefix when the snapshot does not cover the first `count` normalized messages hashed to
+// `hash`, ErrNoPrefix when nothing is stashed, and otherwise asks on exactly the body it checked.
+type PrefixCoveredAsker interface {
+	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
+}
+
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
 // there is no cached prefix to append to.
 //
@@ -424,6 +434,13 @@ type Ctx struct {
 	// the cached prefix changes, and the model reads the content from the inserted copy instead.
 	// Nil (the default, and whenever the anchor cannot be honoured) is today's behaviour.
 	Restored map[string]string
+	// CacheAnchorToolID is set by a component that SPLICED the transcript (cache_aware_summarizer,
+	// #723): the tool_call_id of the last tool_result it kept verbatim after the summary. The host's
+	// count-changing rebuild writes one cache_control breakpoint onto that block in the raw body,
+	// when the provider's 4-breakpoint cap leaves room. Without it, the history after a splice is
+	// text turns only, and a provider entry that ends at a text turn is never read by the next
+	// request, so every turn after a splice re-writes the whole kept history. "" = no anchor.
+	CacheAnchorToolID string
 	// AllowSummarySpan is supplied by a wire adapter when only some normalized
 	// spans can be rebuilt without dropping opaque provider state. Nil means the
 	// ordinary Chat/Anthropic adapter has no extra restriction.
@@ -600,7 +617,18 @@ type Ctx struct {
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
+	//
+	// HOST CONTRACT: a host that sets this must stash each request's forwarded body when its
+	// upstream answers, then call offload.ResolveDeferredCacheAwareSummary(session, thread) when
+	// the request ends. cache_aware_summarizer holds a prefix-ask commission until then, so it
+	// reads that request's body and not the previous one (#722).
 	PrefixAsk PrefixAsker
+	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
+	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares
+	// something for a ping (extract_llm_sweep's question) registers only when it returns true, so a
+	// thread that will never be pinged keeps nothing for it. nil => false: a host with no keep-alive
+	// leaves it unset and such a component keeps nothing.
+	CanKeepAlive func() bool
 	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
 	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has
 	// CacheTTLMinimum set, because OpenAI may retain the entry longer. 0 means unknown.
@@ -745,7 +773,9 @@ type Report struct {
 	// Reformat stashes nothing, so the PIPELINE fills them from the pre-fold text of each
 	// message it rewrote — without that, every Reformat took metrics' keyless fallback and
 	// reported SavedUnique == Saved by construction (overcount_ratio 1.0 for
-	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x).
+	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x). The
+	// pipeline does the same for an Irreversible Offload that returned no keys (marker_mode
+	// summary/off), whose keys are then dedup keys only, not store keys.
 	CacheKeys    []string
 	Skipped      bool // component ran but chose not to act
 	Reverted     bool // pipeline reverted it (error/panic/never-worse)
@@ -1053,6 +1083,16 @@ type KeepAliveReport struct {
 	// sink can record what was requested rather than reading as a request with no output
 	// budget at all.
 	MaxTokens int
+	// Manual marks a ping the USER asked for (keepalive.Keeper.PingNow), not one the keeper
+	// scheduled; Strategy is then "manual". RewriteUSD is the cache write it avoided, 0 when it
+	// read nothing. A sink keeps both off every strategy's ledger.
+	Manual     bool
+	RewriteUSD float64
+	// SweepAnswerUSD is, when extract_llm_sweep's question stood in for this ping, what the ANSWER cost
+	// beyond the read a plain ping would have paid (#404 point 9): the output (thinking included), plus
+	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the
+	// summary's call is (#458). Part of CostUSD, not added to it. 0 for every other ping.
+	SweepAnswerUSD float64
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

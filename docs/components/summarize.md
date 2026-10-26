@@ -179,12 +179,8 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | `custom_prompt` | *(none)* | A deployment-specific instruction appended last to the summarizer prompt, framed as operator guidance that takes precedence over the trajectory but not over the anti-fabrication rule or the `<summary>` output format. |
 | `resummarize_tokens` | 6000 | Tail growth that triggers rolling the checkpoint forward. |
 | `start_from_message` | 6 | Legacy message-count gate, folded into `trigger.min_messages` when that is unset. Prefer `trigger.min_messages`; this key is still read so old documents keep working. |
-| `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). |
+| `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). The endpoint and credential for `config` are the host's own (`CHEAP_MODEL*` env vars on the standalone proxy); this block never names one. |
 | `model.model` | *the source's own model* | The model to summarize WITH, on that source's endpoint and credential. |
-| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
-| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
-| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
-| `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
 | `trigger.min_request_frac` | **0.9** | Summarize only once the session has been billed at least this fraction of the model's context window. Measured from the provider's own input count for the previous turn — see below. |
 | `trigger.cache_state` | **`any`** | No cache constraint: at 0.9 fill, compaction is worth doing whatever the cache is doing. `pre_expiry` restricts firing to a turn whose cached prefix is within `pre_expiry_seconds` of expiring — useful only for a summarizer whose model call reuses that prefix, which this one does not. `cold` and `pre_expiry_or_cold` are **withdrawn** and refused at config time. See below. |
 | `trigger.pre_expiry_seconds` | 60 | How wide "about to expire" is. Must stay below the shortest prompt-cache lifetime (300s) or every warm turn counts as pre-expiry; refused at config time above that. |

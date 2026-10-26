@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -491,8 +492,8 @@ func TestCtlCreateCampaignEndToEnd(t *testing.T) {
 		t.Fatalf("got %d strategies, want 1 (coalesced): %+v", len(strategies), strategies)
 	}
 	s := strategies[0]
-	if s.IdleSeconds != 270 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
-		t.Errorf("strategy = %+v, want idle 270s, 80k floor, targeting both tenants", s)
+	if s.IdleSeconds != 240 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
+		t.Errorf("strategy = %+v, want idle 240s, 80k floor, targeting both tenants", s)
 	}
 
 	if w, _ := f.do(t, "GET", "/api/keepalive/campaigns", "", mgrJar); w.Code != http.StatusOK {
@@ -1167,12 +1168,12 @@ func TestCoalesceCampaignCellsExcludesBaselineAndNonActivatable(t *testing.T) {
 	}
 }
 
-// keepalive-5m carries the recommended policy (270 s, K=2, 80k floor); the K=1 and gated arms
-// stay at 280 because the 270 s evidence covers K>=2 only.
+// keepalive-5m carries the recommended policy (240 s, K=2, 80k floor); the K=1 and gated arms
+// stay at 280 because the K>=2 evidence covers K>=2 only.
 func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
 	a := campaignArmFor(kvcache.StrategyKeepAlive5m)
-	if a.idleSeconds != 270 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
-		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 270, 2, 80000",
+	if a.idleSeconds != 240 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
+		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 240, 2, 80000",
 			a.idleSeconds, a.maxPings, campaignDefaultMinPrefixTokens)
 	}
 	if got := campaignArmFor(kvcache.StrategyKeepAlive5mOnce).idleSeconds; got != 280 {
@@ -1180,7 +1181,7 @@ func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
 	}
 }
 
-// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 270 s / 80k
+// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 80k
 // evidence is K=2 ping-everyone only.
 func TestCampaignNonRecommendedArmsKeepTheirOldFloor(t *testing.T) {
 	for _, arm := range []string{kvcache.StrategyKeepAlive5mOnce, kvcache.StrategyStopReasonGated} {
@@ -1245,5 +1246,26 @@ func TestTileHoursWindowsUTCSurviveStorageAndDST(t *testing.T) {
 			s.InWindow(d.Add(9*time.Hour+30*time.Minute)) {
 			t.Errorf("%s: cell hour 8 must cover exactly 08:00-09:00 UTC", d.Format("2006-01-02"))
 		}
+	}
+}
+
+// A K-PING ARM BECOMES A LIVE STRATEGY WITH K PINGS. The campaign must enforce exactly the budget the
+// cell was scored at; a strategy left at the default of 2 would run a schedule nobody simulated.
+func TestCampaignEnforcesTheKPingArmsBudget(t *testing.T) {
+	for k := 1; k <= kvcache.MaxKeepAlivePings; k++ {
+		arm := kvcache.StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k)
+		a := campaignArmFor(arm)
+		if !a.activatable || a.baseline {
+			t.Fatalf("%s: activatable=%v baseline=%v, want a live non-baseline arm", arm, a.activatable, a.baseline)
+		}
+		if a.maxPings != k {
+			t.Errorf("%s enforces %d pings, want %d", arm, a.maxPings, k)
+		}
+		if err := validStrategyBounds(time.Duration(a.idleSeconds)*time.Second, a.maxPings, a.minPrefixTokens, 0, false, 0); err != nil {
+			t.Errorf("%s builds a strategy the live bounds refuse: %v", arm, err)
+		}
+	}
+	if a := campaignArmFor("keepalive-5m-x12"); a.activatable {
+		t.Error("x12 is above the live bound and must not be enforceable")
 	}
 }

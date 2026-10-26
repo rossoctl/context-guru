@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 )
 
 // The default (public map) path must put the built-in exact list between the map and DefaultStatic
@@ -20,7 +21,7 @@ func TestModelWindowsDefaultPathHasBuiltinBetweenMapAndStatic(t *testing.T) {
 	if !ok || len(chain) != 3 {
 		t.Fatalf("default chain has %d links (chain=%v); want {LiteLLM, Builtin, Static}", len(chain), ok)
 	}
-	if _, ok := chain[0].(*modelinfo.LiteLLM); !ok {
+	if _, ok := chain[0].(*litellm.LiteLLM); !ok {
 		t.Errorf("chain[0] = %T; want *LiteLLM", chain[0])
 	}
 	if _, ok := chain[1].(modelinfo.Builtin); !ok {

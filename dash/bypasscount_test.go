@@ -139,6 +139,11 @@ func TestBypassCountQueueIsBoundedByBytes(t *testing.T) {
 	small.BypassBytes = 1 << 20
 	r.Record(small)
 	waitWritten(t, r, 2)
+	// The writer counts a row as written BEFORE it hands the row to enqueueCount, so Written
+	// reaching 2 does not mean the drop has been counted yet. Wait for the drop itself.
+	for i := 0; i < 400 && r.countsDropped.Load() == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := r.countsDropped.Load(); got != 1 {
 		t.Errorf("countsDropped = %d, want 1: a job that would exceed the byte bound was queued", got)
 	}

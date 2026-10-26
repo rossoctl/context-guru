@@ -34,6 +34,8 @@ func TestCacheAwareAsksUnderTheThreadKey(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(convKey(ctx), 5*time.Second) {
 		t.Fatal("the commissioned summary never resolved")
 	}
@@ -58,7 +60,7 @@ func TestSweepAsksUnderTheThreadKey(t *testing.T) {
 	ctx := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
 	ctx.Thread = "a:S"
 	var rep components.Report
-	if _, err := e.Offload(req, &rep, ctx); err != nil {
+	if _, err := askOffload(e, req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {

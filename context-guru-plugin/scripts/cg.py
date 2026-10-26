@@ -5,11 +5,12 @@
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
     cache     is my cache about to cost me
-    insights  savings, cache and tools (what you carry and never use) in one place; `waste` is `insights tools`
+    insights  savings, cache and tools (what you carry and never use) in one place
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
+    ping      keep this session's cache warm with one ping right now (POST /api/me/cache/ping)
     cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
 
 Read-only: GETs against the local proxy, except `apply`, `revert` and `cache-campaign build | mode`, which the user confirms first. Output is
@@ -29,6 +30,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -37,6 +39,8 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cgcache  # noqa: E402  (the on-disk request budget the status line shares)
+import costly as S  # noqa: E402  (settings that cost money: the list, detection, apply, revert)
 import cgcost as C  # noqa: E402  (usd, spark, bar, table, recommendations, unused_items ...)
 import tvlib as T  # noqa: E402  (Env: colour, ASCII fallback, width; cols, fit, clip)
 
@@ -193,6 +197,214 @@ def cache_state(api: Api, session: str | None) -> dict | None:
     return cs if cs and not cs.get("none") and cs.get("last_ts") else None
 
 
+CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4; the status line uses the same
+
+
+def cachestate_cached(base: str, session: str, fetch=None) -> dict:
+    """The session's /api/cachestate through the status line's own cache file (same key, same TTL,
+    same single flight, same back-off), so a mod calling this and the status line rendering never
+    both hit the network. Adds `age_s` (how old the copy is) and `stale` (served without a refresh).
+    At most one request. {"error": ...} when there is nothing to show."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    path = os.path.join(cgcache.cache_dir(), f"context-guru-statusline-{port}-cs-{session}.json")
+    cached, age = cgcache.read_json(path), cgcache.age_of(path)
+    if cached is not None and age is not None and age < CACHESTATE_TTL_SECONDS:
+        return {**cached, "age_s": round(age, 1), "stale": False}
+    # Past the TTL: one caller per window refreshes; the rest, and anyone inside a back-off, serve the old copy.
+    may_fetch = not cgcache.backoff(path) and (cached is None or cgcache.take_slot(path, CACHESTATE_TTL_SECONDS))
+    if may_fetch:
+        doc = (fetch or (lambda: Api(base).get("/api/cachestate", {"session": session}, timeout=5)))()
+        if isinstance(doc, dict):
+            cgcache.write_atomic(path, json.dumps(doc).encode())
+            cgcache.clear_failure(path)
+            return {**doc, "age_s": 0.0, "stale": False}
+        cgcache.record_failure(path, "error")
+    if cached is not None:
+        return {**cached, "age_s": round(age or 0.0, 1), "stale": True}
+    return {"error": "proxy not answering"}
+
+
+def name_agents(doc: dict, transcript: str) -> None:
+    """Adds `name` to each real sub-agent thread (`a:` ids) of a cachestate doc, with the status line's own
+    naming (Claude Code's agents list, read from <transcript>/subagents/*.meta.json). One copy of that logic:
+    statusline.py. Threads without a name get none, and the mod shows nothing for them."""
+    try:
+        import statusline as sl  # noqa: PLC0415  (lazy: the other commands do not pay for it)
+        ids = sl._agent_ids(doc)
+        names = sl._agent_names({"transcript_path": transcript}, ids)
+        rows = {r["id"]: r["name"] for r in sl._agent_rows(doc, float(doc.get("age_s") or 0), names)}
+    except Exception:  # noqa: BLE001  (a name is decoration: never fail the read over it)
+        return
+    for t in doc.get("threads") or []:
+        if isinstance(t, dict) and rows.get(t.get("id")):
+            t["name"] = rows[t["id"]]
+
+
+def cmd_cachestate(api: Api, o: dict) -> list[str]:
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        doc, code = {"error": "no session"}, 1
+    else:
+        doc = cachestate_cached(api.base, sid)
+        if o.get("transcript") and "error" not in doc:
+            name_agents(doc, o["transcript"])
+        code = 1 if "error" in doc else 0
+    o["exit"] = code
+    return [json.dumps(doc, separators=(",", ":"))]
+
+
+def usd(x: float) -> str:
+    """The one money format of the status line and the mod: `$12.34`, `$0.06`, `<$0.01`, `$123`, `-$1.50`."""
+    if 0 < x < 0.01:
+        return "<$0.01"
+    sign = "-" if x <= -0.005 else ""
+    return f"{sign}${abs(x):.0f}" if abs(x) >= 100 else f"{sign}${abs(x):.2f}"
+
+
+PANE_TTL_SECONDS = 60.0  # day, series and spend move slowly; a pane glance does not need fresher
+PANE_REQUESTS_TTL_SECONDS = 10.0
+
+
+def pane_get(base: str, path: str, params: dict, tag: str, ttl: float) -> dict | None:
+    """One read for the pane through the shared on-disk cache: a fresh copy answers without the network, a failure
+    serves the old copy (any age: the pane marks nothing, it simply shows the last figures) and backs off."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    file = os.path.join(cgcache.cache_dir(), f"context-guru-pane-{port}-{tag}.json")
+    cached, age = cgcache.read_json(file), cgcache.age_of(file)
+    if cached is not None and age is not None and age < ttl:
+        return cached
+    if not cgcache.backoff(file) and (cached is None or cgcache.take_slot(file, ttl)):
+        doc = Api(base).get(path, params, timeout=5)
+        if isinstance(doc, dict):
+            cgcache.write_atomic(file, json.dumps(doc).encode())
+            cgcache.clear_failure(file)
+            return doc
+        cgcache.record_failure(file, "error")
+    return cached
+
+
+def local_midnight_ms(now_s: float, days_ago: int = 0) -> int:
+    lt = time.localtime(now_s)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
+
+
+def lost_today(spend: dict | None, midnight: int) -> float | None:
+    """Dollars cache misses cost today, from the proxy's spend explanation (excess over a hit)."""
+    days = spend.get("daily") if isinstance(spend, dict) else None
+    if not isinstance(days, list):
+        return None
+    return sum(float(d.get("rewrite_usd") or 0.0) for d in days if isinstance(d, dict) and (d.get("day") or 0) >= midnight - 3_600_000)
+
+
+def pane_spark(day: dict | None, series: dict | None, now_s: float) -> dict | None:
+    """SAVED LATELY: today's saving and 14 local days of it (the last value is today, the same read as the number)."""
+    today = day.get("total_saved_usd") if isinstance(day, dict) else None
+    buckets = series.get("buckets") if isinstance(series, dict) else None
+    if not isinstance(today, (int, float)) or not isinstance(buckets, list):
+        return None
+
+    def local_day(ms: float) -> tuple[int, int, int]:  # hourly UTC buckets placed by midpoint into the user's local days
+        lt = time.localtime(ms / 1000 + 1800)
+        return lt.tm_year, lt.tm_mon, lt.tm_mday
+
+    by_day: dict[tuple[int, int, int], float] = {}
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            by_day[local_day(b["ts"])] = by_day.get(local_day(b["ts"]), 0.0) + float(b.get("saved_usd") or 0.0)
+    days = [by_day.get(local_day(local_midnight_ms(now_s, n) + 12 * 3_600_000 - 1_800_000), 0.0) for n in range(13, 0, -1)] + [float(today)]
+    return {"today": float(today), "days": days}
+
+
+def pane_strip(reqs: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """CACHE HITS: the last 20 requests of the main thread as hit / part / miss, oldest first, and what misses cost today."""
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    if not isinstance(rows, list):
+        return None
+    rows = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0))[-20:]
+    kinds = []
+    for r in rows:
+        try:
+            kinds.append(T.kind(r))
+        except (KeyError, TypeError):
+            continue
+    if not kinds:
+        return None
+    return {"kinds": kinds, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_heat(hourly: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """MISSES BY HOUR: cache misses in each local hour of today (24 values) and the hour reached."""
+    buckets = hourly.get("buckets") if isinstance(hourly, dict) else None
+    if not isinstance(buckets, list):
+        return None
+    per = [0.0] * 24
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            per[time.localtime(b["ts"] / 1000 + 1800).tm_hour] += float(b.get("cache_misses") or 0.0)
+    return {"hours": per, "now": time.localtime(now_s).tm_hour, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_fill(reqs: dict | None, cs: dict | None) -> dict | None:
+    """CONTEXT: how full the window is, split into what loads every time and the conversation, and the time to full."""
+    used, window = (cs or {}).get("prefix_tokens"), (cs or {}).get("window")
+    if not isinstance(used, (int, float)) or not isinstance(window, (int, float)) or used <= 0 or window <= 0:
+        return None
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    main = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0)) if isinstance(rows, list) else []
+    try:
+        ctxs = [T.ctx(r) for r in main]
+        growth = T.growth(main)
+    except (KeyError, TypeError):
+        ctxs, growth = [], 0.0
+    base = min([used] + ctxs) / window if ctxs else None
+    eta = (window - used) / growth if growth > 0 else None
+    return {"used": float(used), "window": float(window), "frac": max(0.0, min(1.0, used / window)),
+            "base": None if base is None else max(0.0, min(1.0, base)), "eta_s": eta if eta and eta < 6 * 3600 else None,
+            "miss_usd": (cs or {}).get("next_cold_usd") or (cs or {}).get("rewrite_usd") or None}
+
+
+def cmd_panedata(api: Api, o: dict) -> list[str]:
+    """The five modes' data for the mod's pane, as one JSON document. A section whose data is missing is left out, so
+    the pane omits it instead of drawing it empty. Reads go through the on-disk cache; nothing here writes to the proxy."""
+    now_s = float(o.get("now_s") or time.time())
+    now_ms, midnight = int(now_s * 1000), local_midnight_ms(now_s)
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        return [json.dumps({"error": "no session"})]
+    tz = time.localtime(now_s).tm_gmtoff // 60
+    jobs = {
+        "series": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": local_midnight_ms(now_s, 13), "until": now_ms}, "series14h", PANE_TTL_SECONDS),
+        "hourly": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": midnight, "until": now_ms}, "hourly", PANE_TTL_SECONDS),
+        "spend": lambda: pane_get(api.base, "/api/spend/explain", {"since": midnight, "tz": tz, "now": now_ms}, "spend-today", PANE_TTL_SECONDS),
+        "day": lambda: pane_get(api.base, "/api/stats", {"lean": 1, "since": midnight}, "day", PANE_TTL_SECONDS),
+        "reqs": lambda: pane_get(api.base, "/api/requests", {"limit": 100, "session": sid}, "req100-" + sid, PANE_REQUESTS_TTL_SECONDS),
+    }
+    got: dict = {}
+
+    def run(name: str, fn) -> None:
+        try:
+            got[name] = fn()
+        except Exception:  # noqa: BLE001  (a failed read is a missing section, never a failed pane)
+            got[name] = None
+
+    threads = [threading.Thread(target=run, args=kv, daemon=True) for kv in jobs.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(8)
+    cs = cachestate_cached(api.base, sid)
+    cs = None if "error" in cs else cs
+    main = next((t for t in (cs or {}).get("threads") or [] if isinstance(t, dict) and t.get("main")), None)
+    fill_cs = {**(cs or {}), **(main or {})} if cs else None
+    if fill_cs is not None and not fill_cs.get("window_exact"):
+        fill_cs.pop("window", None)
+    doc = {"spark": pane_spark(got.get("day"), got.get("series"), now_s), "strip": pane_strip(got.get("reqs"), got.get("spend"), now_s),
+           "heat": pane_heat(got.get("hourly"), got.get("spend"), now_s), "fill": pane_fill(got.get("reqs"), fill_cs)}
+    return [json.dumps({k: v for k, v in doc.items() if v is not None}, separators=(",", ":"))]
+
+
 def remaining(cs: dict) -> float:
     return (cs["last_ts"] + cs["ttl_s"] * 1000 - cs["now_ms"]) / 1000
 
@@ -239,7 +451,7 @@ def cmd_home(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:savings
+# /context-guru:insights savings
 
 def cmd_savings(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
@@ -252,6 +464,10 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
          f"({share(saved, st.get('baseline_cost_usd') or bill)} of the {dollars(st.get('baseline_cost_usd') or bill)} "
          f"the same work would have cost)."]
     lv = levers(st)
+    mp = st.get("manual_pings") if isinstance(st.get("manual_pings"), dict) else {}
+    if mp.get("count"):  # the Ping button / command: net of the ping's own cost, kept apart from every strategy
+        n = int(mp["count"])
+        lv.append((f"Manual pings ({n} ping{'s' if n != 1 else ''}, cost {dollars(mp.get('ping_usd') or 0.0)})", mp.get("saved_usd") or 0.0))
     top = max([abs(v) for _, v in lv] + [0.01])
     L += ["", f"✓ Saved   (vs the same requests without Context Guru, at gateway prices)  {C.spark(daily(api, since, now, 'saved_usd'))}"]
     L += C.table([[n, dollars(v), cells(max(v, 0) / top)] for n, v in lv] or [["Nothing saved yet", "", ""]], "lrl")
@@ -269,10 +485,10 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:cache
+# /context-guru:insights cache
 
 CAUSES = {"idle_expiry": "You paused longer than the cache lasts", "prefix_change": "Settings or tools changed mid-session",
-          "cold_start": "A new session started", "new_thread": "A helper agent started",
+          "cold_start": "A new session started", "new_thread": "A subagent or side request started",
           "history_rewrite": "The conversation was rewound or compacted"}
 
 
@@ -432,27 +648,66 @@ def cmd_campaign(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:waste
+# /context-guru:insights tools
+
+def _cost(row: dict) -> tuple[float, bool]:
+    """(dollars, is the whole carry). carry_usd is everything the declaration cost to carry; an older proxy only
+    has unused_usd, the part carried while nothing called it."""
+    if isinstance(row.get("carry_usd"), (int, float)) and row.get("carry_priced", row.get("priced")) is not False:
+        return float(row["carry_usd"]), True
+    return float(row.get("unused_usd") or 0.0), False
+
+
+def tools_carried(tools: dict, details: bool) -> list[str]:
+    """MCP servers (each with its tools underneath) and skills, with what carrying them cost. Claude Code's
+    own tools and Context Guru's own components are left out: nobody removes those."""
+    keep = lambda r: not r.get("builtin") and not C.OWN.search(r.get("name") or r.get("server") or "") and (r.get("carry_priced") if "carry_priced" in r else r.get("priced"))  # noqa: E731
+    by_server: dict[str, list[dict]] = {}
+    for t in tools.get("tools") or []:
+        m = re.match(r"mcp__(.+?)__", t.get("name", ""))
+        if t.get("kind") == "mcp_tool" and keep(t) and m:
+            by_server.setdefault(t.get("server") or m.group(1), []).append(t)
+    servers = sorted((s for s in tools.get("servers") or [] if keep({**s, "name": s["server"]})), key=lambda s: -_cost(s)[0])
+    skills = sorted((k for k in (tools.get("skills") or {}).get("skills", []) if keep(k)), key=lambda k: -_cost(k)[0])
+    if not servers and not skills:
+        return []
+    whole = all(_cost(r)[1] for r in [*servers, *skills])
+    L = ["What you carry (MCP servers, their tools and skills; Claude Code's built-in tools are not listed)" if whole else
+         "What you carry (MCP servers, their tools and skills; this proxy reports only the part carried while unused)"]
+    rows = []
+    for sv in servers[: None if details else 5]:
+        calls = f"{sv['calls']} calls" if sv.get("calls") else "never called"
+        rows.append([f"MCP server  {sv['server']}", f"{sv['tools']} tools", calls, dollars(_cost(sv)[0])])
+        for t in sorted(by_server.get(sv["server"], []), key=lambda t: -_cost(t)[0])[: None if details else 3]:
+            rows.append([f"    {t['name'].split('__', 2)[-1]}", "", f"{t['calls']} calls" if t.get("calls") else "never called", dollars(_cost(t)[0])])
+    for k in skills[: None if details else 5]:
+        rows.append([f"skill       {k['name']}", "", f"{k['calls']} calls" if k.get("calls") else "never called", dollars(_cost(k)[0])])
+    L += C.table(rows, "lrrr")
+    if not details and (len(servers) > 5 or len(skills) > 5):
+        L.append(f"  ... {max(0, len(servers) - 5)} more servers, {max(0, len(skills) - 5)} more skills with details")
+    return L
+
 
 def cmd_waste(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
     tools, last = tools_doc(api, o, d)
     if not tools or not tools.get("totals"):
         return ["No tool inventory yet. The proxy records it per session; try again after a few sessions."]
-    items = C.unused_items(tools, last)
+    carried_rows = tools_carried(tools, o["details"])
+    items = [i for i in C.unused_items(tools, last) if i["kind"] != "client tool"]  # a built-in cannot be removed
     if not items:
-        return ["Nothing wasted: every tool, MCP server and skill you carry was used in this window."]
+        return [*carried_rows, *([""] if carried_rows else []), "Nothing wasted: every MCP server and skill you carry was used in this window."]
     carried = sum(i["usd"] for i in items)
     per_month = carried / d * 30
-    L = [f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
+    L = [*carried_rows, *([""] if carried_rows else []),
+         f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
          f"about {dollars(per_month)} a month.", ""]
     top = items[:5]
-    kind = lambda k: "built-in tool" if k == "client tool" else k  # noqa: E731
-    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
+    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[i["kind"], i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
     L += ["", "Remove the first:", f"  {top[0]['cmd']}"]
     if o["details"]:
         L += ["", "All of them, with the command that removes each:"]
-        L += C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
+        L += C.table([[i["kind"], i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
     L += ["", f"Measured carry; the monthly figure is an estimate that assumes your usage stays the same."]
     return L
 
@@ -533,6 +788,19 @@ def cmd_session(api: Api, o: dict) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # /context-guru:doctor
 
+def _ping_header_state() -> str:
+    """present | missing | opted-out | not-ours | unknown, asked of settings.py (the one place that knows)."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.py"),
+                            "ensure-ping-header", "--check"], capture_output=True, text=True, timeout=10)
+        for ln in r.stdout.splitlines():
+            if ln.startswith("result="):
+                return ln[7:]
+    except Exception:
+        pass
+    return "unknown"
+
+
 def cmd_doctor(api: Api, o: dict) -> list[str]:
     checks: list[tuple[str, str, str]] = []  # (ok|warn|bad, what, fix)
 
@@ -558,6 +826,12 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
     add("ok" if "statusline" in str(sl.get("command", "")) else "warn", "Context Guru status line is installed", "Run /context-guru:statusline")
     add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
         'Add "refreshInterval": 5 to statusLine in settings.json')
+    ping_state = _ping_header_state()
+    if ping_state in ("present", "missing", "user-off", "removed"):
+        add("ok" if ping_state == "present" else "warn", "Ping header is set (the Ping button needs it)",
+            {"missing": "Run /context-guru:install to turn Ping on",
+             "removed": "You removed it. Run /context-guru:install to turn Ping on again",
+             "user-off": "Your own x-context-guru-ping line is not 1. Set it to 1 in env.ANTHROPIC_CUSTOM_HEADERS"}.get(ping_state, ""))
     cache_mode = cfg.get("cache_mode")
     add("ok" if cache_mode else "warn", "Cache mode is set", "See /context-guru:cache-strategy-picker")
     bad = [c for c in checks if c[0] == "bad"]
@@ -574,12 +848,12 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 # each setting and returns one report per kind (contract: docs/plugin/save-more.md). This side renders it and,
 # after a yes, sends back an option id the report offered. It never composes configuration itself.
 
-KINDS = ("config", "cache", "tools")
+KINDS = ("config", "cache", "tools", "settings")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
-ALIAS = {"compaction": "config", "waste": "tools"}  # older names, still understood
+ALIAS = {"compaction": "config"}  # an older name, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
-READS = ("save-more", "remove-mcp-and-skills", "adapt")
-SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
+READS = ("save-more", "remove-mcp-and-skills")
+SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "settings": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
 NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills"}
 ITEM_KINDS = {"mcp_server": "MCP server", "mcp_tool": "MCP tool", "skill": "skill"}  # never a built-in tool
 ADAPT_DAYS = 30
@@ -628,18 +902,18 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
         kinds = ["tools"]
     token = rest[0] if rest else None
     flags = (f" --days {o['days']}" if o["days"] else "") + (" --force" if o.get("force") else "")
-    usage = (f'Usage: python3 "{script}" save-more [config|cache] [details] [--custom] [--days N]\n'
+    usage = (f'Usage: python3 "{script}" save-more [config|cache|settings] [details] [--custom] [--days N]\n'
              f'       python3 "{script}" remove-mcp-and-skills [details] [--days N]\n'
              f'       python3 "{script}" apply <{"|".join(KINDS)}> <option>@<basis>\n'
-             f'       python3 "{script}" revert <{"|".join(KINDS)}>')
+             f'       python3 "{script}" revert <{"|".join(KINDS)}> (settings: revert settings <check-id>)')
     if len(verbs) > 1 or len(kinds) > 1 or (verb == "apply" and (not kinds or len(rest) != 1)) \
-            or (verb == "revert" and (not kinds or rest)) or (verb == "read" and rest) \
+            or (verb == "revert" and (not kinds or len(rest) != (kinds == ["settings"]))) or (verb == "read" and rest) \
             or (cmd == "remove-mcp-and-skills" and kinds != ["tools"]):
         return verb, kinds, token, usage
     if verb != "read" and cmd != verb:
         exact = f'python3 "{script}" {verb} {kinds[0]}' + (f" {shlex.quote(token)}" if token else "") + flags
         return verb, kinds, token, f"Run this instead (a change is its own command): {exact}"
-    return verb, kinds or ["config", "cache"], token, None
+    return verb, kinds or ["config", "cache", "settings"], token, None
 
 
 def money(x: float | None) -> str:
@@ -1007,8 +1281,24 @@ def read_kinds(api: Api, o: dict, kinds: list[str]) -> list[tuple[str, int, dict
     return [(k, st, rep) for k, (st, rep) in zip(kinds, got)]
 
 
+def settings_card(api: Api, o: dict, e) -> list[str]:
+    """The "Settings that cost you money" card, or nothing when no check fires. Fails open: an old proxy or no answer
+    only turns the cost into "not measured". Reads the user's own settings on this machine; writes nothing."""
+    fs = S.findings()
+    if not fs:
+        return []
+    days = o["days"] or ADAPT_DAYS
+    since, now = window(o, days)
+    return S.render(fs, S.costs(api, since, now), days, dollars, card, SLASH["settings"], e)
+
+
 def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, list[tuple[str, dict]]]:
     """(lines, exit code, (kind, report) for each report that carries a recommendation)."""
+    want_settings = "settings" in kinds
+    kinds = [k for k in kinds if k != "settings"]
+    if not kinds:  # `save-more settings` alone: no replay
+        L = settings_card(api, o, e)
+        return (L if L else ["No settings that cost you money were found."]), 0, []
     got = read_kinds(api, o, kinds)
     if o.get("json"):
         return [json.dumps({k: rep for k, _, rep in got}, indent=2)], 0, []
@@ -1036,6 +1326,9 @@ def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, li
         rc = 0 if ok else 1
     elif kinds == ["tools"] and recs:
         L.append(tools_question(recs[0][1], e))
+    if want_settings:
+        sc = settings_card(api, o, e)
+        L += (sc + [""]) if sc else []
     return L, rc, recs
 
 
@@ -1045,16 +1338,17 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
     if err:
         print(err)
         return 1
+    if verb != "read" and kinds[0] == "settings":  # local files, no proxy: a settings change is the user's own, after their yes
+        L, rc = S.apply(token) if verb == "apply" else S.revert(token)
+        print("\n".join(L))
+        return rc
     if verb != "read":
         L, rc = adapt_apply(api, o, kinds[0], token if verb == "apply" else "revert")
         print("\n".join(L))
         return rc
     e = T.Env()
-    pre = []
-    if cmd == "adapt":  # the 0.6 name, for one release
-        pre = ["/context-guru:adapt is now /context-guru:save-more (config, cache) and /context-guru:remove-mcp-and-skills.", ""]
     L, rc, recs = cmd_save(api, o, kinds, e)
-    print("\n".join(pre + L))
+    print("\n".join(L))
     if recs and sys.stdin.isatty() and sys.stdout.isatty():
         for k, rep in recs:
             if input(f"\nApply {rep['recommendation']['change']}? [y/N] ").strip().lower() in ("y", "yes"):
@@ -1070,9 +1364,6 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
 # each screen is the same function as before.
 
 INSIGHTS = {"savings": cmd_savings, "cache": cmd_cache, "tools": cmd_waste}
-INSIGHT_NAME = {"savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}  # the old names
-
-
 def cmd_insights(api: Api, o: dict) -> list[str]:
     unknown = [a for a in o["args"] if a not in INSIGHTS]
     if unknown:  # its own usage, not another command's
@@ -1089,8 +1380,88 @@ def cmd_insights(api: Api, o: dict) -> list[str]:
     return L + ["More: /context-guru:insights savings | cache | tools, each with details"]
 
 
-CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste,
+CMDS = {"home": cmd_home, "insights": cmd_insights,
         "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
+
+
+# Why the server holds nothing to ping with (cachestate `ping_reason`), in words. The mod's toast says the same.
+PING_REASONS = {
+    "not opted in": "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
+    "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
+    "over budget": "one ping would cost more than the per-ping limit",
+    "too large": "context too large to hold for Ping",
+    "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
+    "pings used": "the planned keep-alive pings have run out",
+    "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
+    "expired": "cache already cold",
+    "no entry": "the server knows nothing about this session yet; send a prompt first",
+    "unavailable": "the upstream route or credential is failing right now — try again shortly",
+}
+PING_REASON_OTHER = "cannot ping this session right now"  # a code from a newer server: never shown raw
+
+
+def ping_reason(cs: dict | None) -> str:
+    """The main thread's `ping_reason` from a cachestate doc, else the session entry's, else ""."""
+    if not isinstance(cs, dict):
+        return ""
+    main = next((t for t in cs.get("threads") or [] if isinstance(t, dict) and t.get("main")), {})
+    r = main.get("ping_reason") or cs.get("ping_reason")
+    return r if isinstance(r, str) else ""
+
+
+def ping_lines(code: int, doc: dict | None, reason: str = "") -> list[str]:
+    """The one-line answer of POST /api/me/cache/ping, whatever the status. `reason` is the cachestate's
+    ping_reason, which says WHY a 409 "not held" happened."""
+    doc = doc or {}
+    if code == 200 and doc.get("sent"):
+        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
+    err = doc.get("error")
+    if code == 409 and err == "not held" and reason:
+        return [f"Can't ping: {PING_REASONS.get(reason, PING_REASON_OTHER)}."]
+    if code == 409 and err == "not held":
+        return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
+    if code == 409 and err == "busy":
+        return ["A request is running; it refreshes the cache itself."]
+    if code == 409 and err in ("over budget", "too costly"):
+        return ["One ping would cost more than the keep-alive per-ping limit, so nothing was sent."]
+    if code == 409 and err == "cold":
+        return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
+    if code == 409:
+        return [f"Ping refused: {err or 'no detail'}."]
+    if code == 404 and err == "unknown session":
+        return ["This server does not know that session yet. Send a prompt first."]
+    if code in (404, 405) and not err:  # the mux's plain-text "404 page not found": the route does not exist
+        return ["This Context Guru server does not support manual pings yet. Update the proxy."]
+    if code == 429 and err == "no spare capacity":
+        return [f"No spare capacity right now. Try again in {doc.get('retry_after_s', 5)}s."]
+    if code == 429:
+        return [f"Pinged a moment ago. Try again in {doc.get('retry_after_s', 30)}s."]
+    if code == 502:
+        return ["The upstream model refused the ping."]
+    if code == 0:
+        return ["The Context Guru server did not answer."]
+    if code == -1:
+        return ["The Context Guru server timed out."]
+    return [f"The ping failed (HTTP {code}): {doc.get('error', 'no detail')}."]
+
+
+def ping_main(api: Api, sid: str | None, thread: str | None, as_json: bool) -> int:
+    sid = sid or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print(json.dumps({"status": 0, "error": "no session"}) if as_json else "No session id: pass --session ID.")
+        return 1
+    body: dict = {"session": sid}
+    if thread:
+        body["thread"] = thread
+    code, doc = api.send("POST", "/api/me/cache/ping", body=body, timeout=20)
+    reason = ""
+    if code == 409 and (doc or {}).get("error") == "not held" and api.fixture is None:
+        reason = ping_reason(cachestate_cached(api.base, sid))  # the shared cache first: at most one fetch, only on this refusal
+    if as_json:  # the mod reads this: the HTTP status beside the server's own document
+        print(json.dumps({"status": code, **(doc or {}), **({"ping_reason": reason} if reason else {})}))
+    else:
+        print("\n".join(ping_lines(code, doc, reason)))
+    return 0 if code == 200 else 1
 
 
 def run(cmd: str, api: Api, opts: dict) -> str:
@@ -1098,19 +1469,21 @@ def run(cmd: str, api: Api, opts: dict) -> str:
          "campaign": {"scope": "tenant", "id": "", "window": "30d"}, **opts}
     L = CMDS[cmd](api, o)
     if not o["details"] and cmd not in ("doctor", "home", "insights", "cache-campaign"):
-        L += ["", f"More: /context-guru:{INSIGHT_NAME.get(cmd, cmd)} details"]
+        L += ["", f"More: /context-guru:{cmd} details"]
     return "\n".join(L)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES]))
-    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
+    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "panedata", "tip", "ping"]))
+    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache|settings]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
     ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
                     "cache-campaign mode ... active: go live although the build did not recommend it")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
+    ap.add_argument("--transcript", help="cachestate: this session's transcript path, to name its sub-agents")
+    ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
     ap.add_argument("--fixture", help="read a captured bundle of API responses from this file (tests, demos)")
@@ -1123,11 +1496,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--session-end", action="store_true", help="cache-campaign build --builder auto: score as if the SessionEnd hook is installed")
     ap.add_argument("--mock", action="store_true", help="cache-campaign: use the documented sample response")
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("config", "compaction", "tools"):  # `cg.py config revert`: the read side, which names the change
+    if argv and argv[0] in ("config", "compaction", "tools", "settings"):  # `cg.py config revert`: the read side, which names the change
         argv = ["save-more", *argv]
     a = ap.parse_args(argv)
-    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py cache revert`: say the one command that does it
+    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"
+
+    if a.cmd == "tip":  # for the mod's band: which commands are stale (local files only, no proxy; the status line's rule)
+        try:
+            import statusline as sl  # noqa: PLC0415  (the Codex copy of this file has no status line: no tip there)
+            off = sl._tips_off()  # `--set-tips=off` silences the mod's tip too
+            print(json.dumps({"stale": [] if off else sl.stale_commands() or [], "days": sl.TIP_DAYS}))
+        except Exception:  # noqa: BLE001
+            print(json.dumps({"stale": [], "days": 7}))
+        return 0
+
     opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom, "mock": a.mock,
                   "campaign": {"scope": a.scope, "id": a.id, "window": a.window, "builder": a.builder, "session_end": a.session_end},
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
@@ -1138,14 +1521,31 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.fixture, encoding="utf-8") as f:
             api = Api("", json.load(f))
     else:
-        adapt = a.cmd in (*READS, *WRITES)
+        adapt = a.cmd in (*READS, *WRITES, "ping")
         base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
-        if not base:
+        if not base and a.cmd in ("cachestate", "panedata"):
+            print(json.dumps({"error": "no proxy routing this session"}))
+            return 1
+        local = adapt and "settings" in a.args and (a.cmd in WRITES or a.args[0:1] == ["settings"] and not set(a.args) & {"config", "cache"})
+        if not base and local:  # settings are read on this machine: apply and revert need no proxy; a read says "cost not measured"
+            base = "http://127.0.0.1:0"
+            api = Api(base, token=None)
+        elif not base:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
-        api = Api(base, token=cg_token() if adapt else None)
+        else:
+            api = Api(base, token=cg_token() if adapt else None)
+    if a.cmd == "ping":
+        return ping_main(api, a.session, a.thread, a.json)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
+    if a.cmd == "panedata":  # for the mod's pane: JSON only, the five modes' data (spark, strip, heat, fill)
+        print(cmd_panedata(api, {"session": a.session})[0])
+        return 0
+    if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
+        o = {"session": a.session, "transcript": a.transcript}
+        print(cmd_cachestate(api, o)[0])
+        return o["exit"]
     print(run(a.cmd, api, opts))
     return 0
 

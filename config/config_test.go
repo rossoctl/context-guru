@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -173,6 +174,16 @@ cache:
 		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}
+	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds1h != 59*60 || got.KeepAliveMaxPings1h != 1 {
+		t.Errorf("the 1-hour default is 1 ping at 59 minutes; Resolved() = %d s, %d pings",
+			got.KeepAliveIdleSeconds1h, got.KeepAliveMaxPings1h)
+	}
+	for _, idle := range []int{3600, 7200} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf(
+			"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds_1h: %d\n", idle))); err == nil {
+			t.Errorf("keepalive_idle_seconds_1h: %d was accepted; it is at or past the 1-hour lifetime", idle)
+		}
+	}
 	if (CacheConfig{}).KeepAlive {
 		t.Error("the keep-alive is on by default; it spends the caller's money and must not be")
 	}
@@ -258,9 +269,79 @@ func TestPresetLadderSummarizerModes(t *testing.T) {
 // The recommended keep-alive policy (#435, B-policy-r2) is the default; pin the four knobs.
 func TestKeepAliveRecommendedDefaults(t *testing.T) {
 	r := CacheConfig{}.Resolved()
-	if r.KeepAliveIdleSeconds != 270 || r.KeepAliveMaxPings != 2 ||
+	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
 		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
-		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 270, 2, 80000, 0.50",
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 80000, 0.50",
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
+	}
+}
+
+// The credential hold of a 1-hour thread is (K+1) x 59 min, so K is capped.
+func TestKeepAliveMaxPings1hIsCapped(t *testing.T) {
+	for _, k := range []int{1, 2, 3} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err != nil {
+			t.Errorf("keepalive_max_pings_1h: %d refused: %v", k, err)
+		}
+	}
+	for _, k := range []int{4, 100} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err == nil {
+			t.Errorf("keepalive_max_pings_1h: %d accepted; it would hold a credential for hours", k)
+		}
+	}
+}
+
+// xhigh is high plus the sweep (#404 PR C). The other presets do not carry it.
+func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Build(components.NopEmitter{}); err != nil {
+			t.Fatalf("%s does not build: %v", name, err)
+		}
+		return c
+	}
+	has := func(c *Config) bool {
+		for _, n := range c.Pipeline {
+			if n == "extract_llm_sweep" {
+				return true
+			}
+		}
+		return false
+	}
+	xhigh := load("xhigh")
+	if !has(xhigh) {
+		t.Fatalf("xhigh does not run extract_llm_sweep: %v", xhigh.Pipeline)
+	}
+	if _, ok := xhigh.Components["extract_llm_sweep"]; !ok {
+		t.Error("xhigh carries no extract_llm_sweep config block")
+	}
+	var blk map[string]any
+	if n := xhigh.Components["extract_llm_sweep"]; n.Decode(&blk) == nil && blk["shadow"] != nil {
+		t.Errorf("xhigh turns shadow mode on: %v", blk)
+	}
+	// High with the sweep spliced in after extract_llm is exactly xhigh's pipeline.
+	high := load("high")
+	var want []string
+	for _, n := range high.Pipeline {
+		want = append(want, n)
+		if n == "extract_llm" {
+			want = append(want, "extract_llm_sweep")
+		}
+	}
+	if !reflect.DeepEqual(xhigh.Pipeline, want) {
+		t.Errorf("xhigh pipeline = %v, want high + the sweep after extract_llm: %v", xhigh.Pipeline, want)
+	}
+	// No other tier carries the sweep.
+	for _, name := range []string{"conservative", "medium", "high"} {
+		if has(load(name)) {
+			t.Errorf("%s runs the sweep: the user decided only xhigh does", name)
+		}
+	}
+	list, ok := PresetPipeline("xhigh")
+	if !ok || !reflect.DeepEqual(list, want) {
+		t.Errorf("xhigh preset list = %v (ok=%v), want %v", list, ok, want)
 	}
 }

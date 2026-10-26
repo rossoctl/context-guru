@@ -87,14 +87,15 @@ type CacheConfig struct {
 	// default.
 	KeepAlive bool `yaml:"keepalive"`
 	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
-	// 0 = DefaultKeepAliveIdle (270).
+	// 0 = DefaultKeepAliveIdle (240).
 	//
-	// 270 rather than 280 is chosen for robustness to where the provider's cache cliff sits,
-	// not for a dollar gain: on the full window the two tie (270 vs 280 at K=2, 80k floor:
-	// -19 [-462, +326] model dollars, counterfactual), and if the cliff is at ~290 s 280 loses
-	// about $420 while 270 loses nothing material. K=1 prefers 280. The earlier 280 rationale
-	// (X=240 wastes 111 pings, X=280 wastes 53, +$125.08) rested on the W1 clock and is
-	// superseded (#435).
+	// 240 so that a ping and its whole timeout fit inside the cache: 240 s + the 60 s ping
+	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
+	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
+	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
+	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
 	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after
@@ -123,6 +124,13 @@ type CacheConfig struct {
 	// KeepAliveMinPrefixTokens at 50,000 with K=2 gives +$125.12 on 908 pings — the same money
 	// for fewer requests, a shorter hold, and no extra exposure to the dead-entry mode.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
+	// KeepAliveIdleSeconds1h and KeepAliveMaxPings1h are X and K for a session whose cache the
+	// provider BILLED at the one-hour tier (see proxy.kaEntry.ttl1h). The proxy reads the tier per
+	// session from the traffic, so one proxy serves a 1h subscription session and a 5m API or
+	// subagent session side by side: the 5m pair above runs the second, this pair runs the first.
+	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
+	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
+	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -186,9 +194,11 @@ type CacheConfig struct {
 // in tests and quoted in the settings page, and three copies of 280 is how one of them
 // becomes 240.
 const (
-	DefaultKeepAliveIdle          = 270
+	DefaultKeepAliveIdle          = 240
 	DefaultKeepAliveOpenAIIdle    = int(modelinfo.OpenAIDefaultKeepAliveIdle / time.Second)
 	DefaultKeepAliveMaxPings      = 2
+	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
+	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	DefaultKeepAliveMinPrefix     = 80000
 	DefaultHeadTTLMinTokens       = 50000
@@ -206,6 +216,12 @@ func (c CacheConfig) Resolved() CacheConfig {
 	}
 	if c.KeepAliveMaxPings <= 0 {
 		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
+	}
+	if c.KeepAliveIdleSeconds1h <= 0 {
+		c.KeepAliveIdleSeconds1h = DefaultKeepAliveIdle1h
+	}
+	if c.KeepAliveMaxPings1h <= 0 {
+		c.KeepAliveMaxPings1h = DefaultKeepAliveMaxPings1h
 	}
 	if c.KeepAliveMaxUSDPerPing <= 0 {
 		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
@@ -227,7 +243,8 @@ func (c CacheConfig) Resolved() CacheConfig {
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
 	if c.KeepAliveIdleSeconds >= 300 {
@@ -235,6 +252,16 @@ func (c CacheConfig) validate() error {
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
 			c.KeepAliveIdleSeconds)
+	}
+	if c.KeepAliveIdleSeconds1h >= 3600 {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under 3600 "+
+			"(the one-hour lifetime runs from the previous request's START); got %d",
+			c.KeepAliveIdleSeconds1h)
+	}
+	if c.KeepAliveMaxPings1h > modelinfo.AnthropicMaxKeepAliveMaxPings1h {
+		return fmt.Errorf("config: cache: keepalive_max_pings_1h must be at most %d "+
+			"(the credential hold is (K+1) x the 1-hour idle time); got %d",
+			modelinfo.AnthropicMaxKeepAliveMaxPings1h, c.KeepAliveMaxPings1h)
 	}
 	if c.KeepAliveOpenAIIdleSeconds >= 1730 {
 		return fmt.Errorf("config: cache: keepalive_openai_idle_seconds must be under 1730 " +
@@ -529,7 +556,9 @@ var presets = map[string][]string{
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"xhigh":        {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// The sweep is back in xhigh (#404 PR C), with no production shadow phase first: the false-drop
+	// signals (SweepDropCounters, the dashboard) are the watch on it.
+	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -641,8 +670,7 @@ components:
 	// omission. It asks the REQUEST's own model, because only that model's prompt cache holds the
 	// transcript, so there is no `model` to name. The conversation IS the cached prefix, so there is
 	// no `context` to size. One ask covers every candidate, so there is no call cap. And the economic
-	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor
-	// and the window.
+	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor.
 	//
 	// The sweep's floor is 1000 and not 3000. At 3000 the old preset produced ZERO extractions
 	// across 3,437 requests: 3,401 warm turns did nothing, and on all 36 turns that DID sweep,
@@ -692,16 +720,13 @@ components:
 	// eligibility: 132 calls in three days of heavy use, under a per-session cap of 40 that
 	// was never approached. llm_max_per_request: 8 is the per-turn brake.
 	//
-	// The sweep's `pre_expiry_seconds` is UNSET on purpose, which takes its one-minute default: one
-	// apply.coldMargin, the only figure in this codebase with a stated purpose for clock uncertainty
-	// around cache expiry. The number that used to sit here was a per-sweep CALL cap, motivated by a
-	// production request that made 27 calls, spent $0.229 and added 76.6 s to a turn whose upstream
-	// took 33.5 s. That shape is gone: the sweep makes exactly one ask per firing turn, and what
-	// bounds it is how often the pre-expiry window comes round — at most once per cache lifetime per
-	// session.
+	// The sweep asks its question at the keep-alive ping, in place of the ping, and holds the answer for
+	// the next cold request (#404). There is no window to size. The number that used to sit here was a
+	// per-sweep CALL cap, motivated by a production request that made 27 calls, spent $0.229 and added
+	// 76.6 s to a turn whose upstream took 33.5 s. That shape is gone: the sweep makes exactly one ask
+	// per idle span per thread, and what bounds it is the keep-alive's own schedule.
 	//
-	// The WIDTH of that window is the one unmeasured number in this preset, and widening it is a
-	// yield/cost trade nothing has measured. See extract_llm_sweep's own comment.
+	// `shadow` is deliberately NOT set here or in any preset: it is the measurement switch.
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   extract:

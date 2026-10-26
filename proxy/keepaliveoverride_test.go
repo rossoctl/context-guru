@@ -12,6 +12,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 )
 
@@ -55,7 +56,7 @@ func TestOverrideCannotRaiseThePerPingBudget(t *testing.T) {
 	// And it may switch the mechanism ON for one session while the account default is off —
 	// that is the point of it, and the arming request is the consent act.
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2}
-	if !k.overrideFor("t1", "sess-1", off).on() {
+	if !k.overrideFor("t1", "sess-1", off).On() {
 		t.Error("an override could not enable the keep-alive for one session on an account whose " +
 			"default is off, which is the whole use for it")
 	}
@@ -124,17 +125,15 @@ func TestOverrideRespectsTheCredentialHoldCeiling(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	armOn(t, k, "sess-1", 60*time.Second, 3, clock.now().Add(time.Hour))
 	recordOne(t, k, CachePolicy{}, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
-	k.mu.Lock()
-	e := k.live[kaKey("t1", "sess-1")]
-	k.mu.Unlock()
-	if e == nil {
+	e, ok := k.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+	if !ok {
 		t.Fatal("an armed session was not tracked, so its deadline cannot be checked")
 	}
-	if e.pol.Idle != 60*time.Second || e.pol.MaxPings != 3 {
-		t.Errorf("the entry carries %v/%d, not the override's 60s/3", e.pol.Idle, e.pol.MaxPings)
-	}
-	if e.timer == nil {
-		t.Error("an armed session was retained with no hard retention deadline")
+	// The keeper sets every tracked entry's hard deadline from the entry's own policy, (K+1) x
+	// Idle — keepalive's TestCredentialRetentionRules pins that it fires. What the host decides,
+	// and what is checked here, is that the entry's policy is the override's.
+	if e.Policy.Idle != 60*time.Second || e.Policy.MaxPings != 3 {
+		t.Errorf("the entry carries %v/%d, not the override's 60s/3", e.Policy.Idle, e.Policy.MaxPings)
 	}
 }
 
@@ -144,16 +143,16 @@ func TestOverrideExpiresAndStopsPinging(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2} // KeepAlive false: account is OFF
 	armOn(t, k, "sess-1", 60*time.Second, 3, clock.now().Add(10*time.Minute))
-	if !k.overrideFor("t1", "sess-1", off).on() {
+	if !k.overrideFor("t1", "sess-1", off).On() {
 		t.Fatal("the override is not in force, so its expiry proves nothing")
 	}
 	clock.advance(11 * time.Minute)
-	if k.overrideFor("t1", "sess-1", off).on() {
+	if k.overrideFor("t1", "sess-1", off).On() {
 		t.Error("an expired override still enabled the keep-alive")
 	}
 	// And it is not retained. overrideFor treats it as absent regardless; the sweep deletes it,
 	// so the map cannot grow on the strength of authorizations nobody withdrew.
-	k.sweep(clock.now())
+	k.Sweep(clock.now())
 	k.mu.Lock()
 	_, still := k.overrides[kaKey("t1", "sess-1")]
 	k.mu.Unlock()
@@ -170,7 +169,7 @@ func TestOverrideOnADeadSessionCostsNothing(t *testing.T) {
 	armOn(t, k, "ghost", 60*time.Second, 4, clock.now().Add(6*time.Hour))
 	// No record() call at all: the session never sends anything again.
 	for i := 0; i < 10; i++ {
-		k.sweep(clock.advance(70 * time.Second))
+		k.Sweep(clock.advance(70 * time.Second))
 	}
 	if got := k.Stats().Live; got != 0 {
 		t.Errorf("%d entries live for a session that sent nothing", got)
@@ -178,8 +177,11 @@ func TestOverrideOnADeadSessionCostsNothing(t *testing.T) {
 	if got := fs.n(); got != 0 {
 		t.Errorf("%d pings sent to a session that sent nothing", got)
 	}
-	if k.bytes != 0 {
-		t.Errorf("%d bytes held for a session that sent nothing", k.bytes)
+	if _, ok := k.Entry(keepalive.Key{Tenant: "t1", Session: "ghost"}); ok {
+		t.Error("a body is held for a session that sent nothing")
+	}
+	if _, ok := heldFor(k, keepalive.Key{Tenant: "t1", Session: "ghost"}); ok {
+		t.Error("a credential is held for a session that sent nothing")
 	}
 }
 
@@ -202,11 +204,8 @@ func TestDisarmRetiresTheHeldMaterialNow(t *testing.T) {
 	defer sink.Close()
 	h := New(nil, nil, metrics.NewAggregator(), Options{Dashboard: sink})
 	defer h.Close()
-	k := h.keeper
 	clock := &testClock{at: time.Now()}
-	k.now = clock.now
-	fs := &fakeSender{}
-	k.send = fs.send
+	k := rebuildKeeper(h, &fakeSender{}, clock)
 
 	body := strings.Replace(kaBody, `"text":"hi"`, `"text":"`+secret+`"`, 1)
 	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
@@ -218,16 +217,21 @@ func TestDisarmRetiresTheHeldMaterialNow(t *testing.T) {
 			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
 			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}
-	k.mu.Lock()
-	e := k.live[kaKey("t1", "armed")]
-	k.mu.Unlock()
-	if e == nil {
+	key := keepalive.Key{Tenant: "t1", Session: "armed"}
+	e, ok := k.Entry(key)
+	if !ok {
 		t.Fatal("nothing retained, so nothing is being released")
 	}
-	held := e.body // the keeper's own copy; clear() overwrites the array in place
-	if len(held) == 0 {
+	if len(e.MaskedBody) == 0 {
 		t.Fatal("the entry holds no body")
 	}
+	// The held CREDENTIAL, as the dispatcher holds it; Release overwrites it in place. (That the
+	// keeper zeroizes the body on every release path is keepalive's own test.)
+	hu, ok := heldFor(k, key)
+	if !ok || len(hu.auth) == 0 {
+		t.Fatal("no credential held, so nothing is being released")
+	}
+	held := hu.auth[0].val
 	if !k.disarm("t1", "armed") {
 		t.Fatal("disarm reported nothing was armed")
 	}
@@ -235,24 +239,24 @@ func TestDisarmRetiresTheHeldMaterialNow(t *testing.T) {
 		t.Errorf("%d entries still live after a disarm; the release must not wait for the "+
 			"hard deadline", got)
 	}
-	// The BYTES are gone, not merely unreferenced: a dropped slice sits in the heap until a
-	// collection that may never come, and a dump taken in between still yields the transcript.
-	if strings.Contains(string(held), secret) {
-		t.Error("the held body was dropped rather than zeroized")
+	if _, ok := k.Entry(key); ok {
+		t.Error("the entry is still held after a disarm")
 	}
+	// The BYTES are gone, not merely unreferenced: a dropped slice sits in the heap until a
+	// collection that may never come, and a dump taken in between still yields the key.
 	for _, b := range held {
 		if b != 0 {
-			t.Error("the held body was not fully zeroized")
+			t.Error("the held credential was not fully zeroized")
 			break
 		}
 	}
-	if e.timer != nil {
-		t.Error("the hard retention deadline was left running after a disarm")
+	if _, ok := heldFor(k, key); ok {
+		t.Error("the dispatcher still holds the credential after a disarm")
 	}
 	// And nothing leaked on the way out, at debug level.
 	surfaces := map[string]string{
 		"log sink (debug)": logs.String(),
-		"entry %+v":        fmt.Sprintf("%+v", *e),
+		"entry %+v":        fmt.Sprintf("%+v", e),
 		"KeepAliveStats":   fmt.Sprintf("%+v", k.Stats()),
 	}
 	for name, out := range surfaces {
@@ -277,8 +281,8 @@ func TestArmingIsRefusedWithoutAnAuditSinkOrWithTheKillSwitchOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No audit sink.
-	k := newKeeper(&Handler{opts: Options{}, limiter: NewLimiter(Limits{})})
-	k.now = func() time.Time { return now }
+	k := newKeeperWith(&Handler{opts: Options{}, limiter: NewLimiter(Limits{})},
+		keepalive.Options{Now: func() time.Time { return now }})
 	if err := k.arm("t1", "s", o); err == nil {
 		t.Error("a deployment with no audit sink accepted an arm; the whole credential " +
 			"arrangement rests on being reviewable")
@@ -334,11 +338,11 @@ func TestOverrideForAnotherTenantsSessionIdIsRefusedAndWouldAddressNothing(t *te
 	}
 	// The victim's own traffic is unaffected: resolution is under THEIR tenant id.
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2}
-	if k.overrideFor("t-victim", victim, off).on() {
+	if k.overrideFor("t-victim", victim, off).On() {
 		t.Error("an arm under one principal reached another tenant's session")
 	}
 	// It landed under the attacker's own key, where it is inert.
-	if !k.overrideFor("t1", victim, off).on() {
+	if !k.overrideFor("t1", victim, off).On() {
 		t.Error("the arm did not land under the authenticated principal at all")
 	}
 	// The armed list is scoped too: the victim sees nothing.
@@ -459,7 +463,7 @@ func TestAnOverrideOnAKeepAliveOffAccountStillHasAPingCeiling(t *testing.T) {
 	armOn(t, k, "sess-1", 280*time.Second, 2, clock.now().Add(time.Hour))
 	// The account default: keep-alive off, nothing configured — a zero policy.
 	pol := k.overrideFor("t1", "sess-1", CachePolicy{})
-	if !pol.on() {
+	if !pol.On() {
 		t.Fatal("the override did not enable the mechanism; the rest of this test is vacuous")
 	}
 	if pol.Ceiling() != DefaultMaxUSDPerPing {
@@ -467,71 +471,8 @@ func TestAnOverrideOnAKeepAliveOffAccountStillHasAPingCeiling(t *testing.T) {
 			"nobody configured a ceiling, and in a spend guard that may not mean infinity",
 			pol.Ceiling(), DefaultMaxUSDPerPing)
 	}
-	// And it BITES: an entry whose projected ping cost is over the default is refused.
-	over := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing + 0.01}
-	if over.pingable() {
-		t.Errorf("a ping projected at $%.2f passed the guard on an account with no configured "+
-			"ceiling; the p99 ping is $0.2275 and the max $0.3780, which is what the guard is "+
-			"for", over.pingUSD)
-	}
-	under := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing - 0.01}
-	if !under.pingable() {
-		t.Error("a ping inside the default ceiling was refused; the guard has become a block")
-	}
-	// A caller who really wants no ceiling has to type a negative number.
-	none := &kaEntry{turn: 1, prefix: 1_000_000, pingUSD: 99,
-		pol: CachePolicy{KeepAlive: true, Idle: time.Second, MaxPings: 1, MaxUSDPerPing: -1}}
-	if !none.pingable() {
-		t.Error("an explicitly negative ceiling did not mean unlimited; that is the only way to " +
-			"ask for it and it has to keep working")
-	}
-}
-
-// With no PredictorID at all (every account today, and every strategy that predates the
-// field), pingable() must behave EXACTLY as it did before the predictor gate existed —
-// this is the regression the whole opt-in design rests on.
-func TestPingableWithNoPredictorNamedIsUnchanged(t *testing.T) {
-	base := CachePolicy{KeepAlive: true, Idle: time.Second, MaxPings: 1}
-	for _, reason := range []string{"tool_use", "end_turn", "stop", ""} {
-		e := &kaEntry{turn: 1, prefix: 1_000_000, pol: base, stopReason: reason}
-		if !e.pingable() {
-			t.Errorf("stop_reason=%q with no PredictorID was refused; the gate must not run "+
-				"at all when PredictorID is empty", reason)
-		}
-	}
-}
-
-// With PredictorID naming the shipped stop_reason gate, pingable() must ping ONLY on the
-// actually-done cluster — the whole point of wiring docs/results/kv-ttl-predictor-arms.md's
-// finding into production.
-func TestPingableGatesOnTheNamedPredictor(t *testing.T) {
-	gated := CachePolicy{KeepAlive: true, Idle: time.Second, MaxPings: 1,
-		PredictorID: "stop-reason-gated", PredictorThreshold: 0.5}
-	cases := []struct {
-		reason string
-		want   bool
-	}{
-		{"tool_use", false}, {"stop_sequence", false}, {"stop", false}, {"", false},
-		{"end_turn", true}, {"max_tokens", true},
-	}
-	for _, c := range cases {
-		e := &kaEntry{turn: 1, prefix: 1_000_000, pol: gated, stopReason: c.reason}
-		if got := e.pingable(); got != c.want {
-			t.Errorf("stop_reason=%q: pingable() = %v, want %v", c.reason, got, c.want)
-		}
-	}
-}
-
-// An unknown predictor id must refuse to ping rather than silently letting the entry
-// through unconditionally — the fail-toward-not-spending direction, since the money is
-// what a broken or drifted predictor reference could otherwise waste.
-func TestPingableRefusesAnUnknownPredictorID(t *testing.T) {
-	e := &kaEntry{turn: 1, prefix: 1_000_000, stopReason: "end_turn",
-		pol: CachePolicy{KeepAlive: true, Idle: time.Second, MaxPings: 1,
-			PredictorID: "not-a-real-predictor"}}
-	if e.pingable() {
-		t.Error("an unregistered predictor id let a ping through; it must refuse instead")
-	}
+	// And it BITES: the keeper refuses an entry whose projected ping is over that default —
+	// keepalive's TestAZeroCeilingPolicyStillHasAPingCeiling, with the pingable() cases.
 }
 
 // worst_case_pings is a CEILING, so it counts one ping per idle interval and not K per span.

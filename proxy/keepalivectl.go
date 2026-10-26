@@ -8,6 +8,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -62,6 +63,8 @@ func (h *Handler) ctlKeepAliveArmed(w http.ResponseWriter, r *http.Request) {
 		"max_hours":        int(maxOverrideUntil / time.Hour),
 		"default_hours":    int(defaultOverrideUntil / time.Hour),
 		"max_hold_minutes": int(maxOverrideHold / time.Minute),
+		// A 1-hour thread follows the account's 1-hour schedule, not the override's pair.
+		"max_hold_minutes_1h": int(keepalive.MaxHold1h / time.Minute),
 	})
 }
 
@@ -153,7 +156,7 @@ func (h *Handler) ctlKeepAliveArm(w http.ResponseWriter, r *http.Request) {
 // The shipped policy's defaults, for a body that omits them. Named here rather than reaching
 // into config so this file states what it applies.
 const (
-	recIdleSecondsDefault = 270
+	recIdleSecondsDefault = 240
 	recMaxPingsDefault    = 2
 )
 

@@ -122,3 +122,173 @@ func TestToolsLastUsed(t *testing.T) {
 		t.Errorf("tools = %v", ts)
 	}
 }
+
+// causeCounts runs the pass over rows and returns the rewrite-cause counts.
+func causeCounts(t *testing.T, evs ...*Event) map[string]float64 {
+	t.Helper()
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	seed(t, rec, evs...)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(evs[len(evs)-1].TS+60000), "127.0.0.1:1")
+	got := map[string]float64{}
+	for k, v := range body["rewrites"].(map[string]any) {
+		got[k] = v.(map[string]any)["n"].(float64)
+	}
+	return got
+}
+
+func threadEv(ts int64, model, thread string, tools int) *Event {
+	e := spendEv(ts, "s", 3, 5, 0, 10000, 0)
+	e.Model, e.ThreadID, e.Tools = model, thread, tools
+	return e
+}
+
+func TestSpendExplainOtherModelInSeenSessionIsNewThread(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "sonnet", "p:side", 5),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 {
+		t.Errorf("causes = %v; want one cold_start (main) and one new_thread (side request)", got)
+	}
+}
+
+func TestSpendExplainSubagentsWithSameShapeAreSeparateThreads(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "opus", "a:one", 9),
+		threadEv(t0+120000, "opus", "a:two", 9),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 2 || len(got) != 2 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 2", got)
+	}
+}
+
+func TestSpendExplainSeenThreadGoingIdleStaysIdleExpiry(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "a:one", 9),
+		threadEv(t0+60000, "opus", "", 5),
+		threadEv(t0+20*60000, "opus", "a:one", 9),
+	)
+	if got["idle_expiry"] != 1 || got["cold_start"] != 1 || got["new_thread"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}
+
+func TestSpendExplainEmptyThreadIDKeepsOldBehaviour(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "opus", "", 9), // different tool count, old rows: new_thread
+		threadEv(t0+20*60000, "opus", "", 5),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 || got["idle_expiry"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}
+
+// A "p:" id is a fingerprint of one request, not a stable thread name (a side request that grows
+// gets a new id each turn), so it must not split a thread: a long pause stays idle_expiry.
+func TestSpendExplainSideRequestIDsDoNotSplitThreads(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	got := causeCounts(t,
+		threadEv(t0, "opus", "", 5),
+		threadEv(t0+60000, "sonnet", "p:aaa", 0),
+		threadEv(t0+20*60000, "sonnet", "p:bbb", 0),
+	)
+	if got["cold_start"] != 1 || got["new_thread"] != 1 || got["idle_expiry"] != 1 {
+		t.Errorf("causes = %v; want cold_start 1, new_thread 1, idle_expiry 1", got)
+	}
+}
+
+// The ping's cost sits on the ping row, its saving on the agent row it rescued. Summing the
+// saving over ping rows gave a ping_saved_usd of 0 on every window (#676), so the home screen
+// reported every ping as a loss.
+func TestSpendExplainLedgerCreditsPingSavingFromTheRescuedRow(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	rescued := spendEv(t0+8*m, "s", 5, 5, 10000, 100, 0)
+	rescued.KeepAliveSavedUSD = 0.05
+	// a credit with no ping in the 5 minutes before it: kaSaved refuses it
+	stray := spendEv(t0+8*m, "u", 3, 5, 10000, 100, 0)
+	stray.KeepAliveSavedUSD = 0.07
+	seed(t, rec,
+		spendEv(t0, "s", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "s", 0.002, 10000, 0),
+		rescued,
+		spendEv(t0, "u", 2, 5, 0, 10000, 0),
+		stray,
+	)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+9*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.002) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.002", got)
+	}
+	if got := l["ping_saved_usd"].(float64); math.Abs(got-0.05) > 1e-9 {
+		t.Errorf("ping_saved_usd = %v; want 0.05 (the rescued row only, not the unreachable 0.07)", got)
+	}
+}
+
+// A manual ping is the user's own spend, a category of its own (manual_saved_usd, dash/manualping.go).
+// The ledger's ping_usd names the KEEPER's pings — the autoPing rule every other ledger uses — so a
+// manual ping's cost must stay out of it (#678).
+func TestSpendExplainLedgerLeavesManualPingsOutOfPingUSD(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	rescued := spendEv(t0+8*m, "s", 5, 5, 10000, 100, 0)
+	rescued.KeepAliveSavedUSD = 0.05
+	manual := kaPing(t0+4*m, "s", 0.05, 10000, 0)
+	manual.ManualPing, manual.ManualSavedUSD = true, 0.15
+	seed(t, rec,
+		spendEv(t0, "s", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "s", 0.002, 10000, 0),
+		manual,
+		rescued,
+	)
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+9*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.002) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.002 — the manual ping's $0.05 is not the keeper's spend", got)
+	}
+}
+
+// The ping's cost is counted inside the window only, so the saving must stop at the window start
+// too: a ping just before `since` that keeps a row just after it warm brought a saving in with no
+// cost beside it, and the net at the window edge read too high (#678).
+func TestSpendExplainLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	// "early": the ping sits before the window, the row it kept warm inside it.
+	earlyRescued := spendEv(t0+8*m, "early", 5, 5, 10000, 100, 0)
+	earlyRescued.KeepAliveSavedUSD = 0.05
+	// "late": both halves inside the window — the control that the floor does not eat a credit
+	// the window paid for.
+	lateRescued := spendEv(t0+9*m, "late", 5, 5, 10000, 100, 0)
+	lateRescued.KeepAliveSavedUSD = 0.03
+	seed(t, rec,
+		spendEv(t0, "early", 3, 5, 0, 10000, 0),
+		kaPing(t0+4*m, "early", 0.002, 10000, 0), // before the window
+		earlyRescued,
+		spendEv(t0+6*m, "late", 3, 5, 0, 10000, 0),
+		kaPing(t0+7*m, "late", 0.003, 10000, 0), // inside it
+		lateRescued,
+	)
+	_, body := get(t, a, "/api/spend/explain?since="+itoa(t0+5*m)+"&now="+itoa(t0+10*m), "127.0.0.1:1")
+	l := body["ledger"].(map[string]any)
+	if got := l["ping_usd"].(float64); math.Abs(got-0.003) > 1e-9 {
+		t.Errorf("ping_usd = %v; want 0.003 (the in-window ping only)", got)
+	}
+	if got := l["ping_saved_usd"].(float64); math.Abs(got-0.03) > 1e-9 {
+		t.Errorf("ping_saved_usd = %v; want 0.03 — the early ping cost this window nothing, so it "+
+			"must not credit it either (0.08 is the unbounded look-back)", got)
+	}
+}

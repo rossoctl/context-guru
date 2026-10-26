@@ -146,8 +146,8 @@ func runCGCode(t *testing.T, base string, env []string, args ...string) (string,
 	cmd := exec.Command("python3", append([]string{filepath.Join("scripts", "cg.py")}, append(args,
 		"--now", "2026-10-08T15:30:00Z", "--tz-offset-min", "0")...)...)
 	cfg := t.TempDir()
-	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_CODE_SESSION_ID=session-A",
+	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"awaySummaryEnabled":false,"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_PROJECT_DIR="+t.TempDir(), "CG_MANAGED_SETTINGS="+filepath.Join(cfg, "no-managed.json"), "CONTEXT_GURU_STATE="+t.TempDir(), "CLAUDE_CODE_SESSION_ID=session-A",
 		"ANTHROPIC_BASE_URL="+base+"/anthropic", "TZ=UTC")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
@@ -186,11 +186,10 @@ func TestCGGoldens(t *testing.T) {
 		rc         int
 	}{
 		{"home", warm, []string{"home"}, 0},
-		{"savings", warm, []string{"savings"}, 0},
-		{"savings-details", warm, []string{"savings", "details"}, 0},
-		{"cache-warm", warm, []string{"cache"}, 0},
-		{"cache-cold", cold, []string{"cache"}, 0},
-		{"waste", warm, []string{"waste"}, 0},
+		{"savings", warm, []string{"insights", "savings"}, 0},
+		{"savings-details", warm, []string{"insights", "savings", "details"}, 0},
+		{"cache-warm", warm, []string{"insights", "cache"}, 0},
+		{"cache-cold", cold, []string{"insights", "cache"}, 0},
 		{"session", warm, []string{"session"}, 0},
 		{"doctor", warm, []string{"doctor"}, 0},
 		{"insights", warm, []string{"insights"}, 0},
@@ -198,7 +197,6 @@ func TestCGGoldens(t *testing.T) {
 		{"insights-cache", warm, []string{"insights", "cache"}, 0},
 		{"insights-tools", warm, []string{"insights", "tools"}, 0},
 		{"insights-tools-details", warm, []string{"insights", "tools", "details"}, 0},
-		{"waste-redirect", warm, []string{"waste"}, 0},
 		{"insights-unknown", warm, []string{"insights", "nonsense"}, 0},
 		{"apply-under-insights", warm, []string{"insights", "tools", "apply", "remove-sufficient@8c21e0d4"}, 1},
 		{"save-more", warm, []string{"save-more"}, 0},
@@ -210,8 +208,6 @@ func TestCGGoldens(t *testing.T) {
 		{"remove-mcp-and-skills-details", warm, []string{"remove-mcp-and-skills", "details"}, 0},
 		{"remove-mcp-and-skills-edge", warm, []string{"remove-mcp-and-skills", "--fixture", filepath.Join("testdata", "cg", "fx_tools_edge.json")}, 0},
 		{"apply-under-remove", warm, []string{"remove-mcp-and-skills", "apply", "tools", "remove-sufficient@8c21e0d4"}, 1},
-		{"apply-under-waste", warm, []string{"waste", "apply", "remove-sufficient@8c21e0d4"}, 1},
-		{"adapt-redirect", warm, []string{"adapt", "tools"}, 0},
 		{"apply-config", warm, []string{"apply", "config", "medium@a1b2c3d4"}, 0},
 		{"apply-cache", warm, []string{"apply", "cache", "adaptive@3f9a1c"}, 0},
 		{"apply-stale", warm, []string{"apply", "cache", "adaptive@000000"}, 1},
@@ -219,7 +215,6 @@ func TestCGGoldens(t *testing.T) {
 		{"apply-under-read", warm, []string{"save-more", "cache", "apply", "adaptive@3f9a1c"}, 1},
 		{"revert-under-read", warm, []string{"save-more", "revert", "config"}, 1},
 		{"revert-kind-first", warm, []string{"config", "revert"}, 1},
-		{"revert-under-cache", warm, []string{"cache", "revert"}, 1},
 		{"revert-under-remove", warm, []string{"remove-mcp-and-skills", "revert"}, 1},
 		{"revert-config", warm, []string{"revert", "config"}, 0},
 		{"revert-old-name", warm, []string{"revert", "compaction"}, 0},
@@ -242,8 +237,8 @@ func TestCGGoldens(t *testing.T) {
 // The first line of every screen is the answer: one line, no raw token counts.
 func TestCGBottomLineFirst(t *testing.T) {
 	base := cgProxyStub(t, "cachestate_warm")
-	for _, c := range []string{"home", "savings", "cache", "waste", "session"} {
-		out := runCG(t, base, nil, c)
+	for _, c := range []string{"home", "insights savings", "insights cache", "insights tools", "session"} {
+		out := runCG(t, base, nil, strings.Fields(c)...)
 		first := strings.SplitN(out, "\n", 2)[0]
 		if len(first) < 20 || strings.Contains(first, "tokens") {
 			t.Errorf("%s: first line %q is not a bottom line in dollars", c, first)
@@ -253,7 +248,7 @@ func TestCGBottomLineFirst(t *testing.T) {
 
 func TestCGNoProxy(t *testing.T) {
 	requireTool(t, "python3")
-	cmd := exec.Command("python3", filepath.Join("scripts", "cg.py"), "savings")
+	cmd := exec.Command("python3", filepath.Join("scripts", "cg.py"), "insights", "savings")
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=https://api.anthropic.com", "CG_URL=")
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "No Context Guru proxy") {
@@ -261,18 +256,18 @@ func TestCGNoProxy(t *testing.T) {
 	}
 }
 
-// The save-more, remove-mcp-and-skills and adapt skills pre-approve only their read. A change is a separate
+// The save-more and remove-mcp-and-skills skills pre-approve only their read. A change is a separate
 // top-level command, so Claude Code asks the user for permission to run it: a second gate behind the skill's
 // own yes/no question. No read command writes, whatever words follow it.
 func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
-	for _, c := range []string{"save-more", "remove-mcp-and-skills", "adapt"} {
+	for _, c := range []string{"save-more", "remove-mcp-and-skills"} {
 		body := readFileString(t, filepath.Join("skills", c, "SKILL.md"))
 		if !regexp.MustCompile(`(?m)^allowed-tools: Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/cg\.py" ` + c + `:\*\)(, Bash\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/settings\.py" record-run ` + c + `\))?$`).MatchString(body) {
 			t.Errorf("%s must pre-approve exactly its own read, `cg.py %s:*`", c, c)
 		}
 	}
 	base := cgProxyStub(t, "cachestate_warm")
-	for _, args := range [][]string{{"adapt", "cache", "apply", "adaptive@3f9a1c"}, {"save-more", "apply", "cache", "adaptive@3f9a1c"},
+	for _, args := range [][]string{{"save-more", "apply", "cache", "adaptive@3f9a1c"},
 		{"save-more", "revert", "config"}, {"remove-mcp-and-skills", "apply", "tools", "remove-sufficient@8c21e0d4"}} {
 		if out, code := runCGCode(t, base, nil, args...); code == 0 || strings.Contains(out, "Applied") {
 			t.Errorf("%v must not write (it is inside the pre-approved prefix): exit %d\n%s", args, code, out)
@@ -281,12 +276,12 @@ func TestAdaptSkillPreApprovesOnlyTheRead(t *testing.T) {
 }
 
 // No skill pre-approves a change. A pre-approved pattern names one READ command of cg.py (the first word picks
-// the command, so `cg.py waste:*` can only ever run the waste screen); a bare `cg.py:*` would also cover
+// the command, so `cg.py insights:*` can only ever run the insights screens); a bare `cg.py:*` would also cover
 // `cg.py apply` and `cg.py revert` while that skill is active, and skip the harness's permission prompt.
 // Codex skills pre-approve nothing, and every write they run asks for escalation.
 func TestNoSkillPreApprovesAChange(t *testing.T) {
-	reads := map[string]bool{"adapt": true, "save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true, "insights": true}
-	for _, c := range []string{"home", "savings", "cache", "waste", "session", "doctor"} {
+	reads := map[string]bool{"save-more": true, "remove-mcp-and-skills": true, "cache-campaign": true, "insights": true}
+	for _, c := range []string{"home", "session", "doctor"} {
 		reads[c] = true
 	}
 	allowed := regexp.MustCompile(`(?m)^allowed-tools:(.*)$`)
@@ -438,10 +433,151 @@ func TestSaveMoreSkillsRecordTheirRuns(t *testing.T) {
 	}
 }
 
+// CONTRACT section 1/6: /api/stats' manual_pings is a savings category of its own, "Manual pings",
+// shown in savings and insights only once there is one. Existing goldens (no manual pings) stay as they are.
+func TestCGSavingsShowsManualPings(t *testing.T) {
+	stats := func(extra string) map[string]any {
+		var st map[string]any
+		doc := `{"total_saved_usd":41.2,"cost_usd":856.85,"baseline_cost_usd":898.05,"waterfall":[{"key":"compaction","delta_usd":-33.9}]` + extra + `}`
+		if err := json.Unmarshal([]byte(doc), &st); err != nil {
+			t.Fatal(err)
+		}
+		return map[string]any{"/api/stats": st}
+	}
+	write := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		f := filepath.Join(t.TempDir(), "fx.json")
+		if err := os.WriteFile(f, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	with := runCG(t, "http://127.0.0.1:1", nil, "insights", "savings", "--fixture", write(stats(`,"manual_pings":{"count":3,"ping_usd":0.06,"saved_usd":0.84}`)))
+	if !strings.Contains(with, "Manual pings") || !strings.Contains(with, "$0.84") {
+		t.Errorf("want a Manual pings row with $0.84 saved, got\n%s", with)
+	}
+	if !strings.Contains(with, "3 pings") || !strings.Contains(with, "$0.06") {
+		t.Errorf("want the count and the ping cost beside it, got\n%s", with)
+	}
+	for name, extra := range map[string]string{"absent": "", "zero": `,"manual_pings":{"count":0,"ping_usd":0,"saved_usd":0}`} {
+		if out := runCG(t, "http://127.0.0.1:1", nil, "insights", "savings", "--fixture", write(stats(extra))); strings.Contains(out, "Manual pings") {
+			t.Errorf("%s: no Manual pings row expected, got\n%s", name, out)
+		}
+	}
+}
+
+// CONTRACT section 7: the tools part of insights lists skills, MCP servers and MCP tools with their
+// cost, per-tool rows under each server, and never Claude Code's built-in tools. The cost is the
+// whole carry (carry_usd) when the proxy reports it, else what was carried for nothing (unused_usd).
+func TestCGInsightsToolsListsServersSkillsAndToolsWithoutBuiltins(t *testing.T) {
+	tools := `{"totals":{"priced":true,"unused_usd":9},
+	 "tools":[
+	  {"kind":"mcp_tool","name":"mcp__github__create_issue","server":"github","tokens":900,"calls":5,"carry_usd":4.0,"unused_usd":0,"priced":true},
+	  {"kind":"mcp_tool","name":"mcp__github__list_prs","server":"github","tokens":700,"calls":0,"carry_usd":3.0,"unused_usd":3.0,"priced":true},
+	  {"kind":"mcp_tool","name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":2.0,"unused_usd":2.0,"priced":true},
+	  {"kind":"tool","name":"Read","tokens":300,"calls":90,"carry_usd":7.0,"unused_usd":0,"builtin":true,"priced":true},
+	  {"kind":"tool","name":"Bash","tokens":800,"calls":40,"carry_usd":8.0,"unused_usd":0,"builtin":true,"priced":true}],
+	 "servers":[
+	  {"server":"github","tools":2,"tools_used":1,"tokens":1600,"calls":5,"carry_usd":7.0,"unused_usd":3.0,"priced":true},
+	  {"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":2.0,"unused_usd":2.0,"priced":true}],
+	 "skills":{"state":"ok","skills":[
+	  {"kind":"skill","name":"pdf","tokens":310,"calls":3,"carry_usd":1.5,"unused_usd":0,"priced":true},
+	  {"kind":"skill","name":"brand-voice","tokens":420,"calls":0,"carry_usd":1.6,"unused_usd":1.6,"priced":true}]},
+	 "aside":[]}`
+	fx := map[string]any{"/api/tools": json.RawMessage(tools), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)}
+	b, _ := json.Marshal(fx)
+	f := filepath.Join(t.TempDir(), "fx.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f)
+	for _, want := range []string{"github", "sentry", "pdf", "brand-voice", "create_issue", "list_prs", "$7.00", "$1.50"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{"Read", "Bash"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("built-in tool %q must not be listed:\n%s", banned, out)
+		}
+	}
+	// per-tool rows sit under their own server, in order
+	gh, ci, lp, se := strings.Index(out, "github"), strings.Index(out, "create_issue"), strings.Index(out, "list_prs"), strings.Index(out, "sentry")
+	if !(gh < ci && ci < se && gh < lp && lp < se) {
+		t.Errorf("github's tool rows must sit between github and sentry:\n%s", out)
+	}
+	// carry_priced:false means carry_usd is short (a carrying request had no known rates): never shown as a cost.
+	short := strings.Replace(tools, `"name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":2.0,`, `"name":"mcp__sentry__search","server":"sentry","tokens":400,"calls":0,"carry_usd":0,"carry_priced":false,`, 1)
+	short = strings.Replace(short, `{"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":2.0,`, `{"server":"sentry","tools":1,"tools_used":0,"tokens":400,"calls":0,"carry_usd":0,"carry_priced":false,`, 1)
+	b, _ = json.Marshal(map[string]any{"/api/tools": json.RawMessage(short), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)})
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if o := runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f); strings.Contains(strings.SplitN(o, "\n\n", 2)[0], "sentry") || !strings.Contains(o, "github") {
+		t.Errorf("an unpriced-carry server must not appear as a $0 cost:\n%s", o)
+	}
+	// An older proxy without carry_usd: the unused cost is what there is, and the output says so.
+	old := strings.ReplaceAll(tools, `"carry_usd"`, `"x_carry"`)
+	b, _ = json.Marshal(map[string]any{"/api/tools": json.RawMessage(old), "/api/tools/last-used": json.RawMessage(`{"tools":[]}`)})
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = runCG(t, "http://127.0.0.1:1", nil, "insights", "tools", "--fixture", f)
+	if !strings.Contains(out, "github") || !strings.Contains(out, "never used") {
+		t.Errorf("an older proxy must still list servers with the unused cost:\n%s", out)
+	}
+}
+
+// `cg.py cachestate --json` is what the mods call: it prints the cachestate from the status line's own
+// on-disk cache (CONTRACT section 4), so the first call fetches once and the next ones, from either
+// script, make no request.
+func TestCGCachestateJSONSharesTheStatuslineCache(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"priced":true,`+
+		`"rewrite_usd":0.3,"threads":[{"id":"","main":true,"last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":52000}]}`, now-60_000, now, now-60_000, now-60_000)
+	port, hits := statuslineCounting(t, cache, nil)
+	xdg := t.TempDir()
+	env := []string{"XDG_CACHE_HOME=" + xdg}
+	base := "http://127.0.0.1:" + port
+	var doc map[string]any
+	for i := 0; i < 3; i++ {
+		out := runCG(t, base, env, "cachestate", "--json")
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+	}
+	if n := hitCount(hits, "cachestate"); n != 1 {
+		t.Errorf("3 calls fetched cachestate %d times; the shared 10 s cache must make it 1", n)
+	}
+	if doc["session"] != "session-A" || doc["threads"] == nil {
+		t.Errorf("want the cachestate body back, got %v", doc)
+	}
+	if _, ok := doc["age_s"]; !ok {
+		t.Errorf("want age_s so a mod can tell stale from fresh, got %v", doc)
+	}
+	// The status line, given the same cache directory, must reuse that very file.
+	stdin := `{"session_id":"session-A","context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
+	senv := routedEnv(port)
+	senv["XDG_CACHE_HOME"] = xdg
+	runStatusline(t, senv, stdin, "--layout=balanced")
+	if n := hitCount(hits, "cachestate"); n != 1 {
+		t.Errorf("the status line refetched cachestate (%d); it must read the file cg.py wrote", n)
+	}
+}
+
+// With nothing routed and no session there is nothing to read: a clear JSON error, not a traceback.
+func TestCGCachestateJSONNoSession(t *testing.T) {
+	out, code := runCGCode(t, "http://127.0.0.1:1", []string{"CLAUDE_CODE_SESSION_ID="}, "cachestate", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil || doc["error"] == nil || code == 0 {
+		t.Errorf("want a JSON {error} and a non-zero exit, got code %d: %s", code, out)
+	}
+}
+
 // The Codex plugin ships the same two scripts, because plugin directories are installed apart and
 // cannot import from each other. They are copies, and this keeps them identical.
 func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
-	for _, f := range []string{"cg.py", "cgcost.py"} {
+	for _, f := range []string{"cg.py", "cgcost.py", "cgcache.py", "costly.py", "costly_settings.json"} {
 		a, err := os.ReadFile(filepath.Join("scripts", f))
 		if err != nil {
 			t.Fatal(err)
@@ -458,9 +594,9 @@ func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
 func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
-		"waste": "waste", "session": "session", "doctor": "doctor",
+		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
-		"apply-gate":            "save-more",
+		"apply-gate": "save-more", "save-more-settings": "save-more",
 		"remove-mcp-and-skills": "remove-mcp-and-skills", "apply-tools-async": "remove-mcp-and-skills", "insights": "insights",
 	} {
 		g := strings.TrimRight(string(cgRead(t, "cg", golden+".golden")), "\n")
@@ -533,5 +669,145 @@ func TestInsightsKeepAliveLossStaysNegative(t *testing.T) {
 	rows := cgLevers(t, cgWaterfall(0, map[string]float64{"keepalive_saved": -10, "keepalive_ping": 40}))
 	if got := rows["Keep-alive pings"]; got < -30.005 || got > -29.995 {
 		t.Errorf("Keep-alive pings = %.2f, want -30.00 (saved 10, spent 40)", got)
+	}
+}
+
+// A document of any age is served with `"stale": true` when the proxy cannot refresh it, never as an error (#686): the mod
+// and the status line keep showing the last figures. An error is only for "there never was a document".
+func TestCGCachestateServesAnOldDocumentAsStale(t *testing.T) {
+	const now = 1_800_000_000_000
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000}`, now-60_000, now)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close()
+	xdg := t.TempDir()
+	dir := filepath.Join(xdg, "context-guru")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "context-guru-statusline-"+dead+"-cs-session-A.json")
+	if err := os.WriteFile(file, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runCGCode(t, "http://127.0.0.1:"+dead, []string{"XDG_CACHE_HOME=" + xdg}, "cachestate", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if code != 0 || doc["error"] != nil || doc["stale"] != true || doc["session"] != "session-A" {
+		t.Errorf("want the 3 hour old document with stale:true and exit 0, got code %d %v", code, doc)
+	}
+	if age, _ := doc["age_s"].(float64); age < 3*3600-60 {
+		t.Errorf("age_s must say how old it is, got %v", doc["age_s"])
+	}
+}
+
+// `cg.py panedata` is the pane's data: the four mode sections as one JSON document, built from the proxy's own reads
+// through the shared on-disk cache. A section with no data is absent, so the pane omits it.
+func TestCGPanedata(t *testing.T) {
+	const now = 1_800_000_000_000
+	nowS := int64(now / 1000)
+	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":412000,"priced":true,"rewrite_usd":1.2,`+
+		`"window":1000000,"window_exact":true,"threads":[{"id":"","main":true,"last_ts":%d,"end_ts":%d,"ttl_s":300,"prefix_tokens":412000,"rewrite_usd":1.2,"priced":true}]}`,
+		now-60_000, now, now-60_000, now-60_000)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) })                //nolint:errcheck
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"total_saved_usd":4.2}`)) }) //nolint:errcheck
+	mux.HandleFunc("/api/series", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"buckets":[{"ts":%d,"saved_usd":3,"cache_misses":2}]}`, (nowS-3600)*1000/3_600_000*3_600_000)
+	})
+	mux.HandleFunc("/api/spend/explain", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"daily":[{"day":%d,"rewrite_usd":1.4}]}`, (nowS-3600)*1000)
+	})
+	mux.HandleFunc("/api/requests", func(w http.ResponseWriter, _ *http.Request) {
+		var rows []string
+		for i := 0; i < 5; i++ {
+			rows = append(rows, fmt.Sprintf(`{"id":%d,"ts":%d,"thread_id":"","messages":%d,"fresh_input":0,"cache_read":%d,"cache_write":%d}`, i, now-int64(i)*60_000, 40+i, 198_000, 2000))
+		}
+		fmt.Fprintf(w, `{"requests":[%s]}`, strings.Join(rows, ","))
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	base := "http://127.0.0.1:" + fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	out, code := runCGCode(t, base, []string{"XDG_CACHE_HOME=" + t.TempDir()}, "panedata")
+	var doc map[string]map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil || code != 0 {
+		t.Fatalf("code %d, not JSON: %v\n%s", code, err, out)
+	}
+	for _, section := range []string{"spark", "strip", "heat", "fill"} {
+		if doc[section] == nil {
+			t.Errorf("panedata is missing the %s section: %s", section, out)
+		}
+	}
+	if doc["spark"]["today"] != 4.2 || len(doc["spark"]["days"].([]any)) != 14 {
+		t.Errorf("spark: want today 4.2 and 14 days, got %v", doc["spark"])
+	}
+	if k := doc["strip"]["kinds"].([]any); len(k) != 5 || k[0] != "hit" {
+		t.Errorf("strip: want 5 hits, got %v", doc["strip"])
+	}
+	if len(doc["heat"]["hours"].([]any)) != 24 {
+		t.Errorf("heat: want 24 hours, got %v", doc["heat"])
+	}
+	if f := doc["fill"]["frac"].(float64); f < 0.41 || f > 0.42 {
+		t.Errorf("fill: want 412k of 1M, got %v", doc["fill"])
+	}
+	// A proxy that answers nothing but the cache state: every section with no data is absent, not empty.
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) }) //nolint:errcheck
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	srv2 := &http.Server{Handler: mux2, ReadHeaderTimeout: 5 * time.Second}
+	go srv2.Serve(ln2) //nolint:errcheck
+	t.Cleanup(func() { srv2.Close() })
+	out, _ = runCGCode(t, "http://127.0.0.1:"+fmt.Sprint(ln2.Addr().(*net.TCPAddr).Port), []string{"XDG_CACHE_HOME=" + t.TempDir()}, "panedata")
+	var bare map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &bare); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	for _, gone := range []string{"spark", "strip", "heat"} {
+		if _, ok := bare[gone]; ok {
+			t.Errorf("%s has no data and must be absent, got %v", gone, bare)
+		}
+	}
+}
+
+// `--set-tips=off` silences the mod's weekly tip as it silences the status line's.
+func TestCGTipHonoursSetTipsOff(t *testing.T) {
+	py := requireTool(t, "python3")
+	state, cfg := t.TempDir(), t.TempDir()
+	env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "XDG_CONFIG_HOME="+cfg, "CG_STATUSLINE_NOW=1800000000")
+	os.WriteFile(filepath.Join(state, "last-run.json"), []byte(`{}`), 0o644)                 //nolint:errcheck
+	os.WriteFile(filepath.Join(state, "statusline-first-seen"), []byte("1790000000"), 0o644) //nolint:errcheck
+	tip := func() []any {
+		cmd := exec.Command(py, filepath.Join("scripts", "cg.py"), "tip")
+		cmd.Env = env
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v %s", err, b)
+		}
+		var doc struct{ Stale []any }
+		if err := json.Unmarshal(b, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Stale
+	}
+	if len(tip()) == 0 {
+		t.Fatal("control: both commands are stale, a tip is expected")
+	}
+	off := exec.Command(py, filepath.Join("scripts", "statusline.py"), "--set-tips=off")
+	off.Env = env
+	if b, err := off.CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, b)
+	}
+	if got := tip(); len(got) != 0 {
+		t.Errorf("tips are off: want no stale commands, got %v", got)
 	}
 }

@@ -233,7 +233,11 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens"}
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project"}
+	// An old database has no project index, and SQLite refuses to drop an indexed column.
+	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
+		t.Fatal(err)
+	}
 	for _, col := range added {
 		if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN ` + col); err != nil {
 			t.Fatal(err)
@@ -254,10 +258,22 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 		t.Fatalf("%d rows survived the migration, want 1", n)
 	}
 	for _, col := range added {
-		var sum float64
-		if err := db2.sql.QueryRow(`SELECT COALESCE(SUM(` + col + `),0) FROM requests`).Scan(&sum); err != nil {
+		// COUNT rather than SUM: `project` is TEXT, and a numeric aggregate over it would
+		// succeed by coercing rather than by the column existing.
+		var n2 int64
+		if err := db2.sql.QueryRow(`SELECT COUNT(` + col + `) FROM requests`).Scan(&n2); err != nil {
 			t.Fatalf("%s was not added back: %v", col, err)
 		}
+	}
+	// A pre-migration row reads as the default, which for `project` means "unattributed" rather
+	// than any real folder — the distinction the whole dimension depends on.
+	var proj string
+	if err := db2.sql.QueryRow(`SELECT project FROM requests LIMIT 1`).Scan(&proj); err != nil {
+		t.Fatalf("reading project off a pre-migration row: %v", err)
+	}
+	if proj != "" {
+		t.Errorf("a row written before the column reads project=%q; want \"\", which is how an "+
+			"unattributed request is distinguished from one in a folder actually named that", proj)
 	}
 	// And the whole read path works over rows that predate the columns — a query naming a
 	// column the file has just gained is where a migration that "succeeded" still fails.

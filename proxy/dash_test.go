@@ -408,6 +408,53 @@ func manyToolResultsRequest(model string, results int) []byte {
 // So this drives the REAL handler over ONE keep-alive connection with content capture
 // ON — the path a client actually pays for — and compares against the same handler
 // with the dashboard off. It fails if the dashboard adds a perceptible cost.
+// maxAddedLatency caps what the dashboard may add per request, whatever the runner's own speed.
+// It sits above the paired noise a loaded CI runner shows with nothing wrong (32-36 ms on #674's,
+// whose baseline was 517-546 ms) and under the guarded regression at its floor (53 ms of CPU work,
+// which load can stretch but never shrink). If a runner's paired noise ever nears the cap, raise
+// it — but stay under that 53 ms floor, or the guard stops guarding.
+const maxAddedLatency = 45 * time.Millisecond
+
+// latencyBudget is the most the dashboard may add per request on a runner whose own request median
+// is off: 20% of it, never under 5 ms and never over maxAddedLatency. The relative part keeps the
+// gate a real constraint on a fast runner; the cap keeps a slow one from hiding an added cost of
+// fixed size. The cap does not flake on a slow runner, because the gate reads paired, interleaved
+// differences, which cancel load shared by both handlers. TestLatencyBudgetStillCatchesTheRedactionRegression
+// pins the budget under the guarded regression at a range of baselines.
+func latencyBudget(off time.Duration) time.Duration {
+	budget := 5 * time.Millisecond
+	if rel := off / 5; rel > budget {
+		budget = rel
+	}
+	if budget > maxAddedLatency {
+		budget = maxAddedLatency
+	}
+	return budget
+}
+
+// The regression this file guards is content redaction moved onto the request goroutine: ~53 ms of
+// CPU work. Wall time under load only stretches CPU work, never shrinks it, so 53 ms is that
+// regression's floor on every runner, and the budget must stay under it at every baseline —
+// including the 517-546 ms the #674 CI runner showed and the 5 s of a fully saturated box.
+func TestLatencyBudgetStillCatchesTheRedactionRegression(t *testing.T) {
+	const regression = 53 * time.Millisecond
+	for _, off := range []time.Duration{time.Millisecond, 2 * time.Millisecond, 50 * time.Millisecond,
+		100 * time.Millisecond, 331 * time.Millisecond, 517 * time.Millisecond, 571 * time.Millisecond, 5 * time.Second} {
+		if b := latencyBudget(off); regression <= b {
+			t.Errorf("at a %v baseline the budget is %v and a %v regression would pass", off, b, regression)
+		}
+	}
+	if got := latencyBudget(2 * time.Millisecond); got != 5*time.Millisecond {
+		t.Errorf("floor: got %v, want 5ms", got)
+	}
+	if got := latencyBudget(100 * time.Millisecond); got != 20*time.Millisecond {
+		t.Errorf("relative part: got %v, want 20ms", got)
+	}
+	if got := latencyBudget(517 * time.Millisecond); got != maxAddedLatency {
+		t.Errorf("cap: at a 517ms baseline got %v, want the %v cap", got, maxAddedLatency)
+	}
+}
+
 func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
@@ -475,50 +522,58 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	}
 	offs := make([]time.Duration, 0, iters)
 	ons := make([]time.Duration, 0, iters)
+	diffs := make([]time.Duration, 0, iters) // on minus off for each back-to-back pair
 	for i := 0; i < iters; i++ {
+		var off, on time.Duration
 		if i%2 == 0 { // alternate which one goes first, so ordering cannot bias either
-			offs = append(offs, one(offClient, offURL))
-			ons = append(ons, one(onClient, onURL))
-			continue
+			off = one(offClient, offURL)
+			on = one(onClient, onURL)
+		} else {
+			on = one(onClient, onURL)
+			off = one(offClient, offURL)
 		}
-		ons = append(ons, one(onClient, onURL))
-		offs = append(offs, one(offClient, offURL))
+		offs, ons = append(offs, off), append(ons, on)
+		diffs = append(diffs, on-off)
 	}
 	median := func(ds []time.Duration) time.Duration {
 		slices.Sort(ds)
 		return ds[len(ds)/2]
 	}
 	off, on := median(offs), median(ons)
-	added := on - off
+	// The cost is the median of the PAIRED differences, not the difference of the two medians: the two
+	// requests of a pair run back to back under the same load, so a stall that hits both cancels in the
+	// pair, where it can land on one side's median only. On a shared runner whose own baseline was 571 ms
+	// the difference of medians read 57.69 ms against a 57.10 ms budget with nothing wrong.
+	added := median(diffs)
 
-	// The budget is RELATIVE with an absolute floor, because a fixed budget cannot mean
-	// the same thing at both ends of this machine's range. Measured on this box: idle, a
-	// fake-upstream request settles around 1-2 ms; with the test suite saturating 16
-	// cores (load average 12.9) the same request's own median was 331 ms. A flat 5 ms
-	// gate is a real constraint in the first case and pure scheduler noise in the second,
-	// which is why it failed roughly one run in three while nothing was wrong.
+	// The budget is RELATIVE with an absolute floor and an absolute cap, because a fixed
+	// budget cannot mean the same thing at both ends of this machine's range. Measured on
+	// this box: idle, a fake-upstream request settles around 1-2 ms; with the test suite
+	// saturating 16 cores (load average 12.9) the same request's own median was 331 ms. A
+	// flat 5 ms gate is a real constraint in the first case and pure scheduler noise in
+	// the second, which is why it failed roughly one run in three while nothing was wrong.
 	//
-	// 10% of the request's own cost keeps the guard honest at both ends: the regression
-	// this exists to catch (content redaction moved back onto the request goroutine,
-	// ~53 ms) is caught at any baseline, while contention that slows BOTH handlers
-	// equally cannot trip it.
+	// 20% of the request's own cost (it was 10%, which a loaded CI runner crossed by 0.6 ms) keeps
+	// the guard honest on a fast runner. The cap (maxAddedLatency, 45 ms) keeps a slow runner from
+	// hiding an added cost of fixed size: the regression this exists to catch is 53 ms of CPU work,
+	// whose wall time load can stretch but never shrink, so it clears the cap on every runner — and
+	// so does a cost that waits instead of computing (a lock, a flush, a channel send), which keeps
+	// its idle size while the budget alone would grow with the baseline. The cap sits above the
+	// 32-36 ms of paired noise #674's CI runner showed with nothing wrong.
 	//
 	// The gate reads the median, not the minimum. The minimum was tried and is worse: it
 	// is one sample with no averaging, so under load it tracks whichever handler caught
 	// a lucky scheduling moment. In the same run that produced this comment, the paired
 	// medians differed by 1.27 ms while the paired minima differed by 8.13 ms.
-	budget := 5 * time.Millisecond
-	if rel := off / 10; rel > budget {
-		budget = rel
-	}
+	budget := latencyBudget(off)
 	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
 		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
 		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
 
 	if added > budget {
 		t.Errorf("the dashboard added %v per request with content capture on (median of %d "+
-			"paired samples, budget %v = max(5ms, 10%% of the %v baseline)); something "+
-			"expensive is back on the request goroutine", added, iters, budget, off)
+			"paired samples, budget %v = min(%v cap, max(5ms, 20%% of the %v baseline))); something "+
+			"expensive is back on the request goroutine", added, iters, budget, maxAddedLatency, off)
 	}
 }
 

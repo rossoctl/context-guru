@@ -15,8 +15,10 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/tidwall/gjson"
 )
 
 // A subagent's request is in flight for longer than the main thread's remaining cache lifetime: the
@@ -26,12 +28,14 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	var pings atomic.Int32
+	slowArrived := make(chan struct{}, 1)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b bytes.Buffer
 		b.ReadFrom(r.Body)
 		switch {
 		case strings.Contains(b.String(), "SUMMARIZE"):
-			<-release // the slow call
+			slowArrived <- struct{}{} // reached upstream, so the keeper has seen it arrive
+			<-release                 // the slow call
 		case gjsonMaxTokens(b.Bytes()) == 1:
 			pings.Add(1)
 		}
@@ -58,8 +62,7 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 		Cache: CachePolicy{KeepAlive: true, Idle: 60 * time.Second, MaxPings: 2, MaxUSDPerPing: -1, MinPrefixTokens: 1}}) // no $ ceiling: other tests install price tables
 	t.Cleanup(h.Close)
 	clock := &testClock{at: time.Now()}
-	h.keeper.now = clock.now
-	h.keeper.dispatch = h.keeper.fire
+	rebuildKeeper(h, nil, clock) // the test clock and an inline runner; pings still go to `up`
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	defer unblock() // runs before the servers close: a failing run must not leave the upstream handler blocked
@@ -90,28 +93,28 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 		resp.Body.Close()
 	}
 	// record runs in serve's defer, AFTER the response reaches the client: wait for it, or the next
-	// request's record can run first and take the turn the gate counts.
-	settled := func() {
-		for deadline := time.Now().Add(5 * time.Second); h.keeper.inflightCount("", sess) > 0 && time.Now().Before(deadline); {
+	// request's record can run first and take the turn the gate counts. The first turn is refused
+	// by the gate (counted skipped), the second is held (live).
+	settled := func(done func(KeepAliveStats) bool) {
+		for deadline := time.Now().Add(5 * time.Second); !done(h.keeper.Stats()) && time.Now().Before(deadline); {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	post("", "fix the bug")
-	settled()
+	settled(func(st KeepAliveStats) bool { return st.Skipped >= 1 })
 	post("", "fix the bug", "done", "thanks")
-	settled()
+	settled(func(st KeepAliveStats) bool { return st.Live >= 1 })
 	if h.keeper.Stats().Live != 1 {
 		t.Fatalf("setup: %d live, want 1 (%+v)", h.keeper.Stats().Live, h.keeper.Stats())
 	}
 	done := make(chan struct{})
 	go func() { post("sub1", "SUMMARIZE the module for the main agent"); close(done) }()
-	for deadline := time.Now().Add(5 * time.Second); h.keeper.inflightCount("", sess) == 0; {
-		if time.Now().After(deadline) {
-			t.Fatal("the slow request never arrived")
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-slowArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the slow request never arrived")
 	}
-	h.keeper.sweep(clock.advance(61 * time.Second)) // the main thread is due; the subagent's call is still open
+	h.keeper.Sweep(clock.advance(61 * time.Second)) // the main thread is due; the subagent's call is still open
 	if n := pings.Load(); n != 1 {
 		t.Errorf("%d main-thread pings while a subagent request was in flight, want 1 (on time)", n)
 	}
@@ -133,18 +136,57 @@ func TestAnOpenRequestOnTheSameThreadPausesItsPing(t *testing.T) {
 	k.arrive("t1", "sess-1", "")                   // request A
 	k.arrive("t1", "sess-1", "")                   // request B, overlapping
 	recordTurn(t, k, pol, kaBody, clock.now(), up) // A finishes and holds
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(30 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings while another request of the same thread was open", fs.n())
 	}
-	k.departed(kaThreadKey("t1", "sess-1", "")) // B ends without a hold (a failed request)
-	k.sweep(clock.advance(time.Second))
+	k.depart("t1", "sess-1", "") // B ends without a hold (a failed request)
+	k.Sweep(clock.advance(time.Second))
 	time.Sleep(30 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings after the thread's last request ended, want 1", fs.n())
 	}
 }
+
+// A panic in the host's record BEFORE it hands off to keepalive.Keeper.Record must still depart
+// the thread, or its open count leaks and the thread is never pinged again. A nil request panics
+// at r.UserAgent() while the campaign's arguments are built, ahead of the hand-off. (The normal
+// path departs exactly once — TestAnOpenRequestOnTheSameThreadPausesItsPing pins that.)
+func TestAPanicBeforeTheHandOffStillDeparts(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
+	up := upstream{base: "http://up", path: "/v1/messages"}
+	recordOne(t, k, pol, kaBody, clock.now(), up)  // an earlier turn: the gate needs turn >= 1
+	k.arrive("t1", "sess-1", "")                   // request A, which will panic in record
+	k.arrive("t1", "sess-1", "")                   // request B, overlapping
+	recordTurn(t, k, pol, kaBody, clock.now(), up) // B finishes and holds
+	if k.Stats().Live != 1 {
+		t.Fatalf("setup: %d live, want 1", k.Stats().Live)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("setup: record with a nil request did not panic")
+			}
+		}()
+		k.record(&Tenancy{ID: "t1", Cache: pol}, "sess-1", "", clock.now(), []byte(kaBody), up, nil,
+			bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+	}()
+	k.Sweep(clock.advance(290 * time.Second))
+	time.Sleep(30 * time.Millisecond)
+	if fs.n() != 1 {
+		t.Errorf("%d pings after A's record panicked before its hand-off, want 1 "+
+			"(A's open count leaked and paused the thread)", fs.n())
+	}
+}
+
+// routeFailLimit and routeTripFor mirror package keepalive's breaker constants (breaker.go), which
+// these host-level tests drive through the proxy's own record and Dispatcher.
+const (
+	routeFailLimit = 3
+	routeTripFor   = time.Hour
+)
 
 func gjsonMaxTokens(b []byte) int {
 	var m struct {
@@ -157,11 +199,11 @@ func gjsonMaxTokens(b []byte) int {
 // A ping that reads nothing (a 200 with no usage, or a relayed 5xx) is FAILED: counted, the session
 // stops, and routeFailLimit of them in a row switch the route off; a working route is unaffected.
 func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
+	k, fs, clock := testKeeper(t, Limits{})
 	var sent atomic.Int32
 	var empty atomic.Bool
 	empty.Store(true)
-	k.send = func(j pingJob, b []byte) (Usage, int, error) {
+	fs.fn = func(*http.Request, []byte) (Usage, int, error) {
 		sent.Add(1)
 		if empty.Load() {
 			return Usage{}, http.StatusOK, nil
@@ -186,13 +228,13 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	for i := 0; i < routeFailLimit; i++ {
 		hold("s"+string(rune('a'+i)), bad)
 	}
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	st := k.Stats()
 	if st.Failed != routeFailLimit || st.RouteTrips != 1 {
 		t.Fatalf("failed %d (want %d), trips %d (want 1)", st.Failed, routeFailLimit, st.RouteTrips)
 	}
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	if int(sent.Load()) != routeFailLimit {
 		t.Errorf("%d pings, want %d: a failed session must not be pinged again", int(sent.Load()), routeFailLimit)
@@ -208,7 +250,7 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	k.retireSession("t2", "s-other-tenant")
 	empty.Store(false)
 	hold("s-good", good)
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	if int(sent.Load()) != routeFailLimit+1 || k.Stats().Failed != routeFailLimit {
 		t.Errorf("working route: %d pings, %d failed", int(sent.Load()), k.Stats().Failed)
@@ -220,54 +262,15 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	}
 }
 
-// The name check is for relays only: native Anthropic, Bedrock and Vertex are eligible by upstream
-// type whatever the deployment is called; a relay on the Anthropic route must serve a Claude name.
-func TestKeepAliveNameCheckIsForRelaysOnly(t *testing.T) {
-	arn := "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3"
-	for _, c := range []struct {
-		p           bschemas.ModelProvider
-		base, model string
-		want        bool
-	}{
-		{bschemas.Anthropic, "https://api.anthropic.com", "my-team-alias", true},
-		{bschemas.Bedrock, "https://bedrock-runtime.us-east-1.amazonaws.com", arn, true},
-		{bschemas.BedrockMantle, "https://bedrock.example", arn, true},
-		{bschemas.Vertex, "https://us-east5-aiplatform.googleapis.com", "publishers/anthropic/models/x", true},
-		{bschemas.Anthropic, "http://litellm:4000", "aws/claude-sonnet-5", true},
-		{bschemas.Anthropic, "http://litellm:4000", "vertex_ai/claude-opus-4-5@20251101", true},
-		{bschemas.Anthropic, "http://litellm:4000", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", true},
-		{bschemas.Anthropic, "http://litellm:4000", "opus5-5", true},
-		{bschemas.Anthropic, "http://litellm:4000", "gpt-5-mini-2025-08-07", false},
-		{bschemas.Anthropic, "http://litellm:4000", arn, false},
-		{bschemas.Anthropic, "https://evil-anthropic.com.example", "gpt-5", false},
-		{bschemas.Anthropic, "https://evilanthropic.com", "gpt-5", false},
-	} {
-		if got := relayServesClaude(c.p, c.base, c.model); got != c.want {
-			t.Errorf("%s %s %s: %v, want %v", c.p, c.base, c.model, got, c.want)
-		}
-	}
-}
-
-// CONTEXT_GURU_KEEPALIVE_MODELS adds names a relay serves under aliases that do not say what they are.
-func TestKeepAliveModelAliasesFromTheEnvironment(t *testing.T) {
-	t.Setenv("CONTEXT_GURU_KEEPALIVE_MODELS", " application-inference-profile/a1b2c3 , team-model ")
-	for model, want := range map[string]bool{"arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3": true,
-		"Team-Model-Large": true, "gpt-5-mini-2025-08-07": false} {
-		if got := relayServesClaude(bschemas.Anthropic, "http://litellm:4000", model); got != want {
-			t.Errorf("%s: %v, want %v", model, got, want)
-		}
-	}
-}
-
 // A real miss (the ping landed after expiry: read 0, the prefix written again) is not a failure: it
 // is counted missed, does not trip the route, and pinging goes on. Two in a row are a prefix that
 // does not match, and the session stops.
 func TestARealMissIsNotAFailedPing(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
+	k, fs, clock := testKeeper(t, Limits{})
 	var sent atomic.Int32
 	miss := Usage{CacheWrite: 48576, Output: 1}
 	reply := []Usage{miss, {CacheRead: 48576, Output: 1}, miss, miss}
-	k.send = func(j pingJob, b []byte) (Usage, int, error) {
+	fs.fn = func(*http.Request, []byte) (Usage, int, error) {
 		n := sent.Add(1)
 		return reply[n-1], http.StatusOK, nil
 	}
@@ -280,7 +283,7 @@ func TestARealMissIsNotAFailedPing(t *testing.T) {
 			bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 	}
 	for i := 0; i < 5; i++ {
-		k.sweep(clock.advance(290 * time.Second))
+		k.Sweep(clock.advance(290 * time.Second))
 		time.Sleep(30 * time.Millisecond)
 	}
 	st := k.Stats()
@@ -307,8 +310,8 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 		{"anthropic miss", Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, false},
 		{"read", Usage{CacheRead: 48576, Output: 1}, http.StatusOK, false},
 	} {
-		k, _, clock := testKeeper(t, Limits{})
-		k.send = func(pingJob, []byte) (Usage, int, error) { return c.u, c.status, nil }
+		k, fs, clock := testKeeper(t, Limits{})
+		fs.fn = func(*http.Request, []byte) (Usage, int, error) { return c.u, c.status, nil }
 		pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("Authorization", "Bearer sk-x")
@@ -317,7 +320,7 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 				upstream{base: "http://api", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages", http.StatusOK,
 				Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 		}
-		k.sweep(clock.advance(290 * time.Second))
+		k.Sweep(clock.advance(290 * time.Second))
 		time.Sleep(30 * time.Millisecond)
 		if got := k.Stats().Failed == 1; got != c.failed {
 			t.Errorf("%s: failed %v, want %v", c.name, got, c.failed)
@@ -328,9 +331,9 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 // An overload burst (529, 429, any 5xx) is transient: skipped, the session goes on pinging, and the
 // route is never tripped.
 func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
+	k, fs, clock := testKeeper(t, Limits{})
 	var sent atomic.Int32
-	k.send = func(pingJob, []byte) (Usage, int, error) {
+	fs.fn = func(*http.Request, []byte) (Usage, int, error) {
 		sent.Add(1)
 		return Usage{}, []int{529, http.StatusTooManyRequests}[sent.Load()%2], nil
 	}
@@ -344,33 +347,20 @@ func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
 				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 		}
 	}
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
-	k.sweep(clock.advance(290 * time.Second)) // the next slot retries
+	k.Sweep(clock.advance(290 * time.Second)) // the next slot retries
 	time.Sleep(50 * time.Millisecond)
 	if st := k.Stats(); st.Failed != 0 || st.RouteTrips != 0 || sent.Load() != 2*(routeFailLimit+1) {
 		t.Errorf("529/429s: failed %d, trips %d, sent %d (want 0, 0, %d: every session retried)", st.Failed, st.RouteTrips, sent.Load(), 2*(routeFailLimit+1))
 	}
 }
 
-// inflightCount is every open request of the session, all threads.
-func (k *keeper) inflightCount(tenant, session string) int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	n, base := 0, kaKey(tenant, session)
-	for key, c := range k.inflight {
-		if key == base || strings.HasPrefix(key, base+"\x00") {
-			n += c
-		}
-	}
-	return n
-}
-
 // A non-retryable 4xx (not an auth refusal) counts toward the breaker; forget clears an account's trip; an OpenAI ping that
 // misses twice running (fresh input, no read) stops the session.
 func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	k.send = func(pingJob, []byte) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil }
+	k, fs, clock := testKeeper(t, Limits{})
+	fs.fn = func(*http.Request, []byte) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil }
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 3, MinPrefixTokens: 20000}
 	up := upstream{base: "http://litellm", path: "/v1/messages"}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
@@ -384,7 +374,7 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 	for n := 0; n < routeFailLimit; n++ {
 		hold("s" + strconv.Itoa(n))
 	}
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	if k.Stats().RouteTrips != 1 {
 		t.Fatalf("%d trips after %d 400s, want 1", k.Stats().RouteTrips, routeFailLimit)
@@ -397,13 +387,13 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 	k.retireSession("t1", "after-forget")
 
 	var sent atomic.Int32
-	k.send = func(pingJob, []byte) (Usage, int, error) {
+	fs.fn = func(*http.Request, []byte) (Usage, int, error) {
 		sent.Add(1)
 		return Usage{FreshInput: 48576, Output: 1}, http.StatusOK, nil
 	}
 	hold("openai-miss")
 	for i := 0; i < 3; i++ {
-		k.sweep(clock.advance(290 * time.Second))
+		k.Sweep(clock.advance(290 * time.Second))
 		time.Sleep(30 * time.Millisecond)
 	}
 	if sent.Load() != 2 {
@@ -415,10 +405,10 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 // holds with it, while a teammate's sessions on the same account, route and model ping on, and the
 // route breaker is untouched.
 func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
+	k, fs, clock := testKeeper(t, Limits{})
 	var sentA, sentB atomic.Int32
-	k.send = func(j pingJob, b []byte) (Usage, int, error) {
-		if strings.Contains(j.session, "alice") {
+	fs.fn = func(r *http.Request, _ []byte) (Usage, int, error) {
+		if r.Header.Get("x-api-key") == "sk-alice-revoked" { // every alice session pings with this key
 			sentA.Add(1)
 			return Usage{}, http.StatusUnauthorized, nil
 		}
@@ -442,7 +432,7 @@ func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
 		hold("alice-"+strconv.Itoa(i), "sk-alice-revoked")
 	}
 	for _, d := range []time.Duration{190, 100, 190} { // due: alice-0 + bob, then alice-1..3, then bob again
-		k.sweep(clock.advance(d * time.Second))
+		k.Sweep(clock.advance(d * time.Second))
 		time.Sleep(50 * time.Millisecond)
 	}
 	st := k.Stats()
@@ -457,17 +447,13 @@ func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
 	}
 	hold("alice-new", "sk-alice-revoked")
 	hold("bob-2", "sk-bob")
-	k.mu.Lock()
-	_, aliceHeld := k.live[kaThreadKey("t1", "alice-new", "")]
-	_, bobHeld := k.live[kaThreadKey("t1", "bob-2", "")]
-	k.mu.Unlock()
+	_, aliceHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "alice-new"})
+	_, bobHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "bob-2"})
 	if aliceHeld || !bobHeld {
 		t.Errorf("new holds: revoked key held %v (want false), teammate held %v (want true)", aliceHeld, bobHeld)
 	}
 	hold("alice-rotated", "sk-alice-new-key")
-	k.mu.Lock()
-	_, rotated := k.live[kaThreadKey("t1", "alice-rotated", "")]
-	k.mu.Unlock()
+	_, rotated := k.Entry(keepalive.Key{Tenant: "t1", Session: "alice-rotated"})
 	if !rotated {
 		t.Errorf("a new key for the same user was refused")
 	}
@@ -480,8 +466,7 @@ func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
 	id := func(v string) string {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("x-api-key", v)
-		_, auth := pingHeaders(r, upstream{base: "http://litellm", path: "/v1/messages"})
-		return credKey("t1", auth)
+		return credKey(upstream{base: "http://litellm", path: "/v1/messages"}, r.Header)
 	}
 	if id(a) == id(b) || id(a) != id(a) || id(a) == "" {
 		t.Fatalf("credential ids: a=%q b=%q", id(a), id(b))
@@ -489,10 +474,10 @@ func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
 	if strings.Contains(id(a), "wxyz") || strings.Contains(id(a), "AAAA") {
 		t.Errorf("the id carries part of the key: %q", id(a))
 	}
-	k, _, clock := testKeeper(t, Limits{})
+	k, fs, clock := testKeeper(t, Limits{})
 	var sentB atomic.Int32
-	k.send = func(j pingJob, _ []byte) (Usage, int, error) {
-		if j.session == "a" {
+	fs.fn = func(r *http.Request, _ []byte) (Usage, int, error) {
+		if r.Header.Get("x-api-key") == a { // session "a"'s key
 			return Usage{}, http.StatusUnauthorized, nil
 		}
 		sentB.Add(1)
@@ -509,10 +494,10 @@ func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
 		}
 	}
 	hold("a", a)
-	k.sweep(clock.advance(290 * time.Second)) // a's key is refused
+	k.Sweep(clock.advance(290 * time.Second)) // a's key is refused
 	time.Sleep(50 * time.Millisecond)
 	hold("b", b)
-	k.sweep(clock.advance(290 * time.Second))
+	k.Sweep(clock.advance(290 * time.Second))
 	time.Sleep(50 * time.Millisecond)
 	if sentB.Load() != 1 {
 		t.Errorf("the look-alike key got %d pings, want 1: it is a different credential", sentB.Load())
@@ -527,10 +512,10 @@ func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
 		otherPings   int32
 		otherHeldNew bool
 	}{{http.StatusForbidden, 1, true}, {http.StatusUnauthorized, 0, false}} {
-		k, _, clock := testKeeper(t, Limits{})
+		k, fs, clock := testKeeper(t, Limits{})
 		var sentB atomic.Int32
-		k.send = func(j pingJob, _ []byte) (Usage, int, error) {
-			if j.e.model == "aws/claude-sonnet-5" {
+		fs.fn = func(_ *http.Request, body []byte) (Usage, int, error) {
+			if gjson.GetBytes(body, "model").String() == "aws/claude-sonnet-5" {
 				return Usage{}, c.status, nil
 			}
 			sentB.Add(1)
@@ -548,20 +533,18 @@ func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
 			}
 		}
 		hold("a", kaBody)
-		k.sweep(clock.advance(290 * time.Second)) // model A refused
+		k.Sweep(clock.advance(290 * time.Second)) // model A refused
 		time.Sleep(50 * time.Millisecond)
 		hold("b", bodyB)
-		k.sweep(clock.advance(290 * time.Second))
+		k.Sweep(clock.advance(290 * time.Second))
 		time.Sleep(50 * time.Millisecond)
 		if sentB.Load() != c.otherPings {
 			t.Errorf("%d on model A: the same key on model B got %d pings, want %d", c.status, sentB.Load(), c.otherPings)
 		}
 		hold("b2", bodyB)
 		hold("a2", kaBody)
-		k.mu.Lock()
-		_, bHeld := k.live[kaThreadKey("t1", "b2", "")]
-		_, aHeld := k.live[kaThreadKey("t1", "a2", "")]
-		k.mu.Unlock()
+		_, bHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "b2"})
+		_, aHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "a2"})
 		if bHeld != c.otherHeldNew || aHeld {
 			t.Errorf("%d: new hold on model B %v (want %v), on model A %v (want false)", c.status, bHeld, c.otherHeldNew, aHeld)
 		}

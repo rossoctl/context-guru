@@ -55,6 +55,36 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
+# The header that opts a session in to MANUAL pings (the Ping button and /context-guru:ping) when keep-alive is
+# off: the proxy holds that session's cache request for a manual ping only: at most 300 s on a 5-minute cache, at most 59 min on a 1-hour cache. It rides in
+# ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
+# 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
+# `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.
+HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
+PING_HEADER = "x-context-guru-ping: 1"
+PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+PING_OPT_OUT_META = "ping_header_opt_out"    # true when the install was made with --no-ping-header: SessionStart must not heal it
+
+
+def _ping_line(line: str) -> bool:
+    return line.strip().lower().startswith("x-context-guru-ping")
+
+
+def with_ping_header(value: object) -> tuple[str, bool]:
+    """(the headers with our line in, whether WE added it). An existing x-context-guru-ping line, whatever its
+    value, is the user's to keep: nothing is added or changed, and the second item is False."""
+    text = value if isinstance(value, str) else ""
+    lines = [ln for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    if any(_ping_line(ln) for ln in lines):
+        return text, False
+    return "\n".join([*lines, PING_HEADER]), True
+
+
+def without_ping_header(value: object) -> str:
+    """The headers with the line we added taken out and every other line kept. "" when nothing else is left."""
+    text = value if isinstance(value, str) else ""
+    return "\n".join(ln for ln in text.replace("\r", "").split("\n") if ln.strip() and ln.strip() != PING_HEADER)
+
 # statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
 # own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
 # installs never pass it, and every add/remove call that omits it must behave exactly as it did
@@ -78,6 +108,46 @@ PLUGIN_ID = "context-guru@context-guru"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
+
+
+def user_env_keys(env: dict) -> int:
+    """How many env keys are the USER's: not ours, and not ANTHROPIC_CUSTOM_HEADERS when our line is all it holds."""
+    return len([k for k in env if k not in OURS and not (k == HEADERS_KEY and without_ping_header(env[k]) == "")])
+
+
+def add_ping_header(env: dict, meta: dict) -> bool:
+    """Put our line into env's ANTHROPIC_CUSTOM_HEADERS and record that we did. True when it changed."""
+    new, added = with_ping_header(env.get(HEADERS_KEY))
+    if not added:
+        return False
+    env[HEADERS_KEY] = new
+    meta[PING_HEADER_META] = PING_HEADER
+    return True
+
+
+def record_ping_choice(env: dict, meta: dict, ping_on: bool) -> bool:
+    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone.
+    An opt-out also takes back the line WE added earlier (an install or a heal): the opt-out text promises
+    that a re-run with --no-ping-header stops the header. True when a line was removed."""
+    if ping_on:
+        meta.pop(PING_OPT_OUT_META, None)
+        return False
+    meta[PING_OPT_OUT_META] = True
+    removed = remove_ping_header(env, meta)
+    meta.pop(PING_HEADER_META, None)
+    return removed
+
+
+def remove_ping_header(env: dict, meta: object) -> bool:
+    """Take back the line WE added (and only that one); the user's other headers stay. True when it changed."""
+    if not isinstance(meta, dict) or meta.get(PING_HEADER_META) != PING_HEADER or HEADERS_KEY not in env:
+        return False
+    rest = without_ping_header(env[HEADERS_KEY])
+    if rest:
+        env[HEADERS_KEY] = rest
+    else:
+        del env[HEADERS_KEY]
+    return True
 
 
 def is_ours(data: dict, url: str) -> bool:
@@ -2611,7 +2681,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
+        other_env_keys=user_env_keys(data.get("env") or {}),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
         # Provenance, from the record rather than the URL's shape. install.sh decided "already
@@ -2829,7 +2899,11 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 0
 
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+    ping_on = not getattr(args, "no_ping_header", False)
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
+            and (ping_on or ((data.get(META) or {}).get(PING_OPT_OUT_META) is True
+                             and (data.get(META) or {}).get(PING_HEADER_META) != PING_HEADER)):
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2845,6 +2919,10 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on and add_ping_header(env, meta):
+            changed.append(HEADERS_KEY)
+        if record_ping_choice(env, meta, ping_on):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2865,6 +2943,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on:
+            add_ping_header(env, meta)
+        record_ping_choice(env, meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2929,6 +3010,9 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Record what we wrote, so a re-run can recognise its own work, and what we took over, so
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
+    if ping_on:
+        add_ping_header(env, meta)
+    record_ping_choice(env, meta, ping_on)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -2941,7 +3025,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k not in OURS]))
+         other_env_keys=user_env_keys(env))
     return 0
 
 
@@ -2980,6 +3064,149 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
             print(f"context-guru: status line updated to this plugin version ({real})")
         except Exception:
             continue
+    return 0
+
+
+# The first build that could write --no-ping-header (#667, 328064e3, 2026-10-22 16:58:53 +0300). An install
+# made with that flag on such a build left no record of the choice. A file is healed only when the
+# install-scope row for it was recorded BEFORE this moment: every `add` rewrites the row, so a row older than
+# the cutoff proves nobody ran a flagged install since. Anything else gets a note, never a write.
+PING_FLAG_SHIPPED = "2026-10-22T13:58:53+00:00"
+PING_NOTE_SEEN = "ping-header-note.json"
+
+
+def predates_ping_flag(real: str) -> bool:
+    """True only when EVERY install-scope row that names this file was recorded before --no-ping-header existed.
+    One newer row (a flagged re-run under another key, say a machine-wide row beside a legacy project row)
+    or one row that cannot be read means the install may be an opt-out: then the answer is False."""
+    try:
+        cutoff = _dt.datetime.fromisoformat(PING_FLAG_SHIPPED)
+        found = False
+        for row in _read_install_scopes().values():
+            if not (isinstance(row, dict) and isinstance(row.get("file"), str)
+                    and os.path.realpath(row["file"]) == real):
+                continue
+            found = True
+            when = _dt.datetime.fromisoformat(row.get("recorded_at"))
+            if when.tzinfo is None or when >= cutoff:
+                return False
+        return found
+    except Exception:
+        return False
+
+
+def _note_seen_path() -> str:
+    return os.path.join(state_dir(), PING_NOTE_SEEN)
+
+
+def ping_note_seen(real: str) -> bool:
+    try:
+        with open(_note_seen_path(), encoding="utf-8") as fh:
+            return real in json.load(fh)
+    except Exception:
+        return False
+
+
+def mark_ping_note_seen(real: str) -> None:
+    try:
+        try:
+            with open(_note_seen_path(), encoding="utf-8") as fh:
+                seen = json.load(fh)
+        except Exception:
+            seen = []
+        if real not in seen:
+            ensure_state_dir(state_dir())
+            _write_atomic(_note_seen_path(), (json.dumps([*seen, real]) + "\n").encode("utf-8"), mode=0o600)
+    except Exception:
+        pass
+
+
+def ping_header_state(data: dict) -> str:
+    """Where one settings file stands on the ping header: "not-ours" (no routing record of ours),
+    "opted-out" (--no-ping-header), "removed" (we added the line and the user took it out), "present",
+    "user-off" (the user's own x-context-guru-ping line is not 1) or "missing". Only "missing" can be healed."""
+    env = data.get("env")
+    meta = data.get(META)
+    if not isinstance(env, dict) or not isinstance(meta, dict):
+        return "not-ours"
+    url = meta.get("installed_base_url")
+    if not url or env.get(KEY) != url:
+        return "not-ours"
+    if meta.get(PING_OPT_OUT_META) is True:
+        return "opted-out"
+    lines = [ln.strip() for ln in str(env.get(HEADERS_KEY, "")).replace("\r", "").split("\n") if _ping_line(ln)]
+    if lines:
+        return "present" if any(ln == PING_HEADER for ln in lines) else "user-off"
+    if meta.get(PING_HEADER_META) == PING_HEADER:
+        return "removed"
+    return "missing"
+
+
+PING_CONSENT = ("Ping enabled for this install; it works from your next session. The Context Guru server keeps your "
+                "latest request and key in memory so the Ping button and /context-guru:ping can work: for 5 minutes "
+                "after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never "
+                "pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, "
+                "re-run the install with --no-ping-header.")
+PING_OFF_NOTE = "Ping is off for this install. Run /context-guru:install to turn it on."
+
+
+def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
+    """SessionStart step (#685): an install from before the header existed never got
+    `x-context-guru-ping: 1`, so the Ping button cannot work and a restart cannot change that.
+
+    The header makes the server keep the latest request and key in memory, so it is never written without
+    consent. It is written only for a file with our routing record AND an install-scope row older than
+    --no-ping-header (so no opt-out can exist). Any other install without a record gets `note=1` once and
+    no write. An opt-out, a line the user removed and a ping line the user set are left alone. Never fails:
+    exit code is 0. With --check it only reports.
+    """
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [args.file] if args.file else [
+        user_scope_files()[0],
+        os.path.join(base, ".claude", "settings.json"),
+        os.path.join(base, ".claude", "settings.local.json")]
+    if not args.file:
+        try:
+            scopes = _read_install_scopes()
+            for key in (user_scope_key(), project_key(base)):
+                row = scopes.get(key)
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    files.append(row["file"])
+        except Exception:
+            pass
+    rank = {"not-ours": 0, "opted-out": 1, "removed": 1, "user-off": 2, "present": 2, "missing": 3, "healed": 4}
+    seen: set = set()
+    state, where, notify = "not-ours", "", False
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            st = ping_header_state(data)
+            if st == "not-ours":
+                continue
+            if st == "missing" and not args.check:
+                if predates_ping_flag(real):
+                    if add_ping_header(data["env"], data[META]):
+                        save(real, data)
+                        st = "healed"
+                elif not ping_note_seen(real):
+                    notify = True
+                    mark_ping_note_seen(real)
+            if rank[st] >= rank[state]:
+                state, where = st, real
+        except Exception:
+            continue
+    emit(result=state, file=where)
+    if state == "healed":
+        emit(note=PING_CONSENT)
+    elif notify:
+        emit(note=PING_OFF_NOTE)
     return 0
 
 
@@ -3140,6 +3367,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    remove_ping_header(env, _meta)
     recorded_bin = ""
     if isinstance(_meta, dict):
         recorded_bin = _meta.get("installed_bin") or ""
@@ -3175,6 +3403,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(PING_HEADER_META, None)
+        meta.pop(PING_OPT_OUT_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
         if not meta:
@@ -3306,7 +3536,30 @@ def cmd_config(args: argparse.Namespace) -> int:
 STRATEGY_MARKER_PREFIX = "# context-guru:"
 STRATEGY_MARKER_TAIL = "written by"
 
-DEFAULT_STRATEGY = "5-min-ping"
+# Strategies are named by PING COUNT, never by minutes: the proxy reads each session's cache lifetime
+# (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
+# sessions it governs. The proxy picks the timing; the strategy picks how many pings.
+#
+#   strategy   5-minute cache                   1-hour cache
+#   auto       2 pings, first at 240 s          1 ping at 59 min
+#   1-ping     1 ping, at 240 s                 1 ping at 59 min
+#   2-ping     2 pings, first at 240 s          2 pings, 59 min apart
+#
+# `auto` is the default and is the per-TTL table: a 5-minute session behaves exactly as `5-min-ping`
+# always did. The 1-hour numbers are config.DefaultKeepAliveIdle1h / DefaultKeepAliveMaxPings1h in
+# the proxy; they are written out below so the file says what it does.
+DEFAULT_STRATEGY = "auto"
+
+# Names that existed before the rename. They keep working everywhere a name is read: `strategy set`
+# and `--cache-strategy` store the new name, and `strategy sync` rewrites an old marker under the
+# new one, so an existing install or settings file does not break. `5-min-ping` was the default.
+STRATEGY_ALIASES = {"5-min-ping": "auto"}
+
+
+def canonical_strategy(name: str) -> str:
+    """The current name for `name`: itself, or what an alias maps to."""
+    return STRATEGY_ALIASES.get(name, name)
+
 
 # The default PRESET, in the one place that decides it. It is `off` - the passthrough pipeline, no
 # components at all - and that is a deliberate product claim rather than a conservative guess:
@@ -3357,15 +3610,48 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 270,
+            "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
             "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
-                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
-                "while nobody is at the keyboard.",
+        "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
+                "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
+                ">=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
+                "is at the keyboard.",
+    },
+    "1-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 240,
+            "keepalive_max_pings": 1,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
+        },
+        "spends": True,
+        "desc": "at most 1 idle ping per idle span, whichever cache lifetime the session was "
+                "billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
+                "THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+    },
+    "2-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 240,
+            "keepalive_max_pings": 2,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 2,
+        },
+        "spends": True,
+        "desc": "at most 2 idle pings per idle span, whichever cache lifetime the session was "
+                "billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). "
+                "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
         "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
@@ -3408,7 +3694,37 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _render_strategy(name: str, preset: str) -> str:
+# What the proxy does for a 1-hour cache when the `_1h` keys are absent (config.DefaultKeepAliveIdle1h
+# and DefaultKeepAliveMaxPings1h). A key equal to its default is NOT written, and that is load-bearing:
+# the plugin and the proxy binary ship separately, and an OLD binary's strict loader rejects an
+# unknown key and exits. Omitting the defaults keeps `auto` and `1-ping` loadable by every binary;
+# only a non-default value (`2-ping`) writes a `_1h` key.
+ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1}
+
+# A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
+# it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
+# `strategy set` renders afresh without it, and so does the next one after a proxy update.
+#
+# The marker records the proxy version it was written for. `strategy sync` keeps the keys out only
+# while the installed version is still that one: after a proxy update the keys go back in, and an old
+# binary that is still installed simply rejects them once more and takes the recovery path again.
+LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+
+
+def _installed_proxy_version() -> str:
+    """The version install.sh recorded for the proxy binary, or "" when none is recorded."""
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
+def _legacy_marker() -> str:
+    return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
+
+
+def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
     spec = STRATEGIES[name]
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
@@ -3426,7 +3742,10 @@ def _render_strategy(name: str, preset: str) -> str:
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
     ]
-    cache = spec["cache"]
+    cache = {k: v for k, v in spec["cache"].items()
+             if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
+    if legacy:
+        lines.insert(1, _legacy_marker())
     if cache:
         lines.append("cache:")
         for k, v in cache.items():
@@ -3528,7 +3847,8 @@ def cmd_strategy(args) -> int:
         # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
         # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
         # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
-        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES))
+        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES),
+             aliases=",".join(f"{old}:{new}" for old, new in STRATEGY_ALIASES.items()))
         for name, spec in STRATEGIES.items():
             emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
                     f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
@@ -3552,7 +3872,7 @@ def cmd_strategy(args) -> int:
             emit(result="ok", strategy="(foreign)", file=path, port=port,
                  note="a config exists at our path that we did not write; left alone")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         # A name we do not recognise is reported AS RECORDED, with a note saying so. Two wrong
         # answers were available here and both were worse: mapping it to a current name would claim
         # the file does something it does not, and reporting "(unnamed)" would hide that the file
@@ -3605,7 +3925,7 @@ def cmd_strategy(args) -> int:
             emit(result="skipped", reason="not_ours", file=path,
                  note="a config we did not write is at this path; its preset is its owner's business")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         if not name:
             emit(result="skipped", reason="unnamed", file=path,
                  note="written before strategies had names, so there is no name to re-render from; "
@@ -3623,7 +3943,8 @@ def cmd_strategy(args) -> int:
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset)
+        want = _render_strategy(name, args.preset,
+                                legacy=args.legacy_binary or _legacy_marker() in text.splitlines())
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -3671,9 +3992,9 @@ def cmd_strategy(args) -> int:
         return 0
 
     # op == "set"
-    name = args.name
+    name = canonical_strategy(args.name)
     if name not in STRATEGIES:
-        emit(result="error", reason="unknown_strategy", requested=name,
+        emit(result="error", reason="unknown_strategy", requested=args.name,
              known=",".join(STRATEGIES))
         return 2
     # `none` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
@@ -4013,6 +4334,9 @@ def main() -> int:
         p.add_argument("--bin", default="",
                        help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
                             "machines where its directory is not on PATH")
+        p.add_argument("--no-ping-header", action="store_true",
+                       help="do not add `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS (the opt-in "
+                            "for manual pings when keep-alive is off)")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
@@ -4037,6 +4361,12 @@ def main() -> int:
              "--statusline`, for when both were installed together and only the statusline "
              "should come back off")
     off.add_argument("--file", required=True)
+
+    ep = sub.add_parser("ensure-ping-header",
+        help="SessionStart: add the ping header to the settings file that holds our routing when an older "
+             "install left it out. Skips --no-ping-header installs and files that are not ours.")
+    ep.add_argument("--file", default="", help="check this file only, instead of the three scopes")
+    ep.add_argument("--check", action="store_true", help="report only; write nothing")
 
     en = sub.add_parser("enable-plugin",
         help="set enabledPlugins[<plugin>] = true in --file when it is absent, recorded so `remove` "
@@ -4094,6 +4424,9 @@ def main() -> int:
     st.add_argument("--preset", default="",
                     help="the preset to state in the file. Required for `set` and `sync`, because "
                          "--config REPLACES --preset rather than layering over it.")
+
+    st.add_argument("--legacy-binary", action="store_true",
+                    help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
 
     pr = sub.add_parser("preset")
     pr.add_argument("op", choices=("list", "show", "set"))
@@ -4177,7 +4510,7 @@ def main() -> int:
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
-          "enable-plugin": cmd_enable_plugin,
+          "enable-plugin": cmd_enable_plugin, "ensure-ping-header": cmd_ensure_ping_header,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,

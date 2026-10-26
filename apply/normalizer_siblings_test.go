@@ -470,7 +470,10 @@ func TestCacheAwareSummarizerRebuildWithASplitGroup(t *testing.T) {
 		keepLast    int
 		groupInTail bool
 	}{
-		{"group inside the summarized span", 2, false},
+		// The split group is the transcript's LAST tool exchange. cache_aware_summarizer keeps that
+		// exchange verbatim after a splice (#723), so with keep_last_turns 2 it is kept WHOLE too: the
+		// "never split" invariant still holds, and the wire-pairing check below still runs.
+		{"group is the last tool exchange, so it is kept", 2, true},
 		{"group inside the kept tail", 5, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -366,9 +366,9 @@ func TestRecordInventoryEndToEnd(t *testing.T) {
 	}
 	inv := ScanInventory("anthropic", ccBody(t, []string{tool("Bash", "b")}, skillsReminder,
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
-	rec.RecordInventory("t1", "s1", 1000, inv, true)
-	rec.RecordInventory("t1", "", 1000, inv, true) // no session: nothing to key on, dropped
-	rec.RecordInventory("t1", "s2", 1000, nil, true)
+	rec.RecordInventory("t1", "s1", 1000, inv, true, "")
+	rec.RecordInventory("t1", "", 1000, inv, true, "") // no session: nothing to key on, dropped
+	rec.RecordInventory("t1", "s2", 1000, nil, true, "")
 	db := rec.DB()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -920,4 +920,35 @@ func TestToolReportBillsOnlyTheRequestsThatCarriedIt(t *testing.T) {
 		}
 	}
 	t.Fatalf("no Workflow row: %+v", rep.Tools)
+}
+
+// carry_usd prices carrying a declaration over EVERY request that declared it, used or not, so a
+// tool the user does call still shows its price. unused_usd stays what it was.
+func TestToolReportCarriesTheCostOfUsedDeclarationsToo(t *testing.T) {
+	db := seedReport(t)
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bash (a built-in, so in Aside) is called, so it wasted nothing, but 100 tokens x 10 requests
+	// at the cache-read rate ($0.1/MTok) is what carrying it cost.
+	var bash ToolStat
+	for _, s := range rep.Aside {
+		if s.Name == "Bash" {
+			bash = s
+		}
+	}
+	if bash.UnusedUSD != 0 || bash.CarryReads != 1000 || !near(bash.CarryUSD, 0.0001) {
+		t.Errorf("Bash = unused %v carry_reads %d carry_usd %v, want 0 / 1000 / 0.0001", bash.UnusedUSD, bash.CarryReads, bash.CarryUSD)
+	}
+	for _, s := range rep.Tools {
+		if s.Name == "Workflow" && (s.CarryReads != s.UnusedReads || !near(s.CarryUSD, s.UnusedUSD)) {
+			t.Errorf("a never-used tool carries exactly its unused cost: %+v", s)
+		}
+	}
+	for _, sv := range rep.Servers {
+		if sv.Server == "pw" && (sv.CarryReads != 4000 || sv.CarryUSD <= 0) {
+			t.Errorf("pw server = %+v, want carry_reads 4000 and a price", sv)
+		}
+	}
 }

@@ -198,6 +198,9 @@ type Overview struct {
 	KeepAliveSavedUSD      float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD        float64 `json:"keepalive_net_usd"`
 	KeepAliveMissesAvoided int64   `json:"keepalive_misses_avoided"`
+	// ManualPings is the user's own pings, apart from the cache strategy's four numbers above;
+	// its net is one addend of TotalSavedUSD.
+	ManualPings ManualPings `json:"manual_pings"`
 
 	// CacheWrite1h is how many written tokens the provider billed at the ONE-HOUR tier. It is
 	// the verification path for the mixed-TTL head: asking for `ttl: "1h"` on a model that does
@@ -643,9 +646,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- computed while it still had the session's gap and the ping's own refreshed-token
 		-- count in hand. The COST half cannot be summed here — this query excludes ping rows
 		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
-		-- has its own query below.
-		COALESCE(SUM(`+kaSaved("r.")+`),0),
-		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
+		-- has its own query below. kaSavedSince stops the credit's ping half at the window
+		-- start, because that cost half is summed inside the window: both halves of the net
+		-- must span the same pings (#678), and SavingsTotals reads this same span.
+		COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0),
+		COALESCE(SUM(CASE WHEN `+kaSavedSince("r.", f.Since)+` > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cache_write_1h),0),
 		-- The #240 boundary. billed_token_factor = 0 means the row was written before the
 		-- tokenizer correction existed, so its savings figures came out of the old arithmetic.
@@ -762,6 +767,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		estimatorDivergenceCompactedRows       int64
 		estimatorDivergenceCompacted           float64
 		keepAlivePings                         int64
+		manualPings                            manualAgg
 		keepAlivePingUSD                       float64
 		accountingM, cacheMissM, uncompressedM map[string]int64
 		p95cg, p95up                           float64
@@ -1023,9 +1029,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	g.Go(func() error {
 		kaCond, kaArgs := withKeepAlive(f).where()
 		return d.sql.QueryRowContext(d.readCtx(), `SELECT
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
-			FROM requests r WHERE `+kaCond, kaArgs...).Scan(&keepAlivePings, &keepAlivePingUSD)
+			COALESCE(SUM(CASE WHEN `+autoPing+` THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN `+autoPing+` THEN r.cost_usd ELSE 0 END),0), `+manualSelect+`
+			FROM requests r WHERE `+kaCond, kaArgs...).Scan(append([]any{&keepAlivePings, &keepAlivePingUSD}, manualPings.dest()...)...)
 	})
 	// Both p95 latencies from one read. Exact, as DB.percentile is: the sorted column's element at
 	// int((n-1)*0.95) over the rows with a value, which is what its ORDER BY .. OFFSET picked, but
@@ -1080,13 +1086,15 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.KeepAlivePings, o.KeepAlivePingUSD = keepAlivePings, keepAlivePingUSD
+	o.ManualPings = manualPings.pings()
 	// NetSavedUSD, KeepAliveNetUSD (never the gross — o.CostUSD excludes ping rows, so the
 	// pings' own spend appears nowhere else in this walk) and TotalSavedUSD (the three
 	// addends are disjoint token sets: compaction's removals, the prefix split's stable
 	// half, and the entries the pings refreshed) all come from the ONE formula SavingsTotals
 	// also uses, so the dashboard and /stats can never disagree about what they mean.
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
+		o.ManualPings.SavedUSD)
 	// Both totals exist before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves both.
@@ -1332,6 +1340,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"at 1.25x rather than 1x. A ceiling rather than a floor, and the one figure here " +
 				"that is: the provider's cache is keyed on content, so another session sending the " +
 				"same prefix would have refreshed it for nothing."},
+		{Key: "manual_pings", Label: "Manual pings", DeltaUSD: -o.ManualPings.SavedUSD,
+			Description: "Cache rewrites avoided because YOU pressed Ping (the dashboard or the plugin " +
+				"button), net of what those pings cost. Its own line, outside the cache strategy: a " +
+				"person decided it, the strategy did not, so it never moves a strategy's net. Each " +
+				"press is credited the cache write it avoided on the context as it stood, priced at " +
+				"the tier the cache was written at, minus the ping's own cost; a ping that read " +
+				"nothing is credited nothing. A ceiling, like the keep-alive saving: another session " +
+				"sending the same prefix would have refreshed it for free. It also overlaps the " +
+				"keep-alive credit when automatic pings are on, because a press is only possible " +
+				"while the proxy holds the thread for keep-alive, and an automatic ping would " +
+				"often have refreshed the cache anyway."},
 		{Key: "decl_filter_saved", Label: "Declarations no longer sent", DeltaUSD: -o.DeclFilterUSD,
 			Description: "Tool and MCP schemas, and skill listing entries, that the declaration " +
 				"filter stopped sending — measured on requests that were really sent, from the " +
@@ -1344,8 +1363,8 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"this project."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
-				"keep-alive's NET — its savings minus what its pings cost — plus the declarations " +
-				"the removal filter stopped sending. FOUR disjoint token " +
+				"keep-alive's NET — its savings minus what its pings cost — plus the manual pings' " +
+				"net, plus the declarations the removal filter stopped sending. FOUR disjoint token " +
 				"sets, all ours, so nothing is counted twice: compaction's removals never reached " +
 				"the provider, the split moved a breakpoint over tokens that did, the " +
 				"keep-alive refreshed entries that already existed, and the filter's declarations " +

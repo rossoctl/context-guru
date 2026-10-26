@@ -32,8 +32,10 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/proxy"
 )
 
 // The clause under test, and its replacement. Exact text, so a drift in the contract is a loud failure.
@@ -143,7 +145,10 @@ func renderEvidence(e map[string]any) string {
 	return strings.TrimSpace(b.String())
 }
 
-// buildAsk assembles the inventory question — the SHIPPED prompt, via extract.BuildPrefixAsk.
+// buildAsk assembles the inventory question — the SHIPPED prompt BODY, via extract.BuildPrefixAsk.
+// Production sends the shared opening line (offload.askOpeningLine) in front of this body. This tool
+// does not, so arm results differ from production by that one line (about 20 tokens), identically
+// in every arm.
 //
 // This used to return the ask CONCATENATED ONTO the flattened transcript, as one user message, and that
 // was a different question from the one production asks. Live, the transcript is the request's own
@@ -172,7 +177,7 @@ func buildAsk(b batch, arm string) (string, error) {
 			Evidence:   renderEvidence(c.Evidence),
 		})
 	}
-	ask := extract.BuildPrefixAsk(items) // THE SHIPPED PROMPT
+	ask := extract.BuildPrefixAsk(items) // THE SHIPPED PROMPT BODY, without the opening line
 	if arm == "B" {
 		if !strings.Contains(ask, clauseBefore) {
 			return "", fmt.Errorf("arm B: the clause under test is not in the shipped contract any more.\n"+
@@ -374,19 +379,22 @@ func main() {
 		return
 	}
 
-	model := cheapmodel.Anthropic{
-		BaseURL:    os.Getenv("CG_ARM_BASE"),
-		APIKey:     os.Getenv("CG_ARM_KEY"),
-		Model:      os.Getenv("CG_ARM_MODEL"),
-		AuthScheme: os.Getenv("CG_ARM_AUTH"),
+	armKey, armModel := os.Getenv("CG_ARM_KEY"), os.Getenv("CG_ARM_MODEL")
+	if armKey == "" || armModel == "" {
+		fmt.Fprintln(os.Stderr, "CG_ARM_KEY and CG_ARM_MODEL are required for a live run")
+		os.Exit(2)
+	}
+	base := os.Getenv("CG_ARM_BASE")
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
+	d := proxy.NewDispatcher(nil)
+	ref := d.Pin(base, proxy.AuthHeader(bschemas.Anthropic, armKey, os.Getenv("CG_ARM_AUTH")))
+	model := cheapmodel.Anthropic{D: d, Ref: ref, Model: armModel,
 		// PrefixAskMaxTokens is what production gives an adjudication (16,000). The 4,096 that stood
 		// here was this tool's own invention and a smaller budget than the code under test uses, which
 		// would have made truncation a property of the harness.
 		MaxTokens: cheapmodel.PrefixAskMaxTokens,
-	}
-	if model.APIKey == "" || model.Model == "" {
-		fmt.Fprintln(os.Stderr, "CG_ARM_KEY and CG_ARM_MODEL are required for a live run")
-		os.Exit(2)
 	}
 	fh, err := os.Create(*out)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -439,7 +440,7 @@ func (d predDecision) apply(pol CachePolicy) CachePolicy {
 		pol.KeepAlive = false
 		return pol
 	}
-	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 270 s when none
+	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 240 s when none
 	// is configured), so a campaign never pings later than it (live, pings 275-280 s after a response miss the cache 19% of the time) nor more
 	// often than the tenant's own policy would.
 	idle := pol.Idle
@@ -447,6 +448,14 @@ func (d predDecision) apply(pol CachePolicy) CachePolicy {
 		idle = campaignKeepAlive5mIdle * time.Second
 	}
 	pol.KeepAlive, pol.Idle, pol.MaxPings = true, idle, d.k
+	// A campaign is scored on five-minute economics (cfTC, PWrite5m), so its k is a count of
+	// five-minute windows. On a thread billed at the one-hour tier the keeper swaps in the one-hour
+	// schedule (Policy.ForOneHour); k then only bounds it from above, as an override's does.
+	k1h := pol.MaxPings1h
+	if k1h <= 0 {
+		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	}
+	pol.MaxPings1h = min(k1h, d.k)
 	pol.MinPrefixTokens, pol.PredictorID, pol.PredictorThreshold = 0, "", 0
 	return pol
 }

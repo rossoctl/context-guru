@@ -103,10 +103,11 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
 			"changed_msgs", len(rep.ChangedIdx),
 		}
-		// "stashed" only for an Offload: a Reformat's CacheKeys are dedup keys over
-		// content it did NOT stash (see components.reformatKeys), and labelling those
-		// "stashed" would read as a reversibility claim the fold never makes.
-		if rep.Kind == "offload" {
+		// "stashed" only for an Offload that stashed: a Reformat's CacheKeys, and an
+		// Irreversible Offload's, are dedup keys over content it did NOT stash (see
+		// components.reformatKeys), and labelling those "stashed" would read as a
+		// reversibility claim the run never makes.
+		if rep.Kind == "offload" && !rep.Irreversible {
 			attrs = append(attrs, "stashed", len(rep.CacheKeys))
 		} else {
 			attrs = append(attrs, "dedup_keys", len(rep.CacheKeys))
@@ -631,12 +632,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// bypass passed through as mutable tail and rewrites them, diverging from the
 		// prefix the provider just cached and forcing a full cache-write of the suffix.
 		//
-		// So the cost of a bypass is not confined to the bypassed request, which is what
-		// the anti-latching argument in proxy/agentcompaction.go used to claim. It lands
-		// on the following turn, and it is a cache-write rather than lost savings. That
-		// matters because a false-positive bypass is reachable: the detector's phrase is
-		// quoted verbatim in this repo's own docs/how-to/agent-compaction.md, so an agent
-		// that reads that page gets it into a trailing tool_result.
+		// So the cost of a bypass is not confined to the bypassed request. It lands on the
+		// following turn, and it is a cache-write rather than lost savings. A request is
+		// bypassed only by the x-context-guru-bypass header, or when it is an agent
+		// compaction body over the size ceiling (see proxy.chat).
 		//
 		// Recording is safe in both directions. On a genuine agent compaction the next
 		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.
@@ -699,6 +698,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 		PrefixAsk:           o.PrefixAsk,
+		CanKeepAlive:        canKeepAliveFor(o.CanKeepAlive, sessionID, tr.Thread.ID),
 		CacheTTLMs:          ttlMs,
 		CacheTTLMinimum:     ttlMinimum,
 		// Set BEFORE the run, so cachesplit's own report is right at the source and every
@@ -783,6 +783,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		nb, ok := rebuildCountChanged(body, msgs, slots, chat.Input)
+		if ok && explicitBreakpointProvider(provider) {
+			// The splicing component's kept tool_result, marked so the next turn can read the cache
+			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
+			// carries tool_result blocks and explicit breakpoints (Anthropic, Bedrock, Vertex): an
+			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
+			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
+		}
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
@@ -808,6 +815,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Exact attribution for the diff view: which components rewrote each message, in
 	// order. Built once from the run report the pipeline already produced.
 	touched := touchedBy(rr)
+	// A message no surviving component changed re-marshals to exactly its normalized form, so the
+	// comparison below can skip it: changedIdx (reflect.DeepEqual before/after, per component) is
+	// what says "changed". It is only trusted when nothing was reverted, because a revert installs
+	// a clone of the snapshot, which is equal in content but not proven equal in bytes.
+	trustTouched := rr != nil
+	if rr != nil {
+		for _, rep := range rr.Components {
+			if rep.Reverted {
+				trustTouched = false
+			}
+		}
+	}
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
@@ -853,6 +872,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			changed = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
+			if _, was := touched[i]; trustTouched && !was {
+				continue // no component changed it: keep the original bytes verbatim (I1)
+			}
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
@@ -1028,6 +1050,36 @@ func bodyAsksExtendedTTL(body []byte) bool {
 	return false
 }
 
+// AllBreakpointsAskExtendedTTL reports whether the body has cache breakpoints and every one of them
+// asks for the 1h tier. A single 5m breakpoint (the default when `ttl` is absent) makes it false:
+// that segment expires in five minutes whatever the others ask. The keeper uses this, with the
+// billed tier, to pick a session's keep-alive schedule.
+func AllBreakpointsAskExtendedTTL(body []byte) bool {
+	total, extended := 0, 0
+	var walk func(v gjson.Result)
+	walk = func(v gjson.Result) {
+		if v.IsArray() {
+			v.ForEach(func(_, vv gjson.Result) bool { walk(vv); return true })
+			return
+		}
+		if v.IsObject() {
+			total++
+			if v.Get("ttl").String() == "1h" {
+				extended++
+			}
+		}
+	}
+	for _, p := range []string{
+		"messages.#.content.#.cache_control",
+		"messages.#.cache_control",
+		"system.#.cache_control",
+		"tools.#.cache_control",
+	} {
+		walk(gjson.GetBytes(body, p))
+	}
+	return total > 0 && total == extended
+}
+
 // cacheIsCold reports whether this session has been idle long enough that its prompt cache
 // is certainly gone.
 //
@@ -1176,6 +1228,13 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 // wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
 // JSON string value never matches these paths.
 func hasCacheBreakpoint(body []byte) bool {
+	// Every path below ends in a key spelled cache_control or cachePoint, so a body with neither
+	// "cache" nor a \u escape anywhere in it (a key could be spelled with one) cannot match, and
+	// five full structural walks of a large body are skipped. Exact, unlike a prefilter that
+	// assumes keys are never escaped.
+	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
+		return false
+	}
 	paths := []string{
 		"messages.#.content.#.cache_control",
 		"messages.#.cache_control",
@@ -1338,6 +1397,25 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 		return ""
 	}
 	return sessionIDFrom(tenant, explicitSess, body, norm)
+}
+
+// ProjectFor returns the directory the agent was started in, as stated in the request's own
+// prompt, or "" when the request does not state one.
+//
+// Here rather than in the caller because the normalization it needs — one provider-agnostic
+// message slice out of an Anthropic or OpenAI body — is this package's job and is unexported.
+// SessionIDFor is the same shape for the same reason, and the two share
+// normalizeSessionMessages so that a body shape one accepts is a body shape the other accepts.
+//
+// It must be given the PRISTINE inbound body. A rewritten transcript may have had the
+// environment block compacted out of it, and the project would then flip to unattributed on
+// exactly the requests the pipeline acted on — the ones whose cost is most worth attributing.
+func ProjectFor(provider bschemas.ModelProvider, body []byte) string {
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	return schema.WorkingDirOf(norm)
 }
 
 // RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT

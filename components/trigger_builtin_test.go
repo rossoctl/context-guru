@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 )
 
 // With the LiteLLM map not loaded, a listed model still lets the fraction trigger resolve (#515).
 func TestFracResolvableWithoutMapForListedModel(t *testing.T) {
-	c := modelinfo.NewChain(modelinfo.NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour))
+	c := modelinfo.NewChain(litellm.NewLiteLLM("http://127.0.0.1:1/none", &http.Client{Timeout: 50 * time.Millisecond}, time.Hour))
 	for _, id := range []string{"claude-sonnet-5", "aws/claude-opus-5[1m]", "anthropic/claude-fable-5"} {
 		w, exact, ok := c.WindowExact(context.Background(), id)
 		if !ok {

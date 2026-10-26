@@ -689,3 +689,42 @@ In DB-only mode, pings (`keepalive = 1`) and failed/non-200 rows are
 excluded from the turn sequence before indexing, same as `wait_causes.py`'s
 own DB-only mode — a ping never had its own hit/miss and must not become a
 turn boundary.
+
+## `cc_replay_sweep.py`: what would each component have saved on my transcripts?
+
+Replays recorded Claude Code sessions through the real pipeline, offline, and prices the result.
+It makes no model call and costs $0.
+
+Three parts:
+
+1. **`cc_transcript_requests.py`** rebuilds the request sequence of each transcript. Call k was sent
+   with `messages[:n_k]`. It also tags each `tool_use` by kind (Read, Bash view, other Bash, Edit) and
+   marks a Read whose file is edited later.
+2. **`cmd/cg-transcript-replay`** sends each request through `apply.BodyOpts` with the proxy's
+   cache-boundary tracker and the call's own timestamp. Per call it writes the tokens before and after,
+   whether the forwarded body still starts with the previous forwarded body (if not, that is a cache
+   break), and the saving by component and by `tool_use_id`.
+3. **`cc_replay_sweep.py`** runs the shipped presets, every zero-cost component alone, a few
+   non-default settings, and a greedy search for the best custom pipeline. It runs the search twice:
+   once with no limits, and once limited to pipelines with 0 cache breaks and nothing removed that
+   the agent edits later.
+
+```bash
+python3 -I scripts/analysis/cc_transcript_requests.py /tmp/req s1=~/.claude/projects/<proj>/<session>.jsonl
+go build -o /tmp/cgr ./cmd/cg-transcript-replay
+python3 -I scripts/analysis/cc_replay_sweep.py --bin /tmp/cgr --req /tmp/req --work /tmp/sweep
+```
+
+`--rates IN,OUT,READ,WRITE` sets the USD per million tokens (default: Opus 5 list rates). A finished
+run is reused, so a re-run pays only for new pipelines.
+
+**Read before you trust a number:**
+
+- **Output tokens are fixed.** A replay cannot show how the agent would act on a shorter context.
+  A lossy component can make it re-read a file or ask for an expand. The replay does not count either.
+- **"Edited later" is the quality risk.** It is the share of removed tokens that came from a file the
+  agent later edits. A high share means the agent edits a file whose body is partly hidden.
+- **Only `messages` are replayed.** A transcript holds no `system` or `tools`, so `cachesplit`,
+  `cacheinject`, `toolschema` and `toolfilter` are out of scope.
+- **One thread, no compaction.** The rebuild stops on a sidechain entry. It does not model a
+  compaction event.

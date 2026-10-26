@@ -217,6 +217,8 @@ const CGCharts = (() => {
       ['Our own model calls', -(w.cg_llm ? w.cg_llm.delta_usd : 0), false],
       ['Cache strategy pings', -(w.keepalive_ping ? w.keepalive_ping.delta_usd : 0), false],
       ['Cache strategy: rewrites avoided', -(w.keepalive_saved ? w.keepalive_saved.delta_usd : 0), true],
+      // Net of the pings' own cost, so a single bar. Absent on a server from before the Ping button.
+      ['Manual pings', -(w.manual_pings ? w.manual_pings.delta_usd : 0), true],
       ['Tools and skills filter', -(w.decl_filter_saved ? w.decl_filter_saved.delta_usd : 0), false],
     ];
     const max = Math.max(...rows.map((r) => Math.abs(r[1])), 0.01);

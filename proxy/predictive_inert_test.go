@@ -9,6 +9,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -116,15 +117,13 @@ func TestActiveCampaignNeverOverridesTenantOptOut(t *testing.T) {
 	in.MaxPings = 1
 	recordWith(k2, in, time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC))
 	recordWith(k2, in, time.Date(2026, 8, 22, 12, 0, 5, 0, time.UTC))
-	k2.mu.Lock()
-	defer k2.mu.Unlock()
-	for _, e := range k2.live {
-		if e.pol.MaxPings != 2 || e.appliedStrategy != campaignStrategyID("cmp-000000000001") {
-			t.Errorf("campaign not applied for an opted-in tenant: MaxPings %d, strategy %q", e.pol.MaxPings, e.appliedStrategy)
-		}
-		return
+	e, ok := k2.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+	if !ok {
+		t.Fatal("no entry for the opted-in tenant")
 	}
-	t.Error("no entry for the opted-in tenant")
+	if e.Policy.MaxPings != 2 || e.Tag != campaignStrategyID("cmp-000000000001") {
+		t.Errorf("campaign not applied for an opted-in tenant: MaxPings %d, strategy %q", e.Policy.MaxPings, e.Tag)
+	}
 }
 
 // Two overlapping requests on one thread keep their own identity and their own scored decision.

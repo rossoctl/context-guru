@@ -221,8 +221,11 @@ func TestSettingsAddPreservesEverythingElse(t *testing.T) {
 	if env["SOME_OTHER_VAR"] != "keep me" || env["ANTHROPIC_SMALL_FAST"] != "also keep me" {
 		t.Errorf("the user's own env vars were lost: %v", env)
 	}
-	if len(env) != 3 {
+	if len(env) != 4 { // the 2 originals, the base URL, and the manual-ping opt-in header
 		t.Errorf("env has %d keys, want the 2 originals plus ours: %v", len(env), env)
+	}
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-context-guru-ping: 1" {
+		t.Errorf("env.ANTHROPIC_CUSTOM_HEADERS = %q, want the manual-ping opt-in", env["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
 
@@ -2079,7 +2082,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2260,7 +2263,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2278,12 +2281,12 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
-	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (2s) so the next call actually
+	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (30s) so the next call actually
 	// attempts a fresh fetch instead of serving the just-written in-TTL copy — but still well
 	// inside STALE_STATS_MAX_AGE_SECONDS (600s), matching "a cache a few renders old", not "a
 	// cache from an hour ago".
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
-	old := time.Now().Add(-5 * time.Second)
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
+	old := time.Now().Add(-40 * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
 	}
@@ -2318,7 +2321,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2337,7 +2340,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	// Backdate well past STALE_STATS_MAX_AGE_SECONDS (read from the script itself, not retyped
 	// here, so the two cannot silently drift apart).
 	maxAge := statslineConstInt(t, "STALE_STATS_MAX_AGE_SECONDS")
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
 	old := time.Now().Add(-time.Duration(maxAge+60) * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
@@ -2503,9 +2506,9 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("exit %d", code)
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
-			if c.wantCold {
-				if got != "cache ○ ░░░░░░ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
+			if c.wantCold { // cold is drawn, dim: `cache ○ cold` (a client-only answer does not know since when)
+				if got != "cache ○ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ cold")
 				}
 				return
 			}
@@ -2548,7 +2551,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
 seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
-print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.0))        # remaining == 0: cold, drawn dim
 print(seg(1_700_000_000.5))        # remaining +0.5s
 print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
@@ -2559,7 +2562,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
+	want := []string{"cache ○ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ cold"} // cold is drawn (dim; NO_COLOR here)
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2640,8 +2643,8 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
 		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
 	}
-	if !strings.Contains(got, "ka 4 pings") {
-		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
+	if strings.Contains(got, "ka ") || strings.Contains(got, "keep-alive") {
+		t.Errorf("got %q, want no keep-alive count in the balanced layout (users did not understand it)", got)
 	}
 }
 
@@ -2685,8 +2688,8 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
-	if !strings.Contains(out, "ka 4 pings $0.02") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
+	if !strings.Contains(out, "keep-alive 4 pings · $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "keep-alive 4 pings · $0.02")
 	}
 	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
@@ -2829,7 +2832,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
 	run := func(sessionID string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
@@ -2878,7 +2881,7 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	tmp := t.TempDir()
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
@@ -2933,29 +2936,205 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["default"] != "5-min-ping" {
-		t.Errorf("default strategy is %q, want 5-min-ping: this is the value the install writes, and "+
+	if facts["default"] != "auto" {
+		t.Errorf("default strategy is %q, want auto: this is the value the install writes, and "+
 			"plugin.json's cache_strategy default has to agree with it", facts["default"])
 	}
-	for _, k := range []string{"strategy_none", "strategy_5_min_ping", "strategy_1_hour_head"} {
+	for _, k := range []string{"strategy_none", "strategy_auto", "strategy_1_ping", "strategy_2_ping", "strategy_1_hour_head"} {
 		if facts[k] == "" {
 			t.Errorf("`strategy list` does not describe %s; a name the picker offers but list omits "+
 				"cannot be discovered", k)
 		}
 	}
 	// The honesty that matters most: exactly one strategy spends the caller's money, and it must be
-	// the one that says so. A `spends=false` on 5-min-ping would make the install's one-line
+	// the one that says so. A `spends=false` on auto would make the install's one-line
 	// disclosure wrong.
-	if facts["spends_5_min_ping"] != "true" {
-		t.Errorf("5-min-ping reports spends=%q; it pings on idle turns with the caller's own "+
+	if facts["spends_auto"] != "true" || facts["spends_1_ping"] != "true" || facts["spends_2_ping"] != "true" {
+		t.Errorf("auto reports spends=%q; it pings on idle turns with the caller's own "+
 			"credential, and the install's disclosure is generated from this",
-			facts["spends_5_min_ping"])
+			facts["spends_auto"])
 	}
 	for _, k := range []string{"spends_none", "spends_1_hour_head"} {
 		if facts[k] != "false" {
 			t.Errorf("%s reports spends=%q, want false: neither sends a ping, and claiming they "+
 				"spend would push users off the free strategies for no reason", k, facts[k])
 		}
+	}
+}
+
+// TestOldStrategyNamesStillResolve. `5-min-ping` was the default name before strategies were named by
+// ping count. An existing install, a saved plugin option and a marker already on disk all carry it.
+// Set stores the new name, show and sync read an old marker under the new name, and the written file
+// gains the 1-hour keys, so a pre-rename install picks up the per-TTL schedule on its next start.
+func TestOldStrategyNamesStillResolve(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	list, code := settingsIn(t, state, home, "strategy", "list")
+	if code != 0 || !strings.Contains(list["aliases"], "5-min-ping:auto") {
+		t.Fatalf("strategy list does not publish the alias map: %v", list)
+	}
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 || facts["strategy"] != "auto" {
+		t.Fatalf("set --name 5-min-ping: exit %d, %v; want it stored as auto", code, facts)
+	}
+	body, err := os.ReadFile(facts["file"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 240", "keepalive_max_pings: 2"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("auto config lacks %q:\n%s", want, body)
+		}
+	}
+	// The 1-hour defaults are the proxy's own, so they are not written: an older proxy binary's strict
+	// loader rejects a key it does not know, and the plugin ships separately from the binary.
+	if strings.Contains(string(body), "_1h") {
+		t.Errorf("auto config writes a 1-hour key an older proxy binary would reject:\n%s", body)
+	}
+	// A marker written by the old version.
+	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
+	if err := os.WriteFile(facts["file"], []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort)
+	if show["strategy"] != "auto" {
+		t.Errorf("show reports %q for an old 5-min-ping marker, want auto: %v", show["strategy"], show)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if sync["result"] != "synced" || sync["strategy"] != "auto" {
+		t.Errorf("sync did not migrate the old marker: %v", sync)
+	}
+}
+
+// TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault. `2-ping` is the one strategy that
+// needs a key; `--legacy-binary` (what start-proxy.sh uses after an old binary rejected it) drops it,
+// and `strategy sync` keeps it dropped on later starts.
+func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	body := readFileString(t, facts["file"])
+	if !strings.Contains(body, "keepalive_max_pings_1h: 2") || strings.Contains(body, "keepalive_idle_seconds_1h") {
+		t.Fatalf("2-ping should write only keepalive_max_pings_1h:\n%s", body)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if sync["result"] != "synced" {
+		t.Fatalf("legacy sync: %v", sync)
+	}
+	body = readFileString(t, facts["file"])
+	if strings.Contains(body, "_1h:") || !strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("legacy render still carries a 1-hour key, or lacks its marker:\n%s", body)
+	}
+	again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if again["result"] != "unchanged" {
+		t.Errorf("a plain sync undid the legacy render: %v", again)
+	}
+	if show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort); show["strategy"] != "2-ping" {
+		t.Errorf("the legacy marker line hid the strategy name: %v", show)
+	}
+}
+
+// TestTheLegacyMarkerEndsWhenTheProxyIsUpdated. The marker means "this proxy version rejected the
+// 1-hour keys". After an update (install.sh records the new version) a plain `strategy sync` must put
+// them back, or `2-ping` would stay at one ping on a 1-hour cache for good.
+func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	version := func(v string) {
+		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	version("v0.4.2")
+	settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); again["result"] != "unchanged" {
+		t.Fatalf("the same binary lost the legacy render: %v", again)
+	}
+	version("v0.5.0")
+	up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	body := readFileString(t, facts["file"])
+	if up["result"] != "synced" || !strings.Contains(body, "keepalive_max_pings_1h: 2") ||
+		strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("after the proxy update the 1-hour key did not come back (%v):\n%s", up, body)
+	}
+}
+
+// TestAStaleLogLineDoesNotTriggerTheOneHourRecovery. The proxy log is append-only across starts. A
+// rejection logged by an earlier run must not make this run drop the keys; only this attempt's own
+// output counts.
+func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	logPath := filepath.Join(dir, "context-guru-proxy-"+port+".log")
+	stale := "level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "broken-proxy")
+	script := "#!/usr/bin/env bash\nif [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.5.0'; exit 0; fi\n" +
+		"echo 'level=ERROR msg=\"listen failed for an unrelated reason\"' >&2; exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("a rejection from an earlier run triggered the recovery:\n%s", out)
+	}
+	cfg := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if !strings.Contains(cfg, "keepalive_max_pings_1h: 2") {
+		t.Errorf("the keys were dropped on the strength of a stale line:\n%s", cfg)
+	}
+}
+
+// TestAnOldProxyThatRejectsTheOneHourKeysStillStarts. A new plugin with an old binary: the binary's
+// strict loader exits on `keepalive_max_pings_1h`. start-proxy.sh must re-render without it and retry.
+func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
+	requireTool(t, "python3")
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	sentinel := filepath.Join(dir, "started")
+	// Behaves like an old binary: a config naming a 1-hour key is a parse error; any other serves.
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.4.2 (commit none)'; exit 0; fi\n" +
+		"cfg=; while [ $# -gt 0 ]; do [ \"$1\" = --config ] && cfg=$2; shift; done\n" +
+		"if [ -n \"$cfg\" ] && grep -q '_1h:' \"$cfg\"; then\n" +
+		"  echo 'level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"' >&2; exit 1; fi\n" +
+		"touch \"" + sentinel + "\"\n" +
+		"exec python3 -c '\nimport sys, http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' " + port + "\n"
+	bin := filepath.Join(dir, "old-proxy")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("the old proxy never came up after the 1-hour keys were dropped: %s", out)
+	}
+	if !strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("the fallback did not say what it did: %s", out)
 	}
 }
 
@@ -2967,11 +3146,11 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "codesmart")
+		"--name", "auto", "--port", keepalivePort, "--preset", "codesmart")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["strategy"] != "5-min-ping" || facts["spends"] != "true" {
+	if facts["strategy"] != "auto" || facts["spends"] != "true" {
 		t.Errorf("set reported strategy=%q spends=%q; the caller reports both to the user",
 			facts["strategy"], facts["spends"])
 	}
@@ -2989,7 +3168,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	}
 	// The name has to be IN the file, not merely in the command that wrote it: `strategy show` and
 	// start-proxy.sh both read it back, and the whole point of a name is that it survives.
-	if !strings.Contains(body, "strategy=5-min-ping") {
+	if !strings.Contains(body, "strategy=auto") {
 		t.Errorf("the strategy name was not recorded in the file, so nothing can report it back and "+
 			"the user cannot be told what to switch back to:\n%s", body)
 	}
@@ -3007,7 +3186,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 func TestStrategySplitIsTheAbsenceOfAConfig(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	if _, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache"); code != 0 {
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache"); code != 0 {
 		t.Fatal("could not arm the strategy this test then switches away from")
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
@@ -3048,7 +3227,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 			}
 			args := []string{"strategy", op, "--port", keepalivePort}
 			if op == "set" {
-				args = append(args, "--name", "5-min-ping", "--preset", "cache")
+				args = append(args, "--name", "auto", "--preset", "cache")
 			}
 			facts, code := settingsIn(t, state, home, args...)
 			if code != 2 {
@@ -3092,7 +3271,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 func TestStrategySetRefusesAnEmptyPreset(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "")
+		"--name", "auto", "--port", keepalivePort, "--preset", "")
 	if code == 0 {
 		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
 			"compaction off while the strategy keeps paying for pings: %v", facts)
@@ -3130,7 +3309,7 @@ func TestStrategySetRefusesAnUnknownName(t *testing.T) {
 func TestStrategyRequiresThePortRatherThanDefaultingIt(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	for _, op := range [][]string{
-		{"strategy", "set", "--name", "5-min-ping", "--preset", "cache"},
+		{"strategy", "set", "--name", "auto", "--preset", "cache"},
 		{"strategy", "show"},
 		{"strategy", "clear"},
 	} {
@@ -3163,13 +3342,13 @@ func TestStrategyStillRecognisesTheOldKeepaliveMarker(t *testing.T) {
 			"it carries no name, and inventing one would misreport what is armed", shown["strategy"])
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache")
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache")
 	if code != 0 {
 		t.Fatalf("a pre-rename config could not be re-set, which strands its owner: exit %d %v",
 			code, facts)
 	}
 	b, _ := os.ReadFile(strategyCfg(state))
-	if !strings.Contains(string(b), "strategy=5-min-ping") {
+	if !strings.Contains(string(b), "strategy=auto") {
 		t.Errorf("re-setting a pre-rename config did not give it a name:\n%s", b)
 	}
 }
@@ -3255,6 +3434,10 @@ func TestPickerSkillOffersOnlyRealStrategies(t *testing.T) {
 	for _, m := range regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+){1,3})`").FindAllStringSubmatch(body, -1) {
 		tok := m[1]
 		if strings.Contains(tok, ".") || strings.HasSuffix(tok, ".py") {
+			continue
+		}
+		// An alias is a real name the script accepts; the skill documents the old one.
+		if strings.Contains(","+strings.ReplaceAll(facts["aliases"], ":", ",")+",", ","+tok+",") {
 			continue
 		}
 		if !real[strings.ReplaceAll(tok, "-", "_")] && isStrategyShaped(tok) {
@@ -3887,7 +4070,7 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// The NAME is the whole reason strategies are named: it is the only thing a user can say
 			// back to us. It has to survive from the file into the note, or "switch it back to
-			// 5-min-ping" is not a sentence anybody can act on.
+			// auto" is not a sentence anybody can act on.
 			//
 			// THE PRESET HALF OF THIS ROW FLIPPED, deliberately. It used to assert that the file's
 			// `preset: house` was reported and the plugin option was NOT — the file being the source
@@ -3928,11 +4111,11 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// A config we own but that predates named strategies, or one we do not own at all: report
 			// it as unnamed rather than guessing. Naming the DEFAULT here would be the worst answer —
-			// it would tell the user 5-min-ping is armed when the file might say anything.
+			// it would tell the user auto is armed when the file might say anything.
 			name:     "a config with no strategy marker is unnamed, never guessed",
 			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
 			wantIn:    []string{"cache strategy unnamed"},
-			wantNotIn: []string{"cache strategy 5-min-ping", "cache strategy none"},
+			wantNotIn: []string{"cache strategy auto", "cache strategy none"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -4828,9 +5011,12 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	const relPath = "./.claude/settings.local.json"
 	// Routed already, by a version of the plugin that kept no record — which is what an absent
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
-	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	// The opt-out is already on record: this test is about the hatch, and an install with no ping record
+	// gets its header (or its opt-out) written on a re-run.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"ping_header_opt_out": true}})
 
-	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
 	}
@@ -7622,9 +7808,12 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	//
 	// Raised 235 -> 238 for `plugin_enabled=` (#318): a machine-wide install's outcome for the plugin's
 	// own enablement, which the skill relays and never decides.
-	if n := strings.Count(body, "\n"); n > 238 {
+	//
+	// Raised 238 -> 242 for `history_import=`: the one-time import of pre-install history, whose
+	// outcome (done / already_done / skipped / failed + retry command) the skill relays and never runs.
+	if n := strings.Count(body, "\n"); n > 242 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
-			"well under 238", n)
+			"well under 242", n)
 	}
 }
 
@@ -7816,11 +8005,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",
@@ -8187,7 +8377,7 @@ func TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything(t *testing.T) {
 	}
 	// The names have to be in the refusal, or the model guesses — and the names differ in whether they
 	// spend the user's money, which is not a thing to guess at.
-	if !strings.Contains(facts["note"], "5-min-ping") {
+	if !strings.Contains(facts["note"], "auto") {
 		t.Errorf("the refusal does not list the real strategy names: note=%q", facts["note"])
 	}
 }
@@ -8406,7 +8596,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	const port = "9391"
 
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
 		t.Fatalf("arming a real strategy: exit %d %v", code, facts)
 	}
@@ -8433,7 +8623,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 	// And `clear`, invoked as itself, keeps its own vocabulary — the fix must not have flattened the
 	// distinction, only stopped one op borrowing the other's word.
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 {
 		t.Fatalf("re-arming: exit %d %v", code, facts)
 	}
@@ -8590,7 +8780,7 @@ func stopFakeProxy2(t *testing.T, pidfile string) {
 
 // TestRouteDistinguishesAnUnreadableStrategyListFromABadName. An empty strategy list is not an unknown
 // name, and conflating them made the script state a false thing about the caller's input: with
-// settings.py unavailable, `--cache-strategy 5-min-ping` — the default, and obviously a strategy — came
+// settings.py unavailable, `--cache-strategy auto` — the default, and obviously a strategy — came
 // back as "is not a strategy. Known: unavailable", burying the one fault the user could act on inside a
 // sentence about a typo. The skill's next move is to ask which name they meant, about a correct name.
 func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
@@ -8616,7 +8806,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", filepath.Join(broken, "install.sh"), "--route", "--plan",
-		"--cache-strategy", "5-min-ping")
+		"--cache-strategy", "auto")
 	cmd.Dir = proj
 	cmd.Env = routeEnv(t, home, t.TempDir(), "")
 	out, _ := cmd.CombinedOutput()
@@ -8624,7 +8814,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	body := string(out)
 
 	if strings.Contains(body, "is not a strategy") {
-		t.Errorf("`5-min-ping` is the default strategy and was reported as not being one, because the "+
+		t.Errorf("`auto` is the default strategy and was reported as not being one, because the "+
 			"LIST could not be read. A false statement about the caller's input:\n%s", body)
 	}
 	if !strings.Contains(body, "strategy_list_unavailable") {
@@ -8914,7 +9104,7 @@ func TestStrategySetSplitNeedsNoPreset(t *testing.T) {
 
 	// The control, because the guard is right where it applies: a strategy that DOES write a file must
 	// still refuse an empty preset, or compaction is silently off while pings keep being paid for.
-	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", keepalivePort, "--preset", "")
 	if code == 0 || facts["reason"] != "empty_preset" {
 		t.Errorf("the empty-preset guard was lost where it matters: exit %d %v", code, facts)
@@ -9734,7 +9924,7 @@ func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
 	// survived adopt's teardown while .owner/.fingerprint were correctly removed, so the next
 	// project handed this port silently inherited a dead install's cache strategy.
 	otherKeepalive := filepath.Join(state, "context-guru", "keepalive-"+otherPort+".yaml")
-	if err := os.WriteFile(otherKeepalive, []byte("strategy=5-min-ping\n"), 0o600); err != nil {
+	if err := os.WriteFile(otherKeepalive, []byte("strategy=auto\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -11645,7 +11835,7 @@ func TestTheSpendClauseIsAnswerableByAPersonWhoDoesNotKnowWhatACacheStrategyIs(t
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	q := facts["consent_question"]
-	for _, want := range []string{spendClauseMarker, "5-min-ping", "keep-alive"} {
+	for _, want := range []string{spendClauseMarker, "auto", "keep-alive"} {
 		if !strings.Contains(q, want) {
 			t.Errorf("the question drops %q, so what it costs is no longer in it: %q", want, q)
 		}

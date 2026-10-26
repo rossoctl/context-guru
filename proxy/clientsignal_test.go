@@ -3,12 +3,12 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 func sigPost(h *Handler, body string) int {
@@ -35,7 +35,7 @@ func TestSessionEndRetiresTheHeldEntry(t *testing.T) {
 		t.Errorf("SessionEnd left %d entries held", k.Stats().Live)
 	}
 	clock.advance(290 * time.Second)
-	k.sweep(clock.now())
+	k.Sweep(clock.now())
 	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings after SessionEnd", fs.n())
@@ -86,7 +86,7 @@ func TestCompactRetiresWithoutEndingAndPresenceIsRecordedOnly(t *testing.T) {
 		t.Errorf("compact left an end mark: the next request was not tracked")
 	}
 	clock.advance(290 * time.Second)
-	k.sweep(clock.now())
+	k.Sweep(clock.now())
 	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings, want 1 (the post-compaction entry only)", fs.n())
@@ -109,9 +109,7 @@ func TestCompactRetiresOnlyTheMainThread(t *testing.T) {
 		}
 	}
 	held := func(threadID string) bool {
-		k.mu.Lock()
-		defer k.mu.Unlock()
-		_, ok := k.live[kaThreadKey("t1", "sess-1", threadID)]
+		_, ok := k.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1", Thread: threadID})
 		return ok
 	}
 	hold("")
@@ -147,24 +145,25 @@ func TestLateCompactSignalKeepsThePostCompactionEntry(t *testing.T) {
 	}
 	clock.advance(500 * time.Millisecond)
 	k.signal("t1", "sess-1", "SessionStart", "compact", clock.now())
-	k.mu.Lock()
-	_, oldHeld := k.live[kaThreadKey("t1", "sess-1", "")]
-	_, newHeld := k.live[kaThreadKey("t1", "sess-1", "post")]
-	k.mu.Unlock()
+	_, oldHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+	_, newHeld := k.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1", Thread: "post"})
 	if oldHeld || !newHeld {
 		t.Errorf("late compact event: old prefix held %v (want false), post-compaction held %v (want true)", oldHeld, newHeld)
 	}
 }
 
-// With the flag off nothing changes: the route is absent and a stale mark is ignored.
+// With the flag off nothing changes: the route is absent, so no end mark is made and the next
+// request is held. (main also pinned that a mark made while the flag was on is ignored once it is
+// off; package keepalive has no switch, so a mark it holds always applies. Marks are made only
+// through signal, which the route gates, so that case needs the flag to flip mid-process.)
 func TestSignalsAreInertWhenDisabled(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "off")
 	k, _, clock := testKeeper(t, Limits{})
-	h := &Handler{keeper: k}
-	if c := sigPost(h, `{"session":"s","event":"SessionEnd"}`); c != http.StatusNotFound {
+	h := &Handler{keeper: k, limiter: NewLimiter(Limits{})}
+	h.static.Store(&Tenancy{ID: "t1"})
+	if c := sigPost(h, `{"session":"sess-1","event":"SessionEnd"}`); c != http.StatusNotFound {
 		t.Errorf("disabled route answered %d, want 404", c)
 	}
-	k.ended = map[string]map[string]time.Time{"t1": {kaKey("t1", "sess-1"): clock.now().Add(time.Hour)}}
 	pol := CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MinPrefixTokens: 20000}
 	recordOne(t, k, pol, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
 	if k.Stats().Live != 1 {
@@ -221,7 +220,7 @@ func TestCodexSessionEndMatchesTheSessionIDHeader(t *testing.T) {
 		t.Errorf("an in-flight request re-armed the hold")
 	}
 	clock.advance(290 * time.Second)
-	k.sweep(clock.now())
+	k.Sweep(clock.now())
 	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings after SessionEnd", fs.n())
@@ -311,22 +310,6 @@ func TestSignalNeedsTheTenantsTokenAndCannotReachAnotherTenant(t *testing.T) {
 	}
 }
 
-// One tenant filling its end-mark bucket evicts only its own oldest marks.
-func TestEndMarkCapIsPerTenant(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	now := clock.now()
-	k.mu.Lock()
-	k.markEndedLocked("victim", kaKey("victim", "v"), now)
-	for i := 0; i < maxEndedPerTenant+50; i++ {
-		k.markEndedLocked("noisy", kaKey("noisy", "s"+strconv.Itoa(i)), now.Add(time.Duration(i)*time.Second))
-	}
-	nb, vb := len(k.ended["noisy"]), len(k.ended["victim"])
-	k.mu.Unlock()
-	if nb != maxEndedPerTenant || vb != 1 {
-		t.Errorf("noisy bucket %d (want %d), victim bucket %d (want 1)", nb, maxEndedPerTenant, vb)
-	}
-}
-
 // The limiter applies: a tenant over its request rate gets 429, not a retire.
 func TestSignalIsMetered(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
@@ -382,9 +365,7 @@ func TestRawPayloadAndCodexAliasKeepSubagentsOnCompact(t *testing.T) {
 		}
 	}
 	held := func(threadID string) bool {
-		k.mu.Lock()
-		defer k.mu.Unlock()
-		_, ok := k.live[kaThreadKey("t1", "t1:sha-of-content", threadID)]
+		_, ok := k.Entry(keepalive.Key{Tenant: "t1", Session: "t1:sha-of-content", Thread: threadID})
 		return ok
 	}
 	hold("")

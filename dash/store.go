@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
+	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
 // memSeq names in-memory databases uniquely. See Open.
@@ -28,6 +29,9 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
+	// checks it; SQLite's mode=ro and query_only refuse any other.
+	readOnly bool
 	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
 	// costing the process. nil means context.Background().
 	//
@@ -280,6 +284,100 @@ func openDSN(d, path string) (*DB, error) {
 	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
 }
 
+// OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
+// beside a live proxy, which owns the file.
+//
+// Open is not safe for that: it migrates the schema (additive DDL, new columns), stamps the
+// version, checkpoints the WAL, and on a version mismatch RENAMES the file aside. Any of those
+// against a database a serving process holds is a write the operator never asked for. This opens
+// with SQLite's mode=ro and query_only, runs none of them, and REFUSES a database whose schema
+// version is not this build's: a reader cannot migrate, and a query written for one schema read
+// against another returns wrong numbers rather than an error.
+//
+// mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" || path == ":memory:" {
+		return nil, errors.New("dash: OpenReadOnly needs a database file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&cg_ro=1")
+	if err != nil {
+		return nil, err
+	}
+	// A reader beside a live proxy: a handful of connections, never the 100 the writer's pool
+	// holds, so an analysis cannot crowd the serving process off its own file.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
+	var have string
+	if err := sdb.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("dash: read-only open: %w", err)
+	}
+	if have != fmt.Sprint(schemaVersion) {
+		sdb.Close()
+		return nil, &versionMismatch{have: have}
+	}
+	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
+// file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
+// query with "no such column" would break a reader (the cache-campaign tool opens live databases
+// this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
+// view named `requests` that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified `requests` resolves to the shim; the view is per connection and
+// writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
+// last, because it forbids creating even a temp object.
+//
+// The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "cg_ro=1") {
+			return nil
+		}
+		ctx := context.Background()
+		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests')`, nil)
+		if err != nil {
+			return err
+		}
+		have := map[string]bool{}
+		vals := make([]driver.Value, 1)
+		for rows.Next(vals) == nil {
+			if n, ok := vals[0].(string); ok {
+				have[n] = true
+			}
+		}
+		rows.Close()
+		var extra string
+		for _, c := range additiveColumns {
+			if c.table == "requests" && !have[c.column] {
+				extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+			}
+		}
+		if extra != "" && len(have) > 0 {
+			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
+				return err
+			}
+		}
+		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		return err
+	})
+}
+
+// additiveDefault is the literal a missing additive column reads as: its DEFAULT, else NULL (a
+// column declared without one, like keepalive_strategy_id, reads NULL on an old row).
+func additiveDefault(ddl string) string {
+	if _, def, ok := strings.Cut(ddl, "DEFAULT "); ok {
+		return strings.TrimSpace(def)
+	}
+	return "NULL"
+}
+
 // sanitizeVersion keeps a version string safe to embed in a filename.
 func sanitizeVersion(v string) string {
 	v = strings.Map(func(r rune) rune {
@@ -359,10 +457,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
-		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
+		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
+		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -426,6 +526,17 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
+			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,
+			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
+			// point before the value is on disk and on the SSE feed, and a path is a
+			// client-chosen string that could be named after a credential.
+			ProjectPath(e.Project),
+			/* Allow-listed rather than stored as given: this is the field every honesty rule
+			 * downstream keys off, so an unrecognised value must not quietly become a third
+			 * kind of row. Anything but the one known marker records as measured, which is the
+			 * safe direction — it claims LESS about the row. */
+			sourceOf(e.Source),
+			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
 		)
 		if err != nil {
 			return err
@@ -563,7 +674,20 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 	var deleted int64
 	if maxAge > 0 {
 		cutoff := now.Add(-maxAge).UnixMilli()
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
+		// IMPORTED HISTORY IS EXEMPT FROM THE AGE RULE, and that exemption is the difference
+		// between the import being useful and being pointless.
+		//
+		// Imported rows are old BY DEFINITION — being old is the only reason to import them — so
+		// an age rule that applies to them deletes the whole import on the next janitor pass.
+		// Observed: a live import wrote 5,379 rows and the next pass deleted 5,362, leaving the
+		// seventeen that happened to fall inside the seven-day window. The dashboard then showed
+		// a one-week span and looked as though the import had found almost nothing.
+		//
+		// Age is simply the wrong question for them. A measured row ages out because the traffic
+		// behind it keeps coming and the recent rows are the ones that matter; an imported row is
+		// a one-off recovery of something nobody can re-fetch once it is gone. The BYTE rule
+		// below still applies to both, because disk pressure is real regardless of provenance.
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ? AND source = ''`, cutoff)
 		if err != nil {
 			return deleted, err
 		}
@@ -670,7 +794,7 @@ func (d *DB) reclaim() error {
 // checkpoint folds the write-ahead log into the main database and truncates it.
 // Best-effort: a busy checkpoint is not a failure, only a deferral.
 func (d *DB) checkpoint() {
-	if d.path == "" || d.path == ":memory:" {
+	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
 	}
 	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)

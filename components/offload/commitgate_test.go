@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -36,11 +37,13 @@ import (
 // decisionPrefixes are the namespaces whose contents assert that a removal HAPPENED. A write to
 // any of them for a removal that was refused is the defect above.
 var decisionPrefixes = []string{
-	store.ResultPrefix,  // cg:res:  extract_llm / sweep replayed decision
-	store.XResultPrefix, // cg:xres: the cross-session copy
-	store.FrozenPrefix,  // cg:frz:  mask / collapse / skeleton / ... freeze
-	"cg:own:",           // stash ownership — asserts a payload of ours is in the store
-	"cg:sum:",           // summarize's checkpoint
+	store.ResultPrefix,      // cg:res:  extract_llm / sweep replayed decision
+	store.XResultPrefix,     // cg:xres: the cross-session copy
+	store.FrozenPrefix,      // cg:frz:  mask / collapse / skeleton / ... freeze
+	"cg:own:",               // stash ownership — asserts a payload of ours is in the store
+	"cg:sum:",               // summarize's checkpoint
+	store.SweepDropPrefix,   // cg:swd: the sweep's applied-drop record and its per-thread index
+	store.SweepExpandPrefix, // cg:swx: marker id -> drop record, for charging an expand to the sweep
 }
 
 // spyStore refuses every rewind payload and records every other write, so a test can ask "what
@@ -228,12 +231,20 @@ func gateCases() []gateCase {
 			return e, req, pricedCtx("gate-table", st, model)
 		}},
 		{"extract_llm_sweep", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
-			asker := &labelAsker{verdict: "drop", needed: "none"}
-			asker.cacheRead = 19595
+			// The cold apply (#404 PR C) makes the sweep a remover again. Driven to the commit gate: a
+			// held answer is seeded through the real ping path, then a COLD request applies it. Seeded
+			// into whichever store the case is given, so the saturated run holds the same answer and
+			// is refused at the payload, not at the question.
+			resetSweepLedgerForTest()
+			t.Cleanup(resetSweepLedgerForTest)
 			e := newSweepSmall(t, "")
-			c := preExpiryCtx("gate-table-sweep", asker, st)
-			c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
-			return e, sweepReqStocked(), c
+			key, _ := registered(t, e, "gate-sweep", pingAsker(), st, applyConv(2, 0))
+			dispatch, _, reason, ok := SweepPingSubstitute(key)
+			if !ok {
+				t.Fatalf("no question offered: %s", reason)
+			}
+			dispatch(time.Second, SweepPingWait{})
+			return e, applyConv(2, 1), coldCtx("gate-sweep", st)
 		}},
 		{"cmdfilter", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCmdfilter([]byte("min_size: 1\n"))

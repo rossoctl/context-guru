@@ -17,6 +17,9 @@ type SavingsTotals struct {
 	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
 
+	// ManualPings is the user's own pings, a category of its own (see ManualPings).
+	ManualPings ManualPings `json:"manual_pings"`
+
 	TotalSavedUSD float64 `json:"total_saved_usd"`
 }
 
@@ -30,22 +33,28 @@ type SavingsTotals struct {
 func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 	cond, args := f.where()
 	s := &SavingsTotals{}
+	// kaSavedSince on the saving line, because the ping COST below is summed inside the same
+	// window: a ping just before `since` must not credit a row just after it while its cost
+	// stays outside the window (#678).
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
-		COALESCE(SUM(r.cachesplit_saved_usd),0), COALESCE(SUM(`+kaSaved("r.")+`),0)
+		COALESCE(SUM(r.cachesplit_saved_usd),0), COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&s.CostUSD, &s.BaselineCostUSD, &s.CGLLMCostUSD, &s.CachesplitSavedUSD, &s.KeepAliveSavedUSD)
 	if err != nil {
 		return nil, err
 	}
 	kaCond, kaArgs := withKeepAlive(f).where()
+	var manual manualAgg
 	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
-		FROM requests r WHERE `+kaCond, kaArgs...).Scan(&s.KeepAlivePingUSD); err != nil {
+		COALESCE(SUM(CASE WHEN `+autoPing+` THEN r.cost_usd ELSE 0 END),0), `+manualSelect+`
+		FROM requests r WHERE `+kaCond, kaArgs...).Scan(append([]any{&s.KeepAlivePingUSD}, manual.dest()...)...); err != nil {
 		return nil, err
 	}
+	s.ManualPings = manual.pings()
 	s.NetSavedUSD, s.KeepAliveNetUSD, s.TotalSavedUSD = savingsArithmetic(
-		s.CostUSD, s.BaselineCostUSD, s.CGLLMCostUSD, s.CachesplitSavedUSD, s.KeepAliveSavedUSD, s.KeepAlivePingUSD)
+		s.CostUSD, s.BaselineCostUSD, s.CGLLMCostUSD, s.CachesplitSavedUSD, s.KeepAliveSavedUSD, s.KeepAlivePingUSD,
+		s.ManualPings.SavedUSD)
 	return s, nil
 }
 
@@ -53,9 +62,12 @@ func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 // shared by SavingsTotals and Overview so the two can never disagree about what "total
 // saved" means. See Overview's own KeepAliveNetUSD/TotalSavedUSD field comments for why
 // each term is signed the way it is.
-func savingsArithmetic(cost, baseline, cgllm, cachesplitSaved, kaSaved, kaPing float64) (net, kaNet, total float64) {
+//
+// manualNet is the user's own pings' saved-minus-cost (ManualPings.SavedUSD, already net). It is its own addend and
+// not part of kaNet, so the cache strategy's net stays the strategy's.
+func savingsArithmetic(cost, baseline, cgllm, cachesplitSaved, kaSaved, kaPing, manualNet float64) (net, kaNet, total float64) {
 	net = baseline - cost - cgllm
 	kaNet = kaSaved - kaPing
-	total = net + cachesplitSaved + kaNet
+	total = net + cachesplitSaved + kaNet + manualNet
 	return net, kaNet, total
 }
