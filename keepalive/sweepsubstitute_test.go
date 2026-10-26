@@ -313,7 +313,9 @@ func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
-	// A big output that is already a marker: it registers, and offers nothing.
+	// A big output that is already a marker: it registers, and offers nothing. The marker is real,
+	// so its original is stashed (text that only quotes marker syntax is a candidate, #721).
+	st.Put("abcdef0", []byte("the stashed original"))
 	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
 		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	before := k.Stats().SweepNoInventory
@@ -494,6 +496,7 @@ func TestAClaimedPingFreesTheThreadAndTheSlotOnEveryExit(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	small := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&small, "hello")
+	st.Put("abcdef0", []byte("the stashed original"))
 	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
 		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
@@ -761,4 +764,14 @@ func sess1Entry(k *Keeper) *kaEntry {
 		return e
 	}
 	return &kaEntry{}
+}
+
+// #721: the keeper hands the sweep the cache_read of the real turn that made the entry.
+func TestSweepWaitCauseCarriesTheTurnsRead(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	e := &kaEntry{turnRead: 25512}
+	got := k.sweepWaitCause(pingJob{e: e})
+	if got.LastTurnRead != 25512 {
+		t.Fatalf("LastTurnRead = %d, want 25512", got.LastTurnRead)
+	}
 }

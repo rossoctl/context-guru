@@ -903,22 +903,29 @@ func TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit(t *testing.T) {
 	asker.cacheRead = 39805 // a real partial hit, so CacheRead == 0 is FALSE
 	asker.cacheWrite = 260604
 	e := newSweepSmall(t, "")
-	rep := &components.Report{}
-	if _, err := askOffload(e, sweepReq(), rep,
-		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	if _, err := e.Offload(sweepReq(), &components.Report{}, c); err != nil {
 		t.Fatal(err)
 	}
+	key := thread.Key(c.Session, c.Thread)
+	defer clearSweepPing(key)
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	// Since #721 the write alone decides nothing: the partial hit is caught because it read far less
+	// than the turn it followed (here 300,000), which is what a rebuilt prefix looks like.
+	res := dispatch(time.Second, SweepPingWait{LastTurnRead: 300000})
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected ONE ask, got %d (gates: %v)", n, rep.Gates)
+		t.Fatalf("expected ONE ask, got %d (gates: %v)", n, res.Gates)
 	}
-	if rep.Gates["sweep_prefix_cache_write"] == 0 {
-		t.Errorf("an ask that re-created the agent's prefix for %d tokens recorded nothing "+
-			"(gates: %v)", asker.cacheWrite, rep.Gates)
+	if res.Gates["sweep_prefix_cache_read_below_turn"] == 0 {
+		t.Errorf("an ask that read 39805 of a 300000 turn recorded nothing (gates: %v)", res.Gates)
 	}
-	// And the pre-existing zero-read counter must NOT fire, because the read did happen. The two
-	// name different failures and collapsing them would lose the distinction the fix is for.
-	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 0 {
-		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", rep.Gates)
+	// And the zero-read counter must NOT fire, because the read did happen. The two name different
+	// failures and collapsing them would lose the distinction the fix is for.
+	if res.Gates["sweep_prefix_cache_read_ZERO"] != 0 {
+		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", res.Gates)
 	}
 }
 

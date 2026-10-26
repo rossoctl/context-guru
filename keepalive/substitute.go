@@ -319,14 +319,14 @@ func (k *Keeper) projectedSweepUSD(model, endpoint string, prefix int64) float64
 func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	e := j.e
 	k.mu.Lock()
-	names, stop, usageOK := e.toolUseNames, e.stopReason, e.usageOK
+	names, stop, usageOK, turnRead := e.toolUseNames, e.stopReason, e.usageOK, e.turnRead
 	k.mu.Unlock()
 	bg, tm := 0, 0
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
 	}
 	waitingFor, tool := waitcause.ClassifyWaitingFor(names, stop, false, usageOK, bg, tm)
-	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool}
+	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 
 // fireSweepSubstitute sends extract_llm_sweep's question instead of this due ping (#404). Returns true

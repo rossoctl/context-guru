@@ -467,7 +467,12 @@ optimises would invalidate those measurements rather than improve them.
 
 `PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
 **always counted** (`sweep_prefix_cache_read_ZERO`) — a silent miss looks identical to a working call
-except on the bill.
+except on the bill. A read **below the last real turn's read** is counted too
+(`sweep_prefix_cache_read_below_turn`): the question lost part of a prefix that turn could still read,
+as a model switch does. The owner chose the read rule only (2026-10-26), so a write alone is
+not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `sweep_prefix_cache_write`,
+exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
+question writes some tail; the read, not the write alone, shows the prefix held (#721).
 
 It then **declines**: there is no fallback (#404). A question that reads nothing, or that writes the
 agent's prefix again, is not acted on and the ordinary ping goes out. A failed prefix ask is logged at
@@ -575,7 +580,7 @@ Diagnostics, visible at `/stats` under the component and as
 `sweep_unparseable`, `sweep_reply_truncated` (a different fix from unparseable: raise the budget, not
 the prompt), `sweep_verdict_unusable`, `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`,
 `sweep_verdict_missing`, `sweep_prefix_cache_read_ok`, `sweep_prefix_cache_read_ZERO`,
-`sweep_prefix_cache_write`, `sweep_no_asker`, `sweep_no_prefix`, `sweep_stale_prefix`,
+`sweep_prefix_cache_write`, `sweep_prefix_cache_read_below_turn`, `sweep_no_asker`, `sweep_no_prefix`, `sweep_stale_prefix`,
 `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything` (a deliberate keep-all, which is
 **not** a failure) and `sweep_drop_would_not_shrink`.
 

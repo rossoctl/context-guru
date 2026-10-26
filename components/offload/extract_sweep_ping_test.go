@@ -160,11 +160,13 @@ func TestNoCandidatesMeansNoQuestion(t *testing.T) {
 		t.Fatalf("ok=%v reason=%q, want no_candidate (nothing was big enough to register)", ok, reason)
 	}
 	marked := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("go")}}
+	markedStore := newMemStore()
 	for i := 0; i < 2; i++ {
+		markedStore.Put(fmt.Sprintf("abcdef%d", i), []byte("the stashed original")) // a real marker has one
 		marked.Input = append(marked.Input, toolResultMsgWithID(fmt.Sprintf("toolu_m%d", i),
 			strings.Repeat("a spent line\n", 900)+expand.Marker(fmt.Sprintf("abcdef%d", i))))
 	}
-	key2, _ := registered(t, e, "ping-marked", pingAsker(), newMemStore(), marked)
+	key2, _ := registered(t, e, "ping-marked", pingAsker(), markedStore, marked)
 	if _, _, reason, ok := SweepPingSubstitute(key2); ok || reason != SweepReasonNoInventory {
 		t.Fatalf("ok=%v reason=%q, want no_inventory (big outputs, all already markers)", ok, reason)
 	}
@@ -1061,5 +1063,91 @@ func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
 	done.Wait()
 	if rechecks.Load() != 1 {
 		t.Fatalf("%d of %d concurrent cold requests reported the recheck, want exactly 1", rechecks.Load(), n)
+	}
+}
+
+// #721: the sweep judges the question by what it READ against the last turn's read, not by its write.
+func TestThePingGateJudgesTheReadAgainstTheLastTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		read, write, turn int
+		held              bool
+		gate              string
+	}{
+		{"A5: read equals the turn's, small write", 25512, 53, 25512, true, ""},
+		{"a tail write after a text turn is fine", 25516, 83, 25516, true, ""},
+		{"model switch: read far below the turn", 13440, 12000, 41886, false, "sweep_prefix_cache_read_below_turn"},
+		{"read of zero", 0, 0, 25512, false, "sweep_prefix_cache_read_ZERO"},
+		{"large write with a good read is accepted: the cap ships off", 25512, 12142, 25512, true, ""},
+		{"unknown turn read: read above 0 and a small write pass", 13440, 100, 0, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker := pingAsker()
+			asker.cacheRead, asker.cacheWrite = tc.read, tc.write
+			e := shippedSweep(t, "")
+			key, _ := registered(t, e, "gate-721-"+tc.name, asker, newMemStore(), deepCandidates(2))
+			dispatch, _, reason, ok := SweepPingSubstitute(key)
+			if !ok {
+				t.Fatalf("no question offered (reason %q)", reason)
+			}
+			res := dispatch(time.Second, SweepPingWait{WaitingFor: "own_tool", WaitTool: "Bash", LastTurnRead: tc.turn})
+			if res.Held != tc.held {
+				t.Fatalf("held = %v, want %v (gates %v)", res.Held, tc.held, res.Gates)
+			}
+			if tc.gate != "" && res.Gates[tc.gate] == 0 {
+				t.Errorf("gate %s not recorded (gates %v)", tc.gate, res.Gates)
+			}
+			if tc.gate == "" && res.Gates["sweep_prefix_cache_write"] != 0 {
+				t.Errorf("a write was refused as a rebuild (gates %v)", res.Gates)
+			}
+		})
+	}
+}
+
+// #721: a tool output that QUOTES marker text is a candidate. A marker the sweep made is not.
+func TestThePingOffersAnOutputThatOnlyQuotesAMarker(t *testing.T) {
+	st := newMemStore()
+	req := deepCandidates(2)
+	quote := "grep result: <<cg:notinstore123>> appears in expand.go\n"
+	real := "<<cg:realmarker456>>\n"
+	st.Put("realmarker456", []byte("the original"))
+	req.Input[1] = toolResultMsgWithID("toolu_wire_0", quote+strings.Repeat("candidate 0 distinct line\n", 900))
+	req.Input[2] = toolResultMsgWithID("toolu_wire_1", real+strings.Repeat("candidate 1 distinct line\n", 900))
+	asker := pingAsker()
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "quote-721", asker, st, req)
+	dispatch, info, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	if info.Offered != 1 {
+		t.Fatalf("offered %d, want exactly the quoting output", info.Offered)
+	}
+	_ = dispatch
+}
+
+// #725 review: the write the gate judges is the bridge plus the turn's text-turn tail, never the
+// ask. Built from the REAL ask: it is hundreds of tokens, far over the cap, so the question is only
+// accepted because the ask stays fresh input after the breakpoint.
+func TestThePingGateWriteExcludesTheRealAsk(t *testing.T) {
+	asker := pingAsker()
+	asker.cacheRead, asker.cacheWrite = 25516, 0
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "real-ask-725", asker, newMemStore(), deepCandidates(2))
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	dispatch(time.Second, SweepPingWait{LastTurnRead: 25516})
+	askTokens := schema.TextTokens(asker.ask())
+	if askTokens < 300 {
+		t.Fatalf("the real ask is only %d tokens; the premise of the cap is gone", askTokens)
+	}
+	bridge := schema.TextTokens("Understood.")
+	if ok, why := prefixAskJudge(components.PrefixUsage{CacheRead: 25516, CacheWrite: bridge + 20}, 25516, true); !ok {
+		t.Errorf("a bridge-sized write was refused: %s", why)
+	}
+	if ok, _ := prefixAskJudge(components.PrefixUsage{CacheRead: 25516, CacheWrite: askTokens}, 25516, true); ok {
+		t.Errorf("a write of the whole ask (%d tokens) was accepted: the cap (forced on here) no longer separates the shapes", askTokens)
 	}
 }

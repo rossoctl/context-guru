@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -421,5 +422,99 @@ func TestInsertAskMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #721: the last message's breakpoint moves onto what is appended; nothing else changes.
+func TestInsertAskMessageMovesTheTrailingBreakpoint(t *testing.T) {
+	const early = `{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}`
+	count := func(b []byte) int { return len(gjson.GetBytes(b, "messages.#.cache_control").Array()) + bpInBlocks(b) }
+	for _, tc := range []struct {
+		name, last, cc string
+		bridge         bool
+	}{
+		{"system, string content", `{"role":"system","content":"r","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`, true},
+		{"system, block content", `{"role":"system","content":[{"type":"text","text":"r","cache_control":{"type":"ephemeral"}}]}`, `{"type":"ephemeral"}`, true},
+		{"system, 1h ttl", `{"role":"system","content":"r","cache_control":{"type":"ephemeral","ttl":"1h"}}`, `{"type":"ephemeral","ttl":"1h"}`, true},
+		{"user, block content", `{"role":"user","content":[{"type":"text","text":"u","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`, `{"type":"ephemeral","ttl":"1h"}`, true},
+		{"user, string content", `{"role":"user","content":"u","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(`{"model":"m","messages":[` + early + `,` + tc.last + `]}`)
+			out, err := insertAskMessage(in, "ask")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count(out) != count(in) {
+				t.Errorf("breakpoint count %d -> %d: %s", count(in), count(out), out)
+			}
+			msgs := gjson.GetBytes(out, "messages").Array()
+			if msgs[0].Raw != early {
+				t.Errorf("an earlier message changed: %s", msgs[0].Raw)
+			}
+			if strings.Contains(msgs[1].Raw, "cache_control") {
+				t.Errorf("the old last message keeps its breakpoint: %s", msgs[1].Raw)
+			}
+			carrier := msgs[len(msgs)-1]
+			if tc.bridge {
+				carrier = msgs[len(msgs)-2]
+			}
+			if got := carrier.Get("content.0.cache_control").Raw; got != tc.cc {
+				t.Errorf("carrier cache_control = %q, want %q: %s", got, tc.cc, out)
+			}
+			if carrier.Get("content.0.text").String() != "Understood." || carrier.Get("role").String() != "assistant" {
+				t.Errorf("breakpoint not on the assistant bridge: %s", out)
+			}
+			if last := msgs[len(msgs)-1]; last.Get("content").String() != "ask" || strings.Contains(last.Raw, "cache_control") {
+				t.Errorf("the ask is not a plain string without a breakpoint (#725): %s", last.Raw)
+			}
+		})
+	}
+}
+
+func bpInBlocks(b []byte) int {
+	n := 0
+	for _, m := range gjson.GetBytes(b, "messages").Array() {
+		for _, bl := range m.Get("content").Array() {
+			if bl.Get("cache_control").Exists() {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+func TestInsertAskMessageAddsNoBreakpointWhenTheLastHasNone(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"user","content":"a"},{"role":"system","content":"r"}]}`)
+	out, err := insertAskMessage(in, "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "cache_control") {
+		t.Errorf("a breakpoint appeared: %s", out)
+	}
+	if gjson.GetBytes(out, "messages.2.content").String() != "Understood." {
+		t.Errorf("bridge content is not a plain string: %s", out)
+	}
+}
+
+// #725 review: a trailing user message WITHOUT a breakpoint needs no bridge; a trailing assistant
+// message keeps its breakpoint where it is and the ask follows it directly.
+func TestInsertAskMessageBridgeOnlyWhereABreakpointMoves(t *testing.T) {
+	out, err := insertAskMessage([]byte(`{"messages":[{"role":"user","content":"a"}]}`), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(gjson.GetBytes(out, "messages").Array()); n != 2 {
+		t.Errorf("a plain trailing user message got a bridge: %s", out)
+	}
+	asst := `{"role":"assistant","content":[{"type":"text","text":"done","cache_control":{"type":"ephemeral"}}]}`
+	out, err = insertAskMessage([]byte(`{"messages":[{"role":"user","content":"a"},`+asst+`]}`), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 || msgs[1].Raw != asst || strings.Contains(msgs[2].Raw, "cache_control") {
+		t.Errorf("assistant-last shape changed: %s", out)
 	}
 }

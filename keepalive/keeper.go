@@ -119,6 +119,9 @@ type kaEntry struct {
 	// prefix is what the previous request billed (cache_read + cache_write) — the size of the
 	// entry a ping would refresh, and therefore the input to both the gate and the cost guard.
 	prefix int64
+	// turnRead is the cache_read of the real turn that made this entry. The sweep's question must
+	// read at least this much (#721).
+	turnRead int64
 	// stopReason is the request that established this entry's own terminal stop reason
 	// (Usage.StopReason) — present tense, not a prediction. Read only by pol.PredictorID's
 	// gate in pingable(); "" on every entry until a strategy actually names a predictor.
@@ -822,7 +825,7 @@ func (k *Keeper) Record(r Record) {
 		st:       r.Store,
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
-		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, stopReason: u.StopReason,
+		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK,
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,

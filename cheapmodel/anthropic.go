@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -220,8 +221,9 @@ type PrefixUsage struct {
 //     last message is a `role: system` mid-conversation reminder — which Claude Code sends on
 //     effectively every turn — appending the ask directly after it is a guaranteed 400 ("role
 //     'system' must precede an 'assistant' message or end the array"). insertAskMessage leaves
-//     that system message exactly where it is and appends a short synthetic assistant turn plus
-//     the ask after it, never touching or reordering a single existing byte.
+//     that system message where it is and appends a short synthetic assistant turn plus the ask
+//     after it. The only existing byte it changes is the last message's cache_control, which moves
+//     onto the appended message (#721); everything before that message is byte-identical.
 //
 // Everything else about the body is preserved untouched, because every byte before the appended
 // message is prefix and any edit to it costs the cache read this method exists for. `stream` is the
@@ -376,7 +378,31 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 // insertAskMessage appends `ask` as a new user message to prefixBody's `messages` array. When the
 // array's own last message is a `role: system` mid-conversation reminder, it first appends ONE
 // short synthetic assistant turn ("Understood.") so the result stays a VALID Anthropic request.
-// Nothing already in the array is ever reordered, edited, or removed — only ever appended to.
+// Nothing already in the array is reordered or removed. The ONE edit is the last message's
+// breakpoint, which moves (see the next paragraph); every other byte before the appended messages
+// is untouched.
+//
+// THE LAST MESSAGE'S BREAKPOINT MOVES ONTO WHAT IS APPENDED (#721). Claude Code 2.1.310 puts its
+// last cache_control on the trailing system reminder, and in -p/--resume mode that is the only
+// breakpoint in `messages`. Left there, it stops the provider matching the turn's cache entry
+// once the system message is no longer last: the question rewrote the whole conversation.
+// Replayed against the gateway on one real body:
+//
+//	question as built before:                    read 13,446 (system + tools only), wrote 12,142
+//	breakpoint moved onto "Understood.":         read 25,588 (the whole turn entry), wrote 6
+//	breakpoint on the ask:                       read 25,588, wrote 20
+//
+// So the breakpoint is removed from the last message and the SAME cache_control object (ttl
+// included) is put on the bridge. It sits on a text block, the form the API documents. A last
+// message with no breakpoint gets none added, so the count never goes up.
+//
+// THE BREAKPOINT NEVER GOES ON THE ASK (#725 review). The cache write covers everything up to the
+// breakpoint, so a breakpoint on the ask writes the whole ask: about 1,000 to 1,400 tokens of
+// adjudication contract and inventory, paid at the write rate on every question. On the short
+// bridge the write is a few tokens and the ask stays fresh input. So a trailing USER message that
+// carries a breakpoint also gets the bridge (user, assistant "Understood.", user is a legal
+// sequence), and the breakpoint lands on it. A trailing user message with no breakpoint gets no
+// bridge, and a trailing assistant message keeps its breakpoint where it is.
 //
 // WHY A TRAILING SYSTEM MESSAGE CANNOT BE FOLLOWED BY THE ASK DIRECTLY. Anthropic's own rule —
 // this codebase already enforces it offline, see schema.ValidateShapeFor's RuleSystemPosition and
@@ -431,35 +457,104 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	for _, m := range msgs {
 		parts = append(parts, m.Raw)
 	}
-	if bridge := lastBridge(msgs); bridge != "" {
-		understoodJSON, err := json.Marshal(map[string]any{"role": "assistant", "content": bridge})
+	lastRole := ""
+	if n := len(msgs); n > 0 {
+		lastRole = msgs[n-1].Get("role").String()
+	}
+	// Move the last message's breakpoint (if it has one) onto the bridge. Only a system or user
+	// last message is touched: after an assistant message the ask follows directly and the
+	// breakpoint stays where it is.
+	var moved gjson.Result
+	if lastRole == "system" || lastRole == "user" {
+		var stripped string
+		if stripped, moved = takeLastBreakpoint(parts[len(parts)-1]); moved.Exists() {
+			parts[len(parts)-1] = stripped
+		}
+	}
+	if bridge := askBridgeFor(lastRole, moved.Exists()); bridge != "" {
+		understoodJSON, err := marshalAppended("assistant", bridge, moved)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, string(understoodJSON))
+		parts = append(parts, understoodJSON)
 	}
-	askJSON, err := json.Marshal(map[string]any{"role": "user", "content": ask})
+	askJSON, err := marshalAppended("user", ask, gjson.Result{})
 	if err != nil {
 		return nil, err
 	}
-	parts = append(parts, string(askJSON))
+	parts = append(parts, askJSON)
 	return sjson.SetRawBytes(prefixBody, "messages", []byte("["+strings.Join(parts, ",")+"]"))
 }
 
-// lastBridge is AskBridge for the last message's role, or "" for an empty transcript.
-func lastBridge(msgs []gjson.Result) string {
-	if len(msgs) == 0 {
-		return ""
+// askBridgeFor is the bridge text for a last message of role lastRole, given whether a breakpoint
+// moves with it. A trailing system message always needs one (the position rule). A trailing user
+// message needs one only when it carries a breakpoint to move, so the breakpoint lands on a short
+// message and the ask stays fresh input; see insertAskMessage.
+func askBridgeFor(lastRole string, hasBreakpoint bool) string {
+	if b := AskBridge(lastRole); b != "" {
+		return b
 	}
-	return AskBridge(msgs[len(msgs)-1].Get("role").String())
+	if lastRole == "user" && hasBreakpoint {
+		return askBridgeText
+	}
+	return ""
 }
+
+// takeLastBreakpoint removes the breakpoint a message carries and returns the message without it,
+// plus the cache_control object it held (verbatim, so a ttl survives). The breakpoint sits on the
+// message itself (string content) or on the last content block that has one (array content). A
+// message with none is returned untouched and the result does not Exist. Any failure to edit
+// leaves the message untouched: the question is then asked unmoved, as before #721.
+func takeLastBreakpoint(msg string) (string, gjson.Result) {
+	if cc := gjson.Get(msg, "cache_control"); cc.Exists() {
+		if out, err := sjson.Delete(msg, "cache_control"); err == nil {
+			return out, cc
+		}
+		return msg, gjson.Result{}
+	}
+	blocks := gjson.Get(msg, "content")
+	if !blocks.IsArray() {
+		return msg, gjson.Result{}
+	}
+	arr := blocks.Array()
+	for i := len(arr) - 1; i >= 0; i-- {
+		if cc := arr[i].Get("cache_control"); cc.Exists() {
+			if out, err := sjson.Delete(msg, "content."+strconv.Itoa(i)+".cache_control"); err == nil {
+				return out, cc
+			}
+			return msg, gjson.Result{}
+		}
+	}
+	return msg, gjson.Result{}
+}
+
+// marshalAppended renders one appended message. With a breakpoint to carry, the content becomes a
+// single text block holding it; without one, the content stays a plain string.
+func marshalAppended(role, text string, cc gjson.Result) (string, error) {
+	if !cc.Exists() {
+		b, err := json.Marshal(map[string]any{"role": role, "content": text})
+		return string(b), err
+	}
+	blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
+	if err != nil {
+		return "", err
+	}
+	blkWith, err := sjson.SetRawBytes(blk, "cache_control", []byte(cc.Raw))
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(map[string]any{"role": role, "content": []json.RawMessage{blkWith}})
+	return string(b), err
+}
+
+const askBridgeText = "Understood."
 
 // AskBridge returns the assistant text to insert between a last message of role lastRole and an
 // appended user question, or "" when the question may follow directly. Only a trailing `system`
 // message needs one; see insertAskMessage for why.
 func AskBridge(lastRole string) string {
 	if lastRole == "system" {
-		return "Understood."
+		return askBridgeText
 	}
 	return ""
 }
