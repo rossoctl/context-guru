@@ -469,8 +469,9 @@ optimises would invalidate those measurements rather than improve them.
 **always counted** (`sweep_prefix_cache_read_ZERO`) — a silent miss looks identical to a working call
 except on the bill. A read **below the last real turn's read** is counted too
 (`sweep_prefix_cache_read_below_turn`): the question lost part of a prefix that turn could still read,
-as a model switch does. A write above min(2% of the prefix, 2,000 tokens) is counted as
-`sweep_prefix_cache_write`. The provider never reads an entry that ends at a text turn, so a correct
+as a model switch does. The owner chose the read rule only (2026-10-26), so a write alone is
+not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `sweep_prefix_cache_write`,
+exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
 question writes some tail; the read, not the write alone, shows the prefix held (#721).
 
 It then **declines**: there is no fallback (#404). A question that reads nothing, or that writes the

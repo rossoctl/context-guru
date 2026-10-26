@@ -39,12 +39,16 @@ func TestPrefixAskCacheOK(t *testing.T) {
 	}
 }
 
-// The shipped switch is on, so the shipped decision applies the cap (#721).
-func TestPrefixAskCacheOKShipsWithTheCapOn(t *testing.T) {
-	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25512, CacheWrite: 12142}, 25512); ok || why != prefixAskWriteOverCap {
-		t.Fatalf("got (%v, %q), want the cap to refuse a 12,142 write", ok, why)
+// The owner chose the read rule only (2026-10-26, #721): the cap ships OFF, so a large write is
+// accepted when the read is good. The cap rows above force it on through prefixAskJudge.
+func TestPrefixAskCacheOKShipsWithTheCapOff(t *testing.T) {
+	if prefixAskWriteCapEnabled {
+		t.Fatal("the write cap must ship off")
 	}
-	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: 300}, 25516); !ok {
-		t.Fatalf("a typed-prompt tail write of 300 was refused: %q", why)
+	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25512, CacheWrite: 12142}, 25512); !ok {
+		t.Fatalf("a large write with a good read was refused: %q", why)
+	}
+	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 13440, CacheWrite: 12000}, 41886); ok || why != prefixAskReadBelowTurn {
+		t.Fatalf("got (%v, %q), the read rule must still refuse a model switch", ok, why)
 	}
 }

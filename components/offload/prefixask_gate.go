@@ -2,7 +2,7 @@ package offload
 
 import "github.com/rossoctl/context-guru/components"
 
-// The write cap for a prefix-ask answer. Used only when prefixAskWriteCapEnabled is true.
+// The write cap for a prefix-ask answer. Off as shipped; used only when prefixAskWriteCapEnabled is true.
 const (
 	// prefixAskWriteCapFrac is the largest write, as a share of the prefix the question read and
 	// wrote, that still counts as the turn's own unreadable tail.
@@ -11,13 +11,14 @@ const (
 	prefixAskWriteCapMax = 2000
 )
 
-// prefixAskWriteCapEnabled switches the write cap. The cap ships on, but the owner has not confirmed
-// its numbers (#721), so it is one constant: set it false to drop the cap without a rewrite.
+// prefixAskWriteCapEnabled switches the write cap. The owner chose the read rule only on 2026-10-26
+// (#721), so the cap ships OFF. The code and its constants stay: set this true to turn it on.
 //
-// The cap assumes the question's breakpoint sits on the short bridge, so the ask is fresh input and
-// the write is a few tokens plus the turn's text-turn tail (cheapmodel.insertAskMessage). It would
-// refuse every question if the breakpoint sat on the ask, which writes the whole ask (#725).
-const prefixAskWriteCapEnabled = true
+// If turned on, the cap assumes the question's breakpoint sits on the short bridge, so the ask is
+// fresh input and the write is a few tokens plus the turn's text-turn tail
+// (cheapmodel.insertAskMessage). It would refuse every question if the breakpoint sat on the ask,
+// which writes the whole ask (#725).
+const prefixAskWriteCapEnabled = false
 
 // The reasons prefixAskCacheOK gives. Each maps to one gate in the sweep.
 const (

@@ -1078,7 +1078,7 @@ func TestThePingGateJudgesTheReadAgainstTheLastTurn(t *testing.T) {
 		{"a tail write after a text turn is fine", 25516, 83, 25516, true, ""},
 		{"model switch: read far below the turn", 13440, 12000, 41886, false, "sweep_prefix_cache_read_below_turn"},
 		{"read of zero", 0, 0, 25512, false, "sweep_prefix_cache_read_ZERO"},
-		{"large write is refused by the cap", 25512, 12142, 25512, false, "sweep_prefix_cache_write"},
+		{"large write with a good read is accepted: the cap ships off", 25512, 12142, 25512, true, ""},
 		{"unknown turn read: read above 0 and a small write pass", 13440, 100, 0, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1144,10 +1144,10 @@ func TestThePingGateWriteExcludesTheRealAsk(t *testing.T) {
 		t.Fatalf("the real ask is only %d tokens; the premise of the cap is gone", askTokens)
 	}
 	bridge := schema.TextTokens("Understood.")
-	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: bridge + 20}, 25516); !ok {
+	if ok, why := prefixAskJudge(components.PrefixUsage{CacheRead: 25516, CacheWrite: bridge + 20}, 25516, true); !ok {
 		t.Errorf("a bridge-sized write was refused: %s", why)
 	}
-	if ok, _ := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: askTokens}, 25516); ok {
-		t.Errorf("a write of the whole ask (%d tokens) was accepted: the cap no longer separates the shapes", askTokens)
+	if ok, _ := prefixAskJudge(components.PrefixUsage{CacheRead: 25516, CacheWrite: askTokens}, 25516, true); ok {
+		t.Errorf("a write of the whole ask (%d tokens) was accepted: the cap (forced on here) no longer separates the shapes", askTokens)
 	}
 }
