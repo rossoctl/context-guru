@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,17 @@ func TestBenchmarksRouteIsGone(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Errorf("%s = %d, want 404", path, w.Code)
 		}
+	}
+}
+
+// The History tab is removed: it showed the same data as Cleanup, only earlier. Its route and its
+// script go with it, so nothing serves or loads a page that no longer exists.
+func TestHistoryRouteIsGone(t *testing.T) {
+	a := goldenAPI(t)
+	if w, _ := get(t, a, "/api/history", "127.0.0.1:1234"); w.Code != http.StatusNotFound {
+		t.Errorf("/api/history = %d, want 404", w.Code)
+	}
+	if strings.Contains(readUI(t, "ui/index.html"), "history.js") {
+		t.Error("index.html still loads history.js")
 	}
 }

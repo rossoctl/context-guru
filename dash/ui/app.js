@@ -4454,9 +4454,6 @@ const loaders = {
   // Registered by insights.js, which mounts its own tab; named here because `loaders` is the
   // single map the router consults and a view absent from it renders an empty section forever.
   insights: () => (typeof loadInsights === 'function' ? loadInsights() : undefined),
-  // Registered by history.js, which mounts its own tab; named here for the same reason as
-  // insights above — `loaders` is the single map the router consults.
-  history: () => (typeof loadHistory === 'function' ? loadHistory() : undefined),
 };
 
 // ── nav: two levels, five groups ───────────────────────────────────────────

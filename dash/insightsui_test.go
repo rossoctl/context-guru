@@ -359,9 +359,9 @@ func TestTheVerdictExplanationWrapsInsideItsTableCell(t *testing.T) {
 }
 
 // Every self-mounting view must name a nav group that exists. mountTab throws on an unknown group, so a view
-// that names one mounts nothing and its page fails to load. Cleanup and History named `behaviour`, which the
-// redesigned nav (#564) removed; merged together, both pages threw `mountTab: no such group` on every load
-// (found by the e2e harness on the merged branch).
+// that names one mounts nothing and its page fails to load. Cleanup and the since-removed History tab named
+// `behaviour`, which the redesigned nav (#564) removed; merged together, both pages threw `mountTab: no such
+// group` on every load (found by the e2e harness on the merged branch).
 func TestEverySelfMountedViewNamesANavGroupThatExists(t *testing.T) {
 	app := readUI(t, "ui/app.js")
 	decl := regexp.MustCompile(`(?s)const GROUPS = \[(.*?)\n\];`).FindStringSubmatch(app)
@@ -387,7 +387,8 @@ func TestEverySelfMountedViewNamesANavGroupThatExists(t *testing.T) {
 			}
 		}
 	}
-	if mounted < 5 {
+	// Four self-mounting views remain (the History tab was removed); fewer means the pattern broke.
+	if mounted < 4 {
 		t.Fatalf("found only %d mountTab calls; the pattern no longer matches, update this test", mounted)
 	}
 }

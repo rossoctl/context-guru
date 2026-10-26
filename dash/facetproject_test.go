@@ -7,9 +7,8 @@ package dash
 // ai-native-company/docs/adr, Research/notes/server, context-guru/docs/superpowers/specs -- plus
 // eighteen throwaway /private/tmp folders.
 //
-// The History tab already rolls these up through ProjectGroups, which reads Claude Code's own
-// transcript grouping. The facet feeding every other picker did not, so the same machine showed
-// 6 projects on one tab and 40 on another.
+// ProjectGroups rolls these up from Claude Code's own transcript grouping. The facet feeding the
+// pickers did not, so the same machine showed 6 projects on one tab and 40 on another.
 //
 // Two halves have to hold together: the picker lists roots, AND selecting a root includes the
 // traffic recorded against its subfolders. A picker that folds without a query that folds means
@@ -56,8 +55,7 @@ func TestTheProjectFacetListsRootsNotEveryFolder(t *testing.T) {
 // SELECTING A ROOT HAS TO INCLUDE ITS SUBFOLDERS.
 //
 // The other half, and the one that makes folding safe. Without it the picker offers a root whose
-// own path holds a fraction of the traffic, so choosing it shows less than the pooled view --
-// the same trap the History tab's scoped query documents.
+// own path holds a fraction of the traffic, so choosing it shows less than the pooled view.
 func TestSelectingAProjectRootIncludesItsSubfolders(t *testing.T) {
 	db := openTestDB(t)
 	home := t.TempDir()

@@ -29,28 +29,6 @@
  */
 .ins-own { border: 1px solid var(--border); border-radius: var(--r); margin-bottom: var(--sp-3); overflow: hidden; }
 .ins-own.keep { border-color: var(--border); }
-/* The History tab's owner row, which is a <summary> rather than the .ins-head div Cleanup uses.
-   Reported: "anthropic-agent-skills19 skills never used" -- the name and its count were adjacent
-   inline boxes with no layout between them, so they rendered as one token and a reader could not
-   add the list up. The arithmetic was right and unverifiable on screen, which for a page whose
-   job is letting a reader check a claim is the same as wrong. */
-.ins-own > summary {
-  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-sunken);
-  cursor: pointer;
-  list-style: none;
-}
-.ins-own > summary::-webkit-details-marker { display: none; }
-/* A caret, so a closed section reads as openable rather than as a dead heading. */
-.ins-own > summary::before {
-  content: "\25B8"; color: var(--fg-faint); font-size: var(--t-small);
-  transition: transform .12s ease;
-}
-.ins-own[open] > summary::before { transform: rotate(90deg); }
-/* The count sits away from the name, at the end of the row: two figures the reader compares
-   should not be adjacent to the text that labels them. */
-.ins-own > summary .ins-meta { margin-left: auto; }
 .ins-head {
   display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
   padding: var(--sp-2) var(--sp-3);
