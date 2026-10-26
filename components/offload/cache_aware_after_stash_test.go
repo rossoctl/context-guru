@@ -177,6 +177,7 @@ func TestADeferredCommissionSkipsASpanACheckpointAlreadyCovers(t *testing.T) {
 	ctx := caCtxNoModel("ca-skip-dup", asker)
 	in := caFixture()
 	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end) // the span the commission covers (#723)
 	asker.put(len(in))
 	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), in...)}
 	var rep components.Report

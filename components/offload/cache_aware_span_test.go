@@ -27,6 +27,7 @@ func TestCacheAwareSpanIsNotCutByMarkerTextInAnEarlyMessage(t *testing.T) {
 	in = append(in, caFixture()[1:]...)
 
 	_, start, end := summarizeSpan(in, 1, s.keepLastTurns, nil)
+	end = retreatPastLastToolExchange(in, nil, start, end) // the last tool exchange stays verbatim (#723)
 	wantCovered := end - start
 	if wantCovered < 4 {
 		t.Fatalf("fixture span is %d messages; it must reach past the docs read", wantCovered)
