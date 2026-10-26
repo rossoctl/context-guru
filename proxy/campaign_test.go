@@ -648,10 +648,7 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 		Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
 	})
 
-	w, out := f.do(t, "GET", "/api/keepalive/campaigns/"+campaignID, "", mgrJar)
-	if w.Code != http.StatusOK {
-		t.Fatalf("get = %d %s", w.Code, w.Body)
-	}
+	out := f.waitForCampaignRealSaved(t, mgrJar, campaignID, tenantA)
 	tenants, _ := out["tenants"].([]any)
 	if len(tenants) != 1 {
 		t.Fatalf("got %d tenant summaries, want 1: %v", len(tenants), tenants)
@@ -672,6 +669,41 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 	}
 	if out["caveat"] == "" || out["caveat"] == nil {
 		t.Error("the attribution caveat was not carried onto the response")
+	}
+}
+
+// waitForCampaignRealSaved polls the campaign detail route until the tenant's aggregate
+// reports a real saving, and returns that response. The record helper waits for each ROW
+// to persist; real_saved_usd is computed over several of them at read time, and #163
+// caught it reading 0 on a starved 2-core CI runner with every row persisted. Waiting for
+// the answer the assertion needs, with a loud timeout, keeps the assertion meaningful — a
+// wrong value still fails it — while removing the load sensitivity.
+func (f *mgrFixture) waitForCampaignRealSaved(t *testing.T, jar []*http.Cookie, campaignID, tenantID string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w, out := f.do(t, "GET", "/api/keepalive/campaigns/"+campaignID, "", jar)
+		if w.Code != http.StatusOK {
+			t.Fatalf("get = %d %s", w.Code, w.Body)
+		}
+		tenants, _ := out["tenants"].([]any)
+		var row map[string]any
+		for _, tn := range tenants {
+			if r, _ := tn.(map[string]any); r["tenant_id"] == tenantID {
+				row = r
+			}
+		}
+		if row == nil {
+			t.Fatalf("campaign %s has no summary for %s: %v", campaignID, tenantID, tenants)
+		}
+		if s, _ := row["real_saved_usd"].(float64); s != 0 {
+			return out
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("real_saved_usd for %s stayed 0 for 5s — the aggregate never saw the "+
+				"credited row:\n%v", tenantID, out)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
