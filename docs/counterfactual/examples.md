@@ -13,7 +13,7 @@ and turn 7.
 2. [The same change on hot and cold requests](#2-the-same-change-on-hot-and-cold-requests): one context operation, three requests, three prices
 3. [A rewrite of the tools](#3-a-rewrite-of-the-tools): a change to the tools section; `spans`
 4. [A change that costs money first: summarization](#4-a-change-that-costs-money-first-summarization): a model call that costs money first; `spend` and `rewrite`
-5. [A change of settings](#5-a-change-of-settings): a model and an effort change; the cache break
+5. [A change of settings](#5-a-change-of-settings): a model change (5a) and an effort change (5b); the cache break and its position
 6. [One request in detail](#6-one-request-in-detail): the full flow: context, cache state, context operations, tiers, price
 7. [A change inside the cached prefix](#7-a-change-inside-the-cached-prefix): a cache break and why the breakpoints matter
 8. [A keep-alive ping](#8-a-keep-alive-ping): a ping and the request it rescues
@@ -34,7 +34,7 @@ Every example uses these values. The numbers are made up for the examples.
 | output | $15.00 | $5.00 |
 
 The agent model prices the savings, because the removed tokens would have been billed to the agent's
-requests. The summarizer model prices the summarizer call.
+requests. The summarizer model prices the summarizer call. Example 5a adds a second pair of models.
 
 **Rounding.** Each figure is rounded to $0.00001, half up ($0.0000050 becomes $0.00001). A total
 adds the exact amounts, then rounds. It can differ by $0.00001 from the sum of the rounded figures.
@@ -43,11 +43,12 @@ adds the exact amounts, then rounds. It can differ by $0.00001 from the sum of t
 minutes ago. It is **cold** if not. A hot request reads the cached prefix. A cold request writes it
 again.
 
-**Who adds the `cacheChange`.** A context operator reports `rewrite`, `spend` and `setting` context operations. It
-never reports a `cacheChange`. `Compute` adds each one: a break, with the `changeId` of its cause, and a
-rescue (design §4.4). It needs the previous request of the thread and the cache facts that the host
-supplies, such as a keep-alive ping that read the cache. In the examples, a `cacheChange` is shown as
-returned by `Compute`, not as reported.
+**Who finds the cache effects.** A context operator reports `rewrite`, `spend` and `setting` context
+operations. It never reports a break or a rescue, and the input has no form for one. `Compute` finds each
+one and returns it as a **cache effect**, apart from the operations: a break, with the `changeId` of its
+cause, and a rescue (design §4.4). It needs the previous request of the thread and the cache facts that
+the host supplies, such as a keep-alive ping that read the cache. In the examples, a cache effect is
+shown as returned by `Compute`, in `Result.CacheEffects`, with a `from` and a `to` that give its range.
 
 **Breakpoints.** The client is Claude Code. It sets a 5m breakpoint at the end of `system`, and one
 on the **last message**. So the provider can read or write the cache at two points only: the end of
@@ -204,9 +205,9 @@ agent's requests. The call uses the summarizer model's rates (see the [setup](#s
   written. Saving: 9,500 × $3.75 = +$0.03563. One cold request saves 12.5 times more than a hot one,
   and the balance goes above zero. The total after three requests is **+$0.01675**.
 
-**The context operations.** Three context operations describe the change. The context operator reports two,
-the `spend` and the `rewrite`. `Compute` adds the third, the `cacheChange`. The `spend` and the `rewrite`
-carry the same `changeId`, so the host can add the cost and the saving together.
+**The context operations.** Two context operations describe the change, and the library returns one
+cache effect. The context operator reports the `spend` and the `rewrite`. `Compute` finds the break. All
+three carry the same `changeId`, so the host can add the cost and the saving together.
 
 1. **`spend`, reported once.** The context operator reports it with the summarizer call.
 
@@ -230,16 +231,17 @@ carry the same `changeId`, so the host can add the cost and the saving together.
     "messageSplice": {"at": 0, "removed": 3, "inserted": 1}}
    ```
 
-3. **`cacheChange`, a break, on request A only, added by `Compute`.** The summary is at the start of
+3. **A `break` cache effect, on request A only, found by `Compute`.** The summary is at the start of
    the messages, so the provider reads only up to the end of `system`. `Compute` finds it by comparing request A with the
    previous request, and gives it the `changeId` of the `rewrite`. B and C
-   have no break: on B the summary is already cached, and on C the cache expired.
+   have no break: on B the summary is already cached, and on C the cache expired. It is in
+   `Result.CacheEffects`, not in the operations:
 
    ```json
-   {"id": "op3", "kind": "cacheChange",
-    "cacheBefore": {"cachePhase": "hot",  "extent": {"section": "messages", "index": 4}},
-    "cacheAfter":  {"cachePhase": "cold", "extent": {"section": "system", "index": 0}},
-    "changeId": "cg:summarize:5d21"}
+   {"id": "ce:1", "kind": "break", "changeId": "cg:summarize:5d21",
+    "from": {"section": "system", "index": 0}, "to": {"section": "messages", "index": 4},
+    "saved":  {"cacheRead": 3500},
+    "caused": {"cacheWrite5m": 3500}}
    ```
 
 - `spend` is the call. It names its model, because the summarizer can use a cheaper model than the
@@ -249,8 +251,8 @@ carry the same `changeId`, so the host can add the cost and the saving together.
   so the cost and the saving are added together.
 - `rewrite` is the summary. `messageSplice` says 3 messages became 1, so later positions move up by 2.
   The `spend` and the `rewrite` are reported once, on A. `Compute` applies the `rewrite` again on B and C. Only the cache state changes the saving.
-- A break (`cacheChange`) moves tokens that follow the break from cache read to cache write. This is the
-  **penalty**: the forwarded tokens between the two extents of the break, × ($3.75 − $0.30).
+- A break moves tokens that follow the break from cache read to cache write. This is the
+  **penalty**: the forwarded tokens between `from` and `to` of the break, × ($3.75 − $0.30).
   Here they are the summary and the 3,000-token tail, so the penalty is −$0.01208. It is larger than
   the saving on A, so the first request with a summary costs money.
   Requests B and C have no break, so they pay no penalty.
@@ -259,60 +261,83 @@ carry the same `changeId`, so the host can add the cost and the saving together.
 
 ## 5. A change of settings
 
-A context operator can change the settings of a request, not only its content. Here a router moves request 5
-to a smaller model at a lower effort. The numbers are made up for this case.
+A context operator can change the settings of a request, not only its content. A setting is not
+content: the two bodies are the same, so the library cannot find the change by comparing them. The
+`setting` context operation therefore carries the **position** where the provider renders the
+setting into the prefix (`at`). That position is where the cache can first stop matching
+([`cached-prefix.md`](cached-prefix.md)).
 
-| Request | Model | Effort | Cache before the request |
-|---|---|---|---|
-| 4 | `large-model` | high | 40,000 tokens cached |
-| 5 | `small-model` | low | the router changed both settings |
+The library does not price a settings change (design R50). The alternative is not observable: we
+do not know what the old setting would have written. What it records is the cache break the change
+causes, which is measurable. The numbers are made up. Both examples start from request 4, which
+left 40,000 tokens cached (`tools` 5,000, `system` 3,000, `messages` 32,000) on `large-model` at
+`effort` high. Request 5 adds one 1,000-token message.
 
-> **Open problem — to resolve.** The break of this example has no dollar figure. The design does not
-> say which model's rates price the 40,000 tokens that move from read to write: the large model's or
-> the small model's. The proposed rule is the model that serves the request after the change. It is
-> not decided (design §11, question 10).
+### 5a. A change of model
 
-The router changes two settings in one decision. The library does not price a settings change
-(design R50), for four reasons. The first two: We do not know what the large model would have written at high
-effort. And the effect depends on the task.
+A router moves request 5 to `small-model`.
 
-**The cache break.** The provider keeps its cache for a model, so the new model starts cold. Request
-5 reads 0 tokens from the cache, where request 4 left 40,000 cached. Both settings changed together,
-so the break carries the `changeId` of the decision. It does not say which setting caused it.
+**Rates** (per million tokens):
 
-**The context operations.** Two context operations describe the change. The router reports the first,
-and `Compute` adds the second.
+| Tier | `large-model` | `small-model` |
+|---|---|---|
+| input | $3.00 | $0.80 |
+| cache write (5m) | $3.75 | $1.00 |
+| cache read | $0.30 | $0.08 |
+| output | $15.00 | $4.00 |
 
-1. **`setting`, reported by the router.** It holds both changes in a map, because they are one
-   decision. The key is the setting name. It has no tokens and no price.
+The provider keeps a cache for a model, so the new model starts cold. Request 5 reads 0 tokens where
+request 4 left 40,000 cached. A model is rendered at the start of the prompt, so the setting is at
+`tools[0]` and the break covers the whole cached prefix.
 
-   ```json
-   { "id": "op1", "kind": "setting", "operator": "inference-router",
-     "changeId": "rt:model-7c1a",
-     "settings": {"model":  {"from": "large-model", "to": "small-model"},
-                  "effort": {"from": "high",        "to": "low"}} }
-   ```
+```json
+{ "id": "op1", "kind": "setting", "operator": "inference-router", "changeId": "rt:model-7c1a",
+  "settings": {"model": {"from": "large-model", "to": "small-model",
+                         "at": {"section": "tools", "index": 0}}} }
+```
 
-2. **`cacheChange`, a break, added by `Compute`.** It gives the break the `changeId` of `op1`.
+`Compute` adds the break, with the `changeId` of `op1`. It moves 40,000 tokens from cache read to
+cache write.
 
-   ```json
-   { "id": "op2", "kind": "cacheChange",
-     "cacheBefore": {"cachePhase": "hot"}, "cacheAfter": {"cachePhase": "cold"}, "changeId": "rt:model-7c1a" }
-   ```
+**The rates of the break.** The moved tokens are priced at the rates of the model that serves the
+request after the change, `small-model`: 40,000 × ($1.00 − $0.08) = **−$0.03680**. The large model's
+rates would give −$0.13800. The proposed rule keeps both sides of the break on one rate table, so the
+figure is the cache effect alone. The difference between the two models' rates is the model change's
+own saving, and the library does not compute it. This rule is not decided (design §11, question 10).
+
+### 5b. A change of effort
+
+A router lowers the effort of request 5 from high to low, on the same `large-model`.
+
+Where the provider renders `effort` depends on the model (`cached-prefix.md`). Here it is a model
+that renders it ahead of the messages only, so `tools` and `system` stay valid and `messages` do not.
+The setting says so with its position, `messages[0]`. Without it the library has nothing to go on:
+the bodies are identical up to the new message.
+
+```json
+{ "id": "op1", "kind": "setting", "operator": "inference-router", "changeId": "rt:effort-3b9e",
+  "settings": {"effort": {"from": "high", "to": "low",
+                          "at": {"section": "messages", "index": 0}}} }
+```
+
+The provider reads the 8,000 tokens of `tools` and `system`, and writes the 32,000 tokens of
+messages 0 to 3 again. `Compute` adds a break with the `changeId` of `op1`: 32,000 tokens move from
+read to write, at the model's own rates: 32,000 × ($3.75 − $0.30) = **−$0.11040**.
+
+If `at` is nil, the reporter does not know where the setting is rendered. The library then uses the
+read that the usage shows as the end of the valid prefix, and adds `penalty_unknown` to `Unpriced`,
+as it does for an unknown boundary (design §6.4).
 
 **What the library returns** (tokens, no dollars):
 
 | Item | Tokens | Tier change |
 |---|---|---|
 | `op1` (settings) | none | not priced |
-| `op2` (break) | 40,000 | from cache read to cache write |
+| break | 40,000 in 5a, 32,000 in 5b | from cache read to cache write |
 
 **What a report can show.** The output tokens of request 4 and request 5, labelled as an
-observation, and the cache break with its cause. It shows **no saving** for the move to a smaller
-model, because the design does not compute one.
-
-**The rates.** The 40,000 tokens move from read to write. Which rates price them is the open problem
-above.
+observation, and the cache break with its cause. It shows **no saving** for the cheaper model or the
+lower effort, because the design does not compute one.
 
 ---
 
@@ -430,7 +455,7 @@ good change. It is not, because message 5 is inside the cached prefix.
 
 - Turn 6 cached through `messages[11]`, so B\* = `messages[11]`.
 - The client did not change. The forwarded body first differs from turn 6's at `messages[5]`.
-- So the change itself breaks the cache. `Compute` adds a `cacheChange` with the `changeId` of
+- So the change itself breaks the cache. `Compute` finds a `break` cache effect with the `changeId` of
   the `coref` context operation.
 
 ![Turn 7: coref saves $0.00599 and breaks the cache for $0.06558](example-7-coref-break.svg)
@@ -452,7 +477,7 @@ the end of `system`. So the provider reads `tools` and `system` (15,300 tokens).
 | Item | Calculation | Result |
 |---|---|---|
 | Saving (`rewrite`) | 19,950 × $0.30 | +$0.00599 |
-| Break (`cacheChange`) | 19,010 × ($3.75 − $0.30) | −$0.06558 |
+| Break (cache effect) | 19,010 × ($3.75 − $0.30) | −$0.06558 |
 | **Turn 7** | $0.02378 − $0.08338 | **−$0.05960** |
 
 The 19,010 tokens are messages 0 to 4, the 50-token marker and messages 6 to 11
@@ -468,7 +493,7 @@ On each later hot turn, `coref` saves +$0.00599 again.
 
 ### The context operations
 
-Two context operations describe the change. `coref` reports the `rewrite`, and `Compute` adds the `cacheChange`.
+One context operation and one cache effect describe the change. `coref` reports the `rewrite`, and `Compute` finds the break.
 
 1. **`rewrite`, reported by `coref`.**
 
@@ -482,18 +507,18 @@ Two context operations describe the change. `coref` reports the `rewrite`, and `
    }
    ```
 
-2. **`cacheChange`, a break, added by `Compute`.** It has the `changeId` of op12.
+2. **A `break` cache effect, found by `Compute`.** It has the `changeId` of op12. It is in
+   `Result.CacheEffects`, not in the operations.
 
    ```json
-   { "id": "op13", "kind": "cacheChange",
-     "cacheBefore": {"cachePhase": "hot",  "extent": {"section": "messages", "index": 11}},
-     "cacheAfter":  {"cachePhase": "cold", "extent": {"section": "system", "index": 0}},
-     "changeId": "cg:coref:5e2d" }
+   { "id": "ce:1", "kind": "break", "changeId": "cg:coref:5e2d",
+     "from": {"section": "system", "index": 0}, "to": {"section": "messages", "index": 11},
+     "saved":  {"cacheRead": 19010},
+     "caused": {"cacheWrite5m": 19010} }
    ```
 
-   The range of the break is between the two extents. `cacheBefore` is what turn 6 left cached
-   (B\*). `cacheAfter` is what the provider still reads: only up to the last breakpoint before the
-   first change, the end of `system`.
+   The range of the break is from `from` to `to`. `from` is what the provider still reads: only up to the
+   last breakpoint before the first change, the end of `system`. `to` is what turn 6 left cached (B\*).
 
 ---
 
@@ -547,17 +572,17 @@ total is negative.
    }
    ```
 
-2. **`cacheChange`, a rescue, on turn 10, added by `Compute`.** It adds it after the four conditions of design §4.4 are checked. The ping facts are supplied by the host at turn 10's `EndRequest`: when the ping started, what it read (`messages[5]`), and the window ID `ka:main:w1`.
+2. **A `rescue` cache effect, on turn 10, found by `Compute`.** It adds it after the four conditions of design §4.4 are checked. The ping facts are supplied by the host at turn 10's `EndRequest`: when the ping started, what it read (`messages[5]`), and the window ID `ka:main:w1`.
    Turn 9 forwarded messages 0 to 5, so the extent is `messages[5]`. The range of the rescue is
-   between the two extents, from the start of the prompt to `messages[5]`: 10,000 tokens. Like
-   every `cacheChange`, it has no sizes of its own.
+   from the start of the prompt (`from` is absent) to `messages[5]`: 10,000 tokens. Like
+   every cache effect, it has no sizes of its own, and it is in `Result.CacheEffects`.
 
    ```json
    {
-     "id": "cc:1", "kind": "cacheChange",
-     "cacheBefore": {"cachePhase": "cold"},
-     "cacheAfter": {"cachePhase": "hot", "extent": {"section": "messages", "index": 5}},
-     "changeId": "ka:main:w1"
+     "id": "ce:1", "kind": "rescue", "changeId": "ka:main:w1",
+     "to": {"section": "messages", "index": 5},
+     "saved":  {"cacheWrite5m": 10000},
+     "caused": {"cacheRead": 10000}
    }
    ```
 
@@ -566,7 +591,7 @@ total is negative.
 | Context operation | Calculation | Result |
 |---|---|---|
 | Ping (`spend`) | 10,000 read + 10 input + 1 output | −$0.00305 |
-| Rescue (`cacheChange`, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
+| Rescue (cache effect, cold to hot) | 10,000 × ($3.75 − $0.30) | +$0.03450 |
 | **Total added to session `s2`** | | **+$0.03146** |
 
 The ping re-sends the 10,000 cached tokens, so they are billed as a read. The 10 input tokens are

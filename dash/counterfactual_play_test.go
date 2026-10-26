@@ -55,7 +55,6 @@ func micros(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
 // CGLLMCostUSD. The old code takes that cost as a given from the caller, so Play prices the call
 // with the rates of the model the case names.
 func Play(c opscases.Case) []Played {
-	price := priceOf(c.RateTable())
 	type change struct {
 		id, operator string
 		delta        int
@@ -73,6 +72,7 @@ func Play(c opscases.Case) []Played {
 				if op.Kind != cf.KindSpend || op.Call == nil {
 					continue
 				}
+				price := priceOf(c.ModelRate(op.Call.Model))
 				u := op.Call.Usage
 				e := &dash.Event{
 					Model: fixtureModel, KeepAlive: true,
@@ -105,6 +105,7 @@ func Play(c opscases.Case) []Played {
 			}
 		}
 
+		price := priceOf(c.StepRate(s))
 		at := s.Begin.Meta.At
 		e := &dash.Event{
 			Model:        fixtureModel,
@@ -165,12 +166,17 @@ func Play(c opscases.Case) []Played {
 // expected is the case's expected figure for one step, in micro-dollars.
 func expected(c opscases.Case, s opscases.Step) (net int64, byChange map[string]int64) {
 	byChange = map[string]int64{}
-	rate := c.RateTable()
+	rate := c.StepRate(s)
 	for _, e := range s.Expected.Ops {
 		picos := rate.Picos(e.Saved) - rate.Picos(e.Caused)
 		if e.Call != nil {
 			picos -= c.ModelRate(e.Call.Model).CallPicos(e.Call.Usage)
 		}
+		byChange[e.ChangeID] += opscases.RoundMicros(picos)
+		net += picos
+	}
+	for _, e := range s.Expected.Effects { // breaks and rescues are cache effects, not operations
+		picos := rate.Picos(e.Saved) - rate.Picos(e.Caused)
 		byChange[e.ChangeID] += opscases.RoundMicros(picos)
 		net += picos
 	}
@@ -201,7 +207,7 @@ func Compare(c opscases.Case, played []Played) (report string, diffs []diff) {
 			diffs = append(diffs, diff{i, "", fmt.Sprintf("step %d: expected %d µ$, cg %d µ$", i, want, got.NetMicro)})
 		}
 		if !got.Standalone && s.Expected.BaselineUsage != nil {
-			bill := opscases.RoundMicros(c.RateTable().UsagePicos(*s.Expected.BaselineUsage))
+			bill := opscases.RoundMicros(c.StepRate(s).UsagePicos(*s.Expected.BaselineUsage))
 			if abs(bill-got.BaseMicro) > 1 {
 				diffs = append(diffs, diff{i, "", fmt.Sprintf("step %d: baseline bill expected %d µ$, cg %d µ$", i, bill, got.BaseMicro)})
 			}

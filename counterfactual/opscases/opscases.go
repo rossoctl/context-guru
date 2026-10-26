@@ -94,9 +94,12 @@ type Expected struct {
 	// price difference is the sum of Saved minus Caused over Ops. Absent on a standalone step.
 	BaselineUsage *cf.Usage `json:"baselineUsage,omitempty"`
 	// Ops are the priced operations that save or cost something, or carry a Call, in the order
-	// Compute returns them: reported, then active ones applied again, then the cacheChanges the
-	// library added. Operations that price to nothing are not listed.
-	Ops      []ExpectedOp       `json:"ops"`
+	// Compute returns them: reported, then active ones applied again. Operations that price to
+	// nothing are not listed.
+	Ops []ExpectedOp `json:"ops"`
+	// Effects are the cache effects Compute found (breaks, rescues, breakpoint changes), in the
+	// order it returns them. Only the library writes these, so no step has an input form of them.
+	Effects  []ExpectedEffect   `json:"effects,omitempty"`
 	Unpriced []ExpectedUnpriced `json:"unpriced,omitempty"`
 }
 
@@ -107,6 +110,18 @@ type ExpectedOp struct {
 	Saved    cf.TierTokens `json:"saved"`
 	Caused   cf.TierTokens `json:"caused"`
 	Call     *cf.ModelCall `json:"call,omitempty"` // a spend: the host prices it
+}
+
+// ExpectedEffect is one cache effect. Its range is asserted only when present.
+type ExpectedEffect struct {
+	Note     string             `json:"note,omitempty"` // for the reader; never asserted
+	Kind     cf.CacheEffectKind `json:"kind"`
+	ChangeID string             `json:"changeId"`
+	From     *cf.Position       `json:"from,omitempty"`
+	To       *cf.Position       `json:"to,omitempty"`
+	TTL      string             `json:"ttl,omitempty"`
+	Saved    cf.TierTokens      `json:"saved"`
+	Caused   cf.TierTokens      `json:"caused"`
 }
 
 // ExpectedUnpriced is an operation the library must report as not priced, and why.
@@ -121,17 +136,33 @@ type Rate struct{ Input, CacheWrite5m, CacheWrite1h, CacheRead, Output int64 }
 // Rates are the fixed rate tables a case may name (§10.2). With one table, the expected figure and
 // the current code's figure can be compared in dollars.
 var Rates = map[string]Rate{
-	"fixture-v1":    {Input: 3_000_000, CacheWrite5m: 3_750_000, CacheWrite1h: 6_000_000, CacheRead: 300_000, Output: 15_000_000},
-	"summarizer-v1": {Input: 1_000_000, CacheWrite5m: 1_250_000, CacheWrite1h: 2_000_000, CacheRead: 100_000, Output: 5_000_000},
+	"fixture-v1":     {Input: 3_000_000, CacheWrite5m: 3_750_000, CacheWrite1h: 6_000_000, CacheRead: 300_000, Output: 15_000_000},
+	"summarizer-v1":  {Input: 1_000_000, CacheWrite5m: 1_250_000, CacheWrite1h: 2_000_000, CacheRead: 100_000, Output: 5_000_000},
+	"small-model-v1": {Input: 800_000, CacheWrite5m: 1_000_000, CacheWrite1h: 1_600_000, CacheRead: 80_000, Output: 4_000_000},
 }
 
-// ModelRate says which table prices a model named on a ModelCall. The agent model is priced by the
-// case's own table.
+// ModelRate says which table prices a model named on a request or on a ModelCall. The agent model
+// and the large model are priced by the case's own table.
 func (c Case) ModelRate(model string) Rate {
-	if model == "summarizer-model" {
+	switch model {
+	case "summarizer-model":
 		return Rates["summarizer-v1"]
+	case "small-model":
+		return Rates["small-model-v1"]
 	}
 	return Rates[c.Rates]
+}
+
+// StepRate is the rate table that prices a request step: the model that served the request. A break
+// that a model change caused is priced at the rates of the model after the change (design §11
+// question 10, proposed rule), so both sides of the break use one table and the figure is the cache
+// effect alone. The price difference between the two models is the model change's own saving,
+// which the library does not compute (R50).
+func (c Case) StepRate(s Step) Rate {
+	if s.Begin == nil {
+		return c.RateTable()
+	}
+	return c.ModelRate(s.Begin.Meta.Model)
 }
 
 // Picos prices tokens in pico-dollars (1e-12 USD): tokens × (µ$ per million tokens) is exact, so no
@@ -166,10 +197,13 @@ func RoundMicros(p int64) int64 {
 // case's rates, minus the cost of every spend, priced with its own model's rates.
 func (c Case) StepPicos(s Step) (net int64) {
 	for _, op := range s.Expected.Ops {
-		net += c.RateTable().Picos(op.Saved) - c.RateTable().Picos(op.Caused)
+		net += c.StepRate(s).Picos(op.Saved) - c.StepRate(s).Picos(op.Caused)
 		if op.Call != nil {
 			net -= c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 		}
+	}
+	for _, e := range s.Expected.Effects {
+		net += c.StepRate(s).Picos(e.Saved) - c.StepRate(s).Picos(e.Caused)
 	}
 	return net
 }

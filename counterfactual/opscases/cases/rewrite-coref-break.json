@@ -3117,8 +3117,11 @@
       },
       "caused": {},
       "note": "cmdfilter"
-     },
+     }
+    ],
+    "effects": [
      {
+      "kind": "break",
       "changeId": "cg:coref:5e2d",
       "saved": {
        "cacheRead": 19010
@@ -3126,7 +3129,15 @@
       "caused": {
        "cacheWrite5m": 19010
       },
-      "note": "break: 19,010 tokens move from read to write"
+      "from": {
+       "section": "system",
+       "index": 0
+      },
+      "to": {
+       "section": "messages",
+       "index": 11
+      },
+      "note": "19,010 tokens move from read to write"
      }
     ],
     "boundary": {

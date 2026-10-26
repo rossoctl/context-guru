@@ -74,16 +74,12 @@ type Operation struct {
 	Operator string `json:"operator,omitempty"` // "context-guru.mask", "tool-prune"
 	DryRun   bool   `json:"dryRun,omitempty"`   // set by the framework: computed but not sent (R12)
 
-	At         Position `json:"at"`              // first position touched, in this operator's output; unused by a cacheChange
+	At         Position `json:"at"`              // first position touched, in this operator's output
 	Spans      []Span   `json:"spans,omitempty"` // every touched range, when the change is not contiguous; nil otherwise
 	SizeBefore Size     `json:"sizeBefore"`      // what the operator received over the touched ranges; the sum over Spans
 	SizeAfter  Size     `json:"sizeAfter"`       // what it sent on over the same ranges
 
 	ChangeID string `json:"changeId,omitempty"` // the same on every request that carries this change
-
-	// kind = cacheChange: written by Compute only (§4.2 rule 4).
-	CacheBefore CacheState `json:"cacheBefore"`
-	CacheAfter  CacheState `json:"cacheAfter"`
 
 	// kind = spend
 	Call *ModelCall `json:"call,omitempty"`
@@ -111,9 +107,17 @@ type Span struct {
 }
 
 // SettingChange is one setting going from one value to another. A nil pointer means "not set".
+//
+// At is the first position of the prefix that the provider renders this setting into, so the first
+// position whose cache entry the change can invalidate (cached-prefix.md). A model change starts at
+// tools[0]; an effort change on a model that renders it into the messages starts at messages[0].
+// The body does not differ where a setting differs, so the library cannot find this position by
+// comparing hashes (§5.2). Nil means the reporter does not know: the library then falls back to the
+// read the usage shows.
 type SettingChange struct {
-	From *string `json:"from,omitempty"`
-	To   *string `json:"to,omitempty"`
+	From *string   `json:"from,omitempty"`
+	To   *string   `json:"to,omitempty"`
+	At   *Position `json:"at,omitempty"`
 }
 
 // Size is a token count and the tokenizer that produced it.
@@ -154,7 +158,7 @@ type EntryFacts struct {
 // The enums are strings, not integers, so an unknown value from a newer operator survives a
 // decode and can be reported as unpriced (R19).
 type (
-	Kind         string // rewrite | cacheChange | spend | setting
+	Kind         string // rewrite | spend | setting
 	CachePhase   string // hot | cold | unknown
 	LifetimeKind string // exact | minimum | unknown
 	BillingMode  string // api | subscription | unknown
@@ -162,10 +166,9 @@ type (
 )
 
 const (
-	KindRewrite     Kind = "rewrite"
-	KindCacheChange Kind = "cacheChange"
-	KindSpend       Kind = "spend"
-	KindSetting     Kind = "setting"
+	KindRewrite Kind = "rewrite"
+	KindSpend   Kind = "spend"
+	KindSetting Kind = "setting"
 
 	PhaseHot     CachePhase = "hot"
 	PhaseCold    CachePhase = "cold"

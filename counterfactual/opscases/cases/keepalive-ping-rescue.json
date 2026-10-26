@@ -3,7 +3,7 @@
  "description": "Turn 9 caches 10,000 tokens at minute 20. A keep-alive ping at minute 24 re-reads them (10,000 read, 10 input, 1 output: -$0.00305) and renews the entry. Turn 10 arrives at minute 28, 8 minutes after turn 9 and so past the 5m TTL, but 4 minutes after the ping and so inside it. Lifetime is exact, so the expiry without a ping is proven and the rescue is credited: 10,000 x ($3.75 - $0.30) = +$0.03450. The ping and the rescue share one ChangeID. Total +$0.03146.",
  "source": "examples.md#8",
  "dims": {
-  "kind": "cacheChange",
+  "kind": "rescue",
   "position": "beforeBStar",
   "cache": "rescue",
   "ttl": "5m",
@@ -373,8 +373,10 @@
      "cacheWrite": 10500,
      "cacheWrite1h": 0
     },
-    "ops": [
+    "ops": [],
+    "effects": [
      {
+      "kind": "rescue",
       "changeId": "ka:main:w1",
       "saved": {
        "cacheWrite5m": 10000
@@ -382,7 +384,11 @@
       "caused": {
        "cacheRead": 10000
       },
-      "note": "rescue: without the ping the 5m entry would have expired; write becomes read"
+      "to": {
+       "section": "messages",
+       "index": 5
+      },
+      "note": "without the ping the 5m entry would have expired; write becomes read"
      }
     ]
    }

@@ -49,9 +49,9 @@ Cortex side. This spec answers them as follows.
 |---|---|---|
 | 1 | One set of numbers: spend and savings priced from different rate tables | Inside one host, spend and savings use one resolver (D3, D4, W4.6). The tier logic is in one library. The rates stay host-local by design (§1). |
 | 2 | A figure deployers can trust: how it was computed, and who stands behind it | Each recorded figure names its context operator, its component, `Estimated` and `DryRun` (W7.1), and the `counterfactual` version that computed it (R46). The rules are reviewed in context-guru through the case list and `differences.json` (design §10.4). |
-| 3a | Cache effects: a saving priced at the tier the rewritten request landed in | Saved tokens are priced at the tier they would have had without the change: B\* and the breakpoints (§5.1, R36, R37). A break that a change caused is a separate `cacheChange` cost, linked to that change (R23). |
+| 3a | Cache effects: a saving priced at the tier the rewritten request landed in | Saved tokens are priced at the tier they would have had without the change: B\* and the breakpoints (§5.1, R36, R37). A break that a change caused is a separate cache effect, a cost linked to that change (R23). |
 | 3b | The plugin's own LLM calls through `core/llmclient`, not in the ledger; the `ibac` judge too | `spend` context operations with the call's billed usage (D4, W4.6). This applies to every plugin that calls a model, not only context-guru (R47). |
-| 3c | Keep-alive: the cost and the benefit land on different requests | a `spend` per ping, a rescue `cacheChange`, one `ChangeID` (design §4.4, W4.6). |
+| 3c | Keep-alive: the cost and the benefit land on different requests | a `spend` per ping, a `rescue` cache effect, one `ChangeID` (design §4.4, W4.6). |
 | 4 | Content re-sent every turn: overcount for compaction, correct for tool-prune | `ChangeID` (R22, D1); the tier comes from the position, so tool-prune is priced on every turn and a compaction is not counted again at the full rate (design §4.6). |
 | 5 | Two ways of counting tokens | `Size.Tokenizer`, `bytes-estimate` and `Estimated` (R8); the correction factor is open (design §11, question 3). |
 | 6 | Credit across several plugins | Each context operator is measured against its own input (R29), and R25 for the same content. |
@@ -173,7 +173,7 @@ sequenceDiagram
     Pipeline->>Tracker: EndRequest(thread, forwarded, breakpoints, facts)<br/>copies that thread's ThreadState
     Pipeline->>Upstream: forward (smaller) body
     Upstream-->>Pipeline: response + usage
-    Pipeline->>Ops: request.Compute(usage)<br/>compares inside: B*, cacheChange, phase
+    Pipeline->>Ops: request.Compute(usage)<br/>compares inside: B*, cache effects, phase
     Ops-->>Pipeline: Result (PricedOp[], Boundary, Phase)<br/>and the new ThreadState is stored
     Pipeline->>Settle: Result
     Settle->>Settle: price Saved/Caused with pricing.Resolver
@@ -224,7 +224,7 @@ sequenceDiagram
     Emitter->>Emitter: keep the ping facts (start, PingRead, window ID)<br/>beside thread T's Tracker
     Emitter->>Settle: RequestOps
     Settle->>Settle: ComputeStandalone(RequestOps), price Call.Usage
-    Note over Settle: on the NEXT request on thread T,<br/>EndRequest passes the ping facts and<br/>the library adds a rescue cacheChange<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (design §4.4, W4.6)
+    Note over Settle: on the NEXT request on thread T,<br/>EndRequest passes the ping facts and<br/>the library adds a rescue cache effect<br/>with the SAME ChangeID -- ping cost and rescue<br/>value join under one change (design §4.4, W4.6)
     Settle->>Store: event.Saving (ping leg)
 ```
 
@@ -321,12 +321,13 @@ list (R20): that list is never recorded. `settle` prices `Saved` and `Caused` wi
 the context operations and writes one `event.Saving` for each (context operator, component) — the only form that
 reaches the session store, `:9094`, and the archive.
 
-A `cacheChange` has no `Operator`. `settle` gives an attributed one (a break or a rescue with a
-`ChangeID`) to the operator of the `rewrite` or `setting` with the same `ChangeID` in the result,
-reported or active. A rescue goes to the keeper, by its window. A `cacheChange` with no `ChangeID`
-goes to `Event.UnattributedBreakUSD`.
+A cache effect (`Result.CacheEffects`, design §4.4) is not an operation and has no `Operator`. `settle`
+settles it by its `Kind`. A `break` with a `ChangeID` goes to the operator of the `rewrite` or `setting`
+with the same `ChangeID` in the result, reported or active. A `rescue` goes to the keeper, by its window.
+A `ttlPremium` and a `ttlRescue` go to the head entry named by their `ChangeID`. A `break` with no
+`ChangeID` goes to `Event.UnattributedBreakUSD`.
 
-A break `PricedOp` has both sides (design §6.3): `Saved.CacheRead` is the read that did not happen,
+A `break` cache effect has both sides (design §6.3): `Saved.CacheRead` is the read that did not happen,
 and `Caused.CacheWrite5m` is the write that happened instead. They are one fact, the rate
 difference. So `settle` prices a break as **one net cost**, `Caused` priced minus `Saved` priced,
 and puts it in `PenaltyUSD`. It never adds a break's `Saved` to `USD`, which would inflate the
@@ -416,13 +417,13 @@ The proxy computes its dollar savings from `counterfactual.Compute`, as Cortex d
 
 1. The engine returns the request's context operations (migration step 3).
 2. The proxy calls `BeginRequest`, `Add` for each context operation, and `EndRequest` with `apply.Result.Thread`.
-3. The proxy calls `request.Compute(usage)`, which adds the `cacheChange` context operations itself (one call; there is no separate comparison step). `Compute` stores the new `ThreadState`. A shadow run still calls `Compute`: only the use of the figure is shadowed, and the `ThreadState` must advance. The proxy calls `Preview` only to price an old request again, or to look without changing anything.
+3. The proxy calls `request.Compute(usage)`, which finds the cache effects itself (one call; there is no separate comparison step). `Compute` stores the new `ThreadState`. A shadow run still calls `Compute`: only the use of the figure is shadowed, and the `ThreadState` must advance. The proxy calls `Preview` only to price an old request again, or to look without changing anything.
 4. The proxy converts each `PricedOp` to dollars with `internal/modelinfo.Price` for the request's
    model.
 5. The proxy stores the dollars in the columns its dashboard reads today: the saving of each
    component (`ComponentSavedUSD`) and the baseline delta (`baselineDeltaUSD`).
 
-The `cachesplit` and keep-alive savings are `cacheChange` context operations now (§4.4), written by the library, so the proxy
+The `cachesplit` and keep-alive savings are cache effects now (§4.4), found by the library, so the proxy
 prices them through `counterfactual.Compute` too. Their current rules (`cachesplitSavedUSD`,
 `keepaliveSavedUSD`) are the source of their test cases (design §10), and are removed at step 10.
 
@@ -442,7 +443,7 @@ accounting match it and not diverge. This is how the two compare.
 | Where the avoided cost lives | `Counts.AvoidedMicros`, a column **beside** spend, never inside it | `event.Saving`, beside `Event.Spends`. A `spend` is never inside a saving (W7.1) |
 | Counterfactual and spend | Kept apart by construction. A test, `TestAggregator_TotalsAreInvariantToAvoidedCost`, holds that line | The same rule. The test must also cover savings that come from `Compute` |
 | Applied or projected | Applied savings only. A projected (observe-mode) saving is excluded | The same: `DryRun` is never counted in totals (R12) |
-| Gross or net | Gross. Nothing subtracts the cache re-warm a list change costs | **Different.** Net of the cache break, because `PenaltyUSD` and the `cacheChange` are priced. The floor at zero in `TotalAvoidedUSD` stays |
+| Gross or net | Gross. Nothing subtracts the cache re-warm a list change costs | **Different.** Net of the cache break, because `PenaltyUSD` and the cache effects are priced. The floor at zero in `TotalAvoidedUSD` stays |
 | Unit | Dollars only (micros), no tokens total | Tokens for each tier from the library, dollars in the host. No single token total |
 | Cache effects | Not double-counted, because avoided rides beside the measured cost | Counted once: `Compute` keeps the cache break apart from the content change (R23, R31) |
 | Per agent | Folds into every marginal, `byAgent` included | Same, through `Saving.Operator` and `Saving.Thread` (W7.1) |

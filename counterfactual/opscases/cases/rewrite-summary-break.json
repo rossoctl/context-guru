@@ -376,8 +376,11 @@
       },
       "caused": {},
       "note": "would have been read"
-     },
+     }
+    ],
+    "effects": [
      {
+      "kind": "break",
       "changeId": "cg:summarize:5d21",
       "saved": {
        "cacheRead": 3500
@@ -385,7 +388,15 @@
       "caused": {
        "cacheWrite5m": 3500
       },
-      "note": "break: the summary and the tail are written, not read"
+      "from": {
+       "section": "system",
+       "index": 0
+      },
+      "to": {
+       "section": "messages",
+       "index": 4
+      },
+      "note": "the summary and the tail are written, not read"
      }
     ],
     "boundary": {

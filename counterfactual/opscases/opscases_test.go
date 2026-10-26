@@ -52,6 +52,16 @@ func checkStep(t *testing.T, c Case, i int, s Step) {
 			}
 		}
 	}
+	for _, e := range s.Expected.Effects {
+		for _, tt := range []cf.TierTokens{e.Saved, e.Caused} {
+			if tt.Input < 0 || tt.CacheRead < 0 || tt.CacheWrite5m < 0 || tt.CacheWrite1h < 0 {
+				at("negative tokens for %s effect %q (§6.3)", e.Kind, e.ChangeID)
+			}
+		}
+		if e.Kind == cf.EffectRescue && e.ChangeID == "" {
+			at("a rescue has no changeId: it belongs to a keep-alive window")
+		}
+	}
 	if s.IsStandalone() {
 		for _, op := range s.Standalone.Ops {
 			if op.Kind != cf.KindSpend {
@@ -90,12 +100,15 @@ func checkStep(t *testing.T, c Case, i int, s Step) {
 
 	// Conservation (§6.3, check 6): baseline bill - billed bill = sum of Saved - Caused over the
 	// content changes, breaks and state changes. A spend is not part of the bill difference.
-	rate := c.RateTable()
+	rate := c.StepRate(s)
 	var net int64
 	for _, e := range s.Expected.Ops {
 		if e.Call != nil {
 			continue
 		}
+		net += rate.Picos(e.Saved) - rate.Picos(e.Caused)
+	}
+	for _, e := range s.Expected.Effects {
 		net += rate.Picos(e.Saved) - rate.Picos(e.Caused)
 	}
 	if got := rate.UsagePicos(b) - rate.UsagePicos(s.Usage); got != net {
@@ -104,9 +117,6 @@ func checkStep(t *testing.T, c Case, i int, s Step) {
 }
 
 func checkOp(at func(string, ...any), op cf.Operation) {
-	if op.Kind == cf.KindCacheChange {
-		at("op %q is a cacheChange; only Compute writes those (§4.2 rule 4)", op.ID)
-	}
 	if op.Kind == cf.KindRewrite && op.ChangeID == "" {
 		at("rewrite %q has no changeId", op.ID)
 	}
@@ -174,6 +184,23 @@ func compare(t *testing.T, i int, want Expected, got cf.Result) {
 			t.Errorf("step %d op %d: call presence differs", i, j)
 		}
 	}
+	if len(got.CacheEffects) != len(want.Effects) {
+		t.Fatalf("step %d: %d cache effects, want %d: %+v", i, len(got.CacheEffects), len(want.Effects), got.CacheEffects)
+	}
+	for j, w := range want.Effects {
+		g := got.CacheEffects[j]
+		if g.Kind != w.Kind || g.ChangeID != w.ChangeID || g.Saved != w.Saved || g.Caused != w.Caused ||
+			(w.TTL != "" && g.TTL != w.TTL) {
+			t.Errorf("step %d effect %d: got %s %s saved=%+v caused=%+v, want %s %s saved=%+v caused=%+v",
+				i, j, g.Kind, g.ChangeID, g.Saved, g.Caused, w.Kind, w.ChangeID, w.Saved, w.Caused)
+		}
+		if w.From != nil && (g.From == nil || *g.From != *w.From) {
+			t.Errorf("step %d effect %d: from %v, want %v", i, j, g.From, *w.From)
+		}
+		if w.To != nil && (g.To == nil || *g.To != *w.To) {
+			t.Errorf("step %d effect %d: to %v, want %v", i, j, g.To, *w.To)
+		}
+	}
 	if len(got.Checks) > 0 {
 		t.Errorf("step %d: failed checks %+v", i, got.Checks)
 	}
@@ -216,7 +243,13 @@ func TestExamplesPriceAsDocumented(t *testing.T) {
 	// Example 7: coref on turn 7 nets -$0.05960 by itself.
 	c := byID["rewrite/coref-break-inside-prefix/hot/5m"]
 	var coref int64
-	for _, e := range c.Steps[len(c.Steps)-1].Expected.Ops {
+	last := c.Steps[len(c.Steps)-1]
+	for _, e := range last.Expected.Ops {
+		if e.ChangeID == "cg:coref:5e2d" {
+			coref += c.RateTable().Picos(e.Saved) - c.RateTable().Picos(e.Caused)
+		}
+	}
+	for _, e := range last.Expected.Effects { // the break is a cache effect, not an operation
 		if e.ChangeID == "cg:coref:5e2d" {
 			coref += c.RateTable().Picos(e.Saved) - c.RateTable().Picos(e.Caused)
 		}

@@ -95,8 +95,24 @@ def step(sec, rid, client, fwd, cbp, fbp, add, usage, exp, session="s1", model="
     }
 
 
-def expect(phase, baseline, ops, boundary=None, unpriced=None):
+def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, note=None):
+    """A cache effect the library finds (design 4.4). It has no input form: only Compute writes one."""
+    e = {"kind": kind, "changeId": change, "saved": saved or {}, "caused": caused or {}}
+    if frm:
+        e["from"] = frm
+    if to:
+        e["to"] = to
+    if ttl:
+        e["ttl"] = ttl
+    if note:
+        e["note"] = note
+    return e
+
+
+def expect(phase, baseline, ops, boundary=None, unpriced=None, effects=None):
     e = {"phase": phase, "baselineUsage": baseline, "ops": ops}
+    if effects:
+        e["effects"] = effects
     if boundary:
         e["boundary"] = boundary
     if unpriced:
@@ -251,21 +267,24 @@ def ex4():
             usage = U(read=8000, write=ft - 8000)  # the provider reads tools and system only
             base = hot_usage(prev_c, ct)
             ops = [eop(SU, call=spend["call"], note="the summarizer call: priced by the host"),
-                   eop(SU, saved=TT(cacheRead=9500), note="would have been read"),
-                   eop(SU, saved=TT(cacheRead=3500), caused=TT(cacheWrite5m=3500),
-                       note="break: the summary and the tail are written, not read")]
+                   eop(SU, saved=TT(cacheRead=9500), note="would have been read")]
+            effects = [effect("break", SU, saved=TT(cacheRead=3500), caused=TT(cacheWrite5m=3500),
+                              frm=P("system", 0), to=P("messages", 4),
+                              note="the summary and the tail are written, not read")]
             add = [spend, rw]
             boundary = P("messages", 4)
         elif phase == "hot":
             usage, base = hot_usage(prev_f, ft), hot_usage(prev_c, ct)
             ops = [eop(SU, saved=TT(cacheRead=9500), note="applied again; the summary is cached now")]
+            effects = []
             add, boundary = [], P("messages", 5)
         else:
             usage, base = U(write=ft), U(write=ct)
             ops = [eop(SU, saved=TT(cacheWrite5m=9500), note="the entry expired")]
+            effects = []
             add, boundary = [], None
         steps.append(step(sec, rid, body(tools, sysb, c), body(tools, sysb, f), bps(c), bps(f), add,
-                          usage, expect(phase, base, ops, boundary=boundary)))
+                          usage, expect(phase, base, ops, boundary=boundary, effects=effects)))
         prev_c, prev_f = ct, ft
     write(case("rewrite+spend/summary/break-then-payback/5m",
                "A summarizer replaces messages 0 to 2 (10,000 tokens) with a 500-token summary. The call costs "
@@ -279,36 +298,58 @@ def ex4():
 
 
 # ---------------------------------------------------------------------------------------------
-# Example 5: a router changes the model and the effort.
-RT = "rt:model-7c1a"
+# Examples 5a and 5b: a router changes one setting. Request 4 left 40,000 tokens cached (tools 5,000,
+# system 3,000, messages 32,000). Request 5 adds one 1,000-token message.
+def setting_case(cid, description, source, dims, change, model_to, params_to, settings, read, open_):
+    tools, sysb = [("tools5", 5000)], [("sys5", 3000)]
+    msgs = [(f"m{i}", 8000) for i in range(4)]
+    model_from = "large-model"
+    steps = [step(0, "req-4", body(tools, sysb, msgs), body(tools, sysb, msgs), bps(msgs), bps(msgs), [],
+                  U(write=40000), expect("unknown", U(write=40000), []), session="s3", model=model_from,
+                  params={"effort": "high"})]
+    msgs5 = msgs + [("m4", 1000)]
+    setting = {"id": "op1", "kind": "setting", "operator": "inference-router", "changeId": change,
+               "settings": settings}
+    moved = 40000 - read  # tokens the provider no longer reads
+    start = P("system", 0) if read else None  # the provider still reads up to here
+    steps.append(step(60, "req-5", body(tools, sysb, msgs5), body(tools, sysb, msgs5), bps(msgs5), bps(msgs5),
+                      [setting], U(read=read, write=41000 - read),
+                      expect("hot", U(read=40000, write=1000),
+                             [],
+                             effects=[effect("break", change, saved=TT(cacheRead=moved), caused=TT(cacheWrite5m=moved),
+                                             frm=start, to=P("messages", 3),
+                                             note=f"{moved:,} tokens move from read to write")],
+                             boundary=P("messages", 3)),
+                      session="s3", model=model_to, params=params_to))
+    write(case(cid, description, source, dims, steps, open_=open_), cid.replace("/", "-"))
 
 
 def ex5():
-    tools, sysb = [("tools5", 5000)], [("sys5", 3000)]
-    msgs = [(f"m{i}", 8000) for i in range(4)]
-    steps = [step(0, "req-4", body(tools, sysb, msgs), body(tools, sysb, msgs), bps(msgs), bps(msgs), [],
-                  U(write=40000), expect("unknown", U(write=40000), []), session="s3", model="large-model",
-                  params={"effort": "high"})]
-    msgs5 = msgs + [("m4", 1000)]
-    setting = {"id": "op1", "kind": "setting", "operator": "inference-router", "changeId": RT,
-               "settings": {"model": {"from": "large-model", "to": "small-model"},
-                            "effort": {"from": "high", "to": "low"}}}
-    steps.append(step(60, "req-5", body(tools, sysb, msgs5), body(tools, sysb, msgs5), bps(msgs5), bps(msgs5),
-                      [setting], U(write=41000),
-                      expect("hot", U(read=40000, write=1000),
-                             [eop(RT, saved=TT(cacheRead=40000), caused=TT(cacheWrite5m=40000),
-                                  note="the new model starts cold: 40,000 tokens move from read to write")],
-                             boundary=P("messages", 3)),
-                      session="s3", model="small-model", params={"effort": "low"}))
-    write(case("setting/model-and-effort/break",
-               "A router moves request 5 to a smaller model at a lower effort. The provider keeps its cache for a "
-               "model, so request 5 reads 0 where request 4 left 40,000 cached. The setting operation itself is "
-               "not priced (R50). Compute adds a break carrying the setting's ChangeID: 40,000 tokens from read to "
-               "write. Which model's rates price them is not decided, so the case holds tokens only.",
-               "examples.md#5", {"kind": "setting", "position": "beforeBStar", "cache": "break", "ttl": "5m",
-                                 "lifetime": "exact", "break": "setting"}, steps,
-               open_=["design §11 question 10: the rates of a setting break are not decided", BSTAR_SNAP]),
-          "setting-model-effort-break")
+    settings_model = {"model": {"from": "large-model", "to": "small-model", "at": P("tools", 0)}}
+    setting_case(
+        "setting/model-change/break",
+        "A router moves request 5 from large-model to small-model. The provider keeps a cache for each model, so "
+        "request 5 reads 0 where request 4 left 40,000 cached. A model is rendered at the start of the prompt, so "
+        "the setting is at tools[0] and the break covers the whole cached prefix: 40,000 tokens move from read to "
+        "write. They are priced at the small model's rates (the proposed rule, design section 11 question 10): "
+        "40,000 x ($1.00 - $0.08) = -$0.03680. The large model's rates would give -$0.13800. The saving of the "
+        "cheaper model is not computed (R50).",
+        "examples.md#5a", {"kind": "setting", "setting": "model", "position": "tools", "cache": "break",
+                           "ttl": "5m", "lifetime": "exact", "break": "setting"},
+        "rt:model-7c1a", "small-model", {"effort": "high"}, settings_model, read=0,
+        open_=["design §11 question 10: which model's rates price a setting break", BSTAR_SNAP])
+    settings_effort = {"effort": {"from": "high", "to": "low", "at": P("messages", 0)}}
+    setting_case(
+        "setting/effort-change/break-from-messages",
+        "A router lowers the effort of request 5 from high to low, on the same large-model. On a model that does not "
+        "render the effort ahead of the messages (cached-prefix.md), the tools and the system stay valid: the provider "
+        "reads 8,000 tokens and writes the 32,000 tokens of messages 0 to 3 again. The two bodies are identical up to "
+        "the new message, so a body comparison finds nothing; the setting carries its position, messages[0]. "
+        "32,000 x ($3.75 - $0.30) = -$0.11040.",
+        "examples.md#5b", {"kind": "setting", "setting": "effort", "position": "messages", "cache": "break",
+                           "ttl": "5m", "lifetime": "exact", "break": "setting"},
+        "rt:effort-3b9e", "large-model", {"effort": "low"}, settings_effort, read=8000,
+        open_=[BSTAR_SNAP])
 
 
 # ---------------------------------------------------------------------------------------------
@@ -372,13 +413,15 @@ def thread6(last_turn):
                 ops.append(eop(spec["change"], caused={tier: -spec["delta"]}, note=name + ": an added declaration is a cost"))
         base = hot_usage(prev_c, ct) if hot else U(write=ct)
         usage = hot_usage(prev_f, ft) if hot else U(write=ft)
+        effects = []
         if k == 7:
             usage = U(read=15300, write=ft - 15300)  # the provider reads tools and system only
-            ops.append(eop(COREF, saved=TT(cacheRead=19010), caused=TT(cacheWrite5m=19010),
-                           note="break: 19,010 tokens move from read to write"))
+            effects.append(effect("break", COREF, saved=TT(cacheRead=19010), caused=TT(cacheWrite5m=19010),
+                                  frm=P("system", 0), to=P("messages", 11),
+                                  note="19,010 tokens move from read to write"))
         boundary = P("messages", prev_n - 1) if hot else None
         steps.append(step(60 * (k - 1), f"req-{k}", c, f, bps(c_msgs), bps(f_msgs), [op_json(n) for n in reported],
-                          usage, expect(phase, base, ops, boundary=boundary)))
+                          usage, expect(phase, base, ops, boundary=boundary, effects=effects)))
         active = now_active
         prev_c, prev_f, prev_n = ct, ft, len(c_msgs)
     return steps
@@ -428,9 +471,10 @@ def ex8():
     facts = {"ttl": "5m", "lifetime": "exact", "lastPing": ts(240), "pingRead": P("messages", 5), "pingWindow": KA}
     steps.append(step(480, "turn-10", body([], sysb, msgs10), body([], sysb, msgs10), bps(msgs10), bps(msgs10), [],
                       U(read=10000, write=500),
-                      expect("hot", U(write=10500),
-                             [eop(KA, saved=TT(cacheWrite5m=10000), caused=TT(cacheRead=10000),
-                                  note="rescue: without the ping the 5m entry would have expired; write becomes read")]),
+                      expect("hot", U(write=10500), [],
+                             effects=[effect("rescue", KA, saved=TT(cacheWrite5m=10000), caused=TT(cacheRead=10000),
+                                             to=P("messages", 5),
+                                             note="without the ping the 5m entry would have expired; write becomes read")]),
                       session="s2", facts=facts))
     write(case("keepalive/ping-rescue/exact/5m",
                "Turn 9 caches 10,000 tokens at minute 20. A keep-alive ping at minute 24 re-reads them (10,000 read, "
@@ -438,12 +482,15 @@ def ex8():
                "turn 9 and so past the 5m TTL, but 4 minutes after the ping and so inside it. Lifetime is exact, so "
                "the expiry without a ping is proven and the rescue is credited: 10,000 x ($3.75 - $0.30) = "
                "+$0.03450. The ping and the rescue share one ChangeID. Total +$0.03146.",
-               "examples.md#8", {"kind": "cacheChange", "position": "beforeBStar", "cache": "rescue", "ttl": "5m",
+               "examples.md#8", {"kind": "rescue", "position": "beforeBStar", "cache": "rescue", "ttl": "5m",
                                  "lifetime": "exact", "keepalive": "true"}, steps),
           "keepalive-ping-rescue")
 
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
+    for old in os.listdir(OUT):  # the generator owns this directory: drop cases that no longer exist
+        if old.endswith(".json"):
+            os.remove(os.path.join(OUT, old))
     for f in ex12, ex3, ex4, ex5, ex67, ex8:
         f()

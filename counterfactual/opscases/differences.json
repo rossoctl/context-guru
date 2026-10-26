@@ -85,13 +85,28 @@
   ]
  },
  {
-  "case": "setting/model-and-effort/break",
+  "case": "setting/model-change/break",
   "kind": "notCovered",
-  "reason": "design \u00a75.2 row 3 and R50: a break caused by a setting change. cg has no such concept: its baseline equals the bill, so it books nothing. The rates of the moved tokens are also undecided (design \u00a711 question 10).",
+  "reason": "design section 5.2 row 3 and R50: a break caused by a setting change. cg has no such concept: dash.Event.AttributeCache (dash/event.go:1096-1100) maps a model it has not seen to cold_start, whose comment says a first model use must never be reported as a bust, and baselineDeltaUSD (dash/event.go:1041) adds only removed tokens. cg books nothing. The rates of the moved tokens are also undecided (design section 11 question 10); the case uses the proposed rule.",
   "allow": [
    {
     "step": 1,
     "change": "rt:model-7c1a"
+   },
+   {
+    "step": 1
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "setting/effort-change/break-from-messages",
+  "kind": "notCovered",
+  "reason": "design section 5.2 row 3 and R50: a break caused by an effort change. cg does not read effort, and baselineDeltaUSD (dash/event.go:1041) adds only removed tokens, so cg books nothing.",
+  "allow": [
+   {
+    "step": 1,
+    "change": "rt:effort-3b9e"
    },
    {
     "step": 1

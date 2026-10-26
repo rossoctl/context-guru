@@ -1,10 +1,11 @@
 {
- "id": "setting/model-and-effort/break",
- "description": "A router moves request 5 to a smaller model at a lower effort. The provider keeps its cache for a model, so request 5 reads 0 where request 4 left 40,000 cached. The setting operation itself is not priced (R50). Compute adds a break carrying the setting's ChangeID: 40,000 tokens from read to write. Which model's rates price them is not decided, so the case holds tokens only.",
- "source": "examples.md#5",
+ "id": "setting/effort-change/break-from-messages",
+ "description": "A router lowers the effort of request 5 from high to low, on the same large-model. On a model that does not render the effort ahead of the messages (cached-prefix.md), the tools and the system stay valid: the provider reads 8,000 tokens and writes the 32,000 tokens of messages 0 to 3 again. The two bodies are identical up to the new message, so a body comparison finds nothing; the setting carries its position, messages[0]. 32,000 x ($3.75 - $0.30) = -$0.11040.",
+ "source": "examples.md#5b",
  "dims": {
   "kind": "setting",
-  "position": "beforeBStar",
+  "setting": "effort",
+  "position": "messages",
   "cache": "break",
   "ttl": "5m",
   "lifetime": "exact",
@@ -12,7 +13,6 @@
  },
  "rates": "fixture-v1",
  "open": [
-  "design \u00a711 question 10: the rates of a setting break are not decided",
   "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
  ],
  "steps": [
@@ -161,7 +161,7 @@
     "meta": {
      "requestId": "req-5",
      "session": "s3",
-     "model": "small-model",
+     "model": "large-model",
      "at": "2026-03-02T09:01:00Z",
      "billing": {
       "mode": "api"
@@ -229,15 +229,15 @@
      "id": "op1",
      "kind": "setting",
      "operator": "inference-router",
-     "changeId": "rt:model-7c1a",
+     "changeId": "rt:effort-3b9e",
      "settings": {
-      "model": {
-       "from": "large-model",
-       "to": "small-model"
-      },
       "effort": {
        "from": "high",
-       "to": "low"
+       "to": "low",
+       "at": {
+        "section": "messages",
+        "index": 0
+       }
       }
      }
     }
@@ -306,8 +306,8 @@
    },
    "usage": {
     "input": 0,
-    "cacheRead": 0,
-    "cacheWrite": 41000,
+    "cacheRead": 8000,
+    "cacheWrite": 33000,
     "cacheWrite1h": 0
    },
    "expected": {
@@ -318,16 +318,26 @@
      "cacheWrite": 1000,
      "cacheWrite1h": 0
     },
-    "ops": [
+    "ops": [],
+    "effects": [
      {
-      "changeId": "rt:model-7c1a",
+      "kind": "break",
+      "changeId": "rt:effort-3b9e",
       "saved": {
-       "cacheRead": 40000
+       "cacheRead": 32000
       },
       "caused": {
-       "cacheWrite5m": 40000
+       "cacheWrite5m": 32000
       },
-      "note": "the new model starts cold: 40,000 tokens move from read to write"
+      "from": {
+       "section": "system",
+       "index": 0
+      },
+      "to": {
+       "section": "messages",
+       "index": 3
+      },
+      "note": "32,000 tokens move from read to write"
      }
     ],
     "boundary": {
