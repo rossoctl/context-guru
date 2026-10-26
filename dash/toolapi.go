@@ -912,6 +912,20 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			unusedTok[dr.session] += dr.tokens
 		}
 	}
+	// Calls count every call in scope, the same set lastUsedOf reads. The loop above saw a call only
+	// in a session that also declared the tool, so a call made where the tool had no declaration row
+	// (deferred, or a session that began before the proxy) set last_used and left calls at 0, and
+	// calls 0 files a tool as never used. SessionsUsed and the unused figures stay per session: a
+	// session that carried the tool without calling it still paid for it.
+	allCalls := map[statKey]int{}
+	for _, m := range usedIn {
+		for k, n := range m {
+			allCalls[k] += n
+		}
+	}
+	for k, st := range stats {
+		st.Calls = allCalls[k]
+	}
 
 	// Coverage, and the honest denominator: only captured sessions can say anything about
 	// what they did not use.
@@ -995,7 +1009,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if st.Kind == KindSkill {
 			rep.Skills.Skills = append(rep.Skills.Skills, *st)
 			rep.Skills.Declared++
-			if st.SessionsUsed > 0 {
+			if st.SessionsUsed > 0 || st.Calls > 0 { // the verdict's own test of "invoked"
 				rep.Skills.Invoked++
 				rep.Skills.Calls += st.Calls
 			}
@@ -1126,7 +1140,7 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		if !t.CarryPriced {
 			s.CarryPriced = false
 		}
-		if t.SessionsUsed > 0 {
+		if t.SessionsUsed > 0 || t.Calls > 0 { // the verdict's own test of "invoked"
 			s.ToolsUsed++
 		}
 		if t.SessionsDeclared > s.SessionsDeclared {
