@@ -42,7 +42,14 @@ func TestConcurrentCallsDoNotRaceOnTheGateHistogram(t *testing.T) {
 		req.Input = append(req.Input, toolResultMsg(body))
 	}
 
-	model := &silentModel{}
+	// The leader parks in the model until every candidate has reached the single-flight
+	// join (offloadWithParkedLeader), so the three followers are arranged rather than
+	// hoped for. Before this, the test relied on the goroutines overlapping the leader's
+	// microseconds-long model call, and under full-suite load it sometimes found no
+	// follower at all — failing on the precondition below rather than passing vacuously,
+	// correctly, but red for a reason unrelated to the race it guards (#162).
+	release := make(chan struct{})
+	model := &parkingModel{release: release}
 	e := newCtxGuardComponent(t, model, "")
 	rep := &components.Report{}
 	c := &components.Ctx{
@@ -52,7 +59,7 @@ func TestConcurrentCallsDoNotRaceOnTheGateHistogram(t *testing.T) {
 		// concurrent phase.
 		CacheAware: false, MaxCachedIdx: -1,
 	}
-	if _, err := e.Offload(req, rep, c); err != nil {
+	if err := offloadWithParkedLeader(t, e, req, rep, c, release, identical); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 
