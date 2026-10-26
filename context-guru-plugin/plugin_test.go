@@ -790,8 +790,13 @@ func TestInstallRefusesAnUnverifiedDownload(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "install.sh"))
+	// A hermetic PATH, not the ambient one (#235): install.sh short-circuits with result=present
+	// when it finds context-guru-proxy already on PATH, and a machine with the product installed
+	// (a shared eval box, a developer laptop) has one — the stub curl shadows nothing there, so the
+	// download-and-verify path this test exists to guard was silently never reached. /usr/bin and
+	// /bin carry the coreutils the script needs and no install of ours.
 	cmd.Env = append(sandboxEnv(t),
-		"PATH="+bin+":"+os.Getenv("PATH"),
+		"PATH="+bin+":/usr/bin:/bin",
 		"CONTEXT_GURU_DEST="+dest,
 		"HOME="+dir,
 	)
@@ -1304,7 +1309,10 @@ func TestInstallReportsPATHFromTheSourceFallbackToo(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	run := func(pathHasDest bool) map[string]string {
-		path := bin + ":" + os.Getenv("PATH")
+		// Hermetic for the same reason as TestInstallRefusesAnUnverifiedDownload (#235): an ambient
+		// PATH can hold a real context-guru-proxy, and result=present would bypass the source
+		// fallback this test is about. $DEST is prepended only in the on_path=true row, by design.
+		path := bin + ":/usr/bin:/bin"
 		if pathHasDest {
 			path = dest + ":" + path
 		}
