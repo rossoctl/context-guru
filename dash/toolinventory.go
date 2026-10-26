@@ -120,6 +120,10 @@ type Decl struct {
 	// while keeping its metrics. Applying it here instead would poison declCache, whose
 	// entries are shared by every tenant that declares the same set.
 	Text string `json:"text,omitempty"`
+	// Deferred marks an MCP tool read from the deferred-tools list, not from `tools`. The proxy
+	// filter removes only `tools` elements, so it cannot remove this one: only the user's own
+	// change (claude mcp remove, permissions.deny) can.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // Used is one invoked capability: a tool name, or the Skill tool plus the skill it
@@ -580,7 +584,7 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 			}
 			seen[name] = true
 			out = append(out, Decl{Kind: KindMCPTool, Name: identName(name),
-				Server: identName(server), Tokens: n, Text: name})
+				Server: identName(server), Tokens: n, Text: name, Deferred: true})
 		}
 	}
 }
@@ -867,8 +871,8 @@ func (w *invWriter) write(batch []invMsg) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	declStmt, err := tx.Prepare(`INSERT INTO tool_declarations(
-		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_hash
-	) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
+		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_hash, deferred
+	) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
 	}
@@ -924,7 +928,7 @@ func (w *invWriter) write(batch []invMsg) error {
 					return err
 				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					d.Kind, d.Name, d.Server, d.Tokens, m.ts, h); err != nil {
+					d.Kind, d.Name, d.Server, d.Tokens, m.ts, h, d.Deferred); err != nil {
 					return err
 				}
 			}
@@ -947,7 +951,7 @@ func (w *invWriter) write(batch []invMsg) error {
 					return err
 				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts, h); err != nil {
+					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts, h, false); err != nil {
 					return err
 				}
 			}

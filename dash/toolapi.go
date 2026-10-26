@@ -35,6 +35,9 @@ type ToolStat struct {
 	Kind   string `json:"kind"`
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
+	// Deferred: some session carried it as a deferred MCP tool, which the proxy filter cannot
+	// remove (see Decl.Deferred).
+	Deferred bool `json:"deferred,omitempty"`
 	// Tokens is what carrying this declaration costs on ONE request.
 	Tokens int `json:"tokens"`
 	// SessionsDeclared / SessionsUsed / Calls: how often it was carried, how often it was
@@ -558,6 +561,12 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 		}, carriedOpts{})
 		return err
 	})
+	var deferred map[string]bool
+	g.Go(func() error {
+		var err error
+		deferred, err = d.deferredNames(f, where, args)
+		return err
+	})
 	var decls []declRow
 	if len(sessions) >= declScanMinSessions {
 		// Broad scope: one concurrent pass over the table instead of a probe per session (declfacts.go).
@@ -573,7 +582,37 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	}
 	rep = buildToolReport(sessions, decls, uses, f.PerSession)
 	repriceCarried(rep, carriedRes, carryRes)
+	for i := range rep.Tools {
+		rep.Tools[i].Deferred = deferred[rep.Tools[i].Name]
+	}
 	return rep, nil
+}
+
+// deferredNames is the set of MCP tool names any session in scope carried as deferred
+// (Decl.Deferred). Its own query, so the report's inventory read keeps its covering index
+// (idx_tooldecl_inventory); only deferred rows match, so it is empty on older data.
+func (d *DB) deferredNames(f Filter, where string, args []any) (map[string]bool, error) {
+	q := `SELECT DISTINCT d.name FROM tool_declarations d WHERE d.deferred = 1 AND d.session_id IN
+		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
+	a := append([]any{}, args...)
+	if !f.TenantAll {
+		q += ` AND d.tenant_id = ?`
+		a = append(a, f.Tenant)
+	}
+	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
 }
 
 // repriceCarried replaces the report's unused-carry figures with the per-request pricing
