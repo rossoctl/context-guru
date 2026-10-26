@@ -290,7 +290,7 @@ func rebuildResponsesCountChanged(body []byte, norm []bschemas.ChatMessage, slot
 	head := -1
 	for i := start; i < len(out); i++ {
 		text := schema.MessageText(out[i])
-		if strings.HasPrefix(text, "=== History Summary ===") {
+		if strings.HasPrefix(text, schema.SummaryHeader) {
 			if head >= 0 {
 				return body, false
 			}

@@ -149,3 +149,80 @@ func TestASpliceWithNoToolExchangeAddsNoAnchor(t *testing.T) {
 			written, w, noSlot, ns, notFound, nf)
 	}
 }
+
+// #727 review, finding 1. A one-message span: the splice replaces one text message with the summary,
+// so the message count does not change. The rebuild (and the anchor) must still run; it used to be
+// skipped because the equal-count check knew only summarize's header, not cache_aware_summarizer's.
+func TestAnEqualCountSpliceStillWritesTheAnchor(t *testing.T) {
+	cc := map[string]any{"type": "ephemeral"}
+	long := strings.Repeat("row of tool output with some words in it\n", 60)
+	body, _ := json.Marshal(map[string]any{
+		"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"system": []any{map[string]any{"type": "text", "text": "sys" + strings.Repeat(" padding", 40), "cache_control": cc}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "TASK: read the file"}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "ONLY SPAN MESSAGE " + long}}},
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "toolu_eq", "name": "Read", "input": map[string]any{"p": "a"}}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "toolu_eq", "content": "KEPT OUTPUT " + long}}},
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "read it"}}},
+			map[string]any{"role": "user", "content": "one word"},
+			map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": "<system-reminder>r</system-reminder>", "cache_control": cc}}},
+		},
+	})
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 4\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	model := &recordingModel{reply: "<summary>SUMMARY-MARKER of one message</summary>"}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, components.ModelSpec{Incoming: model})
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, _ := apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, components.ModelSpec{Incoming: model})
+	if !strings.Contains(string(out), "SUMMARY-MARKER") {
+		t.Fatalf("the summarizer never spliced:\n%.400s", out)
+	}
+	if strings.Contains(string(out), "ONLY SPAN MESSAGE") {
+		t.Fatal("the one-message span was not replaced")
+	}
+	if got, want := gjson.GetBytes(out, "messages.#").Int(), gjson.GetBytes(body, "messages.#").Int(); got != want {
+		t.Fatalf("the splice changed the message count (%d -> %d); this test needs an equal-count splice", want, got)
+	}
+	if _, marked := toolResultMark(out, "toolu_eq"); !marked {
+		t.Fatal("an equal-count splice wrote no anchor on the kept tool_result")
+	}
+}
+
+// #727 review (both reviewers). The anchor is Anthropic-shaped (tool_result blocks); on an
+// OpenAI-shaped body a splice must not count it as "not found".
+func TestAnOpenAISpliceDoesNotCountAMissingAnchor(t *testing.T) {
+	_, _, notFound := apply.CacheAnchorStats()
+	long := strings.Repeat("verbose tool output\n", 60)
+	body, _ := json.Marshal(map[string]any{
+		"model": "gpt-x",
+		"messages": []map[string]any{
+			{"role": "system", "content": "you are helpful"},
+			{"role": "user", "content": "do the task " + long},
+			{"role": "assistant", "content": "thinking " + long},
+			{"role": "user", "content": "go on " + long},
+			{"role": "assistant", "content": "", "tool_calls": []map[string]any{{"id": "c1", "type": "function", "function": map[string]any{"name": "read", "arguments": "{}"}}}},
+			{"role": "tool", "tool_call_id": "c1", "content": long},
+			{"role": "assistant", "content": "done"},
+			{"role": "user", "content": "the final question"},
+		},
+	})
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	model := &recordingModel{reply: "<summary>SUMMARY-MARKER openai</summary>"}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, components.ModelSpec{Incoming: model})
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, _ := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, components.ModelSpec{Incoming: model})
+	if !strings.Contains(string(out), "SUMMARY-MARKER") {
+		t.Fatalf("the summarizer never spliced:\n%.400s", out)
+	}
+	if _, _, nf := apply.CacheAnchorStats(); nf != notFound {
+		t.Fatalf("an OpenAI-shaped splice counted %d missing anchor(s)", nf-notFound)
+	}
+}

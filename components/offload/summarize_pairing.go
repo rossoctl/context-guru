@@ -182,10 +182,10 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int, groups 
 // summarize). cache_aware_summarizer only (#723): a splice that keeps a tool exchange gives the next
 // turn a cache entry it can read, once the host marks that exchange's tool_result.
 //
-// On Anthropic traffic the tool_use is an assistant message whose ToolCalls bifrost leaves empty
-// (see requestedToolCalls), so the exchange is found from its results: the run of role=tool
-// messages, and the message just before them. groups keeps the cut on a wire-message edge, as
-// summarizeSpan's own boundary does.
+// The exchange is found from its results — the run of role=tool messages, and the assistant
+// message just before them — rather than from the assistant's ToolCalls, so it does not depend on
+// how a caller populated those. groups keeps the cut on a wire-message edge, as summarizeSpan's own
+// boundary does.
 func retreatPastLastToolExchange(msgs []bschemas.ChatMessage, groups []int, start, end int) int {
 	if len(groups) != len(msgs) {
 		groups = nil
@@ -276,11 +276,12 @@ func advanceSpanBoundary(msgs []bschemas.ChatMessage, groups []int, at int) int 
 // requestedToolCalls reports whether m is an assistant message that asked for tool calls, as
 // bifrost models them.
 //
-// ⚠️ OpenAI-shaped traffic only: bifrost does not map Anthropic `tool_use` content blocks onto
-// ToolCalls, so on the Anthropic path this is always false. The head-retreat above is still
-// correct there, because apply's normalize turns each Anthropic tool_result block into a
-// synthetic role=tool message and the ORIGINAL msgs[0] on that path is the opening user turn,
-// never a tool-calling assistant message.
+// bifrost's own unmarshal does not map Anthropic `tool_use` content blocks onto ToolCalls, but
+// apply's normalize lifts them there (attachToolUse), so on proxy traffic this is true for an
+// Anthropic tool-calling turn too. On a Ctx built some other way it can be false for one; the
+// head-retreat above is still correct then, because apply's normalize turns each Anthropic
+// tool_result block into a synthetic role=tool message and the ORIGINAL msgs[0] on that path is the
+// opening user turn, never a tool-calling assistant message.
 func requestedToolCalls(m bschemas.ChatMessage) bool {
 	return m.Role == bschemas.ChatMessageRoleAssistant &&
 		m.ChatAssistantMessage != nil && len(m.ChatAssistantMessage.ToolCalls) > 0

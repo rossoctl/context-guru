@@ -1183,7 +1183,7 @@ func (s *CacheAwareSummarizer) replayStale(c *components.Ctx, msgs []bschemas.Ch
 }
 
 func cacheAwareSummaryWrapper(summary, key string, mode markerMode) string {
-	body := "=== Compacted Context (cache-aware summary) ===\n" +
+	body := schema.CacheAwareSummaryHeader + "\n" +
 		"The earlier part of this conversation has been compacted into the summary below. " +
 		"The messages before this one, and the messages after it, are verbatim originals.\n\n" +
 		summary + "\n\n" +

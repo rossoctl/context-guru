@@ -997,7 +997,7 @@ var summaryMarkerRe = regexp.MustCompile(
 
 func summaryWrapper(summary, key string, mode markerMode) string {
 	summary = sanitizeSummary(summary)
-	body := "=== History Summary ===\n" +
+	body := schema.SummaryHeader + "\n" +
 		"The earlier trajectory is summarized below.\n\n" +
 		summary + "\n\n" +
 		"Use this summary as the older context, and use the following messages as the most recent context. " +

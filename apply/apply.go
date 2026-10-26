@@ -783,9 +783,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		nb, ok := rebuildCountChanged(body, msgs, slots, chat.Input)
-		if ok {
+		if ok && explicitBreakpointProvider(provider) {
 			// The splicing component's kept tool_result, marked so the next turn can read the cache
-			// up to it (#723). Only on this path: nothing else sets the anchor.
+			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
+			// carries tool_result blocks and explicit breakpoints (Anthropic, Bedrock, Vertex): an
+			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
 		}
 		if !ok && systemSplit {
