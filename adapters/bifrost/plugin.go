@@ -54,6 +54,8 @@ func (p *Plugin) PreRequestHook(ctx *bschemas.BifrostContext, req *bschemas.Bifr
 		Store:   p.store,
 		Model:   components.ModelSpec{Static: p.CheapModel},
 		Bypass:  bypassed(ctx),
+		// This adapter runs the pipeline in place and never writes the CacheAnchorToolID mark (#730).
+		NoCacheBreakpoint: true,
 	}
 	p.pipe.Run(chat, c)
 	return nil

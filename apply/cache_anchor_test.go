@@ -228,8 +228,8 @@ func TestAnOpenAISpliceDoesNotCountAMissingAnchor(t *testing.T) {
 }
 
 // #730. On OpenAI no breakpoint can be written, so the summary covers the last tool exchange too.
-// On Anthropic the exchange stays verbatim and carries the anchor.
-func TestTheSummaryCoversTheLastToolExchangeOnlyOnOpenAI(t *testing.T) {
+// The Anthropic half (the exchange stays and carries the anchor) is the tests above.
+func TestTheOpenAISummaryCoversTheLastToolExchange(t *testing.T) {
 	long := strings.Repeat("verbose tool output\n", 60)
 	body, _ := json.Marshal(map[string]any{
 		"model": "gpt-x",
