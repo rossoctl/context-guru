@@ -43,11 +43,3 @@ func TestTheCleanupViewExplainsAProjectWithNoMeasuredTraffic(t *testing.T) {
 			"timeline before the explanation can render")
 	}
 }
-
-// EACH TAB STATES ITS SPAN AND WHETHER IT HAS MONEY, AND POINTS AT THE OTHER.
-//
-// The two tabs answer different questions over different spans: History covers all of Claude
-// Code's history including before context-guru existed, and has no money; Cleanup covers only the
-// time since install, and is the only place a dollar figure comes from. A reader told neither reads
-// History's longer span as better evidence for money it does not have. Agreed with the user as the
-// framing for the dashboard skill, which opens both tabs side by side.

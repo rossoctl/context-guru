@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -181,5 +182,29 @@ func TestTheDashboardSkillIsLockedToItsScript(t *testing.T) {
 	}
 	if strings.Contains(body, "History") {
 		t.Error("SKILL.md still describes the removed History tab")
+	}
+}
+
+// No skill in either plugin may send the user to the removed History tab. The dashboard skill was
+// fixed with the tab; the install skill was missed and still said "History is not empty on day
+// one", so this walks every skill rather than naming one. It looks for the tab, not the word:
+// "your own history" (past traffic) is fine.
+func TestNoSkillMentionsTheRemovedHistoryTab(t *testing.T) {
+	tab := regexp.MustCompile(`\bHistory (is|tab|page|view|shows|says|covers|lists)\b|\*\*History\*\*|History —|savings/history|/api/history`)
+	var files []string
+	for _, root := range []string{"skills", filepath.Join("..", "codex-marketplace", "plugins", "context-guru", "skills")} {
+		m, err := filepath.Glob(filepath.Join(root, "*", "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, m...)
+	}
+	if len(files) < 10 {
+		t.Fatalf("found only %d skills; the glob no longer matches, update this test", len(files))
+	}
+	for _, f := range files {
+		if loc := tab.FindString(readFileString(t, f)); loc != "" {
+			t.Errorf("%s still names the removed History tab (%q)", f, loc)
+		}
 	}
 }
