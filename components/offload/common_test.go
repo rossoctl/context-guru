@@ -125,6 +125,11 @@ func (m *parkingModel) Complete(_ context.Context, _ string) (string, error) {
 // interleave the goroutines that way. want is the candidate count the fixture expects to
 // reach phase 2; fewer arrivals than that means a gate or cap trimmed the batch, and the
 // test fails on that rather than passing vacuously.
+//
+// The hook is a package global without a lock, like betweenTakeAndStartForTest: the tests
+// that use it must stay sequential. No test in this package calls t.Parallel(), and a test
+// that went parallel would signal another test's arrivals channel — the same hazard
+// summarize_anygate_test.go notes about its session-keyed single-flight.
 func offloadWithParkedLeader(t *testing.T, e *ExtractLLM, req *bschemas.BifrostChatRequest,
 	rep *components.Report, c *components.Ctx, release chan struct{}, want int) error {
 	t.Helper()
