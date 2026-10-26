@@ -1,6 +1,9 @@
 package dash
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A tool's call count and its last-used time must agree. lastUsedOf reads every session in scope;
 // Calls used to count a call only in a session that also declared the tool. So a call in a session
@@ -44,10 +47,17 @@ func TestCallsInADeclaringSessionAreNotDoubleCounted(t *testing.T) {
 
 	rep := buildToolReport(sessions, decls, uses, false)
 
+	found := false
 	for _, st := range rep.Tools {
-		if st.Name == name && (st.Calls != 3 || st.SessionsUsed != 1) {
-			t.Errorf("calls=%d sessions_used=%d, want 3 and 1", st.Calls, st.SessionsUsed)
+		if st.Name == name {
+			found = true
+			if st.Calls != 3 || st.SessionsUsed != 1 {
+				t.Errorf("calls=%d sessions_used=%d, want 3 and 1", st.Calls, st.SessionsUsed)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("%s is missing from the report: %+v", name, rep.Tools)
 	}
 }
 
@@ -88,5 +98,49 @@ func TestSuggestNeverOffersACalledTool(t *testing.T) {
 	w := declWindow{sessions: suggestMinSessions, first: 0, last: suggestMinSpan.Milliseconds()}
 	if _, ok := suggest(ToolStat{Kind: KindMCPTool, Name: "mcp__a__b", Server: "a", Tokens: 500, Calls: 1}, w); ok {
 		t.Error("suggested removing a tool that was called")
+	}
+}
+
+// Withheld counts NEVER-used items that did not reach the evidence bar. A called tool is not one,
+// whatever its per-session counts say.
+func TestWithheldDoesNotCountACalledTool(t *testing.T) {
+	db := openTestDB(t)
+	const name = "mcp__context7__resolve-library-id"
+	var evs []*Event
+	for _, s := range []string{"s1", "s2"} {
+		e := mkEvent(day(0), s, "m", 100, 100)
+		e.TenantID, e.Tools = "t1", 1
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "s2", ts: day(0), inv: &Inventory{Digest: "d2", Decls: []Decl{
+			{Kind: KindMCPTool, Name: name, Server: "context7", Tokens: 9}}}},
+		{tenant: "t1", session: "s1", ts: day(0), inv: &Inventory{Digest: "d1",
+			Used: []Used{{Name: name, Server: "context7", Calls: 2}}, UseFingerprint: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := db.ToolFilterDocFor(Filter{Tenant: "t1"}, nil, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if doc.Withheld != 0 {
+		t.Errorf("withheld = %d, want 0: the only item was called", doc.Withheld)
+	}
+}
+
+// The verdict quotes its evidence. A tool called only in sessions that did not declare it was
+// invoked in 0 of the sessions that carried it, so "invoked in 0 sessions" is no evidence at all.
+func TestVerdictQuotesCallsWhenNoDeclaringSessionUsedIt(t *testing.T) {
+	v, why := verdictFor(ToolStat{Kind: KindMCPTool, Name: "mcp__a__b", Calls: 2, SessionsUsed: 0}, ScopeItem, true, false)
+
+	if v != VerdictKeep || strings.Contains(why, "0 session") || !strings.Contains(why, "2 times") {
+		t.Errorf("verdict = %s, %q; want keep, quoting 2 calls and not 0 sessions", v, why)
 	}
 }

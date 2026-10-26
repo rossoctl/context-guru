@@ -2122,3 +2122,20 @@ func TestPerSessionFactsAttributeTheCostToTheSessionsThatPaidIt(t *testing.T) {
 			"the verdict rests on the floor and the call counts, not on the breakdown", got)
 	}
 }
+
+// The plugin's verdict quotes its evidence the same way the server's does. A tool called only in
+// sessions that did not declare it has sessions_used 0: "2 call(s) in 0 session(s)" is no evidence.
+func TestInsightsVerdictQuotesCallsWhenNoDeclaringSessionUsedIt(t *testing.T) {
+	requireTool(t, "python3")
+	code := `import sys; sys.path.insert(0, sys.argv[1]); import insights
+v, why = insights._verdict({"calls": 2, "sessions_used": 0, "sessions_declared": 1}, False, "item", False)
+print(v + "|" + why)`
+	out, err := exec.Command("python3", "-I", "-c", code, scriptsDir(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("python: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(got, "keep|") || strings.Contains(got, "0 session") || !strings.Contains(got, "2 call") {
+		t.Errorf("verdict = %q; want keep, quoting 2 calls and not 0 sessions", got)
+	}
+}

@@ -439,7 +439,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 		}
 		if s, ok := suggest(st, win[statKey{st.Kind, st.Name}]); ok {
 			out.Suggestions = append(out.Suggestions, s)
-		} else if st.SessionsUsed == 0 && st.Tokens > 0 {
+		} else if st.SessionsUsed == 0 && st.Calls == 0 && st.Tokens > 0 { // never used, below the bar
 			out.Withheld++
 		}
 	}

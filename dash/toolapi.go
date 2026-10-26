@@ -875,10 +875,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
-		calls := usedIn[dr.session][k]
-		if calls > 0 {
+		// Calls is set after this loop, over every session in scope; here only the per-session facts.
+		if usedIn[dr.session][k] > 0 {
 			st.SessionsUsed++
-			st.Calls += calls
 			continue
 		}
 		// UnusedReads and UnusedUSD are computed for every row, aside included: the row-level

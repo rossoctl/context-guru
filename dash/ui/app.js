@@ -55,6 +55,10 @@ const svgEl = (tag, attrs) => {
 // ── formatting ─────────────────────────────────────────────────────────────
 const nf = new Intl.NumberFormat();
 function num(v) { return v === null || v === undefined ? '—' : nf.format(Math.round(v)); }
+/* neverCalled is the server's own test of "never used" (dash: SessionsUsed == 0 && Calls == 0), the one
+ * rule every "unused" filter, row class and pill on the dashboard uses. sessions_used alone is not enough:
+ * a tool called in a session that did not declare it has sessions_used 0 and calls > 0. */
+function neverCalled(t) { return !t.sessions_used && !t.calls; }
 function compact(v) {
   if (v === null || v === undefined) return '—';
   const a = Math.abs(v);
@@ -1822,7 +1826,7 @@ async function loadOverviewTools() {
     const host = clear($('#recommendations'));
     const servers = (rep.servers || []).filter((s) => s.tools_used === 0 && s.unused_usd > 0)
       .map((s) => ({ kind: 'MCP server', name: s.server, usd: s.unused_usd, tools: s.tools, sessions: s.sessions_declared }));
-    const skills = ((rep.skills && rep.skills.skills) || []).filter((t) => t.sessions_used === 0 && t.unused_usd > 0)
+    const skills = ((rep.skills && rep.skills.skills) || []).filter((t) => neverCalled(t) && t.unused_usd > 0)
       .map((t) => ({ kind: 'Skill', name: t.name, usd: t.unused_usd, sessions: t.sessions_declared }));
     const rows = [...servers, ...skills].sort((a, b) => b.usd - a.usd).slice(0, 5);
     if (!rows.length) {

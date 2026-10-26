@@ -1298,7 +1298,10 @@ def _verdict(row: dict, aside: bool, scope: str, qualified: bool) -> tuple[str, 
         # Invoked. The call count is the evidence and it is quoted first, because "37 calls" settles
         # the question in a way "used in 4 sessions" does not — a capability invoked once in one
         # session is a weaker keep than one invoked constantly, and the reader can see which.
-        detail = f"{calls} call(s) in {used} session(s)" if calls else f"invoked in {used} session(s)"
+        if calls and not used:  # called only where it was not declared (deferred, or before the proxy)
+            detail = f"{calls} call(s), in sessions that did not declare it"
+        else:
+            detail = f"{calls} call(s) in {used} session(s)" if calls else f"invoked in {used} session(s)"
         return "keep", f"invoked: {detail}, so it earned the weight it carries"
     if aside or scope == "none":
         return "keep", ("built-in to Claude Code: never invoked here, but removing it takes away a "
