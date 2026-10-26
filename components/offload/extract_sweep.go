@@ -492,6 +492,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			var n int
 			keys, n = e.replayDrops(req, rep, c, thread.Key(c.Session, c.Thread), savedTokenValue(c))
 			changed += n
+			markAnchor(c, c.Store, thread.Key(c.Session, c.Thread), changed)
 		}
 		e.shadowStep(c, req, rep)
 		return keys, nil
