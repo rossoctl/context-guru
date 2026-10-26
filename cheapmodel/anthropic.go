@@ -393,9 +393,16 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 //	breakpoint on the ask:                       read 25,588, wrote 20
 //
 // So the breakpoint is removed from the last message and the SAME cache_control object (ttl
-// included) is put on the bridge, or on the ask when there is no bridge. It sits on a text block,
-// the form the API documents. A last message with no breakpoint gets none added, so the count
-// never goes up.
+// included) is put on the bridge. It sits on a text block, the form the API documents. A last
+// message with no breakpoint gets none added, so the count never goes up.
+//
+// THE BREAKPOINT NEVER GOES ON THE ASK (#725 review). The cache write covers everything up to the
+// breakpoint, so a breakpoint on the ask writes the whole ask: about 1,000 to 1,400 tokens of
+// adjudication contract and inventory, paid at the write rate on every question. On the short
+// bridge the write is a few tokens and the ask stays fresh input. So a trailing USER message that
+// carries a breakpoint also gets the bridge (user, assistant "Understood.", user is a legal
+// sequence), and the breakpoint lands on it. A trailing user message with no breakpoint gets no
+// bridge, and a trailing assistant message keeps its breakpoint where it is.
 //
 // WHY A TRAILING SYSTEM MESSAGE CANNOT BE FOLLOWED BY THE ASK DIRECTLY. Anthropic's own rule —
 // this codebase already enforces it offline, see schema.ValidateShapeFor's RuleSystemPosition and
@@ -450,28 +457,47 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	for _, m := range msgs {
 		parts = append(parts, m.Raw)
 	}
-	// Move the last message's breakpoint (if it has one) onto the first thing appended after it.
+	lastRole := ""
+	if n := len(msgs); n > 0 {
+		lastRole = msgs[n-1].Get("role").String()
+	}
+	// Move the last message's breakpoint (if it has one) onto the bridge. Only a system or user
+	// last message is touched: after an assistant message the ask follows directly and the
+	// breakpoint stays where it is.
 	var moved gjson.Result
-	if n := len(parts); n > 0 {
+	if lastRole == "system" || lastRole == "user" {
 		var stripped string
-		if stripped, moved = takeLastBreakpoint(parts[n-1]); moved.Exists() {
-			parts[n-1] = stripped
+		if stripped, moved = takeLastBreakpoint(parts[len(parts)-1]); moved.Exists() {
+			parts[len(parts)-1] = stripped
 		}
 	}
-	if bridge := lastBridge(msgs); bridge != "" {
+	if bridge := askBridgeFor(lastRole, moved.Exists()); bridge != "" {
 		understoodJSON, err := marshalAppended("assistant", bridge, moved)
 		if err != nil {
 			return nil, err
 		}
 		parts = append(parts, understoodJSON)
-		moved = gjson.Result{}
 	}
-	askJSON, err := marshalAppended("user", ask, moved)
+	askJSON, err := marshalAppended("user", ask, gjson.Result{})
 	if err != nil {
 		return nil, err
 	}
 	parts = append(parts, askJSON)
 	return sjson.SetRawBytes(prefixBody, "messages", []byte("["+strings.Join(parts, ",")+"]"))
+}
+
+// askBridgeFor is the bridge text for a last message of role lastRole, given whether a breakpoint
+// moves with it. A trailing system message always needs one (the position rule). A trailing user
+// message needs one only when it carries a breakpoint to move, so the breakpoint lands on a short
+// message and the ask stays fresh input; see insertAskMessage.
+func askBridgeFor(lastRole string, hasBreakpoint bool) string {
+	if b := AskBridge(lastRole); b != "" {
+		return b
+	}
+	if lastRole == "user" && hasBreakpoint {
+		return askBridgeText
+	}
+	return ""
 }
 
 // takeLastBreakpoint removes the breakpoint a message carries and returns the message without it,
@@ -521,20 +547,14 @@ func marshalAppended(role, text string, cc gjson.Result) (string, error) {
 	return string(b), err
 }
 
-// lastBridge is AskBridge for the last message's role, or "" for an empty transcript.
-func lastBridge(msgs []gjson.Result) string {
-	if len(msgs) == 0 {
-		return ""
-	}
-	return AskBridge(msgs[len(msgs)-1].Get("role").String())
-}
+const askBridgeText = "Understood."
 
 // AskBridge returns the assistant text to insert between a last message of role lastRole and an
 // appended user question, or "" when the question may follow directly. Only a trailing `system`
 // message needs one; see insertAskMessage for why.
 func AskBridge(lastRole string) string {
 	if lastRole == "system" {
-		return "Understood."
+		return askBridgeText
 	}
 	return ""
 }

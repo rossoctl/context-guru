@@ -15,7 +15,6 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -58,6 +57,10 @@ const (
 	eventApplyPanic           = "sweep_apply_panic"
 	eventFalseRef             = "sweep_false_ref"
 )
+
+// gateApplyAlreadyMarked: a held drop's output carries a marker one of our components made, so it is
+// not dropped again (#721). A quoted marker is not one.
+const gateApplyAlreadyMarked = "sweep_apply_already_marked"
 
 // dropVersion is bumped when sweepDropRec changes shape. A record of another version reads as absent.
 const dropVersion = 1
@@ -573,7 +576,7 @@ func (e *ExtractSweep) replayDrops(req *bschemas.BifrostChatRequest, rep *compon
 			continue
 		}
 		content := schema.MessageText(*msg)
-		if content == "" || expand.HasPlaceholder(content) {
+		if content == "" || carriesRealMarker(c, content) {
 			continue
 		}
 		ck := extract.ContentKey(content)
@@ -794,7 +797,13 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		}
 		msg := &req.Input[idx]
 		content := schema.MessageText(*msg)
-		if !schema.Rewritable(*msg) || content == "" || expand.HasPlaceholder(content) {
+		if !schema.Rewritable(*msg) || content == "" {
+			continue
+		}
+		// The same rule as the ping's candidate scan (carriesRealMarker): text that only QUOTES marker
+		// syntax was offered and judged, so its drop must apply. A real marker is skipped and counted.
+		if carriesRealMarker(c, content) {
+			rep.Gate(gateApplyAlreadyMarked)
 			continue
 		}
 		before := *msg

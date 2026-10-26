@@ -74,7 +74,7 @@ const (
 
 // SweepPingWait is the thread's wait cause (#453) at the moment of the question, handed in by the
 // keeper, which is where the tool names and the open-task counts are. Stored with the held answer.
-// Never read to decide anything here.
+// Stored, never used to decide, except LastTurnRead below.
 type SweepPingWait struct {
 	WaitingFor, WaitTool string
 	// LastTurnRead is the cache_read of the thread's last real turn, 0 when unknown. It is the one
@@ -613,7 +613,9 @@ func (cand *sweepPingCandidate) deferBilling(sink *cheapmodel.Sink, ms float64, 
 	deferUsage(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_ping", ms, sink)
 }
 
-// carriesRealMarker reports whether content holds a marker one of our components made: a summary
+// carriesRealMarker is the ONE rule for "this output already carries one of our markers", used by the
+// ping's candidate scan and by the cold apply, so an output offered at the ping is applied later.
+// It reports whether content holds a marker one of our components made: a summary
 // sentinel, or a `<<cg:HASH>>` whose HASH is in the store. Text that merely QUOTES marker syntax,
 // such as a grep of this repo's own source, is not one, and skipping it would take a tool output
 // out of the sweep for nothing (#721, the same fault #705 fixed in the summarizer).

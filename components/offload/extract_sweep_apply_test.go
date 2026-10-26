@@ -1226,3 +1226,84 @@ func TestAHeldAnswerAndItsDropsStayOnTheirThreadKey(t *testing.T) {
 	}
 	_ = want
 }
+
+// #721 review: the apply side uses the same marker rule as the ping. A held drop on an output that
+// only QUOTES marker text applies on a cold request; a held drop on a real marker is skipped and
+// counted.
+func TestAColdApplyDropsAnOutputThatOnlyQuotesAMarker(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	e := shippedSweep(t, "")
+	st := newMemStore()
+	conv := func() *bschemas.BifrostChatRequest {
+		req := applyConv(2, 1)
+		// output 0 quotes marker syntax; output 1 carries a real marker (its original is stashed).
+		req.Input[1] = toolResultMsgWithID("toolu_wire_0", "grep hit: <<cg:quotedonly99>> in expand.go\n"+refOutput(0))
+		req.Input[2] = toolResultMsgWithID("toolu_wire_1", "<<cg:realmarker77>>\n"+refOutput(1))
+		return req
+	}
+	st.Put("realmarker77", []byte("the stashed original"))
+	key, _ := registered(t, e, "quote-apply", pingAsker(), st, conv())
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered: %s", reason)
+	}
+	if res := dispatch(time.Second, SweepPingWait{}); !res.Held || res.Proposed != 1 {
+		t.Fatalf("want a held answer proposing the quoting output only, got %+v", res)
+	}
+	req := conv()
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, coldCtx("quote-apply", st)); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Events[eventAppliedCold] != 1 {
+		t.Fatalf("events = %v, want the quoting output dropped on the cold request", rep.Events)
+	}
+	if got := schema.MessageText(req.Input[1]); strings.Contains(got, "grep hit") {
+		t.Errorf("the quoting output was not dropped: %.80q", got)
+	}
+	// And a LATER warm request replays that drop. The replay must use the same rule, or the prefix
+	// would flip back to the original bytes.
+	next := conv()
+	next.Input = append(next.Input, assistantMsg("more"), userMsg("ok"))
+	nrep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(next, nrep, warmCtx("quote-apply", st)); err != nil {
+		t.Fatal(err)
+	}
+	if nrep.Replays != 1 || schema.MessageText(next.Input[1]) != schema.MessageText(req.Input[1]) {
+		t.Errorf("the warm request replayed %d drops, want 1, byte-identical to the cold request", nrep.Replays)
+	}
+}
+
+// A held drop whose output text is unchanged, but whose quoted marker became real after the ping (its
+// original got stashed), is skipped, and the skip is counted.
+func TestAColdApplySkipsAndCountsAnOutputThatNowCarriesARealMarker(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	e := shippedSweep(t, "")
+	st := newMemStore()
+	conv := func() *bschemas.BifrostChatRequest {
+		req := applyConv(2, 1)
+		req.Input[1] = toolResultMsgWithID("toolu_wire_0", "<<cg:laterreal55>>\n"+refOutput(0))
+		return req
+	}
+	key, _ := registered(t, e, "real-apply", pingAsker(), st, conv())
+	dispatch, _, _, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatal("no question offered")
+	}
+	if res := dispatch(time.Second, SweepPingWait{}); !res.Held {
+		t.Fatalf("not held: %+v", res)
+	}
+	st.Put("laterreal55", []byte("the stashed original")) // the quoted hash is now a real marker
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(conv(), rep, coldCtx("real-apply", st)); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates[gateApplyAlreadyMarked] != 1 {
+		t.Errorf("gates = %v, want %s once", rep.Gates, gateApplyAlreadyMarked)
+	}
+	if rep.Events[eventAppliedCold] != 1 {
+		t.Errorf("events = %v, want only output 1 applied", rep.Events)
+	}
+}

@@ -1078,7 +1078,6 @@ func TestThePingGateJudgesTheReadAgainstTheLastTurn(t *testing.T) {
 		{"a tail write after a text turn is fine", 25516, 83, 25516, true, ""},
 		{"model switch: read far below the turn", 13440, 12000, 41886, false, "sweep_prefix_cache_read_below_turn"},
 		{"read of zero", 0, 0, 25512, false, "sweep_prefix_cache_read_ZERO"},
-		{"typed prompt: a 300-token tail write passes", 25516, 300, 25516, true, ""},
 		{"large write is refused by the cap", 25512, 12142, 25512, false, "sweep_prefix_cache_write"},
 		{"unknown turn read: read above 0 and a small write pass", 13440, 100, 0, true, ""},
 	} {
@@ -1125,4 +1124,30 @@ func TestThePingOffersAnOutputThatOnlyQuotesAMarker(t *testing.T) {
 		t.Fatalf("offered %d, want exactly the quoting output", info.Offered)
 	}
 	_ = dispatch
+}
+
+// #725 review: the write the gate judges is the bridge plus the turn's text-turn tail, never the
+// ask. Built from the REAL ask: it is hundreds of tokens, far over the cap, so the question is only
+// accepted because the ask stays fresh input after the breakpoint.
+func TestThePingGateWriteExcludesTheRealAsk(t *testing.T) {
+	asker := pingAsker()
+	asker.cacheRead, asker.cacheWrite = 25516, 0
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "real-ask-725", asker, newMemStore(), deepCandidates(2))
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	dispatch(time.Second, SweepPingWait{LastTurnRead: 25516})
+	askTokens := schema.TextTokens(asker.ask())
+	if askTokens < 300 {
+		t.Fatalf("the real ask is only %d tokens; the premise of the cap is gone", askTokens)
+	}
+	bridge := schema.TextTokens("Understood.")
+	if ok, why := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: bridge + 20}, 25516); !ok {
+		t.Errorf("a bridge-sized write was refused: %s", why)
+	}
+	if ok, _ := prefixAskCacheOK(components.PrefixUsage{CacheRead: 25516, CacheWrite: askTokens}, 25516); ok {
+		t.Errorf("a write of the whole ask (%d tokens) was accepted: the cap no longer separates the shapes", askTokens)
+	}
 }

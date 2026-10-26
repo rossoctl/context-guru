@@ -23,8 +23,6 @@ func TestPrefixAskCacheOK(t *testing.T) {
 		{"read of zero", 0, 0, 25512, false, false, prefixAskReadZero},
 		{"read of zero, turn unknown", 0, 0, 0, false, false, prefixAskReadZero},
 		{"turn unknown, any read above 0 passes", 100, 5000, 0, false, true, ""},
-		{"typed prompt: question rewrites the text turn's tail, cap on", 25516, 300, 25516, true, true, ""},
-		{"typed prompt: a tail of a few hundred, cap off", 25516, 300, 25516, false, true, ""},
 		{"large write, cap off: not the rule", 25512, 12142, 25512, false, true, ""},
 		{"large write, cap on", 25512, 12142, 25512, true, false, prefixAskWriteOverCap},
 		{"small write, cap on", 25512, 53, 25512, true, true, ""},

@@ -11,8 +11,12 @@ const (
 	prefixAskWriteCapMax = 2000
 )
 
-// prefixAskWriteCapEnabled switches the write cap. The owner has not chosen the cap yet (#721), so
-// it is one constant: set it false to drop the cap without a rewrite.
+// prefixAskWriteCapEnabled switches the write cap. The cap ships on, but the owner has not confirmed
+// its numbers (#721), so it is one constant: set it false to drop the cap without a rewrite.
+//
+// The cap assumes the question's breakpoint sits on the short bridge, so the ask is fresh input and
+// the write is a few tokens plus the turn's text-turn tail (cheapmodel.insertAskMessage). It would
+// refuse every question if the breakpoint sat on the ask, which writes the whole ask (#725).
 const prefixAskWriteCapEnabled = true
 
 // The reasons prefixAskCacheOK gives. Each maps to one gate in the sweep.
