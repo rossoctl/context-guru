@@ -701,8 +701,8 @@ components:
 	// ~2,073 saved tokens, which at the observed ~65% reduction needs a ~3,190-token candidate.
 	// The 873-call per-band measurement agrees from the loss side: candidates under 2,000
 	// tokens cost more per MTok saved than a token is worth even on a top-decile session, so
-	// 2,000 is the measured lower bound and the shipped 3,000 clears it, reaching 48% of
-	// production candidates. The bands are the authority, not this comment:
+	// 2,000 is the measured lower bound and the shipped 3,000 clears it. The bands are the
+	// authority, not this comment:
 	// TestHousellmFloorClearsTheBandsThatLoseAtEveryK (config/config_more_test.go).
 	//
 	// An earlier revision of this derivation used 8,000, priced WITHOUT the amortization, and
