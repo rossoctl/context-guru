@@ -610,6 +610,11 @@ type Ctx struct {
 	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
 	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
+	//
+	// HOST CONTRACT: a host that sets this must stash each request's forwarded body when its
+	// upstream answers, then call offload.ResolveDeferredCacheAwareSummary(session, thread) when
+	// the request ends. cache_aware_summarizer holds a prefix-ask commission until then, so it
+	// reads that request's body and not the previous one (#722).
 	PrefixAsk PrefixAsker
 	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
 	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares

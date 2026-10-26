@@ -16,7 +16,20 @@ import (
 // It waits on the SAME channel a real turn waits on (summaryFlight.done), so a test that passes
 // here is exercising the production synchronisation rather than a sleep that happens to be long
 // enough on the machine that ran it.
+//
+// It first waits out a DEFERRED commission for the thread (#722): a host dispatches one from its
+// request-end hook, which can run after the client already has its response, so a caller that
+// waits right after its request returns could otherwise see nothing in flight yet and return
+// before the summary has even started.
 func WaitForSummaryForTest(session string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for deferralPending(session) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	within = time.Until(deadline)
 	j, ok := inFlight.peek(session)
 	if !ok {
 		// Nothing in flight: either it already finished, or it never started. Both are "no wait
@@ -60,4 +73,15 @@ func WaitForAllSummariesForTest(within time.Duration) bool {
 		time.Sleep(2 * time.Millisecond)
 	}
 	return false
+}
+
+// deferralPending reports whether a cold or warm commission is held for the thread key.
+func deferralPending(key string) bool {
+	coldDeferredMu.Lock()
+	_, cold := coldDeferred[key]
+	coldDeferredMu.Unlock()
+	warmDeferredMu.Lock()
+	_, warm := warmDeferred[key]
+	warmDeferredMu.Unlock()
+	return cold || warm
 }

@@ -57,6 +57,8 @@ func TestCacheAwareDeclinesOnAStalePrefix(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned (and declined) summary never resolved")
 	}
@@ -86,6 +88,8 @@ func TestCacheAwareDeclinesOnAStalePrefix(t *testing.T) {
 	if _, err := s.Offload(req2, &rep2, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned summary never landed once the prefix covered the span")
 	}
@@ -129,6 +133,8 @@ func TestCacheAwareChecksAndAsksOnOneSnapshot(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned (and declined) summary never resolved")
 	}
@@ -152,6 +158,8 @@ func TestCacheAwareChecksAndAsksOnOneSnapshot(t *testing.T) {
 	if _, err := s.Offload(req2, &rep2, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned summary never landed")
 	}
@@ -216,6 +224,8 @@ func TestCacheAskCarriesTheApprovedBodyWhenTheStashIsReplaced(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned summary never resolved")
 	}
