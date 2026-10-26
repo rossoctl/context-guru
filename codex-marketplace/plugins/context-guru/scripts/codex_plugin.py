@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tempfile
 import time
 import urllib.request
 from types import SimpleNamespace
@@ -599,11 +600,18 @@ def status(args):
             return 1
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as response:
-                sys.stdout.write(response.read().decode("utf-8"))
-            return 0
+                body = response.read()
         except Exception as error:
             print(f"context-guru status --stats: {error}", file=sys.stderr)
             return 1
+        # Written to a file and only the path printed (#411): the document is ~10 KB, and printing
+        # it had the agent echo it into its reply a second time. The file holds the exact bytes the
+        # proxy sent, which a printed copy cannot promise.
+        handle, path = tempfile.mkstemp(prefix=f"context-guru-stats-{port}-", suffix=".json")
+        with os.fdopen(handle, "wb") as file:
+            file.write(body)
+        print(path)
+        return 0
     up = bool(port and healthy(port))
     configured = is_routed(main_config())
     values = {"result": "ok" if up and configured else "not_ready", "config": main_config(),

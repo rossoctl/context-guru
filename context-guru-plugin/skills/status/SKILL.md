@@ -1,22 +1,31 @@
 ---
 name: status
-description: Home screen. Whether the local context-guru proxy is running and this project is routed through it, then dollars saved, today against yesterday, and the top three things to do next. Use when the user asks how context-guru is doing, about its status, or whether the proxy is working. Accepts --stats to print the raw /stats JSON verbatim instead of the interpreted report.
+description: Home screen. Whether the local context-guru proxy is running and this project is routed through it, then dollars saved, today against yesterday, and the top three things to do next. Use when the user asks how context-guru is doing, about its status, or whether the proxy is working. Accepts --stats to write the raw /stats JSON to a file and reply with its path instead of the interpreted report.
 
 ---
 
 # context-guru status
 
 **If invoked with `--stats`**, skip everything below: resolve the port the same way step 1 does
-(`settings.py port show`, then `settings.py config`, then the `plugin.json` default), run
+(`settings.py port show`, then `settings.py config`, then the `plugin.json` default), write the JSON
+to a snapshot file, and reply with the path only:
 
 ```bash
-curl -fsS "http://127.0.0.1:${PORT}/stats" | jq .
+OUT="$(mktemp "${TMPDIR:-/tmp}/context-guru-stats-${PORT}.XXXXXX")"
+if command -v jq >/dev/null 2>&1; then
+  curl -fsS "http://127.0.0.1:${PORT}/stats" | jq . >"$OUT"
+else
+  curl -fsS "http://127.0.0.1:${PORT}/stats" >"$OUT"
+fi
 ```
 
-and print its output verbatim — no narration, no interpretation, not even the liveness check. This
-is for someone who wants the JSON itself, not a reading of it; a failed curl (proxy not up) should
-still be shown as-is rather than translated into prose. If `jq` is not installed, fall back to the
-bare `curl` and print the unformatted body rather than failing.
+Reply with `$OUT` and its size, and nothing else — no narration, no interpretation, not even the
+liveness check. This is for someone who wants the JSON itself, not a reading of it; the file holds
+the exact bytes `jq` (or `curl`) wrote, which a printed copy cannot promise. Do not print the JSON:
+Claude Code already shows the tool output to the user, so printing it again shows the same document
+twice and costs roughly 3,000-4,000 output tokens for nothing. A failed curl (proxy not up) is still
+shown as-is rather than translated into prose. Old snapshots are `$TMPDIR`'s to clean up; do not
+delete them yourself.
 
 **Otherwise**, answer two questions in order, because the second is meaningless if the first is "no":
 
