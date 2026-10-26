@@ -50,6 +50,22 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/signal.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/beep.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/beep.sh",
+            "timeout": 5
           }
         ]
       }
