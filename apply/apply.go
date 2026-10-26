@@ -941,6 +941,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		out = nb
 	}
+	// An in-place rewrite (the sweep's cold apply and its replays, #729) can also name an anchor: one
+	// breakpoint on the tool_result the cache entry should be readable from. Same guard and counters
+	// as the splice's anchor above. Only where the request changed and the provider has breakpoints.
+	if changed && c.CacheAnchorToolID != "" && explicitBreakpointProvider(provider) {
+		out = anchorCacheBreakpoint(out, c.CacheAnchorToolID)
+	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
 		dumpChanges(c.Session, changes)

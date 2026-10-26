@@ -226,3 +226,123 @@ func TestAnOpenAISpliceDoesNotCountAMissingAnchor(t *testing.T) {
 		t.Fatalf("an OpenAI-shaped splice counted %d missing anchor(s)", nf-notFound)
 	}
 }
+
+// inPlaceRewriter stands in for the sweep's cold apply (#729): it rewrites one tool output IN PLACE (no
+// message is added or removed) and, when name is set, names an anchor tool_result.
+type inPlaceRewriter struct {
+	shrink string // tool_use id whose output is replaced
+	anchor string // CacheAnchorToolID to set; "" sets none
+}
+
+func (inPlaceRewriter) Name() string                 { return "inplace" }
+func (inPlaceRewriter) Enabled(*components.Ctx) bool { return true }
+func (r inPlaceRewriter) Offload(req *bschemas.BifrostChatRequest, _ *components.Report, c *components.Ctx) ([]string, error) {
+	c.CacheAnchorToolID = r.anchor
+	if r.shrink == "" {
+		return nil, nil
+	}
+	for i := range req.Input {
+		m := &req.Input[i]
+		if m.Role == bschemas.ChatMessageRoleTool && m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil &&
+			*m.ChatToolMessage.ToolCallID == r.shrink {
+			s := "<<cg:abc123>> dropped"
+			m.Content = &bschemas.ChatMessageContent{ContentStr: &s}
+			return []string{"abc123"}, nil
+		}
+	}
+	return nil, nil
+}
+
+func runInPlace(t *testing.T, r inPlaceRewriter, body []byte) []byte {
+	t.Helper()
+	p := components.NewPipeline([]components.Component{r}, nil)
+	return apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.Anthropic, Body: body, Session: "inplace-729",
+	}).Body
+}
+
+// #729. A component that rewrites in place (the sweep's cold apply) and names an anchor gets the
+// breakpoint on that tool_result, through the same writer as the splice's.
+func TestAnInPlaceRewriteWritesTheNamedAnchor(t *testing.T) {
+	written, _, _ := apply.CacheAnchorStats()
+	out := runInPlace(t, inPlaceRewriter{shrink: "toolu_1", anchor: "toolu_2"}, anchorBody(t, true, 2))
+	if !strings.Contains(string(out), "dropped") {
+		t.Fatalf("fixture: the in-place rewrite did not reach the body:\n%.400s", out)
+	}
+	if _, marked := toolResultMark(out, "toolu_2"); !marked {
+		t.Fatal("the named tool_result carries no cache_control after an in-place rewrite")
+	}
+	if n := anchorWireMarks(out); n != 4 {
+		t.Fatalf("%d breakpoints on the wire, want Claude Code's 3 plus the anchor", n)
+	}
+	if w, _, _ := apply.CacheAnchorStats(); w != written+1 {
+		t.Errorf("cache anchors written rose by %d, want 1", w-written)
+	}
+}
+
+// #729, the budget guard: no free slot, no anchor, counted.
+func TestAnInPlaceAnchorIsSkippedWhenNoSlotIsFree(t *testing.T) {
+	_, noSlot, _ := apply.CacheAnchorStats()
+	out := runInPlace(t, inPlaceRewriter{shrink: "toolu_1", anchor: "toolu_2"}, anchorBody(t, true, 3))
+	if _, marked := toolResultMark(out, "toolu_2"); marked {
+		t.Fatal("the anchor was written with no free slot")
+	}
+	if n := anchorWireMarks(out); n > 4 {
+		t.Fatalf("%d breakpoints on the wire, over the provider cap of 4", n)
+	}
+	if _, ns, _ := apply.CacheAnchorStats(); ns != noSlot+1 {
+		t.Errorf("anchors skipped for want of a slot rose by %d, want 1", ns-noSlot)
+	}
+}
+
+// #729. A request the component did not change gets no anchor, even if one is named.
+func TestAnUnchangedRequestGetsNoInPlaceAnchor(t *testing.T) {
+	written, noSlot, notFound := apply.CacheAnchorStats()
+	body := anchorBody(t, true, 2)
+	out := runInPlace(t, inPlaceRewriter{anchor: "toolu_2"}, body)
+	if _, marked := toolResultMark(out, "toolu_2"); marked {
+		t.Fatal("an anchor was written on a request nothing changed")
+	}
+	if w, ns, nf := apply.CacheAnchorStats(); w != written || ns != noSlot || nf != notFound {
+		t.Errorf("anchor counters moved on an unchanged request")
+	}
+}
+
+// #729. Two turns of one conversation: the anchor stays on the same block and the bytes up to it do not
+// move, so the provider's entry stays readable.
+func TestTheInPlaceAnchorStaysOnTheSameBlockAsTheConversationGrows(t *testing.T) {
+	r := inPlaceRewriter{shrink: "toolu_1", anchor: "toolu_2"}
+	first := runInPlace(t, r, anchorBody(t, true, 2))
+	// The second turn has one more exchange after the anchor.
+	var m map[string]any
+	_ = json.Unmarshal(anchorBody(t, true, 2), &m)
+	msgs := m["messages"].([]any)
+	grown := append(append([]any{}, msgs[:len(msgs)-1]...),
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "more"}}},
+		map[string]any{"role": "user", "content": "and more"},
+		msgs[len(msgs)-1])
+	m["messages"] = grown
+	gb, _ := json.Marshal(m)
+	second := runInPlace(t, r, gb)
+	idx := func(out []byte) int {
+		for i, mm := range gjson.GetBytes(out, "messages").Array() {
+			for _, b := range mm.Get("content").Array() {
+				if b.Get("tool_use_id").String() == "toolu_2" && b.Get("cache_control").IsObject() {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	if idx(first) < 0 || idx(first) != idx(second) {
+		t.Fatalf("the anchor moved or vanished: turn 1 at message %d, turn 2 at message %d", idx(first), idx(second))
+	}
+	// Bytes up to and including the anchor are identical across the two turns.
+	a := gjson.GetBytes(first, "messages").Array()
+	b := gjson.GetBytes(second, "messages").Array()
+	for i := 0; i <= idx(first); i++ {
+		if a[i].Raw != b[i].Raw {
+			t.Fatalf("message %d differs between turns, so the cached bytes are not stable", i)
+		}
+	}
+}

@@ -95,6 +95,10 @@ type sweepDropRec struct {
 type sweepDropIndex struct {
 	V   int      `json:"v"`
 	Cks []string `json:"cks"`
+	// Anchor is the tool_use id of the last tool_result the latest cold apply sent (#729). Every later
+	// turn of the thread marks that block with one cache breakpoint, so its cache entry stays readable.
+	// An id only: metadata, no content.
+	Anchor string `json:"anchor,omitempty"`
 }
 
 // Two different separators, so an index key and a record key cannot collide for odd thread names.
@@ -144,6 +148,41 @@ func getDropIndex(st store.Store, threadKey string) sweepDropIndex {
 		}
 	}
 	return ix
+}
+
+// setDropAnchor records the tool_use id the thread's later turns mark with a cache breakpoint (#729).
+func setDropAnchor(st store.Store, threadKey, toolID string) {
+	if st == nil || threadKey == "" || toolID == "" {
+		return
+	}
+	dropMu.Lock()
+	defer dropMu.Unlock()
+	ix := getDropIndex(st, threadKey)
+	ix.V, ix.Anchor = dropVersion, toolID
+	if b, err := json.Marshal(ix); err == nil {
+		st.Put(dropIndexKey(threadKey), b)
+	}
+}
+
+// lastToolResultID is the tool_use id of the last tool message of req, or "".
+func lastToolResultID(req *bschemas.BifrostChatRequest) string {
+	for i := len(req.Input) - 1; i >= 0; i-- {
+		m := req.Input[i]
+		if m.Role == bschemas.ChatMessageRoleTool && m.ChatToolMessage != nil && m.ChatToolMessage.ToolCallID != nil {
+			return *m.ChatToolMessage.ToolCallID
+		}
+	}
+	return ""
+}
+
+// markAnchor asks the host to put one cache breakpoint on the thread's anchor tool_result (#729). It
+// does so only on a request where the sweep changed the conversation, so a request it left alone gets
+// no anchor. A summarizer splice that already named an anchor keeps its own.
+func markAnchor(c *components.Ctx, st store.Store, tkey string, changed int) {
+	if changed <= 0 || c == nil || c.CacheAnchorToolID != "" {
+		return
+	}
+	c.CacheAnchorToolID = getDropIndex(st, tkey).Anchor
 }
 
 func addToDropIndex(st store.Store, threadKey string, cks []string) {
@@ -559,6 +598,10 @@ func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *component
 	// 3. A held answer.
 	ak, ac := e.applyHeld(req, rep, c, tkey)
 	keys, changed = append(keys, ak...), changed+ac
+
+	// 4. The anchor (#729): the entry the cold request wrote ends at a text turn, which the provider
+	// never reads. One breakpoint on its last tool_result makes it readable on the turns that follow.
+	markAnchor(c, c.Store, tkey, changed)
 	return keys, changed
 }
 
@@ -843,6 +886,9 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		}
 	}()
 	addToDropIndex(c.Store, tkey, cks)
+	if len(pending) > 0 {
+		setDropAnchor(c.Store, tkey, lastToolResultID(req))
+	}
 	for reason, n := range res.reasonCounts() {
 		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
 	}
