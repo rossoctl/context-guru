@@ -285,6 +285,10 @@ def cmd_cachestate(api: Api, o: dict) -> list[str]:
             status_extras(api.base, sid, doc, o.get("window_start_ms"))
         elif doc.get("failure") == "down":
             doc["notice"] = "cg ✕ proxy offline"  # the status line's own words, for a proxy that does not answer at all
+        elif doc.get("failure") == "timeout":
+            # Too slow, and nothing was ever read: the status line's `_timeout_result` with no cache says this. It
+            # redraws with real numbers on its own once an answer lands.
+            doc["notice"] = "cg: stats loading…"
         code = 1 if "error" in doc else 0
     o["exit"] = code
     return [json.dumps(doc, separators=(",", ":"))]

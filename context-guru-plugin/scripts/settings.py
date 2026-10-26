@@ -266,6 +266,19 @@ def repoint_statusline(data: dict, running: str) -> bool:
     return True
 
 
+def mark_statusline_asked(data: dict) -> bool:
+    """Record that OUR current statusLine was asked for by name, in place. True if it changed.
+
+    A line installed before 0.6.1 carries no record, so the SessionStart migration (retire_statusline) would remove it.
+    A call that asks for the same line again changes nothing else, and must still record that the line is wanted."""
+    meta = data.get(META)
+    if not isinstance(meta, dict) or meta.get(STATUSLINE_ASKED_META) is True \
+            or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
+        return False
+    meta[STATUSLINE_ASKED_META] = True
+    return True
+
+
 # The one command the 0.4.x to 0.6.0 install wrote by default (install.sh: `python3 "<scripts>/statusline.py"`).
 _DEFAULT_STATUSLINE = re.compile(r'python3 "[^"]*/scripts/statusline\.py"')
 
@@ -2915,10 +2928,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         if sl_unchanged:
             # The same line, asked for again by name: record that it is wanted, or the SessionStart migration
             # (retire_statusline) would remove a line installed before 0.6.1 that the user just asked to keep.
-            meta = data.get(META)
-            if sl_command and existed and isinstance(meta, dict) and meta.get(STATUSLINE_ASKED_META) is not True \
-                    and is_ours_statusline(data, data.get(STATUSLINE_KEY)):
-                meta[STATUSLINE_ASKED_META] = True
+            if sl_command and existed and mark_statusline_asked(data):
                 save(args.file, data)
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
@@ -2944,6 +2954,10 @@ def cmd_add(args: argparse.Namespace) -> int:
             and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
             and (ping_on or ((data.get(META) or {}).get(PING_OPT_OUT_META) is True
                              and (data.get(META) or {}).get(PING_HEADER_META) != PING_HEADER)):
+        # The same line asked for again by name, on a complete install: record that it is wanted (see
+        # mark_statusline_asked), as the statusline-only path above does.
+        if sl_command and existed and mark_statusline_asked(data):
+            save(args.file, data)
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -3110,8 +3124,13 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
                     continue
                 backup(real)  # as `off` does before the same removal
                 save(real, data)
-                print("context-guru: the status line moved into the Context Guru band above the prompt; "
-                      f"/context-guru:statusline brings the line back too ({real})")
+                if data.get(STATUSLINE_KEY) is not None:
+                    # remove_statusline_only gave back the status line the install had replaced.
+                    print("context-guru: your own status line is back; the Context Guru figures are now in the band "
+                          f"above the prompt ({real})")
+                else:
+                    print("context-guru: the status line moved into the Context Guru band above the prompt; "
+                          f"/context-guru:statusline brings the line back too ({real})")
                 continue
             if not repoint_statusline(data, running):
                 continue

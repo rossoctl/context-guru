@@ -89,3 +89,21 @@ func TestCGCachestateSaysOfflineOnlyWhenNothingAnswers(t *testing.T) {
 		t.Errorf("a dead port did not give the offline notice: %s", out)
 	}
 }
+
+// Too slow, and nothing was ever read: the band says the status line's `cg: stats loading…`, not nothing (a GLM
+// round-2 point on #735). A slow proxy is not offline.
+func TestCGCachestateSaysLoadingWhenTheProxyIsTooSlow(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { <-release }), ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { close(release); srv.Close() })
+	out, _ := runCGCode(t, "http://"+ln.Addr().String(), []string{"XDG_CACHE_HOME=" + t.TempDir()}, "cachestate", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil || doc["notice"] != "cg: stats loading…" {
+		t.Errorf("a proxy slower than the 5 s read gave %s, want the `cg: stats loading…` notice", out)
+	}
+}

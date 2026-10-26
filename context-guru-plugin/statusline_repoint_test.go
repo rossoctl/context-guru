@@ -433,3 +433,27 @@ func TestRetiringTheDefaultStatusLineTakesABackup(t *testing.T) {
 		t.Error("the retire removed a statusLine with no backup to restore it from")
 	}
 }
+
+// When the default line had replaced the user's own, the retire gives theirs back, and says so (not "moved into the
+// band", which reads as if they have no status line now; a GLM round-2 point on #735).
+func TestRetiringTheDefaultStatusLineGivesBackTheUsersOwnAndSaysSo(t *testing.T) {
+	e := newRepointEnv(t)
+	v := e.version("0.6.1")
+	theirs := map[string]any{"type": "command", "command": "~/bin/mine.sh"}
+	writeJSON(t, e.userFile(), map[string]any{"statusLine": theirs})
+	args := []string{filepath.Join(v, "settings.py"), "add", "--file", e.userFile(), "--statusline", quoted(v), "--force", "--user-scope", "--no-backup"}
+	if out, code := e.run("python3", args...); code != 0 {
+		t.Fatalf("install over the user's line: %s", out)
+	}
+	data := readJSON(t, e.userFile())
+	delete(data["$context-guru"].(map[string]any), "statusline_asked")
+	writeJSON(t, e.userFile(), data)
+
+	out := e.sessionStart(v)
+	if !strings.Contains(out, "your own status line is back") || strings.Contains(out, "moved into") {
+		t.Errorf("session start said %q, want that the user's own line is back", out)
+	}
+	if cmd, _, _ := statusLineOf(t, e.userFile()); cmd != "~/bin/mine.sh" {
+		t.Errorf("statusLine.command = %q, want the user's own line back", cmd)
+	}
+}

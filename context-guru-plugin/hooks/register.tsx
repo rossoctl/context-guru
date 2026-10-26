@@ -172,6 +172,13 @@ async function setAgentsOff($: Engine, off: boolean): Promise<void> {
   }
 }
 
+/** A chip's name, at most CHIP_NAME characters: a general-purpose agent is named by its description, which can be long. */
+const CHIP_NAME = 24
+const chipName = (name: string | undefined): string => {
+  const n = name ?? ''
+  return n.length > CHIP_NAME ? n.slice(0, CHIP_NAME - 1).trimEnd() + '…' : n
+}
+
 /** Glyph and colour of one cache: ● green warm, ◐ amber in the last minute, cyan with ↻ when pinged, ○ dim when cold. */
 function state(t: ThreadView): { glyph: string; color?: string; dim: boolean; mark: string } {
   if (!t.isWarm) return { glyph: '○', dim: true, mark: '' }
@@ -441,7 +448,7 @@ export const register: Register = on => {
               const s = state(t)
               return (
                 <Text key={t.id} color={s.color} dimColor={s.dim}>
-                  {s.glyph} {t.name}
+                  {s.glyph} {chipName(t.name)}
                   {t.isWarm && <Text dimColor> {t.left}{s.mark}</Text>}
                 </Text>
               )

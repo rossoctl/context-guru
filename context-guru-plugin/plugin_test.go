@@ -1902,6 +1902,17 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("re-adding the same statusline should be unchanged: exit %d, %v", code, facts)
 	}
+	// It still records that the line is asked for: a line installed before 0.6.1 carries no record, and the
+	// SessionStart migration would otherwise remove it (a GLM round-2 point on #735).
+	data := readJSON(t, path)
+	delete(data["$context-guru"].(map[string]any), "statusline_asked")
+	writeJSON(t, path, data)
+	if facts, _ = settings(t, "add", "--file", path, "--url", ourURL, "--statusline", cmdPath); facts["result"] != "unchanged" {
+		t.Fatalf("re-add: %v", facts)
+	}
+	if m, _ := readJSON(t, path)["$context-guru"].(map[string]any); m["statusline_asked"] != true {
+		t.Errorf("a re-ask with --url on a complete install did not record statusline_asked: %v", m)
+	}
 
 	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
 	if code != 0 || facts["result"] != "removed" {
