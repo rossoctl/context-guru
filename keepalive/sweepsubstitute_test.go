@@ -775,3 +775,133 @@ func TestSweepWaitCauseCarriesTheTurnsRead(t *testing.T) {
 		t.Fatalf("LastTurnRead = %d, want 25512", got.LastTurnRead)
 	}
 }
+
+// ⭐ THE CEILING PRICES EVERY QUESTION THE SWEEP WILL ASK (#132). A long list is asked in batches, and each
+// batch reads the prefix again and pays its own answer. The ceiling used to price ONE answer, so a 48-candidate
+// sweep spent about 4x the per-ping $ cap the operator approved.
+//
+// Price: prefix 20,000 x 3.8e-7 + 4,000 x 19e-6 = $0.0836 per question. 48 candidates plan 4 questions
+// ($0.3344). A ceiling of $0.10 admits 1, $0.20 admits 2, $0.40 admits all 4.
+func TestTheSweepCeilingPricesEveryBatchAndLowersTheCount(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ceiling    float64
+		wantAsks   int64
+		wantLowers int64
+		wantRefuse int64
+	}{
+		{"a ceiling that admits one answer asks ONE batch, never four", 0.10, 1, 1, 0},
+		{"a ceiling that admits two asks two", 0.20, 2, 1, 0},
+		{"a ceiling that admits all four asks four, unlowered", 0.40, 4, 0, 0},
+		{"a ceiling below one answer sends the ordinary ping", 0.02, 0, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			offload.ResetSweepBatchForTest()
+			k, fs, clock := testKeeper(t)
+			fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+			st := store.NewMemory(store.Options{MaxEntries: 400})
+			asker := &sweepAsker{cacheRead: 20000}
+			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(48))
+
+			pol := kaPolicy()
+			pol.MaxUSDPerPing = tc.ceiling
+			at := clock.now()
+			for _, d := range []time.Duration{-time.Second, 0} {
+				rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+			}
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 1)
+			if got := asker.calls.Load(); got != tc.wantAsks {
+				t.Fatalf("the sweep asked %d questions, want %d (a ceiling of $%.2f)", got, tc.wantAsks, tc.ceiling)
+			}
+			if got := k.sweepBatchesLowered.Load(); got != tc.wantLowers {
+				t.Errorf("sweep_batches_lowered = %d, want %d", got, tc.wantLowers)
+			}
+			if got := k.sweepOverBudget.Load(); got != tc.wantRefuse {
+				t.Errorf("sweep_over_budget = %d, want %d", got, tc.wantRefuse)
+			}
+			if tc.wantAsks == 0 && fs.n() != 1 {
+				t.Errorf("ordinary pings %d, want 1 when not even one answer fits", fs.n())
+			}
+			// And the candidates the ceiling left out are COUNTED, not silently lost.
+			if lowered := tc.wantAsks > 0 && tc.wantAsks < 4; lowered {
+				if offload.SweepBatchCounters().OverCap != int64(48-12*int(tc.wantAsks)) {
+					t.Errorf("over-cap = %d, want %d candidates left unasked", offload.SweepBatchCounters().OverCap, 48-12*int(tc.wantAsks))
+				}
+			}
+		})
+	}
+}
+
+// The projected cost is n x one question, and affordableSweepBatches never exceeds the plan.
+func TestAffordableSweepBatchesIsTheLargestCountTheCeilingAdmits(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+	one := k.projectedSweepBatchesUSD("claude-sonnet-5", "", 20000, 1)
+	if one <= 0 {
+		t.Fatal("fixture: no price")
+	}
+	if got := k.projectedSweepBatchesUSD("claude-sonnet-5", "", 20000, 4); math.Abs(got-4*one) > 1e-12 {
+		t.Fatalf("4 questions project %.6f, want 4 x %.6f", got, one)
+	}
+	for _, tc := range []struct {
+		ceiling float64
+		planned int
+		want    int
+	}{{0.5 * one, 4, 0}, {one, 4, 1}, {2.5 * one, 4, 2}, {4 * one, 4, 4}, {100, 4, 4}, {100, 1, 1}, {100, 0, 1}} {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, tc.planned, tc.ceiling); got != tc.want {
+			t.Errorf("ceiling %.4f planned %d: %d batches, want %d", tc.ceiling, tc.planned, got, tc.want)
+		}
+	}
+}
+
+// An unpriced model projects nothing and keeps the plan: there is nothing to compare, so the sweep is not
+// refused for a price nobody knows (the old behaviour for one question).
+func TestAnUnpricedModelKeepsThePlannedSweepBatches(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{noPrice{}})
+	if got := k.projectedSweepBatchesUSD("unpriced-model", "", 20000, 4); got != 0 {
+		t.Fatalf("an unpriced model projected %.6f, want 0", got)
+	}
+	if got := k.affordableSweepBatches("unpriced-model", "", 20000, 4, 0.0001); got != 4 {
+		t.Errorf("an unpriced model was lowered to %d batches, want the planned 4", got)
+	}
+}
+
+type noPrice struct{}
+
+func (noPrice) Price(context.Context, string) (modelinfo.Price, bool) { return modelinfo.Price{}, false }
+
+// The batch fields of Stats() come from ONE snapshot of the ledger, and the new counters are published.
+func TestStatsPublishesTheBatchCountersFromOneSnapshot(t *testing.T) {
+	offload.ResetSweepBatchForTest()
+	k, _, clock := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 20000}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(48))
+	pol := kaPolicy()
+	pol.MaxUSDPerPing = 0.20 // admits 2 of the 4 planned
+	at := clock.now()
+	for _, d := range []time.Duration{-time.Second, 0} {
+		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+	}
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	s := k.Stats()
+	want := offload.SweepBatchCounters()
+	if s.SweepAskBatches != want.Batches || s.SweepAskBatches != 2 {
+		t.Errorf("sweep_ask_batches = %d (ledger %d), want 2", s.SweepAskBatches, want.Batches)
+	}
+	if s.SweepBatchOverCap != 24 || s.SweepBatchesLowered != 1 {
+		t.Errorf("over-cap %d, lowered %d, want 24 and 1", s.SweepBatchOverCap, s.SweepBatchesLowered)
+	}
+	if s.SweepBatchSkipped != 0 || s.SweepBatchFailed != 0 {
+		t.Errorf("skipped %d failed %d, want 0 and 0", s.SweepBatchSkipped, s.SweepBatchFailed)
+	}
+	// A skipped batch (the sweep's deadline passed) is published too.
+	offload.NoteSweepBatchSkippedForTest(3)
+	if got := k.Stats().SweepBatchSkipped; got != 3 {
+		t.Errorf("sweep_batch_skipped = %d, want the 3 the ledger holds", got)
+	}
+}

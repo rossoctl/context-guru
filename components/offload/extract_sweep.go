@@ -205,7 +205,7 @@ var sweepBannedKeys = []struct {
 		"prompt carries the output itself"},
 	{"context", "the conversation IS the cached prefix, so there is no amount of it to choose to re-send"},
 	{"context_messages", "the conversation IS the cached prefix; see `context`"},
-	{"max_calls", "one call adjudicates every candidate, because nothing is copied per candidate"},
+	{"max_calls", "a list is asked in batches of 12 (max_ask_batches bounds them), not by a call count"},
 	{"economic_gate", "the gate prices a per-output cheap-model call; this is one cached read for the whole " +
 		"transcript, so its arithmetic does not describe this component"},
 }

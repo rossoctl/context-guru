@@ -65,8 +65,8 @@ const gateApplyAlreadyMarked = "sweep_apply_already_marked"
 // dropVersion is bumped when sweepDropRec changes shape. A record of another version reads as absent.
 const dropVersion = 1
 
-// maxDropsPerThread bounds the per-thread index. A cold apply drops at most maxAskItems outputs per
-// question, so this is many cold applies deep.
+// maxDropsPerThread bounds the per-thread index. A cold apply drops at most maxAskItems x max_ask_batches
+// (at most 12 x 8 = 96) outputs per question set, so this is many cold applies deep.
 const maxDropsPerThread = 512
 
 // sweepDropRec is one applied drop. METADATA ONLY: ids, hashes, counts. No byte of the output is in it

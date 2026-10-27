@@ -1,6 +1,8 @@
 package offload
 
 import (
+	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -97,6 +99,15 @@ func (e *ExtractSweep) askBatchesLimit() int {
 // batches. The smallest candidates beyond it are counted as sweep_over_ask_cap.
 func (e *ExtractSweep) askCandidateLimit() int { return maxAskItems * e.askBatchesLimit() }
 
+// plannedAskBatches is how many questions a sweep of n offered candidates will ask: ceil(n / 12). The
+// keeper prices that many answers against its per-ping cost ceiling.
+func plannedAskBatches(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return (n + maxAskItems - 1) / maxAskItems
+}
+
 // batchRun is the outcome of every question of one sweep, merged.
 type batchRun struct {
 	// judged are the candidates of the batches that ANSWERED, in batch order; drop indexes into judged.
@@ -108,28 +119,52 @@ type batchRun struct {
 	// Usage and cost summed over the questions that reached the provider.
 	prompt, completion, cacheRead, cacheWrite int64
 	costUSD, ms                               float64
-	// answered and failed count the questions by outcome; batches is how many were asked.
-	answered, failed, batches int
+	// answered and failed count the questions by outcome; skipped counts batches never started because
+	// the sweep's context ended first.
+	answered, failed, skipped int
 }
 
 // askInBatches asks the candidates in balanced batches, in sequence, and merges the answers. It is THE
-// batching function: the cold sweep calls it, and any other path that asks a list of outputs should
-// (#720's warm path will). It holds no slot or claim of its own: the caller already holds the thread's
-// claim and a question slot, so a sweep of k questions is still one question's worth of concurrency.
+// batching function: the ping's ask calls it today, and #720's warm path will. It holds no slot or claim
+// of its own: the caller already holds the thread's claim and a question slot, so a sweep of k questions is
+// still one question's worth of concurrency.
+//
+// IT ENFORCES THE OPERATOR'S BOUND ITSELF. It asks at most max_ask_batches batches (and at most
+// maxBatches when the caller passes a lower limit, as the keeper does when its cost ceiling admits fewer
+// answers); a caller that did not pre-cap cannot get around it. The candidates beyond that (the smallest)
+// are not asked and are counted as sweep_over_ask_cap.
 //
 // A batch that fails keeps its items out of the merged answer (they were never judged) and is counted by
-// reason. No item is judged twice: each candidate is in exactly one batch.
-func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *components.Ctx, cands []sweepCand, opt askOpts) batchRun {
+// reason. A PANIC in one batch is one failed batch (reason "panic"): the answers already paid for are kept.
+// A batch never STARTS after the context ended, so k slow batches cannot run past the keeper's outer
+// timeout. No item is judged twice: each candidate is in exactly one batch.
+func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *components.Ctx, cands []sweepCand,
+	opt askOpts, maxBatches int) batchRun {
+
 	br := batchRun{gates: map[string]int{}, events: map[string]int{}}
+	limit := e.askBatchesLimit()
+	if maxBatches > 0 && maxBatches < limit {
+		limit = maxBatches
+	}
+	if over := len(cands) - maxAskItems*limit; over > 0 {
+		// The smallest are the ones left out: ask only about the largest the limit allows.
+		cands = largestFirst(cands)[:maxAskItems*limit]
+		br.gates["sweep_over_ask_cap"] += over
+		sweepOverAskCapBatch.Add(int64(over))
+	}
 	batches := splitAskBatches(cands, maxAskItems)
-	br.batches = len(batches)
 	sweepAskBatches.Add(int64(len(batches)))
 	br.events["sweep_ask_batches"] += len(batches)
 	for bi, b := range batches {
-		start := time.Now()
-		rep := &components.Report{Component: "extract_llm_sweep", Kind: "offload"}
-		drop, r := e.adjudicateWith(req, c, rep, b.cands, opt)
-		br.ms += float64(time.Since(start).Microseconds()) / 1000.0
+		// A batch never starts once the sweep's deadline has passed.
+		if c.Ctx != nil && c.Ctx.Err() != nil {
+			br.skipped += len(batches) - bi
+			sweepBatchSkipped.Add(int64(len(batches) - bi))
+			br.events["sweep_batch_skipped_deadline"] += len(batches) - bi
+			break
+		}
+		drop, r, ms := e.askOneBatch(req, c, b, opt)
+		br.ms += ms
 		br.prompt += r.rec.PromptTokens
 		br.completion += r.rec.CompletionTokens
 		br.cacheRead += r.rec.CacheRead
@@ -156,10 +191,40 @@ func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *compone
 	return br
 }
 
+// askOneBatch asks ONE batch, with its own recover: a panic here is a failed batch (reason "panic") and
+// does not lose the batches before it. The usage of a batch that panicked is unknown and is not booked.
+func (e *ExtractSweep) askOneBatch(req *bschemas.BifrostChatRequest, c *components.Ctx, b askBatch,
+	opt askOpts) (drop []int, r sweepResult, ms float64) {
+
+	start := time.Now()
+	defer func() {
+		if p := recover(); p != nil {
+			sweepPingPanics.Add(1)
+			slog.Error("cg.sweep.batch_panic: recovered; this batch fails open, the others still count",
+				"session", c.Session, "thread", c.Thread, "panic", fmt.Sprint(p), "gate", "sweep_batch_panic")
+			drop, r = nil, sweepResult{}
+			r.gate("sweep_batch_panic")
+		}
+		ms = float64(time.Since(start).Microseconds()) / 1000.0
+	}()
+	rep := &components.Report{Component: "extract_llm_sweep", Kind: "offload"}
+	drop, r = e.adjudicateWith(req, c, rep, b.cands, opt)
+	return drop, r, ms
+}
+
+// largestFirst returns cands sorted by size, largest first, without changing the input.
+func largestFirst(cands []sweepCand) []sweepCand {
+	out := append([]sweepCand(nil), cands...)
+	sort.SliceStable(out, func(a, b int) bool {
+		return schema.TextTokens(out[a].content) > schema.TextTokens(out[b].content)
+	})
+	return out
+}
+
 // batchFailReason names why a batch did not answer, from the gates its question raised. The order is the
 // order a question can fail in.
 func batchFailReason(r sweepResult) string {
-	for _, g := range []string{"sweep_reply_truncated", "sweep_unparseable", "sweep_ask_failed",
+	for _, g := range []string{"sweep_batch_panic", "sweep_reply_truncated", "sweep_unparseable", "sweep_ask_failed",
 		"sweep_prefix_cache_read_ZERO", "sweep_prefix_cache_read_below_turn", "sweep_prefix_cache_write",
 		"sweep_stale_prefix", "sweep_no_prefix", "sweep_no_asker"} {
 		if r.raised(g) {
@@ -170,7 +235,9 @@ func batchFailReason(r sweepResult) string {
 }
 
 var (
-	sweepAskBatches     atomic.Int64
+	sweepAskBatches      atomic.Int64
+	sweepBatchSkipped    atomic.Int64
+	sweepOverAskCapBatch atomic.Int64
 	sweepBatchFailedMu  sync.Mutex
 	sweepBatchFailedBy  = map[string]int64{}
 	sweepBatchFailedAll atomic.Int64
@@ -187,7 +254,10 @@ func noteBatchFailed(reason string) {
 // batches failed, and why.
 type SweepBatchStats struct {
 	Batches, Failed int64
-	FailedBy        map[string]int64
+	// Skipped counts batches never started because the sweep's deadline passed. OverCap counts candidates
+	// left unasked because the limit (max_ask_batches, or the keeper's cost ceiling) allowed fewer batches.
+	Skipped, OverCap int64
+	FailedBy         map[string]int64
 }
 
 // SweepBatchCounters snapshots the batching ledger.
@@ -198,11 +268,22 @@ func SweepBatchCounters() SweepBatchStats {
 	for k, v := range sweepBatchFailedBy {
 		by[k] = v
 	}
-	return SweepBatchStats{Batches: sweepAskBatches.Load(), Failed: sweepBatchFailedAll.Load(), FailedBy: by}
+	return SweepBatchStats{Batches: sweepAskBatches.Load(), Failed: sweepBatchFailedAll.Load(),
+		Skipped: sweepBatchSkipped.Load(), OverCap: sweepOverAskCapBatch.Load(), FailedBy: by}
 }
+
+// ResetSweepBatchForTest clears the batching ledger. For the host's tests, which drive a whole sweep and
+// read the counters.
+func ResetSweepBatchForTest() { resetSweepBatchForTest() }
+
+// NoteSweepBatchSkippedForTest books n skipped batches in the ledger, so the host's tests can check that
+// /stats publishes the counter without staging a sweep that runs out of time.
+func NoteSweepBatchSkippedForTest(n int) { sweepBatchSkipped.Add(int64(n)) }
 
 func resetSweepBatchForTest() {
 	sweepAskBatches.Store(0)
+	sweepBatchSkipped.Store(0)
+	sweepOverAskCapBatch.Store(0)
 	sweepBatchFailedAll.Store(0)
 	sweepBatchFailedMu.Lock()
 	sweepBatchFailedBy = map[string]int64{}

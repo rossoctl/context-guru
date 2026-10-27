@@ -80,6 +80,10 @@ type SweepPingWait struct {
 	// LastTurnRead is the cache_read of the thread's last real turn, 0 when unknown. It is the one
 	// field here that decides something: the cache gate compares the question's read to it (#721).
 	LastTurnRead int
+	// MaxBatches, when > 0, is the most batches this sweep may ask: the keeper sets it to the number of
+	// answers its per-ping cost ceiling admits (#132). The sweep then asks that many and leaves the rest
+	// of the candidates unasked, counted as sweep_over_ask_cap. 0 = no limit beyond max_ask_batches.
+	MaxBatches int
 }
 
 // SweepPingInfo is what a registered candidate looks like before the question is sent, for the
@@ -87,6 +91,9 @@ type SweepPingWait struct {
 type SweepPingInfo struct {
 	Model   string
 	Offered int
+	// Batches is the number of questions this sweep PLANS to ask: ceil(Offered / 12). The keeper prices
+	// that many answers against its per-ping cost ceiling and may lower it (SweepPingWait.MaxBatches).
+	Batches int
 }
 
 // SweepPingResult is what one question cost and produced, shaped like KeepAliveSummaryResult so the
@@ -420,7 +427,7 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 		sweepPingNoInventory.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonBelowMin, false
 	}
-	info = SweepPingInfo{Model: c.ModelName, Offered: len(cands)}
+	info = SweepPingInfo{Model: c.ModelName, Offered: len(cands), Batches: plannedAskBatches(len(cands))}
 	return func(timeout time.Duration, wait SweepPingWait) (res SweepPingResult) {
 		// The same recover for the ask itself: the asker, the verdict checks, buildHeld and the Store
 		// all run here. cand.asked was set before the call and stays set.
@@ -458,7 +465,7 @@ func notePingPanic(where, threadKey string, r any) {
 }
 
 // collect finds the candidates for the question: the same rules as the in-request loop, on the
-// snapshot. The 12 largest, by the same cap.
+// snapshot. The largest 12 x max_ask_batches, by the same cap; askInBatches splits them into batches.
 func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	noteCollect()
 	defer collectDone()
@@ -522,11 +529,13 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	e := cand.e
 	c := *cand.ctx
 	key := thread.Key(c.Session, c.Thread)
-	// TWO DEADLINES MEET HERE, and the shorter wins. The keeper passes CacheAwareSummarizerCallTimeout()
-	// (300 s by default) so a slow question is not cut short as a ping would be; adjudicateWith then
-	// bounds the model call by llmCallTimeout (the in-request extract bound). A question that outlives
-	// llmCallTimeout ends there and is reported as a failed ask, and the ordinary ping goes out. Fail
-	// open either way. If either constant moves, check the other.
+	// TWO DEADLINES MEET HERE. The keeper passes CacheAwareSummarizerCallTimeout() (300 s by default) as
+	// the OUTER bound for the whole sweep, which can be several questions (extract_sweep_batch.go);
+	// adjudicateWith bounds EACH model call by llmCallTimeout (the in-request extract bound, 90 s). So one
+	// slow question ends at llmCallTimeout and counts as a failed batch, but k slow ones could add up past
+	// the outer bound: askInBatches therefore stops before starting a batch once this context has ended,
+	// and a later batch never starts after the deadline. Fail open either way; the ordinary ping goes out.
+	// If either constant moves, check the other.
 	if timeout <= 0 {
 		timeout = llmCallTimeout
 	}
@@ -543,7 +552,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 		trigger:      "ping",
 		gateReason:   "asked at the keep-alive ping, in place of the ping",
 		lastTurnRead: wait.LastTurnRead,
-	})
+	}, wait.MaxBatches)
 	ms := br.ms
 	gates, events := map[string]int{}, map[string]int{}
 	for k, v := range collected.Gates {
@@ -600,7 +609,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	res.Proposed, res.ProposedTokens = h.proposed()
 	cand.deferBilling(sink, ms, res.Substituted)
 	logging.From(c.Ctx).Info("cg.sweep.held", "session", c.Session, "thread", c.Thread,
-		"offered", len(cands), "proposed", res.Proposed, "proposed_tokens", res.ProposedTokens,
+		"offered", res.Offered, "judged", len(cands), "proposed", res.Proposed, "proposed_tokens", res.ProposedTokens,
 		"cache_read", res.CacheRead, "cache_write", res.CacheWrite, "output", res.Output,
 		"waiting_for", wait.WaitingFor, "wait_tool", wait.WaitTool, "held", res.Held)
 	return res

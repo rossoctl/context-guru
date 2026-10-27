@@ -1,16 +1,21 @@
 package offload
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -476,5 +481,153 @@ func TestTheHeldAnswerCarriesTheSumOfEveryBatchsCost(t *testing.T) {
 	}
 	if h.CostUSD <= 0 || h.CostUSD < 1.99*oneAsk || h.CostUSD > 2.01*oneAsk {
 		t.Fatalf("held cost = %.8f, want the sum of two asks = %.8f", h.CostUSD, 2*oneAsk)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Round 1 (#747)
+
+// REVIEW 2, FINDING 2. The cg.sweep.held line reported len(judged) as "offered" after a failed batch: 20
+// candidates, one batch of 10 failed, and the log said offered=10.
+func TestTheHeldLogReportsTheOfferedCountEvenWhenABatchFailed(t *testing.T) {
+	var buf bytes.Buffer
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		if n == 0 {
+			return "", components.PrefixUsage{}, errors.New("boom")
+		}
+		return dropAll(ask), okUse, nil
+	}}
+	resetSweepBatchForTest()
+	st := newMemStore()
+	cand := candidateFor(t, "", "batch-log", a, st, 20)
+	cand.ctx.Ctx = logging.With(cand.ctx.Ctx, slog.New(logging.New(&buf, slog.LevelInfo, false)))
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	cands := cand.collect(rep)
+	res := cand.ask(cands, rep, 0, SweepPingWait{})
+	if !res.Held || res.Offered != 20 {
+		t.Fatalf("fixture: result = %+v, want a held answer with 20 offered", res)
+	}
+	var line string
+	for _, ln := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(ln, "cg.sweep.held") {
+			line = ln
+		}
+	}
+	if line == "" {
+		t.Fatalf("no cg.sweep.held line in %q", buf.String())
+	}
+	if !strings.Contains(line, "offered=20") || !strings.Contains(line, "judged=10") {
+		t.Fatalf("held line = %q, want offered=20 (what was offered) and judged=10 (what answered)", line)
+	}
+}
+
+// A panic in batch k loses batch k only: the answers already paid for are kept.
+func TestAPanicInOneBatchKeepsTheOtherBatches(t *testing.T) {
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		if n == 1 {
+			panic("boom in batch 2")
+		}
+		return dropAll(ask), okUse, nil
+	}}
+	res, st, key := askN(t, a, "", 30, SweepPingWait{}) // 3 batches of 10
+	if a.calls != 3 {
+		t.Fatalf("%d asks, want 3: a panic in batch 2 must not stop batch 3", a.calls)
+	}
+	h, ok := getHeld(st, key)
+	if !ok || !res.Held || len(h.Outputs) != 20 {
+		t.Fatalf("held = %d outputs, want the 20 of the two batches that answered", len(h.Outputs))
+	}
+	if SweepBatchCounters().FailedBy["batch_panic"] != 1 {
+		t.Errorf("counters = %+v, want one batch_panic failure", SweepBatchCounters())
+	}
+}
+
+// directBatch runs askInBatches directly, with candidates taken from a registered conversation and a real
+// request, so the asker's questions name real outputs. n candidates, no pre-cap.
+func directBatch(t *testing.T, cfg string, a components.PrefixAsker, n, maxBatches int, mut func(*components.Ctx)) (batchRun, *ExtractSweep) {
+	t.Helper()
+	resetSweepBatchForTest()
+	st := newMemStore()
+	cand := candidateFor(t, "max_ask_batches: 8\n", "batch-direct", a, st, n)
+	e := shippedSweep(t, cfg)
+	cand.e = e
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	// Collect with a wide cap so the full list reaches askInBatches un-pre-capped.
+	wide := shippedSweep(t, "max_ask_batches: 8\n")
+	cand.e = wide
+	cands := cand.collect(rep)
+	cand.e = e
+	c := *cand.ctx
+	if mut != nil {
+		mut(&c)
+	}
+	req := &bschemas.BifrostChatRequest{Input: cand.input}
+	return e.askInBatches(req, &c, cands, askOpts{}, maxBatches), e
+}
+
+// askInBatches enforces max_ask_batches ITSELF: a caller that did not pre-cap cannot ignore the bound.
+func TestAskInBatchesEnforcesTheOperatorsBatchLimitItself(t *testing.T) {
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) { return dropAll(ask), okUse, nil }}
+	br, _ := directBatch(t, "max_ask_batches: 2\n", a, 60, 0, nil) // 60 candidates, NO pre-cap
+	if a.calls != 2 {
+		t.Fatalf("%d asks, want 2: max_ask_batches is the bound", a.calls)
+	}
+	if got := br.gates["sweep_over_ask_cap"]; got != 36 {
+		t.Errorf("sweep_over_ask_cap = %d, want 36 (60 - 24)", got)
+	}
+	if len(br.judged) != 24 || SweepBatchCounters().OverCap != 36 {
+		t.Errorf("judged %d, ledger over-cap %d, want 24 and 36", len(br.judged), SweepBatchCounters().OverCap)
+	}
+}
+
+// The keeper may lower the limit below max_ask_batches; it can never raise it.
+func TestACallerCanLowerTheBatchLimitButNotRaiseIt(t *testing.T) {
+	for _, tc := range []struct {
+		cfg                string
+		maxBatches, wantAsks int
+	}{
+		{"", 1, 1}, {"", 2, 2}, {"", 4, 4}, {"", 8, 4}, {"", 0, 4},
+		{"max_ask_batches: 2\n", 8, 2},
+	} {
+		a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) { return dropAll(ask), okUse, nil }}
+		directBatch(t, tc.cfg, a, 96, tc.maxBatches, nil)
+		if int(a.calls) != tc.wantAsks {
+			t.Errorf("cfg %q maxBatches %d: %d asks, want %d", tc.cfg, tc.maxBatches, a.calls, tc.wantAsks)
+		}
+	}
+}
+
+// A batch never STARTS after the sweep's context ended: k slow batches cannot run past the outer timeout.
+func TestABatchNeverStartsAfterTheSweepsDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		if n == 0 {
+			cancel() // the deadline passes during batch 1
+		}
+		return dropAll(ask), okUse, nil
+	}}
+	br, _ := directBatch(t, "", a, 36, 0, func(c *components.Ctx) { c.Ctx = ctx }) // 3 batches
+	if a.calls != 1 {
+		t.Fatalf("%d asks, want 1: batches 2 and 3 must not start after the deadline", a.calls)
+	}
+	if br.skipped != 2 || SweepBatchCounters().Skipped != 2 {
+		t.Errorf("skipped %d (ledger %d), want 2", br.skipped, SweepBatchCounters().Skipped)
+	}
+}
+
+// The planned batch count the keeper prices: ceil(offered / 12).
+func TestThePlannedBatchCountIsCeilOfOfferedOverTwelve(t *testing.T) {
+	for n, want := range map[int]int{0: 0, 1: 1, 12: 1, 13: 2, 24: 2, 25: 3, 48: 4, 96: 8} {
+		if got := plannedAskBatches(n); got != want {
+			t.Errorf("%d offered plans %d batches, want %d", n, got, want)
+		}
+	}
+	// And the registered candidate carries it on SweepPingInfo.
+	e := shippedSweep(t, "")
+	key, _ := registered(t, e, "batch-info", pingAsker(), newMemStore(), deepCandidates(30))
+	_, info, _, ok := SweepPingSubstitute(key)
+	if !ok || info.Offered != 30 || info.Batches != 3 {
+		t.Fatalf("info = %+v ok=%v, want Offered 30 and Batches 3", info, ok)
 	}
 }

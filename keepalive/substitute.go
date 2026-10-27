@@ -301,16 +301,47 @@ func (k *Keeper) sweepAnswerUSD(j pingJob, model string, u Usage) float64 {
 // the per-ping ceiling.
 const sweepOutputBudgetGuess = 4000
 
-// projectedSweepUSD mirrors projectedSummaryUSD for the sweep's question.
+// projectedSweepUSD mirrors projectedSummaryUSD for the sweep's question: ONE question, which reads the
+// cached prefix once and pays one answer.
 func (k *Keeper) projectedSweepUSD(model, endpoint string, prefix int64) float64 {
-	if model == "" || prefix <= 0 {
+	return k.projectedSweepBatchesUSD(model, endpoint, prefix, 1)
+}
+
+// projectedSweepBatchesUSD is the projected cost of a sweep of n questions (#132). A long list is asked in
+// batches (extract_sweep_batch.go), and EACH batch reads the whole cached prefix again and pays its own
+// answer, so n questions cost n x (prefix read + answer guess). Pricing one answer for a sweep of four
+// would let it spend four times the per-ping ceiling the operator approved.
+func (k *Keeper) projectedSweepBatchesUSD(model, endpoint string, prefix int64, n int) float64 {
+	if model == "" || prefix <= 0 || n < 1 {
 		return 0
 	}
 	price, ok := k.price(endpoint, model, prefix)
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + float64(sweepOutputBudgetGuess)*price.Output
+	return float64(n) * (float64(prefix)*price.CacheRead + float64(sweepOutputBudgetGuess)*price.Output)
+}
+
+// affordableSweepBatches is how many of the planned batches the per-ping ceiling admits: the largest
+// n <= planned with n x (one question's projected cost) <= ceiling. 0 means not even one fits, and the
+// caller sends the ordinary ping. A ceiling that admits fewer than planned LOWERS the batch count, so a
+// ping still sweeps what it can afford (the smallest candidates are left unasked).
+func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling float64) int {
+	if planned < 1 {
+		planned = 1
+	}
+	one := k.projectedSweepBatchesUSD(model, endpoint, prefix, 1)
+	if one <= 0 { // unpriced: the old behaviour, nothing to compare, nothing to lower
+		return planned
+	}
+	n := int(ceiling / one)
+	if n > planned {
+		n = planned
+	}
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
 
 // sweepWaitCause is the thread's wait cause (#453) for the question to store: what the response that
@@ -357,15 +388,34 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	k.mu.Lock()
 	model, prefix, ceiling, endpoint := e.model, e.prefix, e.pol.Ceiling(), e.endpoint
 	k.mu.Unlock()
-	if cost := k.projectedSweepUSD(model, endpoint, prefix); cost > ceiling {
+	// THE CEILING PRICES EVERY QUESTION THE SWEEP WILL ASK, not one (#132). The sweep plans info.Batches
+	// questions, each reading the prefix again and paying its own answer. If the ceiling admits fewer than
+	// planned, ask fewer (the smallest candidates stay unasked, counted as sweep_over_ask_cap); if it
+	// admits none, send the ordinary ping.
+	planned := info.Batches
+	if planned < 1 {
+		planned = 1
+	}
+	allowed := k.affordableSweepBatches(model, endpoint, prefix, planned, ceiling)
+	if allowed < 1 {
+		cost := k.projectedSweepUSD(model, endpoint, prefix)
 		k.sweepOverBudget.Add(1)
 		slog.Debug("context-guru: sweep keep-alive question would exceed the per-ping cost cap; "+
 			"pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "ceiling_usd", ceiling)
 		return false
 	}
+	wait := k.sweepWaitCause(j)
+	if allowed < planned {
+		k.sweepBatchesLowered.Add(1)
+		wait.MaxBatches = allowed
+		slog.Debug("context-guru: sweep keep-alive: the per-ping cost cap admits fewer questions than planned; "+
+			"asking fewer",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "planned", planned, "allowed", allowed,
+			"ceiling_usd", ceiling)
+	}
 	start := k.now()
-	res := dispatch(offload.CacheAwareSummarizerCallTimeout(), k.sweepWaitCause(j))
+	res := dispatch(offload.CacheAwareSummarizerCallTimeout(), wait)
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	if !res.Substituted {
 		// A full slot is counted by the offload side as sweep_concurrency_full. It is not a failed ask.
