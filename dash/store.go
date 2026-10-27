@@ -804,9 +804,12 @@ func (d *DB) reclaim() error {
 // SQLite re-ask for the lock through the busy handler for up to 5 seconds, so an
 // outer backoff loop would stack full 5s waits on top of each other (measured: five
 // attempts, 25s). What the old code missed is the ROW — busy=1 after that whole
-// budget means the bloat protection did not run, which is a fact worth a log line
-// rather than silence: a WAL left to grow made one writer commit take 5.5s and
-// blocked /metrics for 5.2s, and nothing pointed here (#166).
+// budget means the bloat protection did not run, and err != nil means the pragma
+// itself failed. A reader holding the lock is only the most COMMON cause of the
+// first, so the WARN names the fact (the checkpoint did not complete) rather than
+// one cause of it, and the attributes say which: a fact worth a log line rather
+// than silence — a WAL left to grow made one writer commit take 5.5s and blocked
+// /metrics for 5.2s, and nothing pointed here (#166).
 func (d *DB) checkpoint() {
 	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
@@ -816,7 +819,7 @@ func (d *DB) checkpoint() {
 	if err == nil && busy == 0 {
 		return
 	}
-	slog.Warn("dash: WAL checkpoint skipped, a reader held the lock",
+	slog.Warn("dash: WAL checkpoint did not complete",
 		"busy", busy, "wal_frames", logFrames, "checkpointed", checkpointed, "err", err)
 }
 

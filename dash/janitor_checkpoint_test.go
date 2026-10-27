@@ -188,7 +188,7 @@ func TestCheckpointRetriesWhileAReaderHoldsTheLock(t *testing.T) {
 		t.Fatalf("the reader held the lock across the whole pass, so the WAL must still hold its "+
 			"backlog (size %d) — if it was truncated the fixture held no lock at all", after.Size())
 	}
-	if !strings.Contains(got, "WAL checkpoint skipped") {
+	if !strings.Contains(got, "WAL checkpoint did not complete") {
 		t.Fatal("a checkpoint that stayed busy for the whole retry budget left no trace: the old " +
 			"code discarded the busy row, and an operator cannot tell a checkpoint that ran from " +
 			"one that was silently skipped (#166)")
