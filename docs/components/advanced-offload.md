@@ -532,6 +532,29 @@ being rewritten. `model` because only the request's model has the cache (above).
 `context_messages` because the conversation *is* the cached prefix. `max_calls` because one ask covers
 every candidate. `economic_gate` because it prices a per-output cheap-model call, which this is not.
 
+### Batches: how a long list of outputs is asked (`max_ask_batches`)
+
+One question used to keep the 12 largest outputs and drop the rest (`sweep_over_ask_cap`, #132). On a long session that
+left most old outputs unasked. Now a list longer than 12 is **split into balanced batches** and asked **in sequence**:
+
+- The batch size is 12. `k = ceil(n / 12)` batches. 16 gives 8+8, 23 gives 12+11. The largest-first order is dealt
+  round-robin, so each batch mixes sizes. A list of 12 or fewer is **one question, as before**.
+- `max_ask_batches` (default 4, at most 8) bounds the sweep. Outputs beyond `12 x max_ask_batches` (the smallest) are not
+  asked and are counted as `sweep_over_ask_cap`.
+- The questions run over the same cached prefix, under the thread's one claim and one question slot, so concurrency does
+  not change. Each batch is one more question, so it costs one more answer.
+- Each answer is judged on its own, and by the shared cache-read rule (`prefixAskCacheOK`) on its own.
+- **A batch that fails fails open.** An error, a refused cache read, a truncated reply or an unparseable one: its outputs
+  are left out of the held answer (they were never judged), so the next question may offer them again. The other batches
+  still count. Counted as `sweep_batch_failed`, with the reason in `sweep_batch_failed_by`.
+- All verdicts are merged into **one held answer**, keyed by tool-use id, with no output judged twice. The next cold
+  request does **one recheck and one cut**.
+- The answer cost is the sum of every batch's usage. `sweep_ask_batches` counts the questions asked.
+
+The reply budget stays at the flat 16,000 tokens per batch. 12 is the batch size because one reply carries a verdict (with a
+verbatim quote) for every output in it, and a reply cut off mid-array parses as nothing. A cut reply now loses its batch
+and not the whole sweep.
+
 ### Counters
 
 At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,

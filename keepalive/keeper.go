@@ -1698,6 +1698,12 @@ type Stats struct {
 	SweepPanics           int64 `json:"sweep_ping_panics"`
 	SweepConcurrency      int64 `json:"sweep_concurrency_full"`
 	SweepNotRegistered    int64 `json:"sweep_not_registered"`
+	// SweepAskBatches counts the batches asked in all (#132): a sweep of 20 candidates is 2 batches.
+	// SweepBatchFailed counts batches that failed open, SweepBatchFailedBy giving the reason. The answer
+	// cost sums every batch.
+	SweepAskBatches    int64            `json:"sweep_ask_batches"`
+	SweepBatchFailed   int64            `json:"sweep_batch_failed"`
+	SweepBatchFailedBy map[string]int64 `json:"sweep_batch_failed_by,omitempty"`
 	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
 	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
 	// xhigh on. Metadata only: counts, never content, never a session id.
@@ -1811,6 +1817,9 @@ func (k *Keeper) Stats() Stats {
 		SweepPanics:                        sw.Panics,
 		SweepConcurrency:                   sw.ConcurrencyFull,
 		SweepNotRegistered:                 sw.NotRegistered,
+		SweepAskBatches:                    offload.SweepBatchCounters().Batches,
+		SweepBatchFailed:                   offload.SweepBatchCounters().Failed,
+		SweepBatchFailedBy:                 offload.SweepBatchCounters().FailedBy,
 		SweepDrops:                         sweepDropStats(),
 		SweepGates:                         sw.Gates,
 	}
