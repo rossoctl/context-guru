@@ -870,7 +870,9 @@ func TestAnUnpricedModelKeepsThePlannedSweepBatches(t *testing.T) {
 
 type noPrice struct{}
 
-func (noPrice) Price(context.Context, string) (modelinfo.Price, bool) { return modelinfo.Price{}, false }
+func (noPrice) Price(context.Context, string) (modelinfo.Price, bool) {
+	return modelinfo.Price{}, false
+}
 
 // The batch fields of Stats() come from ONE snapshot of the ledger, and the new counters are published.
 func TestStatsPublishesTheBatchCountersFromOneSnapshot(t *testing.T) {

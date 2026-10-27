@@ -24,6 +24,11 @@ import (
 // Tests for BATCHING (#132): a long list of outputs is asked in balanced batches, in sequence, merged into
 // ONE held answer. n <= 12 is one ask, exactly as before.
 
+// batchTestBudget is the sweep's outer timeout in these tests. It must fit k questions even under -race: a
+// batch never STARTS after the sweep's context ended (extract_sweep_batch.go), so a budget sized for one
+// question (the old 1 s) correctly skips the second batch on a slow machine.
+const batchTestBudget = 60 * time.Second
+
 func candsOfSizes(n int) []sweepCand {
 	out := make([]sweepCand, n)
 	for i := range out {
@@ -393,7 +398,7 @@ func TestTheMergedAnswerIsAppliedAsOneCutOnTheNextColdRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("no question offered: %s", reason)
 	}
-	if res := dispatch(time.Second, SweepPingWait{}); !res.Held || res.Proposed != 20 || a.calls != 2 {
+	if res := dispatch(batchTestBudget, SweepPingWait{}); !res.Held || res.Proposed != 20 || a.calls != 2 {
 		t.Fatalf("fixture: want one held answer of 20 from 2 asks, got %+v after %d asks", res, a.calls)
 	}
 	req := applyConv(20, 1)
@@ -438,7 +443,7 @@ func TestAFailedBatchKeepsItsOutputsOnTheColdRequestAndTheOtherBatchApplies(t *t
 	if !ok {
 		t.Fatal("no question offered")
 	}
-	if res := dispatch(time.Second, SweepPingWait{}); !res.Held || res.Proposed != 10 {
+	if res := dispatch(batchTestBudget, SweepPingWait{}); !res.Held || res.Proposed != 10 {
 		t.Fatalf("fixture: want a held answer of the 10 that answered, got %+v", res)
 	}
 	req := applyConv(20, 1)
@@ -583,7 +588,7 @@ func TestAskInBatchesEnforcesTheOperatorsBatchLimitItself(t *testing.T) {
 // The keeper may lower the limit below max_ask_batches; it can never raise it.
 func TestACallerCanLowerTheBatchLimitButNotRaiseIt(t *testing.T) {
 	for _, tc := range []struct {
-		cfg                string
+		cfg                  string
 		maxBatches, wantAsks int
 	}{
 		{"", 1, 1}, {"", 2, 2}, {"", 4, 4}, {"", 8, 4}, {"", 0, 4},

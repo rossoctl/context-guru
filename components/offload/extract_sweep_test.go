@@ -124,7 +124,7 @@ func askOffload(e *ExtractSweep, req *bschemas.BifrostChatRequest, rep *componen
 		rep.Gate("ping_not_offered_" + string(reason))
 		return keys, err
 	}
-	res := dispatch(time.Second, SweepPingWait{})
+	res := dispatch(batchTestBudget, SweepPingWait{})
 	for g, n := range res.Gates {
 		rep.GateN(g, n)
 	}

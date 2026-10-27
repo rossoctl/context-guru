@@ -238,9 +238,9 @@ var (
 	sweepAskBatches      atomic.Int64
 	sweepBatchSkipped    atomic.Int64
 	sweepOverAskCapBatch atomic.Int64
-	sweepBatchFailedMu  sync.Mutex
-	sweepBatchFailedBy  = map[string]int64{}
-	sweepBatchFailedAll atomic.Int64
+	sweepBatchFailedMu   sync.Mutex
+	sweepBatchFailedBy   = map[string]int64{}
+	sweepBatchFailedAll  atomic.Int64
 )
 
 func noteBatchFailed(reason string) {
