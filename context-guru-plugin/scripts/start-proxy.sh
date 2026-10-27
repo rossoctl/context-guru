@@ -336,10 +336,13 @@ case "${ANTHROPIC_BASE_URL:-}" in
     # no pidfile. Three rounds of guessing followed, and the fix was only found by reading this
     # branch in the source. One line costs nothing and answers it immediately.
     #
-    # The URL is logged with its userinfo (user:pass@) stripped, the way settings.py's redact_url
-    # strips it everywhere else it prints a base URL (#251): the diagnostic value is the port
-    # mismatch, not the credentials a URL can carry.
-    url_=$(printf '%s' "${ANTHROPIC_BASE_URL:-unset}" | sed -E 's#(//)[^/@]*@#\1<credentials not shown>@#')
+    # The URL is logged with its userinfo (user:pass@) replaced and its query dropped entirely, the
+    # way settings.py's redact_url protects credentials everywhere else it prints a base URL (#251):
+    # the diagnostic value is the port mismatch — the scheme, host and path — not the credentials a
+    # URL can carry. The query goes whole rather than selectively masked, because a query can carry
+    # a credential under a name no list of credential-looking words catches.
+    url_=$(printf '%s' "${ANTHROPIC_BASE_URL:-unset}" \
+      | sed -E -e 's#(//)[^/@?]*@#\1<credentials not shown>@#' -e 's#[?#].*##')
     printf '%s declined: ANTHROPIC_BASE_URL=%s does not name port %s; pass --force to start anyway\n' \
       "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$url_" "$PORT" >>"$LOG" 2>/dev/null
     exit 0 ;;

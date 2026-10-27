@@ -12434,6 +12434,49 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	}
 }
 
+// TestTheDeclineBreadcrumbCarriesNoCredentials (#251, review round 1). The gate's decline branch
+// logs ANTHROPIC_BASE_URL so a silent decline stays diagnosable — but the URL can carry credentials
+// in its userinfo and in its query, and this log is the file a user pastes into an issue. The
+// breadcrumb must keep the diagnostic part (the host and port that explain the mismatch) and drop
+// everything that can carry a credential.
+func TestTheDeclineBreadcrumbCarriesNoCredentials(t *testing.T) {
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+	dir, env := portRoutedProject(t, "8841")
+	// This session points somewhere else, with credentials in both places a URL can hide them: the
+	// userinfo and a query value. CLAUDE_PLUGIN_OPTION_PORT stays pinned so PORT resolves to 8841 —
+	// a URL this foreign leaves the delegate with no port to confirm, which declines one branch
+	// earlier ("no install routes this directory") and never logs a URL at all.
+	env = append(env,
+		"CLAUDE_PLUGIN_OPTION_PORT=8841",
+		"ANTHROPIC_BASE_URL=https://user:hunter2@gw.example.com:9443/v1?api_key=TOPSECRET&trace=1")
+	out, code := runIn(t, dir, env, "", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if code != 0 {
+		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("the decline must stay silent on stdout, got %q", out)
+	}
+	log := filepath.Join(dir, "state", "proxy-8841.log")
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the decline left no breadcrumb in %s: %v", log, err)
+	}
+	if !strings.Contains(string(b), "declined:") {
+		t.Fatalf("the decline left no breadcrumb:\n%s", b)
+	}
+	// What must survive: the endpoint that explains the mismatch.
+	if !strings.Contains(string(b), "gw.example.com:9443") {
+		t.Errorf("the breadcrumb lost the diagnostic host and port:\n%s", b)
+	}
+	// What must not: the credentials, from either place the URL carried them.
+	for _, secret := range []string{"user:hunter2", "hunter2", "TOPSECRET", "api_key"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("the breadcrumb logged the credential %q:\n%s", secret, b)
+		}
+	}
+}
+
 func TestNoPortConsumerCarriesABlindDefault(t *testing.T) {
 	// A drift test, because this defect is re-introduced by writing the obvious thing. Every one of
 	// the four consumers had `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` or its Python twin, each looked
