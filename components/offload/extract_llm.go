@@ -1035,6 +1035,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				if !apply(i, content, cached.Projected, cached.Summary, false) {
 					continue
 				}
+				// commitMark took the payload, so the reserve is not full (#214). The same-session
+				// replay above is left out on purpose: commitRefresh never refuses, so a replay
+				// says nothing about whether the reserve has room.
+				e.ratios.noteSpliced()
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
@@ -1542,7 +1546,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
-			e.ratios.noteSpliced() // a payload fit, so the reserve is not full (#214)
+			e.ratios.noteSpliced() // in full mode a payload fit, so the reserve is not full (#214)
 			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what this request's message actually
 			// shrank by, and the basis extract_llm_sweep already books on. Carrying
 			// `before - TextTokens(projection)` out of runCall instead omitted the summary, the
@@ -1594,8 +1598,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			//
 			// That is now closed (#214): ratioTracker.exploring grants no slot while the reserve is
 			// refusing (a refusal inside reserveRefuseWindow with no splice since), and the skip is
-			// counted as the explore_skipped_reserve_full gate. So the spend above applies only to
-			// the first calls of a refusal burst, not to every new session for its whole length.
+			// counted as the explore_skipped_reserve_full gate. So the spend above falls to about
+			// one trial call per window while saturation lasts, not maxExploreCalls per session.
 			// The "observe nothing while refusing" rule stays: it is correct.
 			//
 			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is

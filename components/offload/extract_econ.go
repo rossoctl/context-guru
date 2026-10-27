@@ -510,7 +510,10 @@ func (r *ratioTracker) noteRefused() {
 	r.mu.Unlock()
 }
 
-// noteSpliced records that a removal landed, so the reserve took a payload: it is not full.
+// noteSpliced records that a removal landed through commitMark. In full mode the reserve then
+// took a payload, so it is not full. In a degraded marker mode no reserve write happens, but
+// noteRefused is never set there either, so the call is a no-op. Same-session replays do not
+// call it: commitRefresh never refuses, so a replay is no evidence about room.
 func (r *ratioTracker) noteSpliced() {
 	r.mu.Lock()
 	r.refusedAt = time.Time{}
@@ -572,7 +575,7 @@ const shrinkPriorTokens = 8000
 // much an extraction can remove and still be accepted. Measured ratios were ~0.10-0.12.
 const maxLearnedRatio = 0.60
 
-// exploring reports whether the tracker still lacks the evidence to estimate a ratio, and
+// exploringWhy reports whether the tracker still lacks the evidence to estimate a ratio, and
 // consumes one exploration slot if so.
 //
 // This closes the SECOND deadlock of the same shape as the flat-cost one (see callCost).
@@ -589,13 +592,9 @@ const maxLearnedRatio = 0.60
 //
 // While the reserve is refusing (#214), no slot is granted: a trial call's output would be
 // refused, so it would be pure waste, and the tracker cannot learn from a refused result.
-func (r *ratioTracker) exploring(session string) bool {
-	ok, _ := r.exploringWhy(session)
-	return ok
-}
-
-// exploringWhy is exploring, plus whether a slot was withheld only because the reserve is
-// refusing. A withheld slot is not consumed, so exploration resumes when the reserve frees.
+//
+// The second result is true when a slot was withheld only because the reserve is refusing. A
+// withheld slot is not consumed, so exploration resumes when the reserve frees.
 func (r *ratioTracker) exploringWhy(session string) (explore, skippedReserveFull bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

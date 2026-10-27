@@ -319,7 +319,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	var r ratioTracker
 	explored := 0
 	for i := 0; i < 20; i++ {
-		if r.exploring("sessA") {
+		if r.exploringOK("sessA") {
 			explored++
 		}
 	}
@@ -330,7 +330,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	// counter spent everything on the first session, leaving every later one with an
 	// unrevisable prior — the off-switch failure exploration exists to prevent, at process
 	// scope.
-	if !r.exploring("sessB") {
+	if !r.exploringOK("sessB") {
 		t.Fatal("a different session must get its own exploration budget")
 	}
 
@@ -353,7 +353,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	// Once enough evidence exists, exploration stops even if slots remain unused.
 	var r2 ratioTracker
 	r2.observe(200, minRatioSampleTokens+1)
-	if r2.exploring("anySession") {
+	if r2.exploringOK("anySession") {
 		t.Fatal("with sufficient evidence the gate must stop exploring")
 	}
 }

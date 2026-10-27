@@ -16,6 +16,12 @@ import (
 // #214: while the stash reserve refuses payloads, a trial call is wasted, so exploring()
 // must grant no slot. These tests pin the tracker, then the component end to end.
 
+// exploringOK is the slot decision alone, for tests that do not need the skip flag.
+func (r *ratioTracker) exploringOK(session string) bool {
+	ok, _ := r.exploringWhy(session)
+	return ok
+}
+
 func fixedClock(t *time.Time) func() time.Time { return func() time.Time { return *t } }
 
 func TestExploringWithholdsASlotWhileTheReserveRefuses(t *testing.T) {
@@ -40,21 +46,23 @@ func TestExploringResumesWhenTheReserveFrees(t *testing.T) {
 	// Freed by a successful splice.
 	r.noteRefused()
 	r.noteSpliced()
-	if !r.exploring("sessA") {
+	if !r.exploringOK("sessA") {
 		t.Fatal("exploration did not resume after a splice")
 	}
 
 	// Freed by the window passing. The slot withheld earlier was not consumed.
 	r.noteRefused()
-	if r.exploring("sessB") {
+	if r.exploringOK("sessB") {
 		t.Fatal("explored inside the refusal window")
 	}
 	now = now.Add(reserveRefuseWindow + time.Second)
-	if !r.exploring("sessB") {
+	if !r.exploringOK("sessB") {
 		t.Fatal("exploration did not resume after the window passed")
 	}
-	if !r.exploring("sessB") || r.exploring("sessB") {
-		t.Fatal("sessB must still get exactly maxExploreCalls slots after a withheld one")
+	second := r.exploringOK("sessB")
+	third := r.exploringOK("sessB")
+	if !second || third {
+		t.Fatalf("sessB must get exactly maxExploreCalls slots after a withheld one: second=%v third=%v", second, third)
 	}
 }
 
@@ -114,8 +122,8 @@ func TestExtractLLMMakesNoTrialCallUnderAFullReserve(t *testing.T) {
 	}
 }
 
-// A splice that lands through the real component clears the refusal. The splice here is a
-// cross-session cache hit (no model call), so only apply() can have cleared the state.
+// A fresh splice that lands through the real component clears the refusal. Each run uses a fresh
+// store, so the splice is the fresh phase-3 path (one model call).
 func TestExtractLLMSpliceClearsTheReserveRefusal(t *testing.T) {
 	original := strings.Repeat("2026-08-31T10:00:00Z INFO  worker: processed batch\n", 400)
 	model := &shrinkingModel{}
@@ -143,5 +151,47 @@ func TestExtractLLMSpliceClearsTheReserveRefusal(t *testing.T) {
 	e.ratios.mu.Unlock()
 	if refusing {
 		t.Fatal("a successful splice left the reserve marked as refusing")
+	}
+}
+
+// A cross-session splice also clears the refusal. Both sessions share ONE store, so session B
+// finds session A's global result and splices it with no model call.
+func TestExtractLLMCrossSessionSpliceClearsTheReserveRefusal(t *testing.T) {
+	original := strings.Repeat("2026-08-31T10:00:00Z INFO  worker: processed batch\n", 400)
+	model := &shrinkingModel{}
+	e := newTimeoutTestComponent(t, model)
+	st := &gatedStore{Memory: store.NewMemory(store.Options{MaxEntries: 400})}
+	run := func(session string) *bschemas.BifrostChatRequest {
+		c := &components.Ctx{Session: session, Store: st, Ctx: context.Background(),
+			Model: components.ModelSpec{Static: model, Incoming: model}}
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+			{Role: bschemas.ChatMessageRoleUser}, {Role: bschemas.ChatMessageRoleTool},
+		}}
+		schema.SetMessageText(&req.Input[0], "Summarize the worker log.")
+		schema.SetMessageText(&req.Input[1], original)
+		if _, err := e.Offload(req, &components.Report{Component: "extract_llm"}, c); err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	run("sessA")
+	callsA := model.calls
+	if callsA == 0 {
+		t.Fatal("session A made no model call, so there is no global result to hit")
+	}
+	e.ratios.noteRefused()
+	hitsBefore := extractCacheHits("extract_llm")
+	reqB := run("sessB")
+	if model.calls != callsA || extractCacheHits("extract_llm")-hitsBefore == 0 {
+		t.Fatalf("session B did not take the cross-session branch (calls %d->%d)", callsA, model.calls)
+	}
+	if schema.MessageText(reqB.Input[1]) == original {
+		t.Fatal("session B did not splice")
+	}
+	e.ratios.mu.Lock()
+	refusing := e.ratios.reserveRefusingLocked()
+	e.ratios.mu.Unlock()
+	if refusing {
+		t.Fatal("a cross-session splice left the reserve marked as refusing")
 	}
 }
