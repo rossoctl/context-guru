@@ -672,13 +672,21 @@ func TestAPanicInThePingQuestionLeavesAPlainPing(t *testing.T) {
 			t.Fatal("no question offered")
 		}
 		res := dispatch(time.Second, SweepPingWait{}) // must not panic
-		if res.Substituted || res.Held || res.Reason != SweepReasonPanic {
-			t.Fatalf("result = %+v, want a plain ping with reason panic", res)
+		// The panic is caught PER BATCH (#132): the only batch fails, so nothing is held and the ping stays
+		// plain. It is a failed batch with reason "batch_panic", not a dead sweep, so the answers of earlier
+		// batches would be kept (TestAPanicInOneBatchKeepsTheOtherBatches).
+		if res.Substituted || res.Held {
+			t.Fatalf("result = %+v, want a plain ping: nothing substituted or held", res)
 		}
 		if SweepPingCounters().Panics-before != 1 {
 			t.Error("the panic was not counted")
 		}
-		// The conversation stays marked asked, so the next ping is plain too.
+		if SweepBatchCounters().FailedBy["batch_panic"] < 1 {
+			t.Errorf("batch counters = %+v, want a batch failure with reason batch_panic", SweepBatchCounters())
+		}
+		// The conversation stays marked asked, so the next ping is plain too. A batch that panicked may have
+		// been paid for already (see TestAPanicAfterAPaidCallKeepsTheThreadAsked), so the latch is NOT given
+		// back.
 		if _, _, reason, ok := SweepPingSubstitute(key); ok || reason != SweepReasonAlreadyAsked {
 			t.Fatalf("after a panic: ok=%v reason=%q, want already_asked", ok, reason)
 		}

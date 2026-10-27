@@ -45,3 +45,15 @@ func HeldSweepAnswerForTest(st store.Store, threadKey string) (asked, proposed i
 
 // SweepSlotsInUseForTest reports how many sweep slots are held right now.
 func SweepSlotsInUseForTest() int { return len(sweepSlots) }
+
+// ResetSweepBatchForTest clears the batching ledger. For the host's tests, which drive a whole sweep and
+// read the counters.
+func ResetSweepBatchForTest() { resetSweepBatchForTest() }
+
+// NoteSweepBatchSkippedForTest books n skipped batches in the ledger, so the host's tests can check that
+// /stats publishes the counter without staging a sweep that runs out of time.
+func NoteSweepBatchSkippedForTest(n int) { sweepBatchSkipped.Add(int64(n)) }
+
+// sweepPanicAfterCallHook, set only by a test, runs after the model call returned and before the reply is
+// processed. A test makes it panic to model a bug in the code AFTER a paid call.
+var sweepPanicAfterCallHook func()

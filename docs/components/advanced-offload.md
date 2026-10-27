@@ -521,6 +521,7 @@ net; the model does not get to hear about it.
 |---|---|---|
 | `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
 | `min_inventory` | 1 | Fewest candidates worth asking about; below it the sweep does not ask. It was 10, because the model's judgement is a function of how many candidates it **compares** (shown one output it scored 6% live-kept, ~15 together reached 58%). The question now replaces a ping, so a small inventory costs a small answer and a held answer is rechecked before use; `shadow` measures the real rates. Raise it to bring the old floor back. |
+| `max_ask_batches` | 4 | How many batches of 12 outputs one sweep asks (at most 8). A list longer than 12 is split into balanced batches asked one after the other, each one more question and one more answer; the smallest outputs beyond `12 x max_ask_batches` are not asked (`sweep_over_ask_cap`). See [Batches](#batches-how-a-long-list-of-outputs-is-asked-max_ask_batches). |
 | `shadow` | `false` | Ask, hold and recheck, report what *would* be dropped, change nothing. See [Shadow mode](#shadow-mode). Not in any preset. |
 | `evidence` | `true` | Add the co-reference index's record to each inventory line (about 500 input tokens per question, under $0.003). Write `false` for the old prompt. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
 | `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
@@ -529,14 +530,54 @@ Every other key is a **config error naming its reason**, not an ignored one. `st
 `aggressiveness` and `max_chars` because an adjudicator selects no strategy and produces no rewritten
 text — a silently accepted `rewrite: false` would read as "verified deletion-only is on" when nothing is
 being rewritten. `model` because only the request's model has the cache (above). `context` and
-`context_messages` because the conversation *is* the cached prefix. `max_calls` because one ask covers
-every candidate. `economic_gate` because it prices a per-output cheap-model call, which this is not.
+`context_messages` because the conversation *is* the cached prefix. `max_calls` because a list is asked
+in batches of 12, up to `max_ask_batches`, and not bounded by a call count. `economic_gate` because it prices a per-output cheap-model call, which this is not.
+
+### Batches: how a long list of outputs is asked (`max_ask_batches`)
+
+One question used to keep the 12 largest outputs and drop the rest (`sweep_over_ask_cap`, #132). On a long session that
+left most old outputs unasked. Now a list longer than 12 is **split into balanced batches** and asked **in sequence**:
+
+- The batch size is 12. `k = ceil(n / 12)` batches. 16 gives 8+8, 23 gives 12+11. The largest-first order is dealt
+  round-robin, so each batch mixes sizes. A list of 12 or fewer is **one question, as before**.
+- `max_ask_batches` (default 4, at most 8) bounds the sweep. Outputs beyond `12 x max_ask_batches` (the smallest) are not
+  asked and are counted as `sweep_over_ask_cap`.
+- The questions run over the same cached prefix, under the thread's one claim and one question slot, so concurrency does
+  not change. Each batch is one more question, so it costs one more answer.
+- Each answer is judged on its own, and by the shared cache-read rule (`prefixAskCacheOK`) on its own.
+- **A batch that fails fails open.** An error, a refused cache read, a truncated reply or an unparseable one: its outputs
+  are left out of the held answer (they were never judged), so the next question may offer them again. The other batches
+  still count. Counted as `sweep_batch_failed`, with the reason in `sweep_batch_failed_by`.
+- All verdicts are merged into **one held answer**, keyed by tool-use id, with no output judged twice. The next cold
+  request does **one recheck and one cut**.
+- The answer cost is the sum of every batch's usage. `sweep_ask_batches` counts the questions asked.
+- **The keep-alive cost ceiling prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
+  If the ceiling admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
+  (`sweep_batches_lowered`, `sweep_over_ask_cap`). If it admits none, the ordinary ping goes out.
+- **A batch never starts after the sweep's deadline.** The keeper's timeout (300 s) bounds the whole sweep and each
+  question has its own 90 s bound, so `k` slow questions could add up past it. The rest are skipped
+  (`sweep_batch_skipped`) and the ones already answered are kept.
+- **A panic in one batch is one failed batch** (`batch_panic`): the answers before it are kept. The thread stays
+  marked asked (the batch's model call may already have been paid for), so the next ping is plain and a repeating
+  panic does not pay again on every ping.
+- The ceiling's answer guess is 4,000 output tokens per question. A real 12-verdict reply is about 7,000, so the ceiling
+  **under-prices one answer by about 1.8x** (and the number is left as it was). Read the per-ping ceiling with that
+  tolerance, and remember it is now multiplied by the number of batches.
+- The keeper's second-line stop (a question that wrote more than it read) judges the usage **summed** over the batches.
+  A write-heavy batch can be masked by another batch's read. The per-batch cache rule still gates each batch.
+
+The reply budget stays at the flat 16,000 tokens per batch. 12 is the batch size because one reply carries a verdict (with a
+verbatim quote) for every output in it, and a reply cut off mid-array parses as nothing. A cut reply now loses its batch
+and not the whole sweep.
 
 ### Counters
 
 At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
 `sweep_model_declined`, `sweep_no_inventory`, `sweep_already_asked`, `sweep_no_candidate`,
-`sweep_hold_no_tool_id`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
+`sweep_hold_no_tool_id`, `sweep_ask_batches`, `sweep_batch_failed` (with `sweep_batch_failed_by`, the reason),
+`sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
+`sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
+candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
 `keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
