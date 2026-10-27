@@ -85,6 +85,28 @@ func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
 // and never on a role=tool message or an assistant message carrying ToolCalls, whose meaning
 // lives in fields other than their text.
 func ValidateShapeFor(provider schemas.ModelProvider, msgs []schemas.ChatMessage) []ShapeViolation {
+	return ValidateShapeGrouped(provider, msgs, nil)
+}
+
+// ValidateShapeGrouped is ValidateShapeFor with #457's wire grouping: groups[i] names the
+// ORIGINAL wire message normalized message i was extracted from, so several normalized
+// messages (an Anthropic tool_result's synthetic tool message and the sibling text block
+// beside it) can share one group. Pass nil when every normalized message is its own wire
+// message, which is the OpenAI-shaped case and every legacy caller.
+//
+// The grouping matters for exactly one rule. A wire message that holds a sibling text block
+// BESIDE a tool_result (#460) normalizes to two messages in body order — the sibling
+// (role=user), then the result (role=tool) — so a tool_use answered by it is still answered
+// correctly ON THE WIRE but is no longer ADJACENT in the normalized list, and a
+// literal-adjacency answered-tool-use check reports a violation the provider would not. With
+// groups, the "run" that may answer a call is the members of the ONE wire group that follows
+// it, which is the adjacency the provider actually enforces. A groups slice whose length
+// disagrees with msgs (an earlier component changed the count; see summarizeSpan's own
+// defensive collapse of the same condition) is ignored rather than trusted.
+func ValidateShapeGrouped(provider schemas.ModelProvider, msgs []schemas.ChatMessage, groups []int) []ShapeViolation {
+	if len(groups) != len(msgs) {
+		groups = nil
+	}
 	var out []ShapeViolation
 	seenCall := map[string]bool{}
 
@@ -121,7 +143,7 @@ func ValidateShapeFor(provider schemas.ModelProvider, msgs []schemas.ChatMessage
 				ids = append(ids, *tc.ID)
 			}
 		}
-		answered := answeredInRun(msgs, i+1)
+		answered := answeredInRun(msgs, i+1, groups)
 		for _, id := range ids {
 			if !answered[id] {
 				out = append(out, ShapeViolation{Index: i, Rule: RuleAnsweredToolUse,
@@ -174,8 +196,9 @@ func systemPositionOK(msgs []schemas.ChatMessage, i int) bool {
 	return msgs[i+1].Role == schemas.ChatMessageRoleAssistant
 }
 
-// answeredInRun collects the tool_result ids in the contiguous run of tool messages starting
-// at `from`. Any other role ends the run.
+// answeredInRun collects the tool_result ids that may answer a call at index from-1: the
+// contiguous run of tool messages starting at `from`, or — when a wire grouping is given —
+// the members of the ONE wire group starting at `from`. Any other group or role ends it.
 //
 // PARALLEL CALLS are why this scans a run rather than one message. One assistant message may
 // carry several tool_use blocks, and Anthropic requires every result in the SINGLE user
@@ -189,8 +212,27 @@ func systemPositionOK(msgs []schemas.ChatMessage, i int) bool {
 // which is indistinguishable from the real defect being hunted. Scanning the whole run is the
 // representation-correct reading of the same invariant: the run must still be CONTIGUOUS, so
 // anything else in between (a summary, a user turn) still fails.
-func answeredInRun(msgs []schemas.ChatMessage, from int) map[string]bool {
+//
+// THE GROUPED READ (#460) widens exactly that run, and nothing else. A wire message holding
+// sibling text BESIDE a tool_result normalizes to [sibling(user), result(tool)] in body order,
+// so the run of tool messages does not start at `from` — the literal adjacency check called
+// the exchange unanswered although the provider accepts it. The grouped scan answers from the
+// result members of the wire group that follows the call, which is the adjacency the provider
+// enforces; a sibling it cannot see past does not excuse a genuinely missing answer, because
+// the answer must still be inside that one group.
+func answeredInRun(msgs []schemas.ChatMessage, from int, groups []int) map[string]bool {
 	answered := map[string]bool{}
+	// from can be len(msgs) when the call is the last message; there is then nothing that
+	// could answer it in either reading, and indexing groups[from] would panic.
+	if groups != nil && from < len(groups) {
+		g := groups[from]
+		for j := from; j < len(msgs) && groups[j] == g; j++ {
+			if t := msgs[j].ChatToolMessage; t != nil && t.ToolCallID != nil {
+				answered[*t.ToolCallID] = true
+			}
+		}
+		return answered
+	}
 	for j := from; j < len(msgs); j++ {
 		if msgs[j].Role != schemas.ChatMessageRoleTool {
 			break
