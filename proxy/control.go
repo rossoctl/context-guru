@@ -430,6 +430,7 @@ type tenantView struct {
 	UpOpenAI        string       `json:"up_openai"`
 	UpBob           string       `json:"up_bob"`
 	CaptureContent  bool         `json:"capture_content"`
+	RecordTraces    bool         `json:"record_traces"`
 	MaxRows         int64        `json:"max_rows"`
 	Disabled        bool         `json:"disabled"`
 	// DisabledReason is the manager's note, shown to the account's owner as well as to a
@@ -457,8 +458,8 @@ func (h *Handler) view(t *tenant.Tenant) tenantView {
 		EffectiveConfigYAML: h.registry().Config(t),
 		ConfigInherited:     t.TracksDefault(),
 		UpAnthropic:         t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
-		CaptureContent: t.CaptureContent,
-		MaxRows:        t.MaxRows, Disabled: t.Disabled,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		MaxRows: t.MaxRows, Disabled: t.Disabled,
 		DisabledReason: t.DisabledReason, Variant: t.Variant, HasPassword: t.HasPassword,
 		CreatedAt: msOrZero(t.CreatedAt), LastSeenAt: msOrZero(t.LastSeenAt),
 	}
@@ -1249,6 +1250,9 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		UpOpenAI       *string      `json:"up_openai"`
 		UpBob          *string      `json:"up_bob"`
 		CaptureContent *bool        `json:"capture_content"`
+		// RecordTraces is settable HERE ONLY. PATCH /api/tenants/{id} has no such field,
+		// and the registry refuses it from anyone but the account's owner.
+		RecordTraces *bool `json:"record_traces"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		readErr(w, err)
@@ -1319,7 +1323,7 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
-		CaptureContent: in.CaptureContent}
+		CaptureContent: in.CaptureContent, RecordTraces: in.RecordTraces}
 	if err := h.registry().Update(t, t.ID, patch); err != nil {
 		if errors.Is(err, tenant.ErrForbidden) {
 			ctlErr(w, http.StatusForbidden, "not permitted")

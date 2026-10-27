@@ -151,6 +151,8 @@ type Tenancy struct {
 	Mode components.Mode
 	// CaptureContent is this tenant's consent to storing transcript text.
 	CaptureContent bool
+	// RecordTraces is this tenant's consent to --record trace recording.
+	RecordTraces bool
 	// Upstream names, by dialect, into Options.Upstreams.
 	UpAnthropic, UpOpenAI, UpBob string
 	// Cache is this tenant's host-level prompt-cache policy: the idle keep-alive and the
@@ -574,6 +576,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			tn := *c.t
 			tn.Label, tn.Manager = t.Label, t.IsManager()
 			tn.CaptureContent = t.CaptureContent
+			tn.RecordTraces = t.RecordTraces
 			tn.UpAnthropic, tn.UpOpenAI, tn.UpBob = t.UpAnthropic, t.UpOpenAI, t.UpBob
 			// Pipe/Store/Shadow are shared with the previous copy on purpose: they are
 			// internally synchronised, and per-tenant state must not be duplicated.
@@ -616,8 +619,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) {
 	tn := &Tenancy{
 		ID: t.ID, Label: t.Label, Manager: t.IsManager(),
-		CaptureContent: t.CaptureContent,
-		UpAnthropic:    t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		UpAnthropic: t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
 		Mode: components.ModeSync,
 	}
 	built, err := s.builder([]byte(cfgDoc), s.emitter)
