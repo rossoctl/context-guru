@@ -170,7 +170,7 @@ func TestSummarizeOffloadKeepsExpandedContent(t *testing.T) {
 
 	// THE PROPERTY: marked kept-verbatim, the same fixture must keep it.
 	st := store.NewMemory(store.Options{})
-	MarkKeptVerbatim(st, expanded)
+	MarkKeptVerbatim(st, "s", expanded)
 	req := &bschemas.BifrostChatRequest{Input: build()}
 	rep = components.Report{}
 	if _, err := s.Offload(req, &rep, ctxFor(st)); err != nil {

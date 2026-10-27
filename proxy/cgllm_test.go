@@ -572,3 +572,59 @@ func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
 			sid)
 	}
 }
+
+// The observe record must be keyed under the id the SHADOW PIPELINE derives. toolfilter's skills
+// half rewrites the head system message before that id is hashed, so an id taken from the raw body
+// is a different key and PrevBilledInput stays 0 (#175 round 2).
+func TestObserveBilledInputKeyMatchesThePipelineWithTheSkillsHalfActive(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [toolfilter, summarize]\nmode: observe\ncomponents:\n  toolfilter:\n    remove: [skill__deep-research]\n" +
+			"  summarize:\n    keep_last: 1\n    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: up.URL, Mode: components.ModeObserve})
+	t.Cleanup(h.Close)
+	shadow := h.shadow
+	if shadow == nil {
+		t.Fatal("observe mode built no shadow store")
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	var m map[string]any
+	_ = json.Unmarshal([]byte(summarizableRequest()), &m)
+	msgs := m["messages"].([]any)
+	head := map[string]any{"role": "system", "content": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n" +
+		"- dataviz: Use for charts and plots.\n- deep-research: A research harness.\n</system-reminder>"}
+	m["messages"] = append([]any{head}, msgs...)
+	m["tools"] = []any{map[string]any{"name": "Skill", "description": "Invoke a skill.", "input_schema": map[string]any{"type": "object"}}}
+	body, _ := json.Marshal(m)
+
+	// No explicit session header: the id is DERIVED from the head, which is the divergent case.
+	resp, err := srv.Client().Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	raw := apply.SessionIDFor("", "", bschemas.Anthropic, body)
+	want := apply.EnforcedSessionIDFor(pipe, "", "", "", bschemas.Anthropic, false, body)
+	if raw == want {
+		t.Fatal("fixture does not exercise the bug: raw id equals the pipeline id")
+	}
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(store.BilledPrefix + want); ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Errorf("no cg:bin: record under the pipeline's id %q (raw-body id is %q)", want, raw)
+}

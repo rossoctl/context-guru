@@ -1230,7 +1230,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// when we are rewriting this request at all.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				var repaired int
-				body, repaired = h.repairExpandErrors(wire, body, tn, cp)
+				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
+					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
+					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"), api, provider, bypassed, b)
+				})
 				if repaired > 0 {
 					// A rewrite of the client's own transcript must never be silent: this is
 					// the only line that says the response side failed to withhold the call
@@ -1579,20 +1582,26 @@ func refuseTooLarge(w http.ResponseWriter, limit int64) {
 // because the client keeps its own copy of the error and the repair therefore runs again on
 // every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
 // CALLS, and ten repairs of one stale error are one call.
-func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture) ([]byte, int) {
+func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, sessionOf func(body []byte) string) ([]byte, int) {
 	out, restored := expand.RepairToolResults(wire, body, func(hashID string) (string, bool) {
 		return expand.Resolve(tn.Store, hashID)
 	})
+	if len(restored) == 0 {
+		return out, 0
+	}
+	// Lazy: the derivation re-parses the transcript, and a repair is rare. Derived from the repaired
+	// body, because that is what the pipeline will see.
+	session := sessionOf(out)
 	for _, orig := range restored {
 		// Charge the row only the FIRST time this original comes back. Repairing the same
 		// stale error on ten later turns is one recovery, not ten.
-		if !offload.KeptVerbatim(tn.Store, orig) {
+		if !offload.KeptVerbatim(tn.Store, session, orig) {
 			cp.noteExpand(schema.TextTokens(orig))
 			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
 			// first-time rule as the line above: the repair runs again on every later turn.
 			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
 		}
-		offload.MarkKeptVerbatim(tn.Store, orig)
+		offload.MarkKeptVerbatim(tn.Store, session, orig)
 	}
 	return out, len(restored)
 }
@@ -1766,8 +1775,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// The session id is derived HERE rather than on the request path, so observe keeps
 			// paying only the enqueue for its measurement — the property modes.go documents.
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
-				if sid := apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"),
-					provider, body); sid != "" {
+				// The id the shadow pipeline derives (post-transform), not the raw body's: see
+				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
+					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 				}
 			}
@@ -2041,7 +2052,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				got++
 				// The agent needed this content back — don't re-compact it on later turns
 				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(tn.Store, orig)
+				offload.MarkKeptVerbatim(tn.Store, session, orig)
 				// And, under fixed restore, where to give it back from now on. The mark above stays:
 				// it is the fail-open behaviour for any turn on which the anchor cannot be honoured.
 				if anchor != nil {
