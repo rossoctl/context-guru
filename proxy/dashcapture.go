@@ -49,6 +49,8 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
+	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -408,6 +410,9 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	c.sweepExpandTok += tokens
 	if note.First && !note.Overlap {
 		c.sweepFalseExp++
+		if note.Warm {
+			c.sweepFalseExpWarm++
+		}
 	}
 }
 
@@ -514,6 +519,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	e.SweepFalseExpandsWarm = c.sweepFalseExpWarm
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h

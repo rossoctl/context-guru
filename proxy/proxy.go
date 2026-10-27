@@ -1737,6 +1737,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
 		// majority of sessions that never deferred anything.
 		offload.ResolveDeferredCacheAwareSummary(session, threadID)
+		// The warm sweep's question (#491), if the trigger registered one: it runs now, after this
+		// request was forwarded and answered, on its own goroutine. A failed forward drops it.
+		offload.ResolveWarmQuestion(session, threadID, status/100 == 2, int(usage.CacheRead))
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which

@@ -56,6 +56,9 @@ const (
 	eventApplyDeclined        = "sweep_apply_declined"
 	eventApplyPanic           = "sweep_apply_panic"
 	eventFalseRef             = "sweep_false_ref"
+	// The warm path (#491) applies through the same code and counts apart.
+	eventAppliedWarm  = "sweep_applied_warm"
+	eventFalseRefWarm = "sweep_false_ref_warm"
 )
 
 // gateApplyAlreadyMarked: a held drop's output carries a marker one of our components made, so it is
@@ -64,6 +67,9 @@ const gateApplyAlreadyMarked = "sweep_apply_already_marked"
 
 // dropVersion is bumped when sweepDropRec changes shape. A record of another version reads as absent.
 const dropVersion = 1
+
+// dropKindWarm is the Kind of a drop applied on a warm request (#491).
+const dropKindWarm = "warm"
 
 // maxDropsPerThread bounds the per-thread index. A cold apply drops at most maxAskItems x max_ask_batches
 // (at most 12 x 8 = 96) outputs per question set, so this is many cold applies deep.
@@ -82,7 +88,7 @@ type sweepDropRec struct {
 	// Tokens is what the drop removed, net of the marker and descriptor that replace the output.
 	Tokens int    `json:"tokens"`
 	AtMs   int64  `json:"at_ms"`
-	Kind   string `json:"kind"` // "cold" or "changed_prefix"
+	Kind   string `json:"kind"` // "cold", "changed_prefix" or "warm"
 	// Idents are short hashes of the identifiers the output introduced. A later turn that uses one,
 	// without expanding, is the referenced_later signal.
 	Idents []string `json:"idents,omitempty"`
@@ -244,6 +250,11 @@ func identHash(t string) string {
 // introduced without expanding it (Referenced). A drop that is both is counted once (Overlap).
 type SweepQuality struct {
 	Applied, AppliedCold, AppliedChangedPrefix int64
+	// AppliedWarm and the three Warm counters below are the warm path's share (#491). They are PART of
+	// Applied, Referenced, Expanded and Overlap, never added on top, so the cold figures are the totals
+	// minus these.
+	AppliedWarm                               int64
+	ReferencedWarm, ExpandedWarm, OverlapWarm int64
 	// ApplyDeclined: valid drops the store or the never-worse check refused. They stayed verbatim.
 	ApplyDeclined int64
 	Referenced    int64
@@ -255,6 +266,28 @@ type SweepQuality struct {
 
 // FalseDrops is the number of distinct drops a later turn needed.
 func (q SweepQuality) FalseDrops() int64 { return q.Referenced + q.Expanded - q.Overlap }
+
+// FalseDropsWarm is FalseDrops for the drops applied on a warm request.
+func (q SweepQuality) FalseDropsWarm() int64 {
+	return q.ReferencedWarm + q.ExpandedWarm - q.OverlapWarm
+}
+
+// FalseDropRateWarm is FalseDropsWarm over AppliedWarm, or 0 with none applied.
+func (q SweepQuality) FalseDropRateWarm() float64 {
+	if q.AppliedWarm <= 0 {
+		return 0
+	}
+	return float64(q.FalseDropsWarm()) / float64(q.AppliedWarm)
+}
+
+// FalseDropRateCold is the false-drop rate of every drop that was not applied warm.
+func (q SweepQuality) FalseDropRateCold() float64 {
+	n := q.Applied - q.AppliedWarm
+	if n <= 0 {
+		return 0
+	}
+	return float64(q.FalseDrops()-q.FalseDropsWarm()) / float64(n)
+}
 
 // FalseDropRate is FalseDrops over Applied, or 0 with nothing applied.
 func (q SweepQuality) FalseDropRate() float64 {
@@ -377,6 +410,8 @@ type SweepExpandNote struct {
 	First bool
 	// Overlap: the drop had already been counted as referenced, so it is not a new false drop.
 	Overlap bool
+	// Warm: the first expand was of a drop applied on a warm request (#491).
+	Warm bool
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
@@ -396,6 +431,7 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 	defer dropMu.Unlock()
 	ref := getMarkerRef(st, markerID)
 	credited, firsts, overlaps := 0, 0, 0
+	warmFirsts, warmOverlaps := 0, 0
 	for _, o := range ref.Owners {
 		if threadKey != "" && o.Thread != threadKey {
 			continue
@@ -412,8 +448,10 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			putDrop(st, rec)
 			if !note.First {
 				note.First, note.Overlap = true, overlap
+				note.Warm = rec.Kind == dropKindWarm
 			}
 		}
+		isWarm := rec.Kind == dropKindWarm
 		ledgerNoteThread(rec.Thread, func(q *SweepQuality) {
 			q.ExpandEvents++
 			q.ExpandTokens += int64(tokens)
@@ -422,8 +460,20 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 				if overlap {
 					q.Overlap++
 				}
+				if isWarm {
+					q.ExpandedWarm++
+					if overlap {
+						q.OverlapWarm++
+					}
+				}
 			}
 		})
+		if first && isWarm {
+			warmFirsts++
+			if overlap {
+				warmOverlaps++
+			}
+		}
 		credited++
 		if first {
 			firsts++
@@ -440,6 +490,8 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			q.ExpandTokens += int64(tokens)
 			q.Expanded += int64(firsts)
 			q.Overlap += int64(overlaps)
+			q.ExpandedWarm += int64(warmFirsts)
+			q.OverlapWarm += int64(warmOverlaps)
 		})
 	}
 	return note
@@ -653,7 +705,16 @@ func (e *ExtractSweep) scanReferences(req *bschemas.BifrostChatRequest, rep *com
 			if hit && !cur.Referenced {
 				cur.Referenced = true
 				rep.Event(eventFalseRef)
-				ledgerNote(tkey, func(q *SweepQuality) { q.Referenced++ })
+				warmDrop := cur.Kind == dropKindWarm
+				if warmDrop {
+					rep.Event(eventFalseRefWarm)
+				}
+				ledgerNote(tkey, func(q *SweepQuality) {
+					q.Referenced++
+					if warmDrop {
+						q.ReferencedWarm++
+					}
+				})
 			}
 			putDrop(c.Store, cur)
 		}()
@@ -686,12 +747,52 @@ type pendingDrop struct {
 	before bschemas.ChatMessage
 }
 
+// heldSource is where a held answer lives. The cold apply reads the Store. The warm path (#491) reads a
+// per-thread map in process memory and NEVER writes the answer to the Store, so its source's put is a
+// no-op: a warm answer that is claimed is gone, whatever happens next.
+type heldSource interface {
+	get(tkey string) (heldAnswer, bool)
+	claim(tkey string) (heldAnswer, bool)
+	put(h heldAnswer)
+}
+
+type storeHeld struct{ st store.Store }
+
+func (s storeHeld) get(tkey string) (heldAnswer, bool)   { return getHeld(s.st, tkey) }
+func (s storeHeld) claim(tkey string) (heldAnswer, bool) { return claimHeldSpend(s.st, tkey) }
+func (s storeHeld) put(h heldAnswer)                     { putHeld(s.st, h) }
+
+// warmApply turns applyHeldFrom into the warm apply. gate decides, after the recheck and before any
+// message is changed, whether the valid drops pay; it returns the reason when they do not.
+type warmApply struct {
+	// rewriteBilled is set by the gate: the rewritten tokens, billed-scaled. The apply books it as an
+	// event on the request that paid it, so the dashboard can charge the rewrite there.
+	rewriteBilled int
+	// The gate's numbers for the request that applied: removed (billed-scaled), expected warm turns, the
+	// net the gate expected (saving - rewrite, in dollars), and whether the drop was deeper than the
+	// provider's look-back. Booked as events and as a record in the warm ledger.
+	removedBilled int
+	turns, netUSD float64
+	deep          bool
+	gate          func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
+}
+
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
 // drops after the change point). Anything else leaves the answer held and the request unchanged.
 func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string) (keys []string, changed int) {
+	return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
+}
 
-	h, ok := getHeld(c.Store, tkey)
+// applyHeldFrom is applyHeld over any source. With warm == nil it is the cold apply, exactly. With warm
+// set it is the warm apply (#491): the request is warm and unchanged, which the cold apply never
+// touches, so the cold test and the changed-prefix test are skipped and the economic gate stands in
+// their place. Every other step is the same: claim, recheck, apply with a marker and a stash, commit
+// the drop records, restore on a panic.
+func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
+	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int) {
+
+	h, ok := src.get(tkey)
 	if !ok {
 		return nil, 0
 	}
@@ -703,17 +804,25 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		raw = c.RawInput
 	}
 	cold := sweepColdRequest(c)
-	if !cold && changePoint(raw, h) < 0 {
+	// warmGated: a warm apply on an UNCHANGED prefix, the one case the cold apply never touches. It is
+	// let through only by the economic gate below. A cold request, or a CHANGED prefix, is the cold
+	// apply's own case exactly as #695 defines it: the provider rewrites from there on anyway, so the
+	// drops after it cost nothing extra and need no gate. (A warm answer met by one is applied that way.)
+	warmGated := warm != nil && !cold && changePoint(raw, h) < 0
+	if !cold && !warmGated && changePoint(raw, h) < 0 {
 		return nil, 0 // warm and unchanged: H1. The answer stays held.
 	}
 	kind := "cold"
-	if !cold {
+	switch {
+	case warmGated:
+		kind = dropKindWarm
+	case !cold:
 		kind = "changed_prefix"
 	}
 
 	// CLAIM FIRST: two cold requests of one thread must not both apply. claimHeldSpend marks the answer
 	// spent for exactly one caller and hands back what it read.
-	claimed, won := claimHeldSpend(c.Store, tkey)
+	claimed, won := src.claim(tkey)
 	if !won {
 		return nil, 0
 	}
@@ -722,13 +831,13 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	// answer can land between the read and the claim, and the split of drops into "after the change" and
 	// "before it" must be made against the answer that is being applied.
 	cp := -1
-	if !cold {
+	if !cold && !warmGated {
 		cp = changePoint(raw, h)
 		if cp < 0 {
 			// The answer we won is not changed-prefix against this request (the newer one judged what
 			// this request carries). Nothing to apply on a warm request: give it back, unspent.
 			h.Spent = false
-			putHeld(c.Store, h)
+			src.put(h)
 			return nil, 0
 		}
 	}
@@ -768,14 +877,58 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 				back := whole
 				back.Attempts++
 				back.Spent = back.Attempts >= maxApplyAttempts
-				putHeld(c.Store, back)
+				src.put(back)
 			}()
 			slog.Error("cg.sweep.apply_panic: recovered; the request is forwarded unchanged",
 				"session", c.Session, "thread", c.Thread, "panic", fmt.Sprint(r))
 		}
 	}()
 
+	convBefore := 0
+	if warmGated {
+		convBefore = localTokens(req.Input)
+	}
 	res := recheckHeld(c, req, h, e.minTokens)
+	// THE RECHECK'S REASONS ARE BOOKED NOW, BEFORE THE GATE (#491). They used to be booked at the end of this
+	// function, which a refusal never reaches, so a refused answer showed no reason for what the recheck had
+	// thrown out (in a live run 59 to 87% of the judge's drops). Booked once, here, for every path.
+	for reason, n := range res.reasonCounts() {
+		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
+	}
+	// THE WARM GATE (#491). Between the recheck and the first change to the request. A refusal drops
+	// the answer: it was claimed above and the warm source keeps nothing.
+	if warmGated && warm.gate != nil {
+		if ok, reason := warm.gate(res, raw); !ok {
+			rep.Event("sweep_warm_gate_refuse_" + trimReason(reason))
+			// The refused decision's numbers on the row too, so a refusal reads as numbers.
+			if d, have := lastWarmDecision(); have {
+				rep.EventN("sweep_warm_refused_removed_tokens", d.RemovedBilled)
+				rep.EventN("sweep_warm_refused_rewrite_tokens", d.RewrittenBilled)
+				rep.EventN("sweep_warm_refused_expected_turns", int(d.Turns))
+				if d.Deep {
+					rep.Event("sweep_warm_refused_deep")
+				}
+			}
+			noteWarmGate(false, reason)
+			// A REFUSAL CARRIES THE SURVIVORS FORWARD (#491). The answer was claimed above, so it is gone from
+			// the thread. Its drops that passed the recheck go back, in memory only, to add up with the next
+			// question's until the gate accepts. The recheck's losses do not: a drop that failed the recheck
+			// (gone, changed, referenced, expanded) leaves the set for good. A refusal of an answer with nothing
+			// left, or one the recheck voided, carries nothing.
+			if carried := carryRefused(src, tkey, h, res); carried > 0 {
+				rep.EventN("sweep_warm_carried_drops", carried)
+			}
+			return nil, 0
+		}
+		rep.Event("sweep_warm_gate_accept")
+		rep.EventN("sweep_warm_rewrite_tokens", warm.rewriteBilled)
+		rep.EventN("sweep_warm_removed_tokens", warm.removedBilled)
+		rep.EventN("sweep_warm_expected_turns", int(warm.turns))
+		if warm.deep {
+			rep.Event("sweep_warm_deep")
+		}
+		noteWarmGate(true, "")
+	}
 	// The drops that go in now, and the valid ones that stay held (before the change point).
 	var now []heldOutput
 	var later []heldOutput
@@ -843,9 +996,6 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		}
 	}()
 	addToDropIndex(c.Store, tkey, cks)
-	for reason, n := range res.reasonCounts() {
-		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
-	}
 	slog.Info("cg.sweep.applied", "kind", kind, "session", c.Session, "thread", c.Thread,
 		"proposed_valid", len(res.Valid), "applied", len(pending), "held_back", len(later),
 		"dropped_reasons", res.reasonCounts())
@@ -858,21 +1008,32 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		if cp < len(h.Prints) {
 			h.Prints = h.Prints[:cp]
 		}
-		putHeld(c.Store, h)
+		src.put(h)
 	}
 	// Counted LAST, once the commit and the held trim both succeeded: the ledger and the events describe
 	// only drops the request carries.
 	if n := len(pending); n > 0 {
 		ev := eventAppliedCold
-		if !cold {
+		switch {
+		case warmGated:
+			ev = eventAppliedWarm
+		case !cold:
 			ev = eventAppliedChangedPrefix
 		}
 		rep.EventN(ev, n)
+		if warmGated {
+			noteWarmSweep(tkey, WarmSweep{Drops: n, RemovedLocal: removedNow(pending), RemovedBilled: warm.removedBilled,
+				RewriteBilled: warm.rewriteBilled, ConvBefore: convBefore, ConvAfter: localTokens(req.Input),
+				ExpectedTurns: warm.turns, NetUSD: warm.netUSD, Deep: warm.deep})
+		}
 		ledgerNote(tkey, func(q *SweepQuality) {
 			q.Applied += int64(n)
-			if cold {
+			switch {
+			case warmGated:
+				q.AppliedWarm += int64(n)
+			case cold:
 				q.AppliedCold += int64(n)
-			} else {
+			default:
 				q.AppliedChangedPrefix += int64(n)
 			}
 		})

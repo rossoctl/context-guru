@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // PREFIX ASKS — putting a question to the request's own model with the previous turn's SENT body as
@@ -236,8 +238,15 @@ func (s *sentStash) CoversSpan(session string, count int, hash string) bool {
 // returned body is the one that was checked. A missing session is components.ErrNoPrefix, a
 // present one that falls short components.ErrStalePrefix.
 func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]byte, error) {
+	b, _, err := s.snapshotRead(session, count, hash)
+	return b, err
+}
+
+// snapshotRead is snapshotCovering that also returns the provider of the stashed entry, so a caller can
+// render the body it got.
+func (s *sentStash) snapshotRead(session string, count int, hash string) ([]byte, bschemas.ModelProvider, error) {
 	if s == nil || session == "" {
-		return nil, components.ErrNoPrefix
+		return nil, "", components.ErrNoPrefix
 	}
 	s.mu.Lock()
 	e, ok := s.m[session]
@@ -246,17 +255,17 @@ func (s *sentStash) snapshotCovering(session string, count int, hash string) ([]
 		s.afterEntryRead()
 	}
 	if !ok || len(e.forwarded) == 0 {
-		return nil, components.ErrNoPrefix
+		return nil, "", components.ErrNoPrefix
 	}
 	// e's slices are never mutated after put (a replacement installs new ones), so reading them
 	// outside the lock is safe and is the same entry that was just selected.
 	if count >= 0 {
 		norm := apply.NormalizeMessages(e.provider, e.preBody)
 		if count > len(norm) || components.SpanHash(norm[:count]) != hash {
-			return nil, components.ErrStalePrefix
+			return nil, "", components.ErrStalePrefix
 		}
 	}
-	return e.forwarded, nil
+	return e.forwarded, e.provider, nil
 }
 
 // AskCovered implements components.PrefixCoveredAsker: coverage check and ask on one snapshot.
@@ -267,6 +276,28 @@ func (p prefixAsker) AskCovered(ctx context.Context, session string, count int, 
 	}
 	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
 	return reply, components.PrefixUsage(u), err
+}
+
+// readText renders the messages of a stashed forwarded body as one string, the way the sweep flattens a
+// transcript to check a quote. It is the text the model read.
+func readText(provider bschemas.ModelProvider, forwarded []byte) string {
+	var b strings.Builder
+	for _, m := range apply.NormalizeMessages(provider, forwarded) {
+		b.WriteString(schema.MessageText(m))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// AskRead implements components.PrefixReadAsker: one snapshot for the coverage check, the ask and the
+// text the model read.
+func (p prefixAsker) AskRead(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, string, error) {
+	body, prov, err := p.stash.snapshotRead(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, "", err
+	}
+	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
+	return reply, components.PrefixUsage(u), readText(prov, body), err
 }
 
 // AskCovered implements components.PrefixCoveredAsker for the Responses route.

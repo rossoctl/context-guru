@@ -1711,9 +1711,13 @@ type Stats struct {
 	// event is sweep_batch_skipped_deadline). SweepBatchOverCap counts EVERY candidate left unasked by a
 	// limit: max_ask_batches, or the cost ceiling lowering the count. SweepBatchesLowered counts sweeps
 	// where the per-ping cost ceiling admitted fewer questions than planned.
-	SweepBatchSkipped   int64 `json:"sweep_batch_skipped"`
-	SweepBatchOverCap   int64 `json:"sweep_batch_over_cap"`
-	SweepBatchesLowered int64 `json:"sweep_batches_lowered"`
+	SweepBatchSkipped int64 `json:"sweep_batch_skipped"`
+	// SweepBatchByIndex tells the batches apart by their position in a sweep: asked, items carried, verdicts
+	// judged and fabricated quotes. A fabrication rate that differs between batch 0 and the later ones is a
+	// batch effect; the same everywhere, it is the model.
+	SweepBatchByIndex   []offload.SweepBatchIndexStats `json:"sweep_batch_by_index,omitempty"`
+	SweepBatchOverCap   int64                          `json:"sweep_batch_over_cap"`
+	SweepBatchesLowered int64                          `json:"sweep_batches_lowered"`
 	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
 	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
 	// xhigh on. Metadata only: counts, never content, never a session id.
@@ -1722,20 +1726,82 @@ type Stats struct {
 	// (sweep_kept, sweep_unparseable, sweep_dropped, ...), the counters a request's Report carries
 	// for an in-request question.
 	SweepGates map[string]int64 `json:"sweep_gates,omitempty"`
+	// SweepWarm is the warm path's ledger (#491). Absent unless the path ran.
+	SweepWarm *SweepWarmStats `json:"sweep_warm,omitempty"`
+}
+
+// SweepWarmStats is offload.SweepWarmStats in /stats shape: how often the trigger fired, what the
+// questions and the held answers did, and the economic gate's accepts and refusals with the reasons.
+type SweepWarmStats struct {
+	Fired             int64            `json:"fired"`
+	Asked             int64            `json:"asked"`
+	Held              int64            `json:"held"`
+	Failed            int64            `json:"failed"`
+	NotWorth          int64            `json:"not_worth"`
+	NoBilledSize      int64            `json:"no_billed_size"`
+	ThreadBusy        int64            `json:"thread_busy"`
+	ModelDeclined     int64            `json:"model_declined"`
+	ConcurrencyFull   int64            `json:"concurrency_full"`
+	HeldExpired       int64            `json:"held_expired"`
+	HeldShrunk        int64            `json:"held_shrunk"`
+	CarriedMerged     int64            `json:"carried_merged"`
+	CarriedOverridden int64            `json:"carried_overridden"`
+	CarriedRefused    int64            `json:"carried_refused"`
+	CarriedExpired    int64            `json:"carried_expired"`
+	CarriedCapped     int64            `json:"carried_capped"`
+	NotRegistered     int64            `json:"not_registered"`
+	ThreadsFull       int64            `json:"threads_full"`
+	AlreadyAsked      int64            `json:"already_asked"`
+	NoInventory       int64            `json:"no_inventory"`
+	Gates             map[string]int64 `json:"gates,omitempty"`
+	// TriggerRefusals counts the refusals at the trigger, by reason. Recent is the last warm sweeps
+	// applied, each with the gate's numbers, the conversation before and after, and the net it expected.
+	TriggerRefusals map[string]int64 `json:"trigger_refusals,omitempty"`
+	// GatePriceModel is set only when the DIAGNOSTIC warm_gate_price_model is on: the gate priced with that
+	// model, not the request's. A run with it is not a normal run. PriceModelUnknown counts gate decisions
+	// where that model was not on the rate card and the built-in rates were used.
+	GatePriceModel    string              `json:"gate_price_model,omitempty"`
+	PriceModelUnknown int64               `json:"price_model_unknown,omitempty"`
+	Recent            []offload.WarmSweep `json:"recent_sweeps,omitempty"`
+	// RecentDecisions is every trigger and apply-gate decision, accepted or refused (last 50), with D,
+	// R, N, the weight, the ratios, deep or not and the reason: why a run refused reads as numbers.
+	RecentDecisions []offload.WarmDecision `json:"recent_decisions,omitempty"`
+	GateAccept      int64                  `json:"gate_accept"`
+	GateRefuse      int64                  `json:"gate_refuse"`
+	GateReasons     map[string]int64       `json:"gate_refuse_reasons,omitempty"`
+	Panics          int64                  `json:"panics"`
+}
+
+func sweepWarmStats() *SweepWarmStats {
+	w := offload.SweepWarmCounters()
+	if !w.Any() {
+		return nil
+	}
+	return &SweepWarmStats{Fired: w.Fired, Asked: w.Asked, Held: w.Held, Failed: w.Failed, NotWorth: w.NotWorth,
+		NoBilledSize: w.NoBilled, ThreadBusy: w.ThreadBusy, ModelDeclined: w.ModelDeclined,
+		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, CarriedMerged: w.CarriedMerged, CarriedOverridden: w.CarriedOverridden, CarriedRefused: w.CarriedRefused, CarriedExpired: w.CarriedExpired, CarriedCapped: w.CarriedCapped, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
+		NoInventory: w.NoInventory, GatePriceModel: w.GatePriceModel, PriceModelUnknown: w.PriceModelUnknown, Gates: w.Gates, TriggerRefusals: w.TriggerReasons, Recent: w.Recent, RecentDecisions: w.RecentDecisions, GateAccept: w.GateAccept,
+		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics}
 }
 
 // SweepDropStats is offload.SweepDropStats in /stats shape.
 type SweepDropStats struct {
-	Applied              int64   `json:"applied"`
-	AppliedCold          int64   `json:"applied_cold"`
-	AppliedChangedPrefix int64   `json:"applied_changed_prefix"`
-	ApplyDeclined        int64   `json:"apply_declined"`
-	Referenced           int64   `json:"referenced_later"`
-	Expanded             int64   `json:"expanded"`
-	FalseDrops           int64   `json:"false_drops"`
-	FalseDropRate        float64 `json:"false_drop_rate"`
-	ExpandEvents         int64   `json:"expand_events"`
-	ExpandTokens         int64   `json:"expand_tokens"`
+	Applied              int64 `json:"applied"`
+	AppliedCold          int64 `json:"applied_cold"`
+	AppliedChangedPrefix int64 `json:"applied_changed_prefix"`
+	// AppliedWarm is the warm path's share of Applied (#491). The warm false-drop rate is beside the
+	// cold one so the two can be read apart.
+	AppliedWarm       int64   `json:"applied_warm"`
+	FalseDropsWarm    int64   `json:"false_drops_warm"`
+	FalseDropRateWarm float64 `json:"false_drop_rate_warm"`
+	FalseDropRateCold float64 `json:"false_drop_rate_cold"`
+	ApplyDeclined     int64   `json:"apply_declined"`
+	Referenced        int64   `json:"referenced_later"`
+	Expanded          int64   `json:"expanded"`
+	FalseDrops        int64   `json:"false_drops"`
+	FalseDropRate     float64 `json:"false_drop_rate"`
+	ExpandEvents      int64   `json:"expand_events"`
+	ExpandTokens      int64   `json:"expand_tokens"`
 	// ApplyPanics counts recovered cold-apply panics; HeldStaleWrites older answers refused.
 	ApplyPanics int64 `json:"apply_panics"`
 	// Threads are the busiest threads by drops applied, most first.
@@ -1760,6 +1826,8 @@ func sweepDropStats() *SweepDropStats {
 	}
 	out := &SweepDropStats{Applied: o.Applied, AppliedCold: o.AppliedCold,
 		AppliedChangedPrefix: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
+		AppliedWarm: o.AppliedWarm, FalseDropsWarm: o.FalseDropsWarm(),
+		FalseDropRateWarm: o.FalseDropRateWarm(), FalseDropRateCold: o.FalseDropRateCold(),
 		Referenced: o.Referenced, Expanded: o.Expanded, FalseDrops: o.FalseDrops(),
 		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens,
 		ApplyPanics: offload.SweepApplyPanics()}
@@ -1832,10 +1900,12 @@ func (k *Keeper) Stats() Stats {
 		SweepBatchFailed:                   bc.Failed,
 		SweepBatchFailedBy:                 bc.FailedBy,
 		SweepBatchSkipped:                  bc.Skipped,
+		SweepBatchByIndex:                  bc.ByIndex,
 		SweepBatchOverCap:                  bc.OverCap,
 		SweepBatchesLowered:                k.sweepBatchesLowered.Load(),
 		SweepDrops:                         sweepDropStats(),
 		SweepGates:                         sw.Gates,
+		SweepWarm:                          sweepWarmStats(),
 	}
 }
 

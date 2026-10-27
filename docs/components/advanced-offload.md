@@ -570,6 +570,102 @@ The reply budget stays at the flat 16,000 tokens per batch. 12 is the batch size
 verbatim quote) for every output in it, and a reply cut off mid-array parses as nothing. A cut reply now loses its batch
 and not the whole sweep.
 
+### The warm path (#491, off by default, in no preset)
+
+The cold apply never fires for a session that never goes idle. `warm: true` adds a second way, behind an
+economic gate.
+
+1. **Trigger, a rule.** On a warm request of a thread, at most once every `warm_every_n` requests
+   (default 30). Only when old outputs could pay back a rewrite even if every one were dropped: each at
+   least `min_tokens` (1,000) and at least `warm_min_age_turns` (default 30) model turns old. The removable mass must also be at least `warm_min_mass_frac` (default 0.20) of the conversation. The expected turns at the trigger are the warm turns the thread has run so far, capped. Every refusal is counted by reason (`keepalive.sweep_warm.trigger_refusals`). Each applied sweep leaves a record in `keepalive.sweep_warm.recent_sweeps`: tokens removed, conversation before and after, the gate's numbers and the net it expected.
+2. **What to drop, the model.** The same question as at the ping, plus a file clause for a file read:
+   `file_read=yes later_edits=N later_rereads=N`. It comes from tool names and tool input paths only. No
+   path and no output text reaches the question.
+3. **In the background.** The question runs after the request is forwarded, under the thread's ping claim
+   and the shared question slots. A thread never has two questions at once. It reads the ping registry's
+   existing copy of the conversation and keeps none of its own, so it asks only on a thread the keep-alive
+   can ping (counted as `not_registered` otherwise).
+   **A list longer than 12 is asked in balanced batches, by the same function the cold sweep uses**
+   (see [Batches](#batches-how-a-long-list-of-outputs-is-asked-max_ask_batches)), up to `max_ask_batches`.
+   The answers merge into ONE waiting answer, so the gate below decides once over all of them. The same
+   rules apply as at the ping: each batch is judged on its own by the shared cache-read rule, a failed
+   batch is left out, a panic keeps the thread marked asked, and the outer bound is the keeper's 300 s.
+4. **Held in memory only.** The answer waits in a bounded per-thread map (256 threads, 30 minutes). It is
+   never written to the Store. A restart loses it, which drops nothing.
+5. **On a later warm request:** recheck as the cold apply does, then the gate, then apply. Apply only if
+   `removed x read rate x expected warm turns` is more than `rewritten x (write rate - read rate)`. The
+   rewrite is what comes after the last cache entry the provider can still reach. It looks back about 20
+   content blocks from the previous request's last breakpoint. A drop farther back than that reaches only
+   the fixed system prompt and tools, so the rewrite is the **whole conversation**. A drop inside it
+   rewrites only the tail from the drop. In 6,968 recorded Opus calls every large cache drop read back
+   exactly the fixed size, so a deep drop costs about ten times what it removes. Sizes
+   come from the provider's billed count of the previous turn: the rewrite scales by billed over local
+   size of the whole prompt, the removed content by the family factor (never more than that ratio). A
+   missing billed size refuses. Expected warm turns are the thread's own warm run, capped at
+   `warm_max_turns` (default 60, twice the question interval), times a wait-cause weight read off the
+   request (last message a tool result 1.0, a person's message 0.5, other 0.75).
+   **A refusal keeps the drops that passed the recheck, in memory only.** The next question's answer is
+   merged with them by tool-use id. Each output counts once, and the NEWER verdict wins, a newer keep
+   included. Every apply attempt rechecks the whole merged set, and a carried drop that fails the recheck
+   leaves for good. The gate decides once on the surviving set. Accept means one cut, then the set is
+   cleared. Refuse keeps the survivors. A carried set that was already refused is not retried on each warm
+   request: the trigger asks a new question, and the gate runs when its answer arrives. The set is bounded:
+   30 minutes from the OLDEST question that still contributes a verdict (a refusal does not make it
+   younger), at most 256 carried drops (the oldest go first), and a conversation that gets shorter clears
+   it. The trigger does not count carried drops. It prices every candidate as dropped, as before.
+   A carried drop survives only if the next question does not cover its output, or also drops it. A question
+   that covers it and keeps it overrides it.
+6. **Same apply as the cold path.** Same markers, stash, drop records and replay. A cold request, or a
+   changed prefix, that meets a waiting answer applies it as the cold apply does, with no gate.
+
+**Every decision is recorded, accepted or refused.** `keepalive.sweep_warm.recent_decisions` (last 50, thread as a hash
+label) lists each trigger and apply-gate decision with D (tokens removed, local and billed), R (tokens rewritten, local
+and billed), N (expected warm turns), the wait-cause weight, the full and content ratios, deep or not, the gate's saving
+and rewrite in USD, and the reason. Each decision also writes one INFO line (`cg.sweep.warm_decision`) with the same
+numbers and no content. A refused apply books the same numbers as events on the row
+(`sweep_warm_refused_removed_tokens`, `_rewrite_tokens`, `_expected_turns`, `_deep`).
+
+`warm_gate_price_model` (unset, in no preset) is a **diagnostic**: the gate prices its saving and rewrite with that
+model's rates (for example `claude-opus-5`), for a test run on a model the price table prices at $0. Only the gate's
+decision uses it. The dashboard and `/stats` price the real model. It is logged once at start and shown as
+`keepalive.sweep_warm.gate_price_model`, so such a run is never mistaken for a normal one. A model the rate card
+does not know falls back to the built-in rates and is counted (`price_model_unknown`).
+
+A decision also records `proposed`, the recheck's losses by reason (`dropped`), and the carried and new
+counts and tokens. The recheck's reasons are booked BEFORE the gate, as `sweep_apply_dropped_<reason>`, so
+a refusal shows them too. A held answer judged on a longer conversation than the request has is dropped
+and counted as `held_shrunk` (decision reason `conversation_shrunk`). An empty proposal is
+`no_drop_proposed`. `no_valid_drop` means the recheck threw out a whole proposal.
+Carried-set counters in `keepalive.sweep_warm`: `carried_merged`, `carried_overridden`, `carried_refused`,
+`carried_expired` (a carried set that aged out; an answer never refused that went stale is `held_expired`),
+`carried_capped` (carried drops the 256 cap evicted); event `sweep_warm_carried_drops`.
+
+Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_accept`,
+`sweep_warm_gate_refuse_<reason>`; in `/stats` under `keepalive.sweep_drops` (`applied_warm`,
+`false_drop_rate_warm`, `false_drop_rate_cold`) and `keepalive.sweep_warm` (trigger, question and gate
+counts with refusal reasons).
+
+### How many warm turns are left (`warm_expected_turns`)
+
+The warm gate collects its saving over N more warm turns. N comes from one of three models, and the decision log says which
+(`turns_model`), with the raw N before the cap (`turns_raw`), the cut, and the growth per turn:
+
+1. **`expected`** when `warm_expected_turns` is set: N = max(expected - warm turns so far, 0).
+2. **`cut`** otherwise: the session is assumed to run until it is **cut**. The cut is the `cache_aware_summarizer` or
+   `summarize` trigger's fraction of the window when one is in the pipeline (`trigger.min_request_frac`), else the full window.
+   N = (cut - the current billed prompt) / (the average billed growth per turn on this thread). The growth restarts when the
+   billed prompt shrinks (a client compaction, our own sweep, a rewind). Billed sizes only.
+3. **`so_far_fallback`**: the warm turns so far. Used when the growth is unknown or not positive, there is no billed size, the
+   window is only a family guess (the summarizer's own trigger refuses to act on a guessed window too), or the session is
+   already past the cut. `turns_why` says which.
+
+`warm_max_turns` caps N in every model, and the wait-cause weight applies on top.
+
+The `cut` model needs an **exact** context window, as the summarizer's own trigger does. For a model the public map does
+not list (a GLM behind a gateway, a preview id), an agent builder supplies it with a `window:` in the `MODEL_PRICES` table
+(`MODEL_PRICES=<file>`); an operator's table is authoritative, so it counts as exact. See
+[`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml).
+
 ### Counters
 
 At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
@@ -578,7 +674,8 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
 `sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
 candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
-`keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
+`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
 In a request: `sweep_applied_cold`, `sweep_applied_changed_prefix`, `sweep_apply_declined`,
@@ -614,7 +711,9 @@ The two to **alert** on:
   reply, just said was still needed. The removal did not happen; that is the invariant. But a
   non-zero rate means the contract is not holding.
 - **`sweep_quote_fabricated`** — the model cited transcript text that is not in the transcript. It is
-  inventing evidence, and this is the only signal that says so.
+  inventing evidence, and this is the only signal that says so. The quote is checked against the body the
+  model READ (the stashed body the question was appended to), not the newest request: a quote from a message
+  newer than that body is real and is not counted. It changes only this counter, never a drop decision.
 
 Diagnostics, visible at `/stats` under the component and as
 `cg_component_gate_declines_total{component="extract_llm_sweep",gate="…"}`:

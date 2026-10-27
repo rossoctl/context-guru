@@ -120,3 +120,24 @@ func ClaimPing(threadKey string) PingClaim {
 // summary reserve graduates on it (cacheAwareApplyPhase), and the sweep's cold apply must use the same
 // test: a cold or untracked cache, where the rewrite is already paid for. PR C calls this.
 func ColdApplyPhase(p components.CachePhase) bool { return cacheAwareApplyPhase(p) }
+
+// ClaimThread takes the thread's ping guard and nothing else: the warm path's question (#491) runs
+// under it, so a warm question and a ping substitute of one thread never run together. ok=false means
+// another call holds the thread (counted as sweep_ping_thread_busy by the ping side; the warm side
+// counts its own). release must be called when the question ends.
+func ClaimThread(threadKey string) (release func(), ok bool) {
+	pingGuardMu.Lock()
+	defer pingGuardMu.Unlock()
+	if _, busy := pingGuardBusy[threadKey]; busy {
+		return nil, false
+	}
+	pingGuardBusy[threadKey] = struct{}{}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			pingGuardMu.Lock()
+			delete(pingGuardBusy, threadKey)
+			pingGuardMu.Unlock()
+		})
+	}, true
+}

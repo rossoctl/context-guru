@@ -203,7 +203,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
-	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd`
+	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd, r.sweep_false_expands_warm`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -226,7 +226,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
-		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD)
+		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD, &e.SweepFalseExpandsWarm)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64

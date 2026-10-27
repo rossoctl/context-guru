@@ -51,6 +51,9 @@ type heldOutput struct {
 	// Drop is the model's verdict after Judge: the quote checks and the would-it-shrink test have
 	// already run. A kept output is recorded too, so "asked" and "proposed" are both countable.
 	Drop bool `json:"drop"`
+	// Carried marks a verdict that came from an EARLIER question's refused answer (accumulation, #491). Set by
+	// the merge; false on a fresh answer. Metadata only.
+	Carried bool `json:"carried,omitempty"`
 }
 
 // heldAnswer is one thread's held answer.
