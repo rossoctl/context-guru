@@ -111,10 +111,11 @@ The next round starts that reviewer fresh, and does not resume the session that 
 
    A warning "files changed in <checkout> during the review" means a reviewer may have written
    outside its worktree. Check that checkout with `git status` before you go on.
-4. **If both verdicts are `approve`**, tell the user that the PR is ready to merge. Stop.
-   If the PR changes behavior (a default, a time limit, what gets cached, offloaded or shown),
-   say so, with the old and the new behavior. It needs a human developer's yes before it merges.
-   See RELEASING.md, "Behavior changes need a human's permission".
+4. **If both verdicts are `approve`**, check the diff for a behavior change (a default, a time
+   limit, what gets cached, offloaded or shown). If there is none, tell the user that the PR is
+   ready to merge. If there is one, tell the user that the PR is approved but needs a human
+   developer's yes before it merges, and name the old and the new behavior. See RELEASING.md,
+   "Behavior changes need a human's permission". Then stop.
 5. **Fix the findings** in your own worktree. Check each finding first: fix the real ones; for
    one you reject, reply on the PR and say why. Commit with `git commit -s`, then push.
 6. **Run step 2 again** for round 2. Each reviewer checks its own earlier findings.
