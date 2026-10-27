@@ -2728,3 +2728,30 @@ func TestTheShrinkVoidLeavesAFreshAnswerThatLandedInBetween(t *testing.T) {
 		t.Fatal("the fresh answer that landed in between was voided")
 	}
 }
+
+// At get time (the next warm request), a carried set that aged out is carried_expired, and an answer never
+// refused that aged out is held_expired. Same split as warmHold.
+func TestAnAgedOutAnswerIsCountedByKindWhenTheWarmRequestReadsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		tried         bool
+		carried, held int64
+	}{{"carried", true, 2, 0}, {"never refused", false, 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetWarmForTest()
+			t.Cleanup(resetWarmForTest)
+			old := time.Now().Add(-2 * warmHeldMaxAge).UnixMilli()
+			warmHold("getage", heldOf(old, 40, dropOut("a", 10), dropOut("b", 20)))
+			warmMu.Lock()
+			warmThreads["getage"].heldTried = tc.tried
+			warmMu.Unlock()
+			if _, ok := (memHeld{key: "getage"}).get(""); ok {
+				t.Fatal("an over-age answer was returned")
+			}
+			c := SweepWarmCounters()
+			if c.CarriedExpired != tc.carried || c.HeldExpired != tc.held {
+				t.Fatalf("carried_expired=%d held_expired=%d, want %d and %d", c.CarriedExpired, c.HeldExpired, tc.carried, tc.held)
+			}
+		})
+	}
+}
