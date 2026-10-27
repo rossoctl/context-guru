@@ -24,8 +24,9 @@ func init() { components.Register("searchfold", newSearchfold) }
 // It is a Reformat, so it must be lossless — and it is lossless BY CONSTRUCTION
 // rather than by argument: every fold has an exact inverse, and a fold is adopted
 // only if applying that inverse reproduces the input BYTE FOR BYTE and the result is
-// strictly smaller (see adopt). Anything else returns the input unchanged. No path,
-// line number or line is ever dropped, so there is nothing to stash and no marker.
+// smaller in tokens, with bytes breaking ties (see FoldSearchOutput). Anything else
+// returns the input unchanged. No path, line number or line is ever dropped, so
+// there is nothing to stash and no marker.
 //
 // Cache safety: the fold is a pure function of the message's own text, so a message
 // that reappears on the next turn folds to the same bytes. The already-cached prefix
@@ -130,11 +131,20 @@ func mayCarryPathPrefix(s string) bool {
 	return false
 }
 
-// FoldSearchOutput returns the smallest of the candidate folds whose inverse
+// FoldSearchOutput returns the candidate fold with the fewest tokens whose inverse
 // reproduces s exactly, or s itself when none of them wins. Exported so a measurement
 // harness can run the transform over captured output without a request around it.
+//
+// The pick between survivors is by TOKEN count, with byte length breaking ties only.
+// Bytes are a proxy and tokens are the thing this component exists to save, and the two
+// survivors can disagree about the winner: a long single-character directory run is
+// byte-heavy and token-sparse, so factoring it out (foldHitDir) wins bytes while the
+// heading-per-file fold (foldHitPath) wins tokens. Picking by bytes returned the
+// token-worse of the two whenever that divergence appeared, so tokens lead here. A
+// fold that shrinks bytes but grows tokens never wins the pick.
 func FoldSearchOutput(s string) string {
 	best := s
+	bestTokens := schema.TextTokens(s)
 	for _, c := range []struct {
 		fold    func(string) string
 		inverse func(string) string
@@ -143,8 +153,15 @@ func FoldSearchOutput(s string) string {
 		{foldHitDir, unfoldPrefixDir},   // one hit per file: factor the parent dir
 		{foldPathList, unfoldPrefixDir}, // find/ls -1/rg -l: bare paths
 	} {
-		if out, ok := adopt(s, c.fold, c.inverse); ok && len(out) < len(best) {
-			best = out
+		out, ok := adopt(s, c.fold, c.inverse)
+		if !ok {
+			continue
+		}
+		// TextTokens is memoized by content hash, and adopt has usually just asked for
+		// the same strings, so this comparison is close to free.
+		if toks := schema.TextTokens(out); toks < bestTokens ||
+			(toks == bestTokens && len(out) < len(best)) {
+			best, bestTokens = out, toks
 		}
 	}
 	return best
