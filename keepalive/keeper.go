@@ -1733,22 +1733,27 @@ type Stats struct {
 // SweepWarmStats is offload.SweepWarmStats in /stats shape: how often the trigger fired, what the
 // questions and the held answers did, and the economic gate's accepts and refusals with the reasons.
 type SweepWarmStats struct {
-	Fired           int64            `json:"fired"`
-	Asked           int64            `json:"asked"`
-	Held            int64            `json:"held"`
-	Failed          int64            `json:"failed"`
-	NotWorth        int64            `json:"not_worth"`
-	NoBilledSize    int64            `json:"no_billed_size"`
-	ThreadBusy      int64            `json:"thread_busy"`
-	ModelDeclined   int64            `json:"model_declined"`
-	ConcurrencyFull int64            `json:"concurrency_full"`
-	HeldExpired     int64            `json:"held_expired"`
-	HeldShrunk      int64            `json:"held_shrunk"`
-	NotRegistered   int64            `json:"not_registered"`
-	ThreadsFull     int64            `json:"threads_full"`
-	AlreadyAsked    int64            `json:"already_asked"`
-	NoInventory     int64            `json:"no_inventory"`
-	Gates           map[string]int64 `json:"gates,omitempty"`
+	Fired             int64            `json:"fired"`
+	Asked             int64            `json:"asked"`
+	Held              int64            `json:"held"`
+	Failed            int64            `json:"failed"`
+	NotWorth          int64            `json:"not_worth"`
+	NoBilledSize      int64            `json:"no_billed_size"`
+	ThreadBusy        int64            `json:"thread_busy"`
+	ModelDeclined     int64            `json:"model_declined"`
+	ConcurrencyFull   int64            `json:"concurrency_full"`
+	HeldExpired       int64            `json:"held_expired"`
+	HeldShrunk        int64            `json:"held_shrunk"`
+	CarriedMerged     int64            `json:"carried_merged"`
+	CarriedOverridden int64            `json:"carried_overridden"`
+	CarriedRefused    int64            `json:"carried_refused"`
+	CarriedExpired    int64            `json:"carried_expired"`
+	CarriedCapped     int64            `json:"carried_capped"`
+	NotRegistered     int64            `json:"not_registered"`
+	ThreadsFull       int64            `json:"threads_full"`
+	AlreadyAsked      int64            `json:"already_asked"`
+	NoInventory       int64            `json:"no_inventory"`
+	Gates             map[string]int64 `json:"gates,omitempty"`
 	// TriggerRefusals counts the refusals at the trigger, by reason. Recent is the last warm sweeps
 	// applied, each with the gate's numbers, the conversation before and after, and the net it expected.
 	TriggerRefusals map[string]int64 `json:"trigger_refusals,omitempty"`
@@ -1774,7 +1779,7 @@ func sweepWarmStats() *SweepWarmStats {
 	}
 	return &SweepWarmStats{Fired: w.Fired, Asked: w.Asked, Held: w.Held, Failed: w.Failed, NotWorth: w.NotWorth,
 		NoBilledSize: w.NoBilled, ThreadBusy: w.ThreadBusy, ModelDeclined: w.ModelDeclined,
-		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
+		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, CarriedMerged: w.CarriedMerged, CarriedOverridden: w.CarriedOverridden, CarriedRefused: w.CarriedRefused, CarriedExpired: w.CarriedExpired, CarriedCapped: w.CarriedCapped, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
 		NoInventory: w.NoInventory, GatePriceModel: w.GatePriceModel, PriceModelUnknown: w.PriceModelUnknown, Gates: w.Gates, TriggerRefusals: w.TriggerReasons, Recent: w.Recent, RecentDecisions: w.RecentDecisions, GateAccept: w.GateAccept,
 		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics}
 }

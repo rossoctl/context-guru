@@ -158,19 +158,19 @@ var warmAskSpy func(*sweepPingCandidate)
 
 // Counters.
 var (
-	sweepWarmAsked, sweepWarmHeld, sweepWarmFailed, sweepWarmFired atomic.Int64
-	sweepWarmNotWorth, sweepWarmNoBilled, sweepWarmThreadBusy      atomic.Int64
-	sweepWarmModelDeclined, sweepWarmHeldExpired, sweepWarmPanics  atomic.Int64
-	sweepWarmHeldShrunk                                            atomic.Int64
-	sweepWarmCarriedMerged, sweepWarmCarriedOverridden             atomic.Int64
-	sweepWarmCarriedRefused, sweepWarmCarriedExpired               atomic.Int64
-	sweepWarmNotRegistered, sweepWarmThreadsFull                   atomic.Int64
-	sweepWarmAlreadyAsked, sweepWarmNoInventory                    atomic.Int64
-	sweepWarmPriceModelUnknown                                     atomic.Int64
-	sweepWarmGateAccept, sweepWarmGateRefuse, sweepWarmConcurrency atomic.Int64
-	sweepWarmGateMu                                                sync.Mutex
-	sweepWarmTriggerReasons                                        = map[string]int64{}
-	sweepWarmGateReasons                                           = map[string]int64{}
+	sweepWarmAsked, sweepWarmHeld, sweepWarmFailed, sweepWarmFired           atomic.Int64
+	sweepWarmNotWorth, sweepWarmNoBilled, sweepWarmThreadBusy                atomic.Int64
+	sweepWarmModelDeclined, sweepWarmHeldExpired, sweepWarmPanics            atomic.Int64
+	sweepWarmHeldShrunk                                                      atomic.Int64
+	sweepWarmCarriedMerged, sweepWarmCarriedOverridden                       atomic.Int64
+	sweepWarmCarriedRefused, sweepWarmCarriedExpired, sweepWarmCarriedCapped atomic.Int64
+	sweepWarmNotRegistered, sweepWarmThreadsFull                             atomic.Int64
+	sweepWarmAlreadyAsked, sweepWarmNoInventory                              atomic.Int64
+	sweepWarmPriceModelUnknown                                               atomic.Int64
+	sweepWarmGateAccept, sweepWarmGateRefuse, sweepWarmConcurrency           atomic.Int64
+	sweepWarmGateMu                                                          sync.Mutex
+	sweepWarmTriggerReasons                                                  = map[string]int64{}
+	sweepWarmGateReasons                                                     = map[string]int64{}
 )
 
 // SweepWarmStats is the warm path's ledger for /stats.
@@ -181,7 +181,7 @@ type SweepWarmStats struct {
 	// NotWorth: checks where the candidates could not pay back. NoBilled: checks skipped because the
 	// provider's billed size was not known yet. ThreadBusy, ModelDeclined, ConcurrencyFull: questions
 	// not sent, for the same reasons as at the ping. HeldExpired: waiting answers dropped for age.
-	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, HeldShrunk, CarriedMerged, CarriedOverridden, CarriedRefused, CarriedExpired, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
+	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, HeldShrunk, CarriedMerged, CarriedOverridden, CarriedRefused, CarriedExpired, CarriedCapped, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
 	// GatePriceModel is the diagnostic warm_gate_price_model, "" in a normal run.
 	GatePriceModel string
 	// GateAccept and GateRefuse count the economic gate's verdicts; Reasons splits the refusals.
@@ -206,7 +206,7 @@ func (w SweepWarmStats) Any() bool {
 		return true
 	}
 	return w.Fired+w.Asked+w.Held+w.Failed+w.NotWorth+w.NoBilled+w.ThreadBusy+w.ModelDeclined+
-		w.ConcurrencyFull+w.HeldExpired+w.HeldShrunk+w.CarriedMerged+w.CarriedOverridden+w.CarriedRefused+w.CarriedExpired+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
+		w.ConcurrencyFull+w.HeldExpired+w.HeldShrunk+w.CarriedMerged+w.CarriedOverridden+w.CarriedRefused+w.CarriedExpired+w.CarriedCapped+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
 		w.GateAccept+w.GateRefuse+w.Panics > 0 || len(w.Gates) > 0
 }
 
@@ -253,7 +253,7 @@ func SweepWarmCounters() SweepWarmStats {
 	return SweepWarmStats{TriggerReasons: tr, Recent: warmRecentCopy(), RecentDecisions: warmDecisionsCopy(), Fired: sweepWarmFired.Load(), Asked: sweepWarmAsked.Load(), Held: sweepWarmHeld.Load(),
 		Failed: sweepWarmFailed.Load(), NotWorth: sweepWarmNotWorth.Load(), NoBilled: sweepWarmNoBilled.Load(),
 		ThreadBusy: sweepWarmThreadBusy.Load(), ModelDeclined: sweepWarmModelDeclined.Load(),
-		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), HeldShrunk: sweepWarmHeldShrunk.Load(), CarriedMerged: sweepWarmCarriedMerged.Load(), CarriedOverridden: sweepWarmCarriedOverridden.Load(), CarriedRefused: sweepWarmCarriedRefused.Load(), CarriedExpired: sweepWarmCarriedExpired.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
+		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), HeldShrunk: sweepWarmHeldShrunk.Load(), CarriedMerged: sweepWarmCarriedMerged.Load(), CarriedOverridden: sweepWarmCarriedOverridden.Load(), CarriedRefused: sweepWarmCarriedRefused.Load(), CarriedExpired: sweepWarmCarriedExpired.Load(), CarriedCapped: sweepWarmCarriedCapped.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
 		AlreadyAsked: sweepWarmAlreadyAsked.Load(), NoInventory: sweepWarmNoInventory.Load(), Gates: copyWarmGates(),
 		PriceModelUnknown: sweepWarmPriceModelUnknown.Load(), GatePriceModel: gatePriceModel(),
 		GateAccept: sweepWarmGateAccept.Load(), GateRefuse: sweepWarmGateRefuse.Load(), Reasons: rs,
@@ -291,6 +291,7 @@ func warmHold(key string, h heldAnswer) {
 		merged, stats := mergeHeld(*t.held, h)
 		sweepWarmCarriedMerged.Add(int64(stats.carriedKept))
 		sweepWarmCarriedOverridden.Add(int64(stats.overridden))
+		sweepWarmCarriedCapped.Add(int64(stats.evicted))
 		h = merged
 	}
 	t.held, t.heldAt, t.heldTried = &h, time.Now(), false
@@ -417,7 +418,7 @@ func resetWarmForTest() {
 	warmGatePriceModelSet = atomic.Value{}
 	for _, c := range []*atomic.Int64{&sweepWarmAsked, &sweepWarmHeld, &sweepWarmFailed, &sweepWarmFired,
 		&sweepWarmNotWorth, &sweepWarmNoBilled, &sweepWarmThreadBusy, &sweepWarmModelDeclined,
-		&sweepWarmHeldExpired, &sweepWarmHeldShrunk, &sweepWarmCarriedMerged, &sweepWarmCarriedOverridden, &sweepWarmCarriedRefused, &sweepWarmCarriedExpired, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
+		&sweepWarmHeldExpired, &sweepWarmHeldShrunk, &sweepWarmCarriedMerged, &sweepWarmCarriedOverridden, &sweepWarmCarriedRefused, &sweepWarmCarriedExpired, &sweepWarmCarriedCapped, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
 		c.Store(0)
 	}
 }
