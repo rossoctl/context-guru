@@ -836,6 +836,11 @@ type Snapshot struct {
 	CacheAwareSummarizerCacheWriteTokens int64 `json:"cache_aware_summarizer_cache_write_tokens"`
 	// a PAID-FOR call whose raw reply was missing the closing </summary> tag the prompt asks for
 	// — the signature of a reply cut off mid-generation by the model's own token/thinking budget.
+	// a decline because an EARLIER COMPONENT changed the message count, so the span to verify
+	// against the stash could not be located (components.ErrCoordsShifted). Not a stash defect:
+	// expected on every compacted turn of a `high`/`xhigh` pipeline, counted apart from
+	// StalePrefix so that counter keeps meaning "the stashed body was the wrong one" (#452)
+	CacheAwareSummarizerCoordsShifted int64 `json:"cache_aware_summarizer_coords_shifted"`
 	// Refused rather than committed, so a non-zero figure here is lost compaction, never a wrong
 	// checkpoint
 	CacheAwareSummarizerTruncated int64 `json:"cache_aware_summarizer_truncated"`

@@ -82,6 +82,11 @@ func classifyCallErr(ctx context.Context, session string, err error) {
 		atomic.AddInt64(&cacheAwareNoPrefix, 1)
 		return
 	}
+	if errors.Is(err, components.ErrCoordsShifted) {
+		atomic.AddInt64(&cacheAwareCoordsShifted, 1)
+		logging.From(ctx).Debug("cg.cache_aware_summarizer.coords_shifted", "session", session)
+		return
+	}
 	if errors.Is(err, components.ErrStalePrefix) {
 		atomic.AddInt64(&cacheAwareStalePrefix, 1)
 		logging.From(ctx).Debug("cg.cache_aware_summarizer.stale_prefix", "session", session)

@@ -2353,6 +2353,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.PrefixStashOversized = PrefixStashOversized()
 	snap.CacheAnchorWritten, snap.CacheAnchorNoSlot, snap.CacheAnchorNotFound = apply.CacheAnchorStats()
 	snap.CacheAwareSummarizerStalePrefix = offload.CacheAwareSummarizerStalePrefix()
+	snap.CacheAwareSummarizerCoordsShifted = offload.CacheAwareSummarizerCoordsShifted()
 	snap.CacheAwareSummarizerPrefixAskUsed = offload.CacheAwareSummarizerPrefixAskUsed()
 	snap.CacheAwareSummarizerCacheReadTokens, snap.CacheAwareSummarizerCacheWriteTokens =
 		offload.CacheAwareSummarizerCacheTokens()

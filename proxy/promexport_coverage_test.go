@@ -186,6 +186,7 @@ var notExportedWhy = map[string]string{
 	"CacheAwareSummarizerAsyncCommitted":   "NOT EXPORTED YET — detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost",
 	"CacheAwareSummarizerNoPrefix":         "NOT EXPORTED YET — a session's first turn through PrefixAsk (components.ErrNoPrefix), not a failure",
 	"CacheAwareSummarizerStalePrefix":      "NOT EXPORTED YET — the PrefixAsk stash did not cover the span this turn would have claimed as summarized; a real alert candidate once it has a dashboard home",
+	"CacheAwareSummarizerCoordsShifted":    "NOT EXPORTED YET — an earlier component changed the message count so the span could not be located; expected on compacted `high`/`xhigh` turns, not a stash defect (#452)",
 	"PrefixStashOversized":                 "NOT EXPORTED YET — request bodies the prefix stash refused as over its per-body cap; same family as CacheAwareSummarizerNoPrefix, exported with it",
 	"CacheAnchorWritten":                   "NOT EXPORTED YET — splice anchors written (#723); same family as the cache_aware_summarizer counters, exported with them",
 	"CacheAnchorNoSlot":                    "NOT EXPORTED YET — splice anchors skipped for want of a free breakpoint slot (#723)",
