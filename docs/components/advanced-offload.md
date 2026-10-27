@@ -645,7 +645,7 @@ The warm gate collects its saving over N more warm turns. N comes from one of th
 The `cut` model needs an **exact** context window, as the summarizer's own trigger does. For a model the public map does
 not list (a GLM behind a gateway, a preview id), an agent builder supplies it with a `window:` in the `MODEL_PRICES` table
 (`MODEL_PRICES=<file>`); an operator's table is authoritative, so it counts as exact. See
-[`deploy/service/prices.example.yaml`](../../deploy/service/prices.example.yaml).
+[`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml).
 
 ### Counters
 

@@ -279,9 +279,13 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 
 // parseSSEUsage pulls usage out of a streamed response. Both dialects report it in
 // terminal events (Anthropic: message_start carries the input tiers and
-// message_delta the output; OpenAI: a final chunk with `usage`), so the tiers are
-// merged across events, taking the maximum of each — a later event repeating a
-// value must not double it.
+// message_delta the output; OpenAI: a final chunk with `usage`).
+//
+// The INPUT tiers (fresh, cache read, cache write) are taken as ONE set from the last event that carries an
+// input count, so a later event replaces an earlier one's tiers (#745): a litellm gateway puts the TOTAL
+// prompt in message_start and the true split in message_delta, and a per-field maximum counted the read
+// twice. An event with no input count (a real Anthropic message_delta) leaves the earlier tiers alone.
+// Output keeps the maximum, because the last event carries the final count and a repeat must not double it.
 func parseSSEUsage(raw []byte) (Usage, bool) {
 	u, why, _ := parseSSEUsageWhy(raw)
 	return u, why == usageMissNone

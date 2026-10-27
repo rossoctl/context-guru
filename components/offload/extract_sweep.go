@@ -219,6 +219,7 @@ var sweepBannedKeys = []struct {
 	{"strategy", "an adjudicator selects no compaction strategy — it returns a verdict, not a program"},
 	{"rewrite", "nothing is rewritten, so there is no rewrite to validate; the output is kept verbatim or removed"},
 	{"aggressiveness", "there is no compaction target to teach: the only question asked is whether the output is spent"},
+	{"max_ask_items", "the batch size is fixed at 12 (#747); use max_ask_batches (default 4, at most 8) to ask a longer list in batches"},
 	{"max_chars", "no projection window exists — a dropped output leaves a shape descriptor, not a truncation"},
 	// THE MODEL IS NOT A FREE CHOICE HERE, and this is the one place that asymmetry with extract_llm
 	// is visible, so it is spelled out rather than left to look like an oversight.
