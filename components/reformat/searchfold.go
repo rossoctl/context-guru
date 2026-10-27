@@ -157,8 +157,10 @@ func FoldSearchOutput(s string) string {
 		if !ok {
 			continue
 		}
-		// TextTokens is memoized by content hash, and adopt has usually just asked for
-		// the same strings, so this comparison is close to free.
+		// TextTokens is memoized by content hash. The INPUT has usually been counted
+		// already — the trigger and the never-worse guard both size the request — so the
+		// bestTokens call above is close to free. Each fold's OUTPUT is a fresh count,
+		// three at most. (adopt itself never counts tokens; it compares bytes.)
 		if toks := schema.TextTokens(out); toks < bestTokens ||
 			(toks == bestTokens && len(out) < len(best)) {
 			best, bestTokens = out, toks
