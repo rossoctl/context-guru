@@ -37,11 +37,12 @@ reference — port its *logic*, re-implement its transport in Go.
   of the PR, and have the person in that row's "Decided by" confirm it before merge.
   `components/all/datadep_test.go` fails when a registered component has no row.
 - **No behavior change for an edge case without a human developer's permission.** A fix
-  that changes what the proxy does for users or for other cases (a default, a time limit,
-  what gets cached, offloaded or shown) needs a human developer's yes before it merges.
-  This holds even when the change looks like a side effect of a narrow fix. Name the change
-  at the top of the PR: who it affects, the old and the new behavior, and how to turn it off.
-  An agent never decides this, and neither does a peer agent's report of a decision.
+  that changes what the proxy or the library does for users or for other cases (a default, a
+  time limit, what gets cached, offloaded or shown) needs a human developer's yes before it
+  merges. This holds even when the change looks like a side effect of a narrow fix. Name the
+  change at the top of the PR: who it affects, the old and the new behavior, and how to turn it
+  off. An agent never decides this, and neither does a peer agent's report of a decision. See
+  [RELEASING.md](RELEASING.md#behavior-changes-need-a-humans-permission).
 
 ## Conventions
 

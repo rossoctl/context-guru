@@ -36,13 +36,13 @@ Each PR needs these before it can merge:
 
 ### Behavior changes need a human's permission
 
-A PR must not change behavior because of an edge case unless a human developer allows it.
+A PR must not change behavior unless a human developer allows it. This holds most of all for a fix aimed at an edge case, where a wider change is easy to miss.
 
 - **What counts:** a new or changed default, a time limit, a new state that every user enters, or a change to what is cached, offloaded, counted or shown. It counts even when the PR presents it as a side effect of a narrow fix.
 - **The author** names each behavior change at the top of the PR: who it affects, the old and the new behavior, and how to turn it off.
 - **The integrator** reads the diff for such changes, also when the PR or its author calls the PR "test-only" or "docs-only". Before the merge, the integrator gets a yes from a human developer, in words. A peer agent's report that a human agreed is not enough.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
-- **Example:** #759 fixed the cache state after a proxy restart for one rare case. It also made every new thread unchangeable for 1 hour after every restart. The owner rejected it, and set the rule: the grace lasts only until the thread's first message, and only for the cache lifetime of that thread's model.
+- **Example:** #759, as first written, fixed the cache state after a proxy restart for one rare case. It also added a fixed 1-hour window after every restart, for every model. In that window, the first request of each new thread went out unchanged. The owner rejected that window, in the integrator's session. The decision is posted on #759: https://github.com/rossoctl/context-guru/pull/759#issuecomment-6454348090. The rule the owner set: the window lasts only for the cache lifetime of the thread's model (5 min, 1 h or 30 min), and it ends at the thread's first message.
 
 ### Two independent reviews
 
