@@ -113,6 +113,52 @@ func TestFoldShapes(t *testing.T) {
 	}
 }
 
+// TestThePickBetweenSurvivorsJudgesTokensNotBytes pins the dispatcher's choice between
+// candidate folds that BOTH survive adopt. Bytes are a proxy; tokens are the thing this
+// component exists to save, and the two survivors can disagree about the winner: a long
+// single-character directory run is byte-heavy and token-sparse, so factoring it out of
+// every row (foldHitDir) wins on bytes while the heading-per-file fold (foldHitPath)
+// wins on tokens. The byte-first pick this replaces returned the token-worse of the two.
+//
+// The preconditions are asserted, not assumed: if the tokenizer ever changes so the two
+// winners stop diverging, this fails loudly instead of silently testing nothing.
+func TestThePickBetweenSurvivorsJudgesTokensNotBytes(t *testing.T) {
+	dir := strings.Repeat("a", 400)
+	var b strings.Builder
+	for _, file := range []string{"x.go", "y.go"} {
+		for n := 1; n <= 20; n++ {
+			fmt.Fprintf(&b, "%s/%s:%d:foo\n", dir, file, n)
+		}
+	}
+	s := b.String()
+
+	hitPath, okPath := adopt(s, foldHitPath, unfoldHitPath)
+	hitDir, okDir := adopt(s, foldHitDir, unfoldPrefixDir)
+	if !okPath || !okDir {
+		t.Fatalf("scenario collapsed: survivors path=%v dir=%v — the pick is only "+
+			"observable when both folds survive", okPath, okDir)
+	}
+	if len(hitDir) >= len(hitPath) {
+		t.Fatalf("scenario collapsed: foldHitDir (%d bytes) is not byte-shorter than "+
+			"foldHitPath (%d bytes)", len(hitDir), len(hitPath))
+	}
+	pathToks, dirToks := schema.TextTokens(hitPath), schema.TextTokens(hitDir)
+	if pathToks >= dirToks {
+		t.Fatalf("scenario collapsed: foldHitPath (%d tokens) is not token-shorter than "+
+			"foldHitDir (%d tokens)", pathToks, dirToks)
+	}
+	if pathToks >= schema.TextTokens(s) {
+		t.Fatalf("scenario collapsed: the token-winner (%d) does not beat the input (%d)",
+			pathToks, schema.TextTokens(s))
+	}
+
+	if got := FoldSearchOutput(s); got != hitPath {
+		t.Errorf("pick between survivors chose %d bytes/%d tokens (foldHitDir); want the "+
+			"token-winner: %d bytes/%d tokens (foldHitPath)",
+			len(got), schema.TextTokens(got), len(hitPath), pathToks)
+	}
+}
+
 // TestFrozenPrefixIsByteStable is the cache-safety proof. The fold carries no
 // TailOnly gate because it is a pure function of one message's own text; what that
 // buys is only real if the message folds to the SAME bytes on the next turn. So:

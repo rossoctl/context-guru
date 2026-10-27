@@ -722,6 +722,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// verify either way is the pre-existing, separately tracked gap (#122), not this guard's job.
 	usePrefixAsk := c.PrefixAsk != nil
 	stalePrefix := false
+	coordsShifted := false
 	// The span the guard verified, kept so the ask below can check it again on the SAME read of the
 	// stash it asks over (PrefixCoveredAsker) instead of trusting that the stash did not change
 	// between the check above and the ask.
@@ -741,32 +742,46 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 				// component in the configured pipeline (textclean, format, dedup, … in housellm/
 				// xhigh) — see rawSpanForHash's own comment and PR #431 round 1.
 				//
+				// !rawOK and !CoversSpan are counted as DIFFERENT gates, because only the second
+				// means the stash is stale. !rawOK says an earlier component changed the message
+				// count, so no span of either coordinate system is safe to compare — the stash can
+				// be perfectly current, and on a `high`/`xhigh` pipeline (summarize first, then
+				// this) it is the expected decline of every compacted turn, not a stash defect.
+				//
 				// thread.Key(c.Session, c.Thread), not bare c.Session: the host's stash (proxy's
 				// sentStash) is keyed per thread (#423), and the Ask call just below already reads
 				// it that way. Checking coverage under the plain session would almost always MISS
 				// for a non-primary thread — CoversSpan's own missing-key convention then reports
 				// "covered" and this guard would never fire for any thread but the first.
-				if span, ok := rawSpanForHash(c, req, requiredCount); !ok ||
-					!pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)) {
+				span, rawOK := rawSpanForHash(c, req, requiredCount)
+				switch {
+				case !rawOK:
+					coordsShifted = true
+				case !pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)):
 					stalePrefix = true
-				} else {
+				default:
 					haveCover, coverCount, coverHash = true, requiredCount, components.SpanHash(span)
 				}
 			}
 		}
 	}
-	if !usePrefixAsk || stalePrefix {
-		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
-		// same fork, because both mean there is nothing SAFE to ask through: one has nothing stashed,
-		// the other has the wrong thing. Gated separately so a run showing sweep_stale_prefix, rather
-		// than sweep_no_asker, says which one happened.
+	if !usePrefixAsk || stalePrefix || coordsShifted {
+		// No asker at all (a non-Anthropic route, or no incoming client), a stale stash and a
+		// shifted coordinate system take the same fork, because all three mean there is nothing
+		// SAFE to ask through: one has nothing stashed, one has the wrong thing, and one cannot
+		// even say which span to check. Gated separately so a run showing
+		// sweep_stale_prefix, sweep_coords_shifted or sweep_no_asker says which one happened.
 		//
 		// THERE IS NO FALLBACK (#404). The ask is made at the keep-alive ping, which has no request to
 		// pay a full-price content-carrying completion for. The ping is sent instead.
-		if stalePrefix {
+		switch {
+		case coordsShifted:
+			r.gate("sweep_coords_shifted")
+			r.rec.Rejection = "an earlier component changed the message count, so the stashed span cannot be located"
+		case stalePrefix:
 			r.gate("sweep_stale_prefix")
 			r.rec.Rejection = "stashed prefix does not cover the candidates offered"
-		} else {
+		default:
 			r.gate("sweep_no_asker")
 			r.rec.Rejection = "no prefix asker on this route"
 		}

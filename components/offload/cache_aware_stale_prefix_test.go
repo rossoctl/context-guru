@@ -98,6 +98,57 @@ func TestCacheAwareDeclinesOnAStalePrefix(t *testing.T) {
 	}
 }
 
+// A count-changing component BEFORE the summarizer declines through the same guard, but it is
+// NOT a stale stash (#452): the raw and pipeline coordinates name different messages, so
+// rawSpanForHash cannot locate the span at all and the call returns components.ErrCoordsShifted.
+// The stash itself can be perfectly current — on a `high`/`xhigh` pipeline this is the expected
+// decline of every compacted turn — so it is counted apart from the stale-prefix counter, which
+// keeps meaning "the stashed body was the wrong one".
+func TestCacheAwareCountsShiftedCoordinatesApartFromAStalePrefix(t *testing.T) {
+	s := newCacheAware(t, caBaseCfg+"instruction_role: auto\n")
+	asker := &coverageAsker{fakePrefixAsker: fakePrefixAsker{
+		out: "<summary>should never be committed.</summary>"}}
+	asker.covers = true // covering: only the coordinate shift can decline
+	ctx := caCtxNoModel("ca-coords-shifted", asker)
+	// The pre-pipeline body holds one message more than req.Input does at this component's own
+	// position — what a count-changing summarize ahead of it leaves behind.
+	in := caFixture()
+	raw := make([]bschemas.ChatMessage, len(in), len(in)+1)
+	copy(raw, in)
+	ctx.RawInput = append(raw, in[0])
+
+	before := CacheAwareSummarizerCoordsShifted()
+	staleBefore := CacheAwareSummarizerStalePrefix()
+	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), in...)}
+	var rep components.Report
+	if _, err := s.Offload(req, &rep, ctx); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("the commissioned (and declined) summary never resolved")
+	}
+	if atomic.LoadInt64(&asker.coversSpanCalled) != 0 {
+		t.Fatal("CoversSpan was consulted; with the coordinates shifted there is no span safe to " +
+			"compare, so the stash must not be judged at all")
+	}
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a guard that cannot locate the span must decline before "+
+			"paying for the call", asker.calls)
+	}
+	if CacheAwareSummarizerCoordsShifted() != before+1 {
+		t.Error("the coords-shifted decline was not counted")
+	}
+	if CacheAwareSummarizerStalePrefix() != staleBefore {
+		t.Error("a shifted coordinate system was miscounted as a stale stash — the stash was " +
+			"never judged, so it cannot have been found stale")
+	}
+	if _, ok := loadCheckpoint(ctx); ok {
+		t.Fatal("a checkpoint was committed from a span the guard could not locate")
+	}
+}
+
 // coveredAsker also implements components.PrefixCoveredAsker. Its CoversSpan always says
 // "covered", as a stash read a moment too early would; AskCovered reports what the single
 // snapshot it asks on really holds. The guard must follow AskCovered.

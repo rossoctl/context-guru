@@ -280,6 +280,22 @@ type errStalePrefix struct{}
 
 func (errStalePrefix) Error() string { return "stashed prefix does not cover the span to summarize" }
 
+// ErrCoordsShifted is what a caller should treat an attempted PrefixAsk as having returned when
+// an earlier component in the pipeline changed the MESSAGE COUNT, so the span the caller wanted
+// to verify against the host's stash cannot be located at all: rawSpanForHash reports !ok and
+// there is no slice of either coordinate system safe to compare. Kept apart from
+// ErrStalePrefix for the same reason the two have different counters: the stash itself can be
+// perfectly current here — the pipeline geometry moved, not the data — and on a `high` or
+// `xhigh` pipeline, where `summarize` runs before the later guards and compacts, this is the
+// expected decline on every turn rather than a defect in the stash.
+var ErrCoordsShifted = errCoordsShifted{}
+
+type errCoordsShifted struct{}
+
+func (errCoordsShifted) Error() string {
+	return "an earlier component changed the message count, so the stashed span cannot be located"
+}
+
 // MessagesModel is an OPTIONAL capability on a Model: a client that can send a full
 // message ARRAY rather than one flattened prompt string. Components detect it by type
 // assertion and must degrade gracefully when a client does not implement it.

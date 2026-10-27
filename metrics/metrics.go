@@ -126,11 +126,12 @@ type Aggregator struct {
 	// stream to inspect it for an expand call. Buffering is the only thing that stops a
 	// stream being a stream, so counting it makes that cost visible instead of inferred
 	// (it used to be unconditional and unmeasured — issue #26).
-	sseTTFBMs     float64
-	sseTTFBMsBuf  float64
-	sseStreamed   int64
-	sseBuffered   int64
-	sseExpandLate int64
+	sseTTFBMs         float64
+	sseTTFBMsBuf      float64
+	sseStreamed       int64
+	sseBuffered       int64
+	sseExpandLate     int64
+	sseAdjudicateLate int64
 	// Mode dimension (#31). Enforced requests are counted per mode; observe-mode results
 	// are kept in PHYSICALLY separate fields with their own serialized names, so no query
 	// over the enforced rollups can accidentally include a hypothetical.
@@ -621,6 +622,19 @@ func (a *Aggregator) RecordSSEExpandAfterStream() {
 	a.mu.Unlock()
 }
 
+// RecordSSEAdjudicateAfterStream notes a response whose adjudication tool_use reached the
+// client — the adjudication half of what RecordSSEExpandAfterStream used to count alone (#174).
+// The split matters at the moment this pair is promoted to the alert candidate
+// notExportedWhy names it as: "the peek leaked" must also say WHICH tool, because the two
+// leaks read differently — an expand leak is the splice giving up on a turn it could have
+// answered, an adjudicate leak is a co-called stray the loop deliberately deferred to the
+// next request's repair.
+func (a *Aggregator) RecordSSEAdjudicateAfterStream() {
+	a.mu.Lock()
+	a.sseAdjudicateLate++
+	a.mu.Unlock()
+}
+
 func (a *Aggregator) Run(r components.RunReport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -822,6 +836,11 @@ type Snapshot struct {
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")
 	CacheAwareSummarizerStalePrefix int64 `json:"cache_aware_summarizer_stale_prefix"`
+	// a decline because an EARLIER COMPONENT changed the message count, so the span to verify
+	// against the stash could not be located (components.ErrCoordsShifted). Not a stash defect:
+	// expected on every compacted turn of a `high`/`xhigh` pipeline, counted apart from
+	// StalePrefix so that counter keeps meaning "the stashed body was the wrong one" (#452)
+	CacheAwareSummarizerCoordsShifted int64 `json:"cache_aware_summarizer_coords_shifted"`
 	// commission calls that reached the model through components.PrefixAsker rather than a
 	// components.MessagesModel — i.e. the Anthropic incoming-model path (#275). Zero here on a
 	// deployment running Anthropic-only traffic means this component is still measuring `off`,
@@ -870,6 +889,10 @@ type Snapshot struct {
 	// batched with a client tool, past the round cap, past the retain bound, or in a dialect
 	// that cannot be reconstructed. See Aggregator.RecordSSEExpandAfterStream.
 	SSEExpandAfterStream int64 `json:"sse_expand_after_stream"`
+	// SSEAdjudicateAfterStream is the same leak for the adjudication tool, split out of
+	// SSEExpandAfterStream so the pair can name its tool (#174). See
+	// Aggregator.RecordSSEAdjudicateAfterStream.
+	SSEAdjudicateAfterStream int64 `json:"sse_adjudicate_after_stream"`
 	// Freeze-replay health — the cache-WRITE cost line. A frozen decision replayed
 	// (frozen_hits) keeps an already-cached message byte-identical. A decision the store
 	// DROPS (frozen_dropped: TTL expiry / pin cap) would flip that message's
@@ -1164,13 +1187,14 @@ func (a *Aggregator) Snapshot() Snapshot {
 		AddedLatencyMsAvg: addedAvg, UpstreamMsAvg: upAvg, UpstreamMsAvgBypassed: upAvgByp,
 		SSEStreamed: a.sseStreamed, SSEBuffered: a.sseBuffered,
 		SSETTFBMsAvg: ttfb, SSETTFBMsAvgBuf: ttfbBuf, SSEBufferedPct: bufPct,
-		SSEExpandAfterStream: a.sseExpandLate,
-		CmdfilterFamilies:    copyFilterStats(a.filterFam),
-		CmdfilterFilters:     copyFilterStats(a.filterName),
-		CmdfilterMisses:      topMisses(a.filterMiss, 20),
-		Mode:                 string(mode),
-		SyncEnforced:         a.syncRequests,
-		FreshInputTokens:     a.freshInput, CacheReadTokens: a.cacheRead,
+		SSEExpandAfterStream:     a.sseExpandLate,
+		SSEAdjudicateAfterStream: a.sseAdjudicateLate,
+		CmdfilterFamilies:        copyFilterStats(a.filterFam),
+		CmdfilterFilters:         copyFilterStats(a.filterName),
+		CmdfilterMisses:          topMisses(a.filterMiss, 20),
+		Mode:                     string(mode),
+		SyncEnforced:             a.syncRequests,
+		FreshInputTokens:         a.freshInput, CacheReadTokens: a.cacheRead,
 		CacheWriteTokens: a.cacheWrite, OutputTokens: a.outputTok,
 		AttemptedTokens: a.attempted, FrozenTokens: a.frozen,
 		SavingsPctAttempted: attemptedPct, SavingsPctNewInput: newInputPct,

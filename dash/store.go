@@ -792,12 +792,35 @@ func (d *DB) reclaim() error {
 }
 
 // checkpoint folds the write-ahead log into the main database and truncates it.
-// Best-effort: a busy checkpoint is not a failure, only a deferral.
+//
+// wal_checkpoint(TRUNCATE) does not error when it cannot run: it returns a row,
+// busy/log/checkpointed, where busy=1 means another connection held a read lock and
+// the WAL was left untouched. d.sql is a pool shared with every dashboard and
+// /metrics reader, so a reader being active is the normal case on a busy deployment
+// — and correlated with the write traffic growing the WAL, which is exactly when the
+// bloat protection this call exists for is most needed.
+//
+// The retry is inside the call, not around it: the pool's busy_timeout(5000) makes
+// SQLite re-ask for the lock through the busy handler for up to 5 seconds, so an
+// outer backoff loop would stack full 5s waits on top of each other (measured: five
+// attempts, 25s). What the old code missed is the ROW — busy=1 after that whole
+// budget means the bloat protection did not run, and err != nil means the pragma
+// itself failed. A reader holding the lock is only the most COMMON cause of the
+// first, so the WARN names the fact (the checkpoint did not complete) rather than
+// one cause of it, and the attributes say which: a fact worth a log line rather
+// than silence — a WAL left to grow made one writer commit take 5.5s and blocked
+// /metrics for 5.2s, and nothing pointed here (#166).
 func (d *DB) checkpoint() {
 	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
 	}
-	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	var busy, logFrames, checkpointed int
+	err := d.sql.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	if err == nil && busy == 0 {
+		return
+	}
+	slog.Warn("dash: WAL checkpoint did not complete",
+		"busy", busy, "wal_frames", logFrames, "checkpointed", checkpointed, "err", err)
 }
 
 // optimize refreshes the query planner's statistics for tables whose statistics are missing or

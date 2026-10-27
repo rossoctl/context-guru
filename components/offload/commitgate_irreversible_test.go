@@ -2,6 +2,10 @@ package offload
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strings"
 	"testing"
 
@@ -25,12 +29,15 @@ import (
 //
 // Asserted on rep rather than through the pipeline because rep is what the pipeline reads; the
 // revert itself is pipeline.go's behaviour and already covered there.
-// NO COMPLETENESS CHECK, unlike TestNoStateIsRecordedBeforeTheCommitGate's gateExempt: the three
-// subtests below are hand-maintained, and nothing fails if a sixth commitRefresh caller is added
-// that passes a computed eff and is not listed here. The coverage is complete today — only the two
-// sites passing a computed eff can reach the eff != markerFull branch; state.go and summarize.go's
-// two sites pass markerFull and handle the degraded case themselves — but that rests on reading
-// five call sites rather than on anything mechanical. #198 carries the mechanism.
+//
+// The completeness side is TestEveryComputedEffCommitRefreshSiteIsCoveredByTheReplayTable below,
+// the commitRefresh counterpart of TestNoStateIsRecordedBeforeTheCommitGate's gateExempt: only a
+// call site passing a COMPUTED eff can reach commitRefresh's eff != markerFull branch — the one
+// that sets rep.Irreversible — so those are exactly the sites this table must drive, and that
+// test fails when one appears without a subtest. The sites passing markerFull (state.go's
+// reapplyFrozen, summarize.go's two) cannot reach the branch and handle the degraded case
+// themselves; reapplyFrozen is still driven here because its own len(keys) == 0 block is what
+// carries the mask replay.
 func TestADegradedModeReplayDeclaresItselfIrreversible(t *testing.T) {
 	body := strings.Repeat("2026-08-31T10:00:00Z INFO worker: processed batch\n", 200)
 
@@ -100,6 +107,21 @@ func TestADegradedModeReplayDeclaresItselfIrreversible(t *testing.T) {
 		}
 		assertReplayIsExemptFromRevert(t, &r2, req2, originals)
 	})
+
+	t.Run("sweep drop replay", func(t *testing.T) {
+		// The third replay branch, driven at the same seam the sweep itself uses. A replayed
+		// drop cannot decline (see applySweepDropReplay), so its Irreversible is carried by
+		// commitRefresh alone — the same dependence the extract_llm subtest pins.
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		c := &components.Ctx{Session: "s", Store: st, Ctx: context.Background()}
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(sweepFixture)}}
+		originals := capturedText(req)
+		var rep components.Report
+		if _, ok := applySweepDropReplay(c, &rep, markerSummary, &req.Input[0], sweepFixture); !ok {
+			t.Fatal("the replay was refused, so nothing under test ran")
+		}
+		assertReplayIsExemptFromRevert(t, &rep, req, originals)
+	})
 }
 
 // assertReplayIsExemptFromRevert checks the exact conjunction components/pipeline.go tests: the
@@ -152,4 +174,107 @@ func capturedText(req *bschemas.BifrostChatRequest) []string {
 		out[i] = schema.MessageText(req.Input[i])
 	}
 	return out
+}
+
+// irreversibleCovered maps every commitRefresh call site passing a COMPUTED eff — keyed
+// "file:function" — to the subtest of TestADegradedModeReplayDeclaresItselfIrreversible that
+// drives it. Only a computed eff can differ from markerFull, which is the only way to reach
+// commitRefresh's rep.Irreversible branch, so those are exactly the sites the table must drive.
+// The completeness test below keeps this list honest in both directions.
+var irreversibleCovered = map[string]string{
+	"extract_llm.go:Offload":          "extract_llm",
+	"extract_sweep_drop.go:sweepDrop": "sweep drop replay",
+}
+
+// TestEveryComputedEffCommitRefreshSiteIsCoveredByTheReplayTable is #198's completeness check,
+// the commitRefresh counterpart of TestNoStateIsRecordedBeforeTheCommitGate's gateExempt. It
+// parses the package's non-test sources, classifies every commitRefresh call by whether its eff
+// argument is the markerFull identifier, and fails when a site passing anything else is not in
+// irreversibleCovered — because a replay through such a site that forgot rep.Irreversible is
+// reverted by components/pipeline.go on EVERY replay turn, the exact defect two of the three
+// subtests exist to catch. It also fails when an entry goes stale (its site disappeared) or
+// names a subtest the table does not run, so a renamed subtest cannot keep a dead entry looking
+// like coverage.
+//
+// go/ast rather than a source regex because the classification IS the property that matters:
+// "is the eff argument the markerFull identifier" is a syntactic fact, and a regex over call
+// sites gets argument boundaries wrong in exactly the complicated calls this check exists for.
+func TestEveryComputedEffCommitRefreshSiteIsCoveredByTheReplayTable(t *testing.T) {
+	// The subtest names the table actually runs, read from this file's own AST.
+	tableSubtests := map[string]bool{}
+	fset := token.NewFileSet()
+	self, err := parser.ParseFile(fset, "commitgate_irreversible_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(self, func(n ast.Node) bool {
+		run, ok := n.(*ast.CallExpr)
+		if !ok || len(run.Args) == 0 {
+			return true
+		}
+		if sel, ok := run.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Run" {
+			if lit, ok := run.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				tableSubtests[strings.Trim(lit.Value, "`\"")] = true
+			}
+		}
+		return true
+	})
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				ident, ok := call.Fun.(*ast.Ident)
+				if !ok || ident.Name != "commitRefresh" || len(call.Args) != 5 {
+					return true
+				}
+				if id, ok := call.Args[2].(*ast.Ident); ok && id.Name == "markerFull" {
+					return true // constant: cannot reach the branch that sets Irreversible
+				}
+				key := name + ":" + fn.Name.Name
+				seen[key] = true
+				sub, listed := irreversibleCovered[key]
+				if !listed {
+					t.Errorf("%s passes a computed eff to commitRefresh and is not in "+
+						"irreversibleCovered: a replay through it that forgets "+
+						"rep.Irreversible is reverted on every turn under a degraded marker "+
+						"mode. Drive it with a subtest of "+
+						"TestADegradedModeReplayDeclaresItselfIrreversible, or list it here "+
+						"with the test that pins it and a reason", key)
+					return true
+				}
+				if !tableSubtests[sub] {
+					t.Errorf("irreversibleCovered maps %s to %q, a subtest the table does not "+
+						"run — the entry covers nothing", key, sub)
+				}
+				return true
+			})
+		}
+	}
+	for key := range irreversibleCovered {
+		if !seen[key] {
+			t.Errorf("irreversibleCovered entry %s matches no commitRefresh call site — it went "+
+				"stale when the site changed or disappeared", key)
+		}
+	}
 }

@@ -374,6 +374,43 @@ func TestSweepDeclinesOnAStalePrefix(t *testing.T) {
 	}
 }
 
+// A count-changing component BEFORE the sweep is a third decline, distinct from a stale stash
+// (#452): the raw and pipeline coordinates name different messages, so rawSpanForHash cannot
+// locate a span at all and the guard declines WITHOUT judging the stash — which can be perfectly
+// current. Counted as sweep_coords_shifted, never as sweep_stale_prefix, so a `high`/`xhigh`
+// pipeline (summarize first, then this) does not report a stash defect on every compacted turn.
+func TestSweepCountsShiftedCoordinatesApartFromAStalePrefix(t *testing.T) {
+	// covers: true, so only the coordinate shift can decline — if the stash were judged, it
+	// would pass.
+	asker := &fakeCoverageAsker{covers: true}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-shifted", asker, store.NewMemory(store.Options{}))
+	// What apply.BodyOpts would have set had a component ahead of the sweep changed the message
+	// count: the pre-pipeline body holds one message more than req.Input does at this position.
+	raw := make([]bschemas.ChatMessage, len(req.Input), len(req.Input)+1)
+	copy(raw, req.Input)
+	ctx.RawInput = append(raw, req.Input[0])
+	rep := &components.Report{}
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_coords_shifted"] != 1 {
+		t.Fatalf("a shifted coordinate system was not counted as sweep_coords_shifted (gates: %v)", rep.Gates)
+	}
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("a shifted coordinate system was counted as a stale stash (gates: %v)", rep.Gates)
+	}
+	if got := asker.gotCount.Load(); got != 0 {
+		t.Errorf("CoversSpan was consulted for %d messages; with the coordinates shifted there is "+
+			"no span safe to compare, so the stash must not be judged at all", got)
+	}
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a guard that cannot locate the span must decline before "+
+			"paying for the call", asker.calls)
+	}
+}
+
 // The mirror of the test above: the asker reports full coverage, so the ask proceeds exactly as
 // it did before this guard existed.
 func TestSweepAsksNormallyWhenPrefixCovers(t *testing.T) {
