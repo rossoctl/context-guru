@@ -1429,3 +1429,15 @@ func countDrops(h heldAnswer) int {
 	n, _ := h.proposed()
 	return n
 }
+
+// SeedCarriedCountersForTest sets each carried-set counter to a distinct non-zero value and returns a func
+// that clears the warm state. It lets the keeper's test prove every counter reaches /stats.
+func SeedCarriedCountersForTest() (reset func()) {
+	resetWarmForTest()
+	sweepWarmCarriedMerged.Store(1)
+	sweepWarmCarriedOverridden.Store(2)
+	sweepWarmCarriedRefused.Store(3)
+	sweepWarmCarriedExpired.Store(4)
+	sweepWarmCarriedCapped.Store(5)
+	return resetWarmForTest
+}
