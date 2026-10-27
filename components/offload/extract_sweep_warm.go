@@ -153,6 +153,10 @@ func warmFor(key string) *warmThread {
 // prove the request still goes out unchanged.
 var warmTriggerHook func()
 
+// warmShrinkHook, set only by tests, runs after the shrink check has read the held answer and before it takes
+// the lock to void it, as a question landing in between would.
+var warmShrinkHook func()
+
 // warmAskSpy, set only by tests, sees the candidate a warm question is about to use.
 var warmAskSpy func(*sweepPingCandidate)
 
@@ -284,7 +288,13 @@ func warmHold(key string, h heldAnswer) {
 	// question's answer is merged with them, so refused drops add up across questions until the gate accepts.
 	// The merge is by tool-use id, each output once, and the NEWER verdict wins, a newer "keep" included.
 	if t.held != nil && (time.Since(t.heldAt) > warmHeldMaxAge || heldAge(*t.held, time.Now()) > warmHeldMaxAge) {
-		sweepWarmCarriedExpired.Add(int64(countDrops(*t.held)))
+		// carried_expired counts a CARRIED set that aged out. An answer that was never refused (never tried) and
+		// simply went stale is not a carried verdict, and memHeld.get counts it as held_expired.
+		if t.heldTried {
+			sweepWarmCarriedExpired.Add(int64(countDrops(*t.held)))
+		} else {
+			sweepWarmHeldExpired.Add(1)
+		}
 		t.held = nil
 	}
 	if t.held != nil {
@@ -803,14 +813,23 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			rawNow = c.RawInput
 		}
 		if heldJudged > 0 && len(rawNow) < heldJudged {
+			// The lock was released since heldJudged was read, so a question may have landed a FRESH answer. Void
+			// only the answer this decision was made on: the same one (same Judged) is still held.
+			voided := false
+			if warmShrinkHook != nil {
+				warmShrinkHook()
+			}
 			warmMu.Lock()
-			if t := warmFor(tkey); t != nil {
+			if t := warmFor(tkey); t != nil && t.held != nil && t.held.Judged == heldJudged {
 				t.held = nil
+				voided = true
 			}
 			warmMu.Unlock()
-			sweepWarmHeldShrunk.Add(1)
-			noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "conversation_shrunk",
-				Weight: 1, Proposed: heldProposed})
+			if voided {
+				sweepWarmHeldShrunk.Add(1)
+				noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "conversation_shrunk",
+					Weight: 1, Proposed: heldProposed})
+			}
 			hasHeld = false
 		}
 	}
@@ -1303,7 +1322,7 @@ type WarmDecision struct {
 	RatioContent float64 `json:"ratio_content"`
 	Deep         bool    `json:"deep"`
 	// Proposed is how many drops the held answer carried into the recheck, and Dropped is what the recheck
-	// removed from them, by reason (output_gone, content_changed, referenced, expanded, conversation_shorter).
+	// removed from them, by reason (output_gone, content_changed, referenced_later, expanded, conversation_shorter).
 	// Without it a refused apply read as "no valid drop" with no way to say why 59 to 87% of the judge's
 	// drops were gone by the time the gate saw them. Apply stage only.
 	Proposed int            `json:"proposed,omitempty"`
@@ -1417,6 +1436,9 @@ func carryRefused(src heldSource, tkey string, claimed heldAnswer, res recheckRe
 	}
 	back.V = heldVersion
 	t.held = &back
+	// Marked tried even when that newer answer (never tried itself) is now part of the set. This is
+	// conservative on purpose: the next warm request asks a new question instead of applying at once, so a
+	// fresh answer waits one more question rather than risk an apply on a set the gate has just refused.
 	t.heldTried = true
 	// heldAt is NOT reset: it is the age the get() below checks, and a refused answer is no younger for having
 	// been refused. (warmHold, for a NEW question, does reset it: that answer is fresh.)

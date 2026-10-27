@@ -637,7 +637,8 @@ a refusal shows them too. A held answer judged on a longer conversation than the
 and counted as `held_shrunk` (decision reason `conversation_shrunk`). An empty proposal is
 `no_drop_proposed`. `no_valid_drop` means the recheck threw out a whole proposal.
 Carried-set counters in `keepalive.sweep_warm`: `carried_merged`, `carried_overridden`, `carried_refused`,
-`carried_expired`; event `sweep_warm_carried_drops`.
+`carried_expired` (a carried set that aged out; an answer never refused that went stale is `held_expired`),
+`carried_capped` (carried drops the 256 cap evicted); event `sweep_warm_carried_drops`.
 
 Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_accept`,
 `sweep_warm_gate_refuse_<reason>`; in `/stats` under `keepalive.sweep_drops` (`applied_warm`,

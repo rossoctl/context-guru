@@ -267,7 +267,7 @@ var (
 	sweepBatchIdx   [maxBatchIndexStats]SweepBatchIndexStats
 )
 
-// noteBatchFabricated books one batch's judging: how many candidates it carried, how many verdicts were
+// noteBatchJudged books one batch's judging: how many candidates it carried, how many verdicts were
 // judged and how many carried a quote that is not in the transcript (the sweep_quote_fabricated count).
 func noteBatchJudged(index, items, judged, fabricated int) {
 	if index < 0 {
