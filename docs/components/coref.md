@@ -73,7 +73,8 @@ The same transcript cut by 60k in **one pass** needs *T* > 23, which a long sess
   the summarizer's trigger fraction of the window when one is in the pipeline, else the whole window. If
   the billed size, the growth or an exact window is unknown, `break_even` uses the old local-token
   estimate and counts the event `horizon_fallback_<reason>` (`no_billed_size`, `window_not_exact`,
-  `growth_unknown`). Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
+  `growth_unknown`). The summarizer's own cut fires on the session figure, while *T* uses the thread
+  figure. In a session with several threads the cut point can drift from the one *T* assumes. Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
   *T* ≈ 0**, so the profitable moment to compact is *earlier* than the moment of maximum pressure.
 
 ## Before → After

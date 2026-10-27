@@ -23,6 +23,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -572,7 +573,16 @@ func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
 			sid)
 	}
 	// The per-thread record the billed-growth horizon reads (primary thread: the key is the session).
-	if _, ok := shadow.Get(store.BilledThreadPrefix + sid); !ok {
+	// Written after cg:bin:, so poll for it too.
+	var foundThread bool
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
+			foundThread = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !foundThread {
 		t.Errorf("no cg:bint: record in the shadow store under %q: the billed-growth horizon would "+
 			"read an unknown thread figure forever in observe mode", sid)
 	}
@@ -618,4 +628,68 @@ func TestEnforcedModeRecordsBilledInputPerThread(t *testing.T) {
 	_, a := st.Get(store.BilledPrefix + sid)
 	_, b := st.Get(store.BilledThreadPrefix + sid)
 	t.Fatalf("billed records after an enforced request: session=%v thread=%v, want both", a, b)
+}
+
+// A subagent's answer must land under the SUBAGENT's thread key in observe mode, which is the key
+// the off-path run reads. Observe returns an empty Trace, so a write that took the thread from it
+// would put every thread's figure on the primary key and overwrite the main thread's.
+func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [summarize]\nmode: observe\ncomponents:\n  summarize:\n    keep_last: 1\n" +
+			"    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		Mode:              components.ModeObserve,
+	})
+	t.Cleanup(h.Close)
+	shadow := h.shadow
+	if shadow == nil {
+		t.Fatal("observe mode built no shadow store")
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(summarizableRequest()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-observe-sub")
+	req.Header.Set(agentIDHeader, "sub1")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("proxy returned %d", resp.StatusCode)
+	}
+	sid := apply.SessionIDFor("", "sess-observe-sub", bschemas.Anthropic, []byte(summarizableRequest()))
+	if sid == "" {
+		t.Fatal("no session id derived for the observe body")
+	}
+	subKey := store.BilledThreadPrefix + thread.Key(sid, "a:sub1")
+	var found bool
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(subKey); ok {
+			found = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("no cg:bint: record under the subagent thread key %q", subKey)
+	}
+	if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
+		t.Errorf("the subagent's figure was written under the primary thread key, so it would overwrite the main thread's")
+	}
 }

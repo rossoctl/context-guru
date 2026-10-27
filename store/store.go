@@ -235,8 +235,8 @@ const (
 	// thread (internal/thread.Key(session, thread)), so a side request or a subagent that shares the
 	// session cannot move the main thread's figure. It is metadata (one integer), read only by the
 	// billed-growth horizon (Ctx.PrevBilledInputThread). BilledPrefix stays the session figure every
-	// other reader uses. PINNED for the same reason as BilledPrefix: a lost key restarts the growth
-	// run, which costs a fallback horizon, not correctness.
+	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between
+	// turns. A lost key is safe: the growth run restarts and the horizon falls back to the estimate.
 	BilledThreadPrefix = "cg:bint:"
 	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
 	// this session's next turn.
