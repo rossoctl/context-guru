@@ -589,7 +589,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		PrefixAsk:    o.PrefixAsk,
 		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
 		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
-		PrevBilledInput: prevBilledInput(st, res.Session), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
+		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)
 	start := 0

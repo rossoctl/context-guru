@@ -28,8 +28,8 @@ func bigReq(n, each int) *bschemas.BifrostChatRequest {
 	return req
 }
 
-// COREF'S PATH IS UNTOUCHED, term for term. prefixRewritePays is shared with a component that decides
-// with a deterministic index and pays for no call, so the refactor must be exactly a no-op there.
+// THE FALLBACK IS UNTOUCHED, term for term. prefixRewritePays (no billed growth) is coref's old
+// horizon, and it must stay exactly a no-op of the original arithmetic.
 // Asserted against an independent recomputation of the ORIGINAL expression rather than against the new
 // one, because comparing the new code to itself would pass however wrong it is.
 func TestPrefixRewritePaysUnchangedWithoutAnAsk(t *testing.T) {
@@ -109,14 +109,14 @@ func TestTurnsRemainingAfterCollapsesToTheOriginal(t *testing.T) {
 	}
 }
 
-// COREF's horizon is measured on the request AS IT ARRIVED. A request already past the window has no
-// turns left, so nothing can repay and coref declines. The sweep's removed pricing credited the removal;
-// coref never did, and must not start.
+// The FALLBACK horizon (no billed growth) is measured on the request AS IT ARRIVED. A request already
+// past the window has no turns left, so nothing can repay. The fallback never credited the removal, and
+// must not start. The billed horizon does credit it (TestHorizonCreditsTheRemoval).
 func TestCorefHorizonIsNotCredited(t *testing.T) {
 	req := bigReq(24, 400)
 	total := schema.MessagesTokens(req)
 	c := econCtx(total * 7 / 10) // over-window: the case where crediting would change the answer
 	if _, have, ok := prefixRewritePays(req, total/2, 2, c); have != 0 || ok {
-		t.Fatalf("coref's path started crediting the removal: have=%d ok=%v, want 0/false", have, ok)
+		t.Fatalf("the fallback started crediting the removal: have=%d ok=%v, want 0/false", have, ok)
 	}
 }

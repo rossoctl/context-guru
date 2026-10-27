@@ -231,6 +231,13 @@ const (
 	// only grows, so the previous turn is a sound lower bound on this one, and a gate that
 	// fires one turn late is the safe direction.
 	BilledPrefix = "cg:bin:"
+	// BilledThreadPrefix is BilledPrefix per THREAD: the billed input of the previous turn of one
+	// thread (internal/thread.Key(session, thread)), so a side request or a subagent that shares the
+	// session cannot move the main thread's figure. It is metadata (one integer), read only by the
+	// billed-growth horizon (Ctx.PrevBilledInputThread). BilledPrefix stays the session figure every
+	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between
+	// turns. A lost key is safe: the growth run restarts and the horizon falls back to the estimate.
+	BilledThreadPrefix = "cg:bint:"
 	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
 	// this session's next turn.
 	//
@@ -255,7 +262,7 @@ const (
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix}
+	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

@@ -686,14 +686,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Read under the SAME sessionID the host will write back under (Trace.Session), which
 		// is what keeps the fraction gate from reading a permanent zero. See
 		// RecordBilledInput.
-		PrevBilledInput: prevBilledInput(st, sessionID),
-		ModelName:       gjson.GetBytes(body, "model").String(),
-		SelfRates:       o.SelfRates,
-		RatesFor:        o.RatesFor,
-		CacheAware:      cacheAware,
-		ColdCache:       coldCache,
-		IdleMs:          idleMs,
-		MaxCachedIdx:    maxCachedIdx,
+		PrevBilledInput:       prevBilledInput(st, sessionID),
+		PrevBilledInputThread: prevBilledInputThread(st, sessionID, tr.Thread.ID),
+		ModelName:             gjson.GetBytes(body, "model").String(),
+		SelfRates:             o.SelfRates,
+		RatesFor:              o.RatesFor,
+		CacheAware:            cacheAware,
+		ColdCache:             coldCache,
+		IdleMs:                idleMs,
+		MaxCachedIdx:          maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -1454,6 +1455,31 @@ func RecordBilledInput(st store.Store, session string, tokens int64) {
 		return
 	}
 	st.Put(store.BilledPrefix+session, []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// RecordBilledInputThread stores the same figure per thread, for the billed-growth horizon. Call it next
+// to RecordBilledInput, with the thread id the request was served under.
+func RecordBilledInputThread(st store.Store, session, threadID string, tokens int64) {
+	if st == nil || session == "" || tokens <= 0 {
+		return
+	}
+	st.Put(store.BilledThreadPrefix+thread.Key(session, threadID), []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// prevBilledInputThread reads back what RecordBilledInputThread stored, or 0 (unknown).
+func prevBilledInputThread(st store.Store, session, threadID string) int {
+	if st == nil {
+		return 0
+	}
+	b, ok := st.Get(store.BilledThreadPrefix + thread.Key(session, threadID))
+	if !ok || len(b) == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // prevBilledInput reads back what RecordBilledInput stored, or 0 when this session has no earlier

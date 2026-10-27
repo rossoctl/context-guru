@@ -1203,6 +1203,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
 		var added time.Duration // hoisted with tr: the lifecycle log line reads both
 		var threadID string     // hoisted with it: serve hands it to the keeper
+
+		// threadOf is hoisted too: serve resolves the observe-mode thread with it.
+		var threadOf func(session string) thread.Result
 		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
 		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
 		// read by h.serve below, and stashed alongside the body actually forwarded: see the
@@ -1274,7 +1277,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// The thread is resolved INSIDE apply, once the session id is known and before the
 			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
 			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
-			threadOf := func(sess string) thread.Result {
+			threadOf = func(sess string) thread.Result {
 				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
 			}
 			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
@@ -1431,7 +1434,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg)
 	}
 }
 
@@ -1629,7 +1632,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1760,6 +1763,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if usageOK {
 			billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 			apply.RecordBilledInput(tn.Store, session, billed)
+			apply.RecordBilledInputThread(tn.Store, session, threadID, billed)
 			// OBSERVE MODE NEEDS ITS OWN RECORD, or the projection it exists to produce is a
 			// permanent zero.
 			//
@@ -1780,6 +1784,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
+					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
+					// real one from the same inputs the off-path run's ThreadOf uses (agent header,
+					// then prefix continuity), so the key written is the key that run reads.
+					obsThread := threadID
+					if threadOf != nil {
+						obsThread = threadOf(sid).ID
+					}
+					apply.RecordBilledInputThread(tn.Shadow, sid, obsThread, billed)
 				}
 			}
 		}

@@ -164,6 +164,10 @@ func (h *Handler) observe(r *reqInfo) {
 			Models: info.models, Window: info.window, WindowExact: info.windowExact, CacheMode: h.opts.CacheMode,
 			CompactionPoint: info.compactionPoint, CompactionPointSource: info.compactionPointSource,
 			Mode: components.ModeObserve,
+			// The thread, resolved from the same facts the response path's billed-input write
+			// uses (serve), so the per-thread figure the off-path run READS (cg:bint:) is the one
+			// that write PUT. Without it every observed run reads the primary thread's key.
+			ThreadOf: info.threadOf,
 			// The Tracker, so the projection is measured under the SAME cached-prefix
 			// boundary an enforcing mode would use. Without it the boundary is unknown,
 			// MaxCachedIdx is -1, the tail gate never fires, and every message in the

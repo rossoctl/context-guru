@@ -68,8 +68,13 @@ The same transcript cut by 60k in **one pass** needs *T* > 23, which a long sess
 
 - `min_batch_frac` — one rewrite has to serve the whole pass.
 - `rewrite_budget` — the spend is capped per session and answerable, not incidental.
-- `break_even` — the inequality itself, with *T* estimated from how fast the transcript has been
-  growing. Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
+- `break_even` — the inequality itself, with *T* priced from the **billed** growth per turn on this
+  thread: *T* = (the cut − the billed prompt after the removal) ÷ (billed growth per turn). The cut is
+  the summarizer's trigger fraction of the window when one is in the pipeline, else the whole window. If
+  the billed size, the growth or an exact window is unknown, `break_even` uses the old local-token
+  estimate and counts the event `horizon_fallback_<reason>` (`no_billed_size`, `window_not_exact`,
+  `growth_unknown`). The summarizer's own cut fires on the session figure, while *T* uses the thread
+  figure. In a session with several threads the cut point can drift from the one *T* assumes. Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
   *T* ≈ 0**, so the profitable moment to compact is *earlier* than the moment of maximum pressure.
 
 ## Before → After
@@ -306,7 +311,7 @@ total. Real, small on this traffic, and the reason
 | **11.5×** | One cache-write costs 11.5 cache-reads: `($2.50 − $0.20) / $0.20` per MTok. |
 | **`S`** | Tokens the cut removes (the saving, collected on every later turn). |
 | **`W`** | The **rewritten suffix** — tokens from the shallowest cut to the end of what the provider already cached. The cost. |
-| **`T`** | Turns remaining in the session, i.e. how many times the saving gets collected. Nobody has this, so it's estimated from how fast the transcript has been growing. |
+| **`T`** | Turns remaining in the session, i.e. how many times the saving gets collected. Nobody has this, so it is priced from the billed growth per turn on this thread (see `break_even`). When that is unknown it falls back to a local-token estimate and counts `horizon_fallback_<reason>` (`no_billed_size`, `window_not_exact`, `growth_unknown`). A summarizer's `min_request_tokens` / `max_request_tokens` gates can cut earlier than its fraction says, so *T* can be an overestimate. |
 | **break-even** | `S × T > 11.5 × W`. |
 
 **Why this reshapes everything:** a single early cut can never clear it — 5k cut from 20% depth of a 150k
