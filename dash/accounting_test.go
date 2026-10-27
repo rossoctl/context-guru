@@ -518,10 +518,21 @@ func TestBuiltinClassification(t *testing.T) {
 		{KindTool, "CronCreate", true, "builtin"},
 		{KindTool, "EnterWorktree", true, "builtin"},
 		{KindTool, "ExitWorktree", true, "builtin"},
+		// Verified against a live Claude Code 2.1.283 session, and previously missing. DesignSync
+		// is the one this list used to cite as its own example of a name that merely LOOKS
+		// built-in — see the map's comment for how that belief was corrected.
+		{KindTool, "ArtifactCheck", true, "builtin"},
+		{KindTool, "ArtifactComments", true, "builtin"},
+		{KindTool, "ArtifactData", true, "builtin"},
+		{KindTool, "SendFeedback", true, "builtin"},
+		{KindTool, "ReadMcpResourceTool", true, "builtin"},
+		{KindTool, "ReadMcpResourceDirTool", true, "builtin"},
+		{KindTool, "ListMcpResourcesTool", true, "builtin"},
+		{KindTool, "DesignSync", true, "builtin"},
 		// Not a real tool name — the thing people write when they mean Agent.
 		{KindTool, "Task", false, "client_tool"},
 		// Some other agent's own tool: removable, and must not be warned about as a built-in.
-		{KindTool, "DesignSync", false, "client_tool"},
+		{KindTool, "AcmeWidgetTool", false, "client_tool"},
 		{KindMCPTool, "mcp__srv__thing", false, "mcp_tool"},
 		{KindSkill, "dataviz", false, "skill"},
 		{KindSkill, "someplugin:someskill", false, "plugin_skill"},
