@@ -1,6 +1,6 @@
 {
   "name": "context-guru",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Run context-guru in front of Codex and inspect measured context cost.",
   "author": {"name": "rossoctl", "url": "https://github.com/rossoctl"},
   "homepage": "https://rossoctl.github.io/context-guru/",
