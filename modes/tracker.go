@@ -82,14 +82,6 @@ const DefaultMaxKeys = 4096
 // default keep-alive span.
 const StaleAfter = 6 * time.Hour
 
-// DefaultRestartGrace is how long after the tracker starts an unknown key is read as
-// all-cached rather than as a new thread. The tracker's records die with the process; the
-// provider's cache entries do not. After a restart, a live thread's first request finds no
-// record, and a 0 boundary would let every component rewrite a prefix the provider still
-// holds (#496). The grace lasts the longest cache lifetime, 1 hour: past it, no entry a
-// restart forgot can still be alive, so an unknown key is a new thread again.
-const DefaultRestartGrace = time.Hour
-
 // Tracker holds the cached-prefix boundary per key (a session, or one thread of a session), each
 // key's state guarded by one lock so concurrent turns cannot interleave a read and a write.
 type Tracker struct {
@@ -98,13 +90,15 @@ type Tracker struct {
 	max int    // bound on tracked keys; 0 => default
 	seq uint64 // use counter: each turn stamps its key, and the smallest stamp is evicted first
 	// startedAtMs is when this tracker was created, in unix milliseconds: a proxy restart's
-	// marker. An unknown key inside restartGraceMs of it reads as all-cached (#496). 0 (a
-	// Tracker built without NewTracker) gets no grace, which is the old behaviour.
+	// marker. An unknown key whose first request comes less than that request's cache lifetime
+	// after the start reads as all-cached (#496). 0 (a Tracker built without NewTracker) gets
+	// no grace, which is the old behaviour.
 	startedAtMs int64
-	// restartGraceMs is how long after startedAtMs that rule holds, in milliseconds: the
-	// host's setting, DefaultRestartGrace from NewTracker. 0 or less turns the grace off —
-	// the escape an eval that sends whole transcripts to a fresh proxy needs.
-	restartGraceMs int64
+	// graceOn is the host's on/off switch for that rule. The length is not ours to choose: each
+	// request carries its own cache lifetime, and the caller passes it to TurnFrom. A benchmark
+	// that sends whole transcripts to a fresh proxy switches the rule off (false) so it measures
+	// compaction, not the grace.
+	graceOn bool
 	// dropped holds a hash of every key the tracker evicted or expired, bounded at 4x max. A
 	// later request on such a key gets the WHOLE request as its boundary (nothing may change),
 	// not 0. 0 would let every component rewrite a prefix the provider may still hold — the
@@ -132,26 +126,26 @@ func NewTracker(maxKeys int) *Tracker {
 		maxKeys = DefaultMaxKeys
 	}
 	return &Tracker{m: map[string]turn{}, max: maxKeys, startedAtMs: time.Now().UnixMilli(),
-		restartGraceMs: DefaultRestartGrace.Milliseconds(), dropped: map[uint64]struct{}{}}
+		graceOn: true, dropped: map[uint64]struct{}{}}
 }
 
 // SetStartedAt sets the tracker's start time (unix milliseconds). NewTracker stamps the real
 // clock; a test can set a past time to build a tracker BEYOND its restart grace (#496) without
-// waiting for the hour to pass.
+// waiting for the grace to pass.
 func (t *Tracker) SetStartedAt(ms int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.startedAtMs = ms
 }
 
-// SetRestartGrace sets how long after its start an unknown key reads as all-cached. The host
-// passes its setting here (the proxy's --restart-grace); d of 0 or less turns the grace off,
-// which an eval that sends whole transcripts to a fresh proxy wants. Must run before traffic:
-// like the flags it mirrors, it is a startup setting, not a live knob.
-func (t *Tracker) SetRestartGrace(d time.Duration) {
+// SetRestartGrace switches the restart grace on or off. The grace's LENGTH is per request (the
+// caller passes the cache lifetime to TurnFrom); this is only the on/off switch, which the host
+// passes its setting to (the proxy's --restart-grace). A benchmark that sends whole transcripts
+// to a fresh proxy switches it off. Startup setting, not a live knob.
+func (t *Tracker) SetRestartGrace(on bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.restartGraceMs = d.Milliseconds()
+	t.graceOn = on
 }
 
 // Turn records that this session's current turn carries n normalized messages and
@@ -162,19 +156,20 @@ func (t *Tracker) SetRestartGrace(d time.Duration) {
 // A shorter transcript under the same session id is the agent's own compaction, and
 // resets the boundary to 0 — see Boundary for the rule and why it is not "grow only".
 func (t *Tracker) Turn(session string, n int) (prevLen int) {
-	prevLen, _ = t.TurnAt(session, n, 0)
+	prevLen, _ = t.TurnAt(session, n, 0, 0)
 	return prevLen
 }
 
 // TurnAt is Turn plus the previous turn's timestamp, so the caller can tell how long this
 // session has been idle. nowMs of 0 means "do not record a time" (the legacy Turn path);
-// the clock is the caller's so this stays a pure, testable function.
+// the clock is the caller's so this stays a pure, testable function. grace is this request's
+// cache lifetime; it matters only for a key with no record (see TurnFrom).
 //
 // prevAtMs is 0 when there is no previous turn recorded — a new session, or one evicted by
 // the bound above. A caller MUST treat that as "unknown", never as "idle forever": acting
 // on a fabricated idle time is how a warm cache gets invalidated after a proxy restart.
-func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
-	return t.TurnFrom(session, "", n, nowMs)
+func (t *Tracker) TurnAt(session string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
+	return t.TurnFrom(session, "", n, nowMs, grace)
 }
 
 // TurnFrom is TurnAt for a key that may be a NEW thread continuing another thread's prefix.
@@ -195,11 +190,13 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 // the next turn has a real record again.
 //
 // The same answer serves a proxy restart (#496): a key with no record, no drop and no usable
-// parent reads as all-cached while the tracker is younger than its restart grace, because the
-// process forgot the record, not the provider the prefix. A restart's cost is one turn: a
-// brand-new thread's first request cannot be changed either. Past the grace an unknown key is a
-// new thread again, as before. The host sets the grace (SetRestartGrace); 0 turns it off.
-func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
+// parent reads as all-cached while the tracker started less than THIS request's cache lifetime
+// ago (the caller passes it as grace), because the process forgot the record, not the provider
+// the prefix. The grace is per thread and ends at that first request, which writes the record:
+// the thread's second request follows the normal rules. A brand-new thread's first request
+// cannot be changed either, for the same lifetime. A first request past the lifetime is a new
+// thread again, as before. The host can switch the rule off (SetRestartGrace).
+func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	prev, ok := t.m[key]
@@ -209,7 +206,7 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 	case t.wasDropped(key):
 		prevLen = n
 	case parent == "":
-		prevLen = t.graceLocked(n, nowMs)
+		prevLen = t.graceLocked(n, nowMs, grace)
 	default:
 		if p, pok := t.m[parent]; pok {
 			prevLen, prevAtMs = min(p.n, n), p.at
@@ -219,7 +216,7 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 			// next request still reads as dropped too.
 			prevLen = n
 		} else {
-			prevLen = t.graceLocked(n, nowMs)
+			prevLen = t.graceLocked(n, nowMs, grace)
 		}
 	}
 	if !ok && len(t.m) >= t.max {
@@ -237,19 +234,20 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 }
 
 // graceLocked is the boundary for a key with no record, no drop and no usable parent: n when
-// the tracker started less than its restart grace ago (a restart that forgot a live thread,
-// #496), 0 as before once that window is past. prevAtMs stays 0 either way: the idle clock is
-// unknown, so nothing may read cold off it.
+// the tracker started less than grace — this request's cache lifetime, the longest a
+// restart-forgotten entry of this thread can still be alive (#496) — ago, 0 as before once
+// that window is past. prevAtMs stays 0 either way: the idle clock is unknown, so nothing may
+// read cold off it.
 //
 // nowMs <= 0 (the legacy Turn path, which records no time) gets no grace: there is no clock to
 // measure the restart against, and the request path always supplies one. A caller clock BEHIND
 // the start (a test's fixed past timestamp) is not a restart either: it reads as past the grace,
 // which keeps fake-clock callers on the old behaviour.
-func (t *Tracker) graceLocked(n int, nowMs int64) int {
-	if t.startedAtMs == 0 || t.restartGraceMs <= 0 || nowMs <= 0 {
+func (t *Tracker) graceLocked(n int, nowMs int64, grace time.Duration) int {
+	if !t.graceOn || t.startedAtMs == 0 || nowMs <= 0 || grace <= 0 {
 		return 0
 	}
-	if d := nowMs - t.startedAtMs; d >= 0 && d < t.restartGraceMs {
+	if d := nowMs - t.startedAtMs; d >= 0 && d < grace.Milliseconds() {
 		return n
 	}
 	return 0

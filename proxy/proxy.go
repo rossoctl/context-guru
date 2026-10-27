@@ -110,13 +110,14 @@ type Options struct {
 	// auto/on keep offloaders from mutating already-cached content on prompt-caching
 	// backends; off restores legacy compact-everything (for confirmed non-caching backends).
 	CacheMode string
-	// RestartGrace is how long after startup an unknown thread key reads as all-cached
-	// (nil = modes.DefaultRestartGrace, 1 hour). The tracker's records die with the
-	// process; the provider's cache entries do not, so a live thread's first request
-	// after a restart must not be rewritten (#496). An explicit 0 turns the grace off —
-	// what an eval that sends whole transcripts to a fresh proxy wants, so it measures
-	// compaction, not the grace. Startup setting, not a live knob.
-	RestartGrace *time.Duration
+	// RestartGrace switches the restart grace on (nil, the default) or off. The tracker's
+	// records die with the process; the provider's cache entries do not, so a live thread's
+	// first request after a restart must not be rewritten (#496). The grace's LENGTH is not
+	// set here: each request carries its own cache lifetime, and apply passes it to the
+	// tracker. An explicit false turns the rule off — what an eval that sends whole
+	// transcripts to a fresh proxy wants, so it measures compaction, not the grace.
+	// Startup setting, not a live knob.
+	RestartGrace *bool
 	// Prices resolves a model's per-token rates so the dashboard can price each
 	// request AT WRITE TIME (so history does not reprice when a rate changes). nil =
 	// no pricing, and every captured row is marked partially accounted rather than
