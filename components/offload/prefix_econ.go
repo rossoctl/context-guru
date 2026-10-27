@@ -108,27 +108,14 @@ func prefixRewritePaysWith(req *bschemas.BifrostChatRequest, saved, shallowest i
 // prices the turns left from the billed growth the provider reported on this thread. This function
 // runs only when that horizon cannot be computed, and the caller counts each such use with a reason.
 func estimateTurnsRemaining(reqTokens, turns, window int) int {
-	return turnsRemainingAfter(reqTokens, reqTokens, turns, window)
-}
-
-// turnsRemainingAfter is estimateTurnsRemaining with the two roles reqTokens used to play separated:
-//
-//	reqBefore  the request as it stands — the GROWTH RATE is derived from it, because the rate is a
-//	           property of the history that has already been observed
-//	reqAfter   the request as it will be once the mutation under consideration is applied — the ROOM
-//	           LEFT is derived from it
-//
-// Passing the same value for both reproduces the original expression term for term, which is what
-// estimateTurnsRemaining above does.
-func turnsRemainingAfter(reqBefore, reqAfter, turns, window int) int {
-	if window <= 0 || turns <= 0 || reqBefore <= 0 || reqAfter >= window {
+	if window <= 0 || turns <= 0 || reqTokens <= 0 || reqTokens >= window {
 		return 0
 	}
-	perTurn := reqBefore / turns
+	perTurn := reqTokens / turns
 	if perTurn <= 0 {
 		return 0
 	}
-	return (window - reqAfter) / perTurn
+	return (window - reqTokens) / perTurn
 }
 
 // modelTurns counts assistant messages — the closest thing in a request to "steps taken",
@@ -250,7 +237,7 @@ func noteThreadGrowth(c *components.Ctx) billedGrowth {
 		growthThreads[key] = e
 	}
 	e.touched = now
-	e.g.note(c.PrevBilledInput)
+	e.g.note(c.PrevBilledInputThread)
 	return e.g
 }
 
@@ -259,10 +246,10 @@ func noteThreadGrowth(c *components.Ctx) billedGrowth {
 //		N = (cut - billed after the removal) / (billed growth per turn on this thread)
 //
 //	  - cut is the summarizer's trigger fraction of the window when one is in the pipeline
-//	    (Ctx.CutFrac), else the whole window. Both are read through Ctx.FillDenominator.
-//	  - billed is Ctx.PrevBilledInput, less the removal. The removal is `removedLocal` local tokens,
+//	    (Ctx.CutFrac) times Ctx.FillDenominator(): the CompactionPoint when it is known, else the window.
+//	  - billed is Ctx.PrevBilledInputThread (this thread only, not the session), less the removal. The removal is `removedLocal` local tokens,
 //	    scaled to billed units by billed/local of this request (kept within [1, horizonMaxRatio]).
-//	    So N is the room left AFTER the mutation (#232 defect 1), as turnsRemainingAfter does.
+//	    So N is the room left AFTER the mutation (#232 defect 1).
 //	  - growth is billed growth per turn, measured on this thread (billedGrowth).
 //
 // It falls back to estimateTurnsRemaining only when the billed size, the growth, or an exact window
@@ -278,7 +265,7 @@ func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g 
 		n := estimateTurnsRemaining(local, modelTurns(req), window)
 		return rewriteHorizon{N: float64(n), Model: horizonModelFallback, Why: why}
 	}
-	if c == nil || c.PrevBilledInput <= 0 {
+	if c == nil || c.PrevBilledInputThread <= 0 {
 		return fallback(horizonWhyNoBilled)
 	}
 	if !c.CtxWindowExact || c.CtxWindow <= 0 {
@@ -288,9 +275,9 @@ func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g 
 	if growth <= 0 {
 		return fallback(horizonWhyGrowthUnknown)
 	}
-	billedAfter := float64(c.PrevBilledInput)
+	billedAfter := float64(c.PrevBilledInputThread)
 	if removedLocal > 0 && local > 0 {
-		ratio := float64(c.PrevBilledInput) / float64(local)
+		ratio := float64(c.PrevBilledInputThread) / float64(local)
 		ratio = math.Min(math.Max(ratio, 1), horizonMaxRatio)
 		billedAfter -= ratio * float64(removedLocal)
 	}

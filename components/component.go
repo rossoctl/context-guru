@@ -419,8 +419,8 @@ func ParseMode(s string) (Mode, error) {
 
 // CutFracProvider is implemented by a component that cuts the conversation when billed input reaches a
 // fraction of the window: cache_aware_summarizer and summarize (their trigger's min_request_frac). The
-// pipeline asks each once per run and hands the SMALLEST positive value to the components that run after
-// it as Ctx.CutFrac, so the warm sweep can estimate how many turns are left before the conversation is cut
+// pipeline asks each once, before any component runs, and hands the SMALLEST positive value to every
+// component as Ctx.CutFrac, so the warm sweep can estimate how many turns are left before the conversation is cut
 // (#491) without reaching into a sibling component. 0 means "no fraction".
 type CutFracProvider interface {
 	CutFrac() float64
@@ -518,6 +518,12 @@ type Ctx struct {
 	// harmless direction. A component must treat 0 as UNKNOWN and decline a fill decision, the
 	// same rule CtxWindowExact carries, for the same reason.
 	PrevBilledInput int
+	// PrevBilledInputThread is PrevBilledInput for THIS request's thread only: the billed input of the
+	// previous turn of the same thread, or 0 when the thread has none (unknown). A session holds the main
+	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one to
+	// measure how a thread GROWS (the billed-growth horizon). Use PrevBilledInput to ask how full the
+	// session's context is.
+	PrevBilledInputThread int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their
@@ -630,8 +636,10 @@ type Ctx struct {
 	// nil-ness check alone.
 	RawInput []schemas.ChatMessage
 	// CutFrac is the smallest trigger fraction of the window at which a component of THIS pipeline cuts
-	// the conversation (CutFracProvider), or 0 when none does. Set by Pipeline.Run. The warm sweep reads
-	// it to estimate the turns left before the cut.
+	// the conversation (CutFracProvider), or 0 when none does. Set by Pipeline.Run before any
+	// component runs. Coref's horizon (and later the warm sweep's) reads it to estimate the turns left
+	// before the cut. A summarizer's min/max_request_tokens gates can cut earlier than this fraction
+	// says, so the horizon can be an overestimate.
 	CutFrac float64
 	// WireGroup names, for each req.Input index, the ORIGINAL wire message it came from (#457).
 	// On Anthropic traffic several normalized messages can share one wire message — a

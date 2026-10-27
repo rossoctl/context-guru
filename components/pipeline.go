@@ -85,6 +85,8 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 	rr.TokensBefore = schema.MessagesTokens(req)
 	// The cut fraction of this pipeline, for a component that estimates the turns left before a cut. Only
 	// ENABLED components count: a summarizer that is configured but off for this request cuts nothing.
+	// An enabled summarizer that will not cut (no model resolved, its cache_state declines) still counts.
+	// The horizon is shorter then, which is the safe direction.
 	if c.CutFrac <= 0 {
 		for _, comp := range p.comps {
 			if cf, ok := comp.(CutFracProvider); ok && comp.Enabled(c) {

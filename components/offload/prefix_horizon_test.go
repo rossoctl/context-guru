@@ -12,7 +12,7 @@ import (
 )
 
 func horizonCtx(billed, window int, exact bool) *components.Ctx {
-	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, Session: "h", Thread: "t"}
+	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInputThread: billed, Session: "h", Thread: "t"}
 }
 
 // growthOf builds a billedGrowth that grew by `per` each turn over `turns` turns, ending at `last`.
@@ -63,7 +63,7 @@ func TestHorizonCutFracIsTheCut(t *testing.T) {
 	if h.turns() != 30 { // (500,000 - 200,000) / 10,000
 		t.Fatalf("N = %d, want 30", h.turns())
 	}
-	c.PrevBilledInput = 600_000 // past the cut
+	c.PrevBilledInputThread = 600_000 // past the cut
 	if h := cacheRewriteHorizon(shapedReq(10, 0, 0), c, growthOf(600_000, 10_000, 5), 0); h.turns() != 0 || h.Model != horizonModelBilled {
 		t.Fatalf("past the cut: N = %d model %q, want 0 billed", h.turns(), h.Model)
 	}
@@ -124,19 +124,19 @@ func TestThreadGrowthIsPerThreadAndAged(t *testing.T) {
 	a := &components.Ctx{Session: "s", Thread: "a"}
 	b := &components.Ctx{Session: "s", Thread: "b"}
 	for _, v := range []int{100, 200} {
-		a.PrevBilledInput = v
+		a.PrevBilledInputThread = v
 		noteThreadGrowth(a)
 	}
-	b.PrevBilledInput = 5000
+	b.PrevBilledInputThread = 5000
 	if g := noteThreadGrowth(b); g.perTurn() != 0 {
 		t.Fatalf("thread b read thread a's growth: %+v", g)
 	}
-	a.PrevBilledInput = 300
+	a.PrevBilledInputThread = 300
 	if g := noteThreadGrowth(a); g.perTurn() != 100 {
 		t.Fatalf("thread a growth %v, want 100", g.perTurn())
 	}
 	now = now.Add(horizonGrowthMaxAge + time.Minute)
-	a.PrevBilledInput = 400
+	a.PrevBilledInputThread = 400
 	if g := noteThreadGrowth(a); g.perTurn() != 0 {
 		t.Fatalf("an aged entry was kept: %+v", g)
 	}
@@ -147,7 +147,7 @@ func TestThreadGrowthMapIsBounded(t *testing.T) {
 	growthThreads = map[string]*growthEntry{}
 	growthMu.Unlock()
 	for i := 0; i < horizonMaxThreads+50; i++ {
-		noteThreadGrowth(&components.Ctx{Session: "s" + string(rune('A'+i%26)) + string(rune('a'+i/26)), PrevBilledInput: 10})
+		noteThreadGrowth(&components.Ctx{Session: "s" + string(rune('A'+i%26)) + string(rune('a'+i/26)), PrevBilledInputThread: 10})
 	}
 	growthMu.Lock()
 	n := len(growthThreads)
@@ -193,5 +193,23 @@ func TestCorefCountsHorizonFallback(t *testing.T) {
 	cf.breakEvenTurns(req, []plannedCut{{idx: 2, saved: 800}}, c, growthOf(100_000, 2000, 5), &rep)
 	if len(rep.Events) != 0 {
 		t.Fatalf("billed horizon counted as a fallback: %v", rep.Events)
+	}
+}
+
+// A side request between the main thread's turns does not reset the main thread's run, because the
+// horizon notes PrevBilledInputThread, not the session figure (which the side request overwrites).
+func TestSideRequestDoesNotResetMainThreadGrowth(t *testing.T) {
+	growthMu.Lock()
+	growthThreads = map[string]*growthEntry{}
+	growthMu.Unlock()
+	main := &components.Ctx{Session: "sx", Thread: ""}
+	var g billedGrowth
+	for _, b := range []int{100_000, 104_000, 108_000, 112_000} {
+		// The session figure at this request is a small side answer; the thread figure is the main one.
+		main.PrevBilledInput, main.PrevBilledInputThread = 3_000, b
+		g = noteThreadGrowth(main)
+	}
+	if g.perTurn() != 4_000 || g.turns != 3 {
+		t.Fatalf("main thread growth %+v per turn %v, want a steady 4000 over 3 turns", g, g.perTurn())
 	}
 }

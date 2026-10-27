@@ -1751,6 +1751,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if usageOK {
 			billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 			apply.RecordBilledInput(tn.Store, session, billed)
+			apply.RecordBilledInputThread(tn.Store, session, threadID, billed)
 			// OBSERVE MODE NEEDS ITS OWN RECORD, or the projection it exists to produce is a
 			// permanent zero.
 			//
@@ -1769,6 +1770,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				if sid := apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"),
 					provider, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
+					apply.RecordBilledInputThread(tn.Shadow, sid, threadID, billed)
 				}
 			}
 		}
