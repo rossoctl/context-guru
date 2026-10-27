@@ -110,6 +110,13 @@ type Options struct {
 	// auto/on keep offloaders from mutating already-cached content on prompt-caching
 	// backends; off restores legacy compact-everything (for confirmed non-caching backends).
 	CacheMode string
+	// RestartGrace is how long after startup an unknown thread key reads as all-cached
+	// (nil = modes.DefaultRestartGrace, 1 hour). The tracker's records die with the
+	// process; the provider's cache entries do not, so a live thread's first request
+	// after a restart must not be rewritten (#496). An explicit 0 turns the grace off —
+	// what an eval that sends whole transcripts to a fresh proxy wants, so it measures
+	// compaction, not the grace. Startup setting, not a live knob.
+	RestartGrace *time.Duration
 	// Prices resolves a model's per-token rates so the dashboard can price each
 	// request AT WRITE TIME (so history does not reprice when a rate changes). nil =
 	// no pricing, and every captured row is marked partially accounted rather than
@@ -362,8 +369,12 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if c == nil {
 		c = &http.Client{Transport: upstreamTransport(opts.UpstreamHeaderTimeout)}
 	}
+	tr := modes.NewTracker(0)
+	if opts.RestartGrace != nil {
+		tr.SetRestartGrace(*opts.RestartGrace)
+	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
-		tracker: modes.NewTracker(0), rec: opts.Dashboard,
+		tracker: tr, rec: opts.Dashboard,
 		sent: newSentStash()}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)

@@ -34,6 +34,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
@@ -89,6 +90,13 @@ func main() {
 		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
 		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		// The tracker's records die with the process; the provider's cache entries do not.
+		// Within the grace, the first request of an unknown thread is forwarded unchanged so a
+		// live thread's cached prefix survives a restart (#496). 0 turns it off: for an eval
+		// that sends whole transcripts to a fresh proxy and must measure compaction, not the
+		// grace.
+		restartGrace = flag.Duration("restart-grace", envDuration("RESTART_GRACE", modes.DefaultRestartGrace),
+			"how long after startup an unknown thread is treated as fully cached; 0 turns it off (for benchmark runs)")
 		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
 		// that self-terminates is a much worse failure than a laptop process left running.
 		//
@@ -569,6 +577,10 @@ func main() {
 		CheapModel:   cheapModelFromEnv(),        // static "config"-source LLM for NeedsModel components
 		InjectExpand: os.Getenv("INJECT_EXPAND"), // auto (default) | always | never
 		CacheMode:    os.Getenv("CACHE_MODE"),    // auto (default) | on | off — cache-aware compaction
+		// --restart-grace (RESTART_GRACE). The flag always carries a value (its default is
+		// modes.DefaultRestartGrace), so pass it through as-is — including an explicit 0,
+		// which turns the grace off for benchmark runs.
+		RestartGrace: restartGrace,
 		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
 		Cache:     cachePolicy(cfg.Cache),

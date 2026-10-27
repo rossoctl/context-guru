@@ -66,8 +66,9 @@ func TestTheFirstRequestAfterARestartKeepsTheCachedPart(t *testing.T) {
 
 	// The restart: a NEW tracker, so the live thread's record is gone. Now is left at zero,
 	// so the request runs on the real clock the tracker started on.
+	tr := modes.NewTracker(0)
 	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
-		Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0),
+		Provider: bschemas.Anthropic, CacheMode: "on", Tracker: tr,
 		Body: body, Models: components.ModelSpec{Incoming: restartModel{}},
 	})
 	if res.Messages != 925 {
@@ -82,6 +83,42 @@ func TestTheFirstRequestAfterARestartKeepsTheCachedPart(t *testing.T) {
 	}
 	if len(rep.ChangedIdx) != 0 {
 		t.Errorf("extract_llm changed messages %v deep in a prefix the provider still holds", rep.ChangedIdx)
+	}
+
+	// Turn 2 on the same thread: the grace recorded the first request, so the boundary is
+	// now real (925 of 927 messages). The NEW tail must be changeable, and nothing deeper.
+	tail := append(append([]map[string]any{}, msgs...),
+		map[string]any{"role": "assistant", "content": []map[string]any{
+			{"type": "tool_use", "id": "call_tail", "name": "Read", "input": map[string]any{}}}},
+		map[string]any{"role": "user", "content": []map[string]any{
+			{"type": "tool_result", "tool_use_id": "call_tail",
+				"content": "output tail\n" + strings.Repeat("payload line\n", 600)}}})
+	body2, err := json.Marshal(map[string]any{
+		"model": "claude-sonnet-4-5", "metadata": map[string]any{"taskId": "restart-496"}, "messages": tail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2 := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.Anthropic, CacheMode: "on", Tracker: tr,
+		Body: body2, Models: components.ModelSpec{Incoming: restartModel{}},
+	})
+	if res2.Messages != 927 {
+		t.Fatalf("turn 2: normalized message count = %d, want 927 (the fixture changed shape)", res2.Messages)
+	}
+	if res2.MaxCachedIdx != 924 {
+		t.Fatalf("turn 2: MaxCachedIdx = %d, want 924 (the boundary is the 925 the grace recorded)", res2.MaxCachedIdx)
+	}
+	rep2 := extract(res2)
+	changed := false
+	for _, i := range rep2.ChangedIdx {
+		if i < 925 {
+			t.Errorf("turn 2: extract_llm changed message %d, below the boundary 925", i)
+		}
+		changed = true
+	}
+	if !changed {
+		t.Fatalf("turn 2: extract_llm changed nothing; the new tail must be changeable (gates %v)", rep2.Gates)
 	}
 
 	// Control: the same request with the boundary unknown (no tracker, the library path)

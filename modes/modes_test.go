@@ -232,7 +232,7 @@ func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
 }
 
 // Issue #496. The tracker's records die with the process; the provider's cache entries do not.
-// A tracker younger than restartGraceMs reads an unknown key as all cached, like a dropped key,
+// A tracker younger than its restart grace reads an unknown key as all cached, like a dropped key,
 // so a proxy restart cannot let components rewrite a live thread's cached prefix. The idle
 // clock stays unknown (prevAtMs 0), so nothing reads cold off a fabricated age.
 func TestAYoungTrackerReadsAnUnknownKeyAsAllCached(t *testing.T) {
@@ -259,6 +259,22 @@ func TestAnOldTrackerReadsAnUnknownKeyAsNew(t *testing.T) {
 	}
 	if n, at := tr.TurnFrom("side", "nobody", 925, t0); n != 0 || at != 0 {
 		t.Fatalf("old tracker, unknown key with a parent = (%d, %d), want (0, 0)", n, at)
+	}
+}
+
+// The host can turn the grace off (the proxy's --restart-grace 0): an eval that sends whole
+// transcripts to a fresh proxy must measure compaction, not the grace. A young tracker with
+// no grace reads an unknown key as a new thread, the old behaviour.
+func TestAZeroGraceTurnsTheRestartProtectionOff(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds() // started 1 minute ago: inside the default grace
+	tr.SetRestartGrace(0)
+	if n, at := tr.TurnAt("unknown", 925, t0); n != 0 || at != 0 {
+		t.Fatalf("young tracker, grace 0, unknown key = (%d, %d), want (0, 0): the old behaviour", n, at)
+	}
+	if n, at := tr.TurnFrom("side", "nobody", 925, t0); n != 0 || at != 0 {
+		t.Fatalf("young tracker, grace 0, unknown key with a parent = (%d, %d), want (0, 0)", n, at)
 	}
 }
 
