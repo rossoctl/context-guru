@@ -58,12 +58,12 @@ type WireCall struct {
 
 // wireLine is one JSONL line. Field order is the order in the file.
 type wireLine struct {
-	Path       string            `json:"path"`
-	Request    string            `json:"request"`
-	Response   string            `json:"response"`
-	Status     int               `json:"status"`
-	StartUnix  float64           `json:"start_unix"`
-	TotalMS    float64           `json:"total_ms"`
+	Path      string            `json:"path"`
+	Request   string            `json:"request"`
+	Response  string            `json:"response"`
+	Status    int               `json:"status"`
+	StartUnix float64           `json:"start_unix"`
+	TotalMS   float64           `json:"total_ms"`
 	Model     string            `json:"model,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 }
