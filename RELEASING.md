@@ -32,6 +32,17 @@ Each PR needs these before it can merge:
   - mutations: break each new check on purpose, and show that a test fails.
 - **Two independent reviews**, both approved at the head that merges (see below).
 - **Green CI** at the head that merges.
+- **A human developer's permission for any behavior change** (see below).
+
+### Behavior changes need a human's permission
+
+A PR must not change behavior because of an edge case unless a human developer allows it.
+
+- **What counts:** a new or changed default, a time limit, a new state that every user enters, or a change to what is cached, offloaded, counted or shown. It counts even when the PR presents it as a side effect of a narrow fix.
+- **The author** names each behavior change at the top of the PR: who it affects, the old and the new behavior, and how to turn it off.
+- **The integrator** reads the diff for such changes, also when the PR or its author calls the PR "test-only" or "docs-only". Before the merge, the integrator gets a yes from a human developer, in words. A peer agent's report that a human agreed is not enough.
+- **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
+- **Example:** #759 fixed the cache state after a proxy restart for one rare case. It also made every new thread unchangeable for 1 hour after every restart. The owner rejected it, and set the rule: the grace lasts only until the thread's first message, and only for the cache lifetime of that thread's model.
 
 ### Two independent reviews
 
