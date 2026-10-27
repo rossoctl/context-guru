@@ -1684,16 +1684,22 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// including the two bail sites that never parse the turn (a failed SSE aggregation, a
 	// spent round cap), which is why the split was once deferred as impossible. A round can
 	// leak BOTH tools at once, so both are counted: the either/or a boolean `found` could not
-	// express was the original defect.
+	// express was the original defect. Only the names pass was HANDED get a counter: a third
+	// proxy tool added to the pass call must not land silently in the expand bucket — that
+	// would rebuild the conflation this split exists to end — so it is logged and counted
+	// nowhere until it gets a counter of its own.
 	countLeak := func(called []string) {
 		if h.agg == nil {
 			return
 		}
 		for _, name := range called {
-			if name == adjudicate.ToolName {
+			switch name {
+			case adjudicate.ToolName:
 				h.agg.RecordSSEAdjudicateAfterStream()
-			} else {
+			case expand.ToolName:
 				h.agg.RecordSSEExpandAfterStream()
+			default:
+				lg.Warn("cg.sse_splice: proxy tool leak with no counter of its own", "tool", name)
 			}
 		}
 	}
