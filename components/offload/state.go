@@ -357,30 +357,15 @@ func contentKey(s string) string { return extract.ContentKey(s) }
 // offloaders leave it alone thereafter.
 
 // keptKey is the session-scoped mark: cg:keep:<session>:<contentkey> (#175). The mark stops ONE
-// session's expand loop, so it must not exempt the same bytes in another session. The content key
-// is a hex hash, so the first ":" after the prefix always ends the session part.
-func keptKey(session, ck string) string { return "cg:keep:" + session + ":" + ck }
-
-// legacyKeptKey is the key shape before #175: no session, so one session's mark exempted the
-// content in every session. Marks in this shape are still READ and never written.
+// session's expand loop, so it must not exempt the same bytes in another session. Nothing parses
+// the key: the session part may hold ":" (a scoped id is tenant:base, and an explicit id may hold
+// one too), so the key is only ever built and looked up whole.
 //
-// Deprecation window: two releases after the one that ships #175. The Store is in memory only, so
-// a proxy restart (every upgrade) already drops every old-shape mark, and an old mark nobody reads
-// expires after one store TTL (store.DefaultTTL, about 2.8 hours). The window only covers a Store
-// that survives the roll, such as a shared pod. To retire the shape, delete this function and the
-// legacy lookup in keptMarked.
-func legacyKeptKey(ck string) string { return "cg:keep:" + ck }
-
-// keptMarked reports whether this session has a mark for the content key, in either shape.
-func keptMarked(st store.Store, session, ck string) bool {
-	if session != "" {
-		if _, ok := st.Get(keptKey(session, ck)); ok {
-			return true
-		}
-	}
-	_, ok := st.Get(legacyKeptKey(ck))
-	return ok
-}
+// There is no read of the pre-#175 shape (cg:keep:<contentkey>). The Store is in memory and never
+// written to disk, so a mark cannot outlive the process that wrote it, and the process that
+// writes the new shape is a new process. Reading the old shape would only keep the cross-session
+// exemption alive for no gain.
+func keptKey(session, ck string) string { return "cg:keep:" + session + ":" + ck }
 
 // MarkKeptVerbatim records that this session expanded this original content, so it must not be
 // re-compacted in this session (keyed by session and content hash). Exported for the proxy's
@@ -405,7 +390,8 @@ func MarkKeptVerbatim(st store.Store, session, original string) {
 // session, so a second session that gets the same bytes back is a second recovery and is charged.
 // A global "counted" flag would charge it to the first session only.
 func KeptVerbatim(st store.Store, session, original string) bool {
-	return keptMarked(st, session, contentKey(original))
+	_, ok := st.Get(keptKey(session, contentKey(original)))
+	return ok
 }
 
 // isKeptVerbatim is the ONE place every offloader asks "did the agent expand this?" — reapplyFrozen,
@@ -420,7 +406,8 @@ func isKeptVerbatim(c *components.Ctx, ck string) bool {
 	if _, ok := c.Restored[ck]; ok {
 		return false
 	}
-	return keptMarked(c.Store, c.Session, ck)
+	_, ok := c.Store.Get(keptKey(c.Session, ck))
+	return ok
 }
 
 // restoredSpanGuard reports whether text is, in either form, an original the host restores at a

@@ -1400,6 +1400,21 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 	return sessionIDFrom(tenant, explicitSess, body, norm)
 }
 
+// EnforcedSessionIDFor derives the session id BodyOpts will use for this request on an ENFORCED
+// path: it runs the same envelope transform first (toolfilter's skills half rewrites the head
+// message that the session hash reads), then derives the id exactly as BodyOpts does. A host that
+// must write state under the pipeline's session BEFORE the pipeline runs (the proxy's expand
+// repair, #175) calls this, so the two cannot disagree. It costs a transform and a re-parse, so
+// call it only when there is state to write.
+func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
+	if api == "responses" {
+		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
+		return SessionIDFor(tenant, explicitSess, provider, out)
+	}
+	out, _, _, _ := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
+	return SessionIDFor(tenant, explicitSess, provider, out)
+}
+
 // ProjectFor returns the directory the agent was started in, as stated in the request's own
 // prompt, or "" when the request does not state one.
 //

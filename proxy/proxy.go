@@ -1230,8 +1230,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// when we are rewriting this request at all.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				var repaired int
-				body, repaired = h.repairExpandErrors(wire, body, tn, cp,
-					apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"), provider, body))
+				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
+					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
+					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"), api, provider, bypassed, b)
+				})
 				if repaired > 0 {
 					// A rewrite of the client's own transcript must never be silent: this is
 					// the only line that says the response side failed to withhold the call
@@ -1580,10 +1582,16 @@ func refuseTooLarge(w http.ResponseWriter, limit int64) {
 // because the client keeps its own copy of the error and the repair therefore runs again on
 // every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
 // CALLS, and ten repairs of one stale error are one call.
-func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, session string) ([]byte, int) {
+func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, sessionOf func(body []byte) string) ([]byte, int) {
 	out, restored := expand.RepairToolResults(wire, body, func(hashID string) (string, bool) {
 		return expand.Resolve(tn.Store, hashID)
 	})
+	if len(restored) == 0 {
+		return out, 0
+	}
+	// Lazy: the derivation re-parses the transcript, and a repair is rare. Derived from the repaired
+	// body, because that is what the pipeline will see.
+	session := sessionOf(out)
 	for _, orig := range restored {
 		// Charge the row only the FIRST time this original comes back. Repairing the same
 		// stale error on ten later turns is one recovery, not ten.

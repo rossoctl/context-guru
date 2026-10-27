@@ -133,7 +133,7 @@ func plainCtx(st store.Store, tail bool) *components.Ctx {
 func TestTheSpanGuardProtectsARestoredOriginalInEitherForm(t *testing.T) {
 	body := strings.Repeat("verbose tool output line\n", 30)
 	const id = "0123456789abcdef"
-	c := &components.Ctx{Store: store.NewMemory(store.Options{}),
+	c := &components.Ctx{Session: "s", Store: store.NewMemory(store.Options{}),
 		Restored: map[string]string{contentKey(body): id}}
 	MarkKeptVerbatim(c.Store, "s", body)
 	if isKeptVerbatim(c, contentKey(body)) {

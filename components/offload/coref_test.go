@@ -397,32 +397,11 @@ func TestMarkKeptVerbatimIgnoresAnEmptySession(t *testing.T) {
 	if _, ok := st.Get(keptKey("", contentKey(content))); ok {
 		t.Fatal("an empty session wrote a mark; it must be a no-op")
 	}
-	if _, ok := st.Get(legacyKeptKey(contentKey(content))); ok {
+	if _, ok := st.Get("cg:keep:" + contentKey(content)); ok {
 		t.Fatal("an empty session fell back to the global key; that is the leak")
 	}
 	if KeptVerbatim(st, "", content) || KeptVerbatim(st, "s", content) {
 		t.Fatal("a no-op write left a readable mark")
-	}
-}
-
-// Marks written by a binary before #175 sit under the old, session-less key. For the deprecation
-// window the read side still honours them, so a session mid-expand-loop across a roll keeps its
-// exemption; nothing writes that shape any more.
-func TestLegacyKeptMarkIsStillReadButNeverWritten(t *testing.T) {
-	st := store.NewMemory(store.Options{})
-	const content = "content an older binary marked"
-	st.Put(legacyKeptKey(contentKey(content)), []byte{1})
-	if !KeptVerbatim(st, "s", content) {
-		t.Fatal("an old-shape mark was ignored; a session mid-expand-loop would start bouncing")
-	}
-	c := &components.Ctx{Session: "s", Store: st}
-	if !isKeptVerbatim(c, contentKey(content)) {
-		t.Fatal("isKeptVerbatim ignored an old-shape mark")
-	}
-	fresh := store.NewMemory(store.Options{})
-	MarkKeptVerbatim(fresh, "s", content)
-	if _, ok := fresh.Get(legacyKeptKey(contentKey(content))); ok {
-		t.Fatal("MarkKeptVerbatim wrote the old key shape")
 	}
 }
 
