@@ -910,6 +910,14 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 				}
 			}
 			noteWarmGate(false, reason)
+			// A REFUSAL CARRIES THE SURVIVORS FORWARD (#491). The answer was claimed above, so it is gone from
+			// the thread. Its drops that passed the recheck go back, in memory only, to add up with the next
+			// question's until the gate accepts. The recheck's losses do not: a drop that failed the recheck
+			// (gone, changed, referenced, expanded) leaves the set for good. A refusal of an answer with nothing
+			// left, or one the recheck voided, carries nothing.
+			if carried := carryRefused(src, tkey, h, res); carried > 0 {
+				rep.EventN("sweep_warm_carried_drops", carried)
+			}
 			return nil, 0
 		}
 		rep.Event("sweep_warm_gate_accept")

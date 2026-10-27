@@ -603,8 +603,18 @@ economic gate.
    size of the whole prompt, the removed content by the family factor (never more than that ratio). A
    missing billed size refuses. Expected warm turns are the thread's own warm run, capped at
    `warm_max_turns` (default 60, twice the question interval), times a wait-cause weight read off the
-   request (last message a tool result 1.0, a person's message 0.5, other 0.75). A refusal **drops** the
-   answer.
+   request (last message a tool result 1.0, a person's message 0.5, other 0.75).
+   **A refusal keeps the drops that passed the recheck, in memory only.** The next question's answer is
+   merged with them by tool-use id. Each output counts once, and the NEWER verdict wins, a newer keep
+   included. Every apply attempt rechecks the whole merged set, and a carried drop that fails the recheck
+   leaves for good. The gate decides once on the surviving set. Accept means one cut, then the set is
+   cleared. Refuse keeps the survivors. A carried set that was already refused is not retried on each warm
+   request: the trigger asks a new question, and the gate runs when its answer arrives. The set is bounded:
+   30 minutes from the OLDEST question that still contributes a verdict (a refusal does not make it
+   younger), at most 256 carried drops (the oldest go first), and a conversation that gets shorter clears
+   it. The trigger does not count carried drops. It prices every candidate as dropped, as before.
+   A carried drop survives only if the next question does not cover its output, or also drops it. A question
+   that covers it and keeps it overrides it.
 6. **Same apply as the cold path.** Same markers, stash, drop records and replay. A cold request, or a
    changed prefix, that meets a waiting answer applies it as the cold apply does, with no gate.
 
@@ -620,6 +630,14 @@ model's rates (for example `claude-opus-5`), for a test run on a model the price
 decision uses it. The dashboard and `/stats` price the real model. It is logged once at start and shown as
 `keepalive.sweep_warm.gate_price_model`, so such a run is never mistaken for a normal one. A model the rate card
 does not know falls back to the built-in rates and is counted (`price_model_unknown`).
+
+A decision also records `proposed`, the recheck's losses by reason (`dropped`), and the carried and new
+counts and tokens. The recheck's reasons are booked BEFORE the gate, as `sweep_apply_dropped_<reason>`, so
+a refusal shows them too. A held answer judged on a longer conversation than the request has is dropped
+and counted as `held_shrunk` (decision reason `conversation_shrunk`). An empty proposal is
+`no_drop_proposed`. `no_valid_drop` means the recheck threw out a whole proposal.
+Carried-set counters in `keepalive.sweep_warm`: `carried_merged`, `carried_overridden`, `carried_refused`,
+`carried_expired`; event `sweep_warm_carried_drops`.
 
 Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_accept`,
 `sweep_warm_gate_refuse_<reason>`; in `/stats` under `keepalive.sweep_drops` (`applied_warm`,
@@ -655,7 +673,8 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
 `sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
 candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
-`keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
+`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
 In a request: `sweep_applied_cold`, `sweep_applied_changed_prefix`, `sweep_apply_declined`,
@@ -691,7 +710,9 @@ The two to **alert** on:
   reply, just said was still needed. The removal did not happen; that is the invariant. But a
   non-zero rate means the contract is not holding.
 - **`sweep_quote_fabricated`** — the model cited transcript text that is not in the transcript. It is
-  inventing evidence, and this is the only signal that says so.
+  inventing evidence, and this is the only signal that says so. The quote is checked against the body the
+  model READ (the stashed body the question was appended to), not the newest request: a quote from a message
+  newer than that body is real and is not counted. It changes only this counter, never a drop decision.
 
 Diagnostics, visible at `/stats` under the component and as
 `cg_component_gate_declines_total{component="extract_llm_sweep",gate="…"}`:

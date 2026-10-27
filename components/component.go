@@ -253,6 +253,16 @@ type PrefixCoveredAsker interface {
 	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
 }
 
+// PrefixReadAsker, when a PrefixAsker also implements it, asks over ONE snapshot of the stash and also
+// returns the text of the messages the model read in that snapshot. The sweep checks a judge's quote
+// against that text, because that is what the model was shown. The ping registry's snapshot is one
+// request newer, so a quote taken from the newest message there is real but not in what the model read.
+// count < 0 skips the coverage check; count >= 0 behaves as in PrefixCoveredAsker. The text is only used
+// to count fabricated quotes. It never decides a drop.
+type PrefixReadAsker interface {
+	AskRead(ctx context.Context, session string, count int, hash, ask string) (reply string, usage PrefixUsage, read string, err error)
+}
+
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
 // there is no cached prefix to append to.
 //

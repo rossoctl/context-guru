@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -381,14 +382,20 @@ func TestTheGateAcceptsACaseThatPaysAndRefusesOneThatDoesNot(t *testing.T) {
 		if c := SweepWarmCounters(); c.GateRefuse != 1 || c.Reasons["does_not_pay"]+c.Reasons["does_not_pay_deep"] != 1 {
 			t.Fatalf("counters = %+v, want one refusal for does_not_pay", c)
 		}
-		// A refusal DROPS the answer: it is not kept for later.
-		if r.held() {
-			t.Fatal("a refused answer is still waiting")
+		// A refusal CARRIES the surviving drops forward (accumulation, #491): they stay in memory, marked as
+		// tried, to add up with the next question's. They are NOT retried on the next warm requests, which
+		// would be refused again on nearly the same numbers.
+		if !r.held() {
+			t.Fatal("a refused answer's surviving drops were not carried forward")
 		}
+		gateBefore := SweepWarmCounters().GateRefuse
 		for i := 0; i < 2; i++ {
 			if _, rep := r.request(nil); rep.Events[eventAppliedWarm] != 0 {
-				t.Fatal("a later request applied a refused answer")
+				t.Fatal("a later request applied a carried set the gate had refused")
 			}
+		}
+		if got := SweepWarmCounters().GateRefuse; got != gateBefore {
+			t.Fatalf("the gate was retried on a carried set (%d -> %d refusals): it must wait for a new question", gateBefore, got)
 		}
 	})
 }
@@ -2174,5 +2181,484 @@ func TestAHeldAnswerIsKeptWhenTheRequestHasExactlyAsManyMessagesAsItJudged(t *te
 	// It is APPLIED (the gate decided), not voided.
 	if len(decisionsOf("apply")) != 1 || decisionsOf("apply")[0].Reason == "conversation_shrunk" {
 		t.Fatalf("decisions = %+v, want the gate's own decision", SweepWarmCounters().RecentDecisions)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// ACCUMULATION (#491, the owner): refused warm drops carry forward until the gate accepts.
+
+func heldOf(askedAtMs int64, judged int, outs ...heldOutput) heldAnswer {
+	return heldAnswer{V: heldVersion, AskedAtMs: askedAtMs, Judged: judged, Outputs: outs}
+}
+
+func dropOut(id string, saves int) heldOutput {
+	return heldOutput{ToolUseID: id, Hash: "h-" + id, Tokens: saves + 20, Saves: saves, Drop: true}
+}
+
+func keepOut(id string) heldOutput {
+	return heldOutput{ToolUseID: id, Hash: "h-" + id, Tokens: 100, Saves: 80, Drop: false}
+}
+
+func outputIDs(h heldAnswer) []string {
+	var ids []string
+	for _, o := range h.Outputs {
+		ids = append(ids, o.ToolUseID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// The merge: by tool-use id, each output once; the NEWER verdict wins, a newer keep included; only DROP
+// verdicts are carried; carried ones are marked.
+func TestMergeHeldKeepsEachOutputOnceAndTheNewerVerdictWins(t *testing.T) {
+	now := time.Now().UnixMilli()
+	carried := heldOf(now-1000, 50, dropOut("a", 10), dropOut("b", 20), dropOut("c", 30), keepOut("k"))
+	newer := heldOf(now, 60, dropOut("c", 31), keepOut("b"), dropOut("d", 40))
+	m, st := mergeHeld(carried, newer)
+	if got := fmt.Sprint(outputIDs(m)); got != "[a b c d]" {
+		t.Fatalf("merged ids = %s, want [a b c d]: each output once, a carried keep not carried", got)
+	}
+	byID := map[string]heldOutput{}
+	for _, o := range m.Outputs {
+		byID[o.ToolUseID] = o
+	}
+	if !byID["a"].Drop || !byID["a"].Carried {
+		t.Errorf("a = %+v, want a carried drop", byID["a"])
+	}
+	if byID["b"].Drop || byID["b"].Carried {
+		t.Errorf("b = %+v, want the NEWER keep to override the carried drop", byID["b"])
+	}
+	if byID["c"].Saves != 31 || byID["c"].Carried {
+		t.Errorf("c = %+v, want the newer drop (saves 31) to replace the carried one", byID["c"])
+	}
+	if !byID["d"].Drop || byID["d"].Carried {
+		t.Errorf("d = %+v, want a new drop", byID["d"])
+	}
+	if st.carriedKept != 1 || st.overridden != 2 {
+		t.Errorf("stats = %+v, want 1 carried kept (a) and 2 overridden (b, c)", st)
+	}
+	if m.Judged != 60 {
+		t.Errorf("merged Judged = %d, want the newer question's 60", m.Judged)
+	}
+}
+
+// The age limit counts from the OLDEST question that still contributes a verdict.
+func TestTheMergedAnswerKeepsTheOldestContributingQuestionsAge(t *testing.T) {
+	now := time.Now().UnixMilli()
+	old := heldOf(now-20*60*1000, 50, dropOut("a", 10))
+	m, _ := mergeHeld(old, heldOf(now, 60, dropOut("b", 20)))
+	if m.AskedAtMs != old.AskedAtMs {
+		t.Fatalf("AskedAtMs = %d, want the carried (older) question's %d", m.AskedAtMs, old.AskedAtMs)
+	}
+	// If the newer answer replaced EVERY carried verdict, only the newer question contributes.
+	m2, _ := mergeHeld(heldOf(now-20*60*1000, 50, dropOut("a", 10)), heldOf(now, 60, keepOut("a")))
+	if m2.AskedAtMs != now {
+		t.Fatalf("AskedAtMs = %d, want the newer question's %d once the carried verdict is replaced", m2.AskedAtMs, now)
+	}
+}
+
+// The cap: the OLDEST carried drops go first.
+func TestTheCarriedSetIsCappedAndTheOldestGoFirst(t *testing.T) {
+	now := time.Now().UnixMilli()
+	var outs []heldOutput
+	for i := 0; i < maxCarriedDrops+30; i++ {
+		outs = append(outs, dropOut(fmt.Sprintf("o%04d", i), 10))
+	}
+	m, st := mergeHeld(heldOf(now-1, 10, outs...), heldOf(now, 10, dropOut("new", 10)))
+	if len(m.Outputs) > maxCarriedDrops || st.evicted != 31 {
+		t.Fatalf("merged %d outputs, evicted %d; want at most %d and 31 evicted", len(m.Outputs), st.evicted, maxCarriedDrops)
+	}
+	have := map[string]bool{}
+	for _, o := range m.Outputs {
+		have[o.ToolUseID] = true
+	}
+	if have["o0000"] || !have[fmt.Sprintf("o%04d", maxCarriedDrops+29)] || !have["new"] {
+		t.Fatal("the cap kept an old carried drop over a newer one, or lost the new answer")
+	}
+}
+
+// warmHold merges with what the thread already carries, counts it, and clears the 'tried' mark.
+func TestWarmHoldMergesWithTheCarriedSetAndClearsTried(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	now := time.Now().UnixMilli()
+	warmHold("acc", heldOf(now-5, 40, dropOut("a", 10), dropOut("b", 20)))
+	warmMu.Lock()
+	warmThreads["acc"].heldTried = true
+	warmMu.Unlock()
+	warmHold("acc", heldOf(now, 50, dropOut("c", 30), keepOut("a")))
+	warmMu.Lock()
+	th := warmThreads["acc"]
+	got, tried := *th.held, th.heldTried
+	warmMu.Unlock()
+	if fmt.Sprint(outputIDs(got)) != "[a b c]" || tried {
+		t.Fatalf("held ids %v tried=%v, want [a b c] merged and tried cleared", outputIDs(got), tried)
+	}
+	c := SweepWarmCounters()
+	if c.CarriedMerged != 1 || c.CarriedOverridden != 1 {
+		t.Fatalf("counters = %+v, want 1 carried merged (b) and 1 overridden (a)", c)
+	}
+}
+
+// The age limit: a carried set older than the held answer's limit is dropped and counted when a new answer arrives.
+func TestACarriedSetOlderThanTheLimitIsDroppedAndCounted(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	old := time.Now().Add(-2 * warmHeldMaxAge).UnixMilli()
+	warmHold("age", heldOf(old, 40, dropOut("a", 10), dropOut("b", 20)))
+	warmMu.Lock()
+	warmThreads["age"].heldAt = time.Now()
+	warmMu.Unlock()
+	warmHold("age", heldOf(time.Now().UnixMilli(), 50, dropOut("c", 30)))
+	warmMu.Lock()
+	got := *warmThreads["age"].held
+	warmMu.Unlock()
+	if fmt.Sprint(outputIDs(got)) != "[c]" {
+		t.Fatalf("held ids = %v, want only the new answer: the over-age carried drops must be gone", outputIDs(got))
+	}
+	if SweepWarmCounters().CarriedExpired != 2 {
+		t.Fatalf("counters = %+v, want carried_expired = 2", SweepWarmCounters())
+	}
+	// And get() refuses an answer that is over age by its OLDEST question even if heldAt is fresh.
+	warmMu.Lock()
+	warmThreads["age"].held.AskedAtMs = old
+	warmThreads["age"].heldAt = time.Now()
+	warmMu.Unlock()
+	if _, ok := (memHeld{"age"}).get(""); ok {
+		t.Fatal("get() returned an answer older than the limit")
+	}
+}
+
+// Nothing is written to the Store: the carried set is memory only.
+func TestTheCarriedSetIsNeverWrittenToTheStore(t *testing.T) {
+	r := newWarmRig(t, "w-carry-store", warmCfg, payingTail(), 6.0) // billed 6x local: the gate refuses and carries
+	rs := &recStore{Store: r.st}
+	r.st = rs
+	r.toHeld()
+	_, rep := r.request(nil)
+	if rep.Events["sweep_warm_carried_drops"] != 3 {
+		t.Fatalf("events = %v, want 3 drops carried after the refusal", rep.Events)
+	}
+	for _, k := range rs.keys() {
+		if strings.HasPrefix(k, store.SweepHeldPrefix) {
+			t.Fatalf("a carried drop was written to the Store under %q", k)
+		}
+	}
+	for _, p := range rs.payloads() {
+		if strings.Contains(p, "toolu_wire_") && strings.Contains(p, `"drop"`) {
+			t.Fatalf("a Store write carries a held verdict: %.100s", p)
+		}
+	}
+	if _, ok := getHeld(r.st, r.key()); ok {
+		t.Fatal("the Store holds a held answer")
+	}
+	resetWarmForTest() // a restart: nothing carried
+	if r.held() {
+		t.Fatal("a restart kept a carried set")
+	}
+}
+
+// A shrink clears the carried set (fix 3 covers carried drops, not only a fresh answer).
+func TestAConversationShrinkClearsTheCarriedSet(t *testing.T) {
+	r := newWarmRig(t, "w-carry-shrink", warmCfg, payingTail(), 6.0)
+	r.toHeld()
+	r.request(nil) // the gate refuses, 3 drops carried
+	if !r.held() {
+		t.Fatal("fixture: nothing was carried")
+	}
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("a fresh start"), assistantMsg("ok")}}
+	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
+	c := warmCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.PrevBilledInput = 1000
+	if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
+		t.Fatal(err)
+	}
+	if r.held() || SweepWarmCounters().HeldShrunk != 1 {
+		t.Fatalf("held=%v counters=%+v, want the carried set cleared and held_shrunk 1", r.held(), SweepWarmCounters())
+	}
+}
+
+// A carried set the gate refused is NOT retried on the next warm request: it waits for a new question.
+func TestACarriedSetIsNotRetriedUntilANewQuestionIsMergedIn(t *testing.T) {
+	r := newWarmRig(t, "w-carry-wait", warmCfg, payingTail(), 6.0)
+	r.toHeld()
+	r.request(nil) // refused and carried
+	before := len(decisionsOf("apply"))
+	for i := 0; i < 2; i++ {
+		_, rep := r.request(nil)
+		// A retry could ACCEPT as well as refuse, so count decisions and applied drops, not refusals only.
+		if rep.Events[eventAppliedWarm] != 0 {
+			t.Fatalf("request %d applied %d warm drops from a set that was waiting", i, rep.Events[eventAppliedWarm])
+		}
+	}
+	if got := len(decisionsOf("apply")); got != before {
+		t.Fatalf("the gate was retried on a carried set: %d apply decisions -> %d", before, got)
+	}
+	warmMu.Lock()
+	tried := warmThreads[r.key()].heldTried
+	warmMu.Unlock()
+	if !tried {
+		t.Fatal("a refused set is not marked tried")
+	}
+}
+
+// sliceAsker answers question q (0, 1, 2) over the outputs it is shown, dropping every output whose number is
+// in the q-th third of n and keeping the rest. It stands for a judge that is consistent between questions. What
+// differs between questions is WHICH outputs the question covers, which the test controls through the
+// candidate set (a failed batch, the cap, an output that is not yet old enough). n must be 12 or fewer so a
+// question is ONE batch. The output a label names is read from the ask's text (handler_<num>_...).
+type sliceAsker struct {
+	mu    sync.Mutex
+	calls int
+	n     int
+	// seen records, per question, the output numbers the question named, so a test can say what it covered.
+	seen [][]int
+}
+
+func (a *sliceAsker) Ask(_ context.Context, _, ask string) (string, components.PrefixUsage, error) {
+	a.mu.Lock()
+	q := a.calls
+	a.calls++
+	a.mu.Unlock()
+	var parts []string
+	var nums []int
+	for _, l := range askLabelRe.FindAllStringSubmatch(ask, -1) {
+		verdict, needed := "keep", "a"
+		rest := ask[strings.Index(ask, "["+l[1]+"] "):]
+		if j := strings.Index(rest, "handler_"); j >= 0 {
+			var num int
+			fmt.Sscanf(rest[j:], "handler_%d_", &num)
+			nums = append(nums, num)
+			if num/(a.n/3) == q {
+				verdict, needed = "drop", "none"
+			}
+		}
+		parts = append(parts, `{"i":`+l[1]+`,"needed_by":"`+needed+`","quote":"","verdict":"`+verdict+`"}`)
+	}
+	a.mu.Lock()
+	a.seen = append(a.seen, nums)
+	a.mu.Unlock()
+	return "[" + strings.Join(parts, ",") + "]", components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
+}
+
+func (a *sliceAsker) count() int { a.mu.Lock(); defer a.mu.Unlock(); return a.calls }
+
+// ⭐ ACCUMULATION through the real trigger, question and apply: a refusal CARRIES its surviving drops, the next
+// question's answer is merged with them, and the merged set is what the gate decides on. The next question
+// here covers only the outputs the first did NOT drop (a smaller slice), so the carried drops are not
+// re-judged and survive; the merged D is bigger than either answer alone.
+func TestARefusedAnswersDropsAreCarriedAndMergedWithTheNextQuestionsAndTheGateDecidesOnTheMergedSet(t *testing.T) {
+	r := newWarmRig(t, "w-acc", warmCfg, payingTail(), 6.0) // billed 6x: the gate refuses and carries
+	r.toHeld()
+	warmMu.Lock()
+	first := *warmThreads[r.key()].held
+	warmMu.Unlock()
+	if len(first.Outputs) != 3 {
+		t.Fatalf("fixture: question 1 judged %d outputs", len(first.Outputs))
+	}
+	_, rep := r.request(nil) // the gate refuses
+	if rep.Events["sweep_warm_carried_drops"] != 3 {
+		t.Fatalf("events = %v, want the refusal to carry 3 drops", rep.Events)
+	}
+	ds := decisionsOf("apply")
+	if len(ds) != 1 || ds[0].Accept || ds[0].New != 3 || ds[0].Carried != 0 {
+		t.Fatalf("decisions = %+v, want one refusal over 3 NEW drops", SweepWarmCounters().RecentDecisions)
+	}
+	// A new question's answer arrives (a DIFFERENT output set: output "toolu_wire_9" only). It is merged in.
+	now := time.Now().UnixMilli()
+	warmHold(r.key(), heldOf(now, first.Judged, dropOut("toolu_wire_9", 500)))
+	warmMu.Lock()
+	merged := *warmThreads[r.key()].held
+	tried := warmThreads[r.key()].heldTried
+	warmMu.Unlock()
+	if tried || len(merged.Outputs) != 4 {
+		t.Fatalf("merged %d outputs tried=%v, want the 3 carried + 1 new, tried cleared", len(merged.Outputs), tried)
+	}
+	carried, fresh := 0, 0
+	for _, o := range merged.Outputs {
+		if o.Carried {
+			carried++
+		} else {
+			fresh++
+		}
+	}
+	if carried != 3 || fresh != 1 {
+		t.Fatalf("merged has %d carried and %d new, want 3 and 1", carried, fresh)
+	}
+}
+
+// A carried drop that later fails the recheck leaves the set for good, and the gate decides on what survives.
+func TestACarriedDropThatLaterFailsTheRecheckLeavesTheSet(t *testing.T) {
+	r := newWarmRig(t, "w-acc-recheck", warmCfg, payingTail(), 6.0) // refused, so the 3 drops are carried
+	r.toHeld()
+	r.request(nil)
+	if !r.held() {
+		t.Fatal("fixture: nothing carried")
+	}
+	// A later turn now references output 1: the recheck must throw that carried drop out.
+	warmMu.Lock()
+	warmThreads[r.key()].heldTried = false // as if a new question had been merged in: the gate retries
+	warmMu.Unlock()
+	_, rep := r.requestReferencingOutputs(1)
+	if rep.Events["sweep_apply_dropped_referenced_later"] != 1 {
+		t.Fatalf("events = %v, want the carried drop referenced later to be thrown out", rep.Events)
+	}
+	ds := decisionsOf("apply")
+	last := ds[len(ds)-1]
+	// No new question was merged in between, so the survivors are still the answer's own verdicts (New), not
+	// yet marked Carried: that mark is put on by the merge with the NEXT question's answer.
+	if last.Proposed != 3 || last.Dropped["referenced_later"] != 1 || last.New != 2 || last.Carried != 0 {
+		t.Fatalf("decision = %+v, want 3 proposed, 1 referenced_later dropped and 2 survivors", last)
+	}
+	// And it does not come back: the survivors that were carried again are only the 2 that passed.
+	warmMu.Lock()
+	h := warmThreads[r.key()].held
+	warmMu.Unlock()
+	if h == nil || len(h.Outputs) != 2 {
+		t.Fatalf("carried set = %v, want only the 2 survivors", h)
+	}
+	for _, o := range h.Outputs {
+		if o.ToolUseID == "toolu_wire_0" {
+			t.Fatal("the dropped carried output is back in the set")
+		}
+	}
+}
+
+// ⭐ THE POINT OF ACCUMULATION, end to end: a refused answer's drops are too small to pay alone. The next
+// question covers other outputs. Merged, they pay: the gate accepts ONCE on the merged set, one cut, and the
+// set is cleared. Driven through the real warm path, with the gate's arithmetic (not a forced verdict).
+func TestTwoRefusedAnswersThatCannotPayAloneAreAcceptedTogetherWithOneCut(t *testing.T) {
+	const n = 8
+	save := outputSavesN(n)
+	per := save / n
+	// Find a tail where 3 outputs fail, 4 fail and 8 pay (the gate: D x read x N against (whole - D) x (write - read)).
+	found, N := 0, 2.5
+	for tail := 500; tail < 600000; tail += 250 {
+		whole := localTokens(warmConvN(n, 8, tail).Input)
+		pays := func(k int) bool { D := k * per; return float64(D)*0.3*N > float64(whole-D)*3.45 }
+		if !pays(3) && !pays(4) && pays(8) {
+			found = tail
+			break
+		}
+	}
+	if found == 0 {
+		t.Fatal("fixture: no tail makes 3 and 4 outputs fail but 8 pay")
+	}
+	a := &batchAsker{}
+	r := newWarmRig(t, "w-acc2", warmCfg+"warm_min_mass_frac: 0.01\n", found, 1.0)
+	r.outputs, r.askerAny = n, a
+	// Question 1 (all 8 judged; we keep only 3 as drops by replacing the held answer's verdicts below).
+	for i := 0; i < 3; i++ {
+		r.request(nil)
+	}
+	r.forward()
+	now := time.Now().UnixMilli()
+	warmMu.Lock()
+	judged, prints := warmThreads[r.key()].held.Judged, warmThreads[r.key()].held.Prints
+	warmMu.Unlock()
+	mk := func(ids ...int) heldAnswer {
+		var outs []heldOutput
+		for _, i := range ids {
+			id := fmt.Sprintf("toolu_wire_%d", i)
+			text := schema.MessageText(r.conv(r.step).Input[idxOfTool(r.conv(r.step), id)])
+			outs = append(outs, heldOutput{ToolUseID: id, Hash: outputHash(r.conv(r.step).Input[idxOfTool(r.conv(r.step), id)]),
+				Tokens: schema.TextTokens(text), Saves: per, Drop: true})
+		}
+		h := heldOf(now, judged, outs...)
+		h.Prints = prints
+		return h
+	}
+	// Replace question 1's answer with 3 drops, as if the judge proposed only those.
+	warmMu.Lock()
+	warmThreads[r.key()].held = nil
+	warmMu.Unlock()
+	warmHold(r.key(), mk(0, 1, 2))
+	_, rep := r.request(nil)
+	if rep.Events[eventAppliedWarm] != 0 || rep.Events["sweep_warm_carried_drops"] != 3 {
+		t.Fatalf("3 drops: events = %v, want a refusal that carries 3", rep.Events)
+	}
+	// Question 2's answer: 5 other outputs. Merged: 8, which pays.
+	warmHold(r.key(), mk(3, 4, 5, 6, 7))
+	before := len(decisionsOf("apply"))
+	req, rep := r.request(nil)
+	ds := decisionsOf("apply")
+	if len(ds)-before != 1 {
+		t.Fatalf("%d decisions on the merged request, want exactly one", len(ds)-before)
+	}
+	last := ds[len(ds)-1]
+	if !last.Accept || last.Carried != 3 || last.New != 5 {
+		t.Fatalf("decision = %+v, want an accept over 3 carried + 5 new", last)
+	}
+	if rep.Events[eventAppliedWarm] != n {
+		t.Fatalf("events = %v, want all %d dropped in ONE cut", rep.Events, n)
+	}
+	dropped := 0
+	for _, i := range toolIndices(req) {
+		if expand.HasPlaceholder(schema.MessageText(req.Input[i])) {
+			dropped++
+		}
+	}
+	if dropped != n {
+		t.Fatalf("%d outputs dropped, want %d", dropped, n)
+	}
+	if r.held() {
+		t.Fatal("the carried set was not cleared after the accept")
+	}
+	if c := SweepWarmCounters(); c.GateAccept != 1 || c.GateRefuse != 1 {
+		t.Errorf("gate counters = %+v, want 1 refusal then 1 accept", c)
+	}
+}
+
+func idxOfTool(req *bschemas.BifrostChatRequest, id string) int {
+	i, _ := rawToolMessage(req.Input, id)
+	return i
+}
+
+// A newer KEEP for a carried output overrides the carried drop, through the real merge in warmHold.
+func TestANewerKeepOverridesACarriedDropInTheThreadsHeldState(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	now := time.Now().UnixMilli()
+	warmHold("keepwins", heldOf(now-10, 40, dropOut("a", 10), dropOut("b", 20)))
+	warmMu.Lock()
+	warmThreads["keepwins"].heldTried = true
+	warmMu.Unlock()
+	warmHold("keepwins", heldOf(now, 50, keepOut("a"), dropOut("c", 30)))
+	warmMu.Lock()
+	got := *warmThreads["keepwins"].held
+	warmMu.Unlock()
+	var a *heldOutput
+	for i := range got.Outputs {
+		if got.Outputs[i].ToolUseID == "a" {
+			a = &got.Outputs[i]
+		}
+	}
+	if a == nil || a.Drop {
+		t.Fatalf("output a = %+v, want the NEWER keep to have replaced the carried drop", a)
+	}
+	if n, _ := got.proposed(); n != 2 {
+		t.Fatalf("%d drops in the merged set, want b (carried) and c (new)", n)
+	}
+}
+
+// A refusal must not make a carried answer younger. heldAt is the age the in-memory source checks, so a
+// reset on carry would let a thread keep a verdict alive for ever by being refused again and again.
+func TestACarryOnRefusalDoesNotMakeTheAnswerYounger(t *testing.T) {
+	r := newWarmRig(t, "w-age", warmCfg, payingTail(), 6.0) // billed 6x: the gate refuses and carries
+	r.toHeld()
+	old := time.Now().Add(-29 * time.Minute)
+	warmMu.Lock()
+	warmThreads[r.key()].heldAt = old
+	warmMu.Unlock()
+	_, rep := r.request(nil)
+	if rep.Events["sweep_warm_carried_drops"] == 0 {
+		t.Fatalf("fixture: the gate did not refuse and carry (events %v)", rep.Events)
+	}
+	warmMu.Lock()
+	got := warmThreads[r.key()].heldAt
+	warmMu.Unlock()
+	if !got.Equal(old) {
+		t.Fatalf("heldAt moved from %v to %v: a refusal made the carried answer younger", old, got)
 	}
 }
