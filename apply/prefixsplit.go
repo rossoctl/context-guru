@@ -97,7 +97,8 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	}
 
 	sysOut := make([]json.RawMessage, 0, len(blocks)+1)
-	for _, b := range blocks {
+	for i := 0; i < len(blocks); i++ {
+		b := blocks[i]
 		txt := b.Get("text").String()
 		at := -1
 		if !split && len(txt)/4 >= minSplitTokens {
@@ -146,7 +147,16 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
-		sysOut = append(sysOut, sb, vb)
+		sysOut = append(sysOut, sb)
+		// Bedrock Converse spells a breakpoint as its OWN entry right after the block it
+		// ends: [{"text":...},{"cachePoint":...}]. That entry must stay directly after the
+		// stable half, and the volatile half goes after it. Inserting the volatile half
+		// before it leaves the breakpoint covering the churn while still reporting a split.
+		if i+1 < len(blocks) && isStandaloneCachePoint(blocks[i+1]) {
+			sysOut = append(sysOut, json.RawMessage(blocks[i+1].Raw))
+			i++
+		}
+		sysOut = append(sysOut, vb)
 		split = true
 		stableTokens = tokens.Count(txt[:at])
 		// The tail's identity, so the dashboard can tell a turn where the snapshot MOVED from
@@ -173,6 +183,12 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	// sjson spliced the new value over [sys.Index, sys.Index+len(sys.Raw)); every byte
 	// after that range moved by the length difference.
 	return next, true, sys.Index + len(sys.Raw), len(next) - len(body), stableTokens, tailHash
+}
+
+// isStandaloneCachePoint reports whether a system entry is only a Converse breakpoint
+// (`{"cachePoint":{...}}`), not a content block that carries one as a field.
+func isStandaloneCachePoint(e gjson.Result) bool {
+	return e.IsObject() && e.Get("cachePoint").Exists() && !e.Get("text").Exists()
 }
 
 // hashString identifies a volatile tail. FNV-1a, not a cryptographic hash: this compares a
