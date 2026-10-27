@@ -68,7 +68,9 @@ const (
 	// SweepReasonNoAsker: the route has no prefix asker.
 	SweepReasonNoAsker SweepPingReason = "no_asker"
 	// SweepReasonPanic: the question panicked and was recovered. The ping stays plain, and the
-	// conversation is marked asked so the next ping is plain too.
+	// conversation is marked asked so the next ping is plain too. A panic inside ONE batch is caught per
+	// batch (reason batch_panic): the other batches' answers are kept, and the conversation is still marked
+	// asked, because that batch's model call may already have been paid for.
 	SweepReasonPanic SweepPingReason = "panic"
 )
 
@@ -508,6 +510,9 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 			return schema.TextTokens(cands[a].content) > schema.TextTokens(cands[b].content)
 		})
 		rep.GateN("sweep_over_ask_cap", len(cands)-max)
+		// The same candidates feed the batching ledger, so sweep_batch_over_cap counts EVERY candidate left
+		// unasked by any limit: max_ask_batches here, or the keeper's cost ceiling in askInBatches.
+		sweepOverAskCapBatch.Add(int64(len(cands) - max))
 		cands = cands[:max]
 	}
 	rep.EventN("sweep_offered", len(cands))
@@ -580,11 +585,16 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	// The provider touched the prefix if it read or wrote any of it. That refreshed the TTL, which is
 	// all a ping is for, so the keeper counts this as the ping.
 	res.Substituted = res.CacheRead > 0 || res.CacheWrite > 0
-	if res.Substituted || in > 0 || out > 0 {
+	if res.Substituted || in > 0 || out > 0 || br.panicked > 0 {
 		sweepPingAsked.Add(1)
 	} else {
 		// Nothing left the process (no stashed prefix, a stale one): not an ask. Allow the next ping
 		// to try again.
+		//
+		// A PANIC IS NOT THIS CASE. A batch can panic after its model call returned and was paid for; the
+		// recover zeroes that batch's result, so the sums read zero. Releasing the latch then would pay for
+		// the same question on every ping while the panic repeats. A panicked batch keeps the thread marked
+		// asked, so the next ping is plain.
 		cand.asked.Store(false)
 	}
 	if br.answered == 0 {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,13 +141,23 @@ func collectN(t *testing.T, cfg string, n int) ([]sweepCand, *components.Report)
 }
 
 func TestOnlyBatchTimesBatchesCandidatesAreOfferedAndTheSmallestAreCounted(t *testing.T) {
+	resetSweepBatchForTest()
 	cands, rep := collectN(t, "", 60) // 12 x 4 = 48
 	if len(cands) != 48 || rep.Gates["sweep_over_ask_cap"] != 12 {
 		t.Fatalf("offered %d (over cap %d), want 48 and 12 over", len(cands), rep.Gates["sweep_over_ask_cap"])
 	}
+	// /stats publishes the batching ledger, so collect's cap must reach it too: sweep_batch_over_cap counts
+	// EVERY candidate left unasked, the same ones sweep_over_ask_cap counts per request. 12 so far.
+	if got := SweepBatchCounters().OverCap; got != 12 {
+		t.Fatalf("the batching ledger holds %d over-cap candidates after collect, want 12", got)
+	}
+	resetSweepBatchForTest()
 	cands, rep = collectN(t, "max_ask_batches: 2\n", 60) // 12 x 2 = 24
 	if len(cands) != 24 || rep.Gates["sweep_over_ask_cap"] != 36 {
 		t.Fatalf("with 2 batches offered %d (over cap %d), want 24 and 36 over", len(cands), rep.Gates["sweep_over_ask_cap"])
+	}
+	if got := SweepBatchCounters().OverCap; got != 36 {
+		t.Fatalf("the batching ledger holds %d over-cap candidates, want 36", got)
 	}
 	cands, rep = collectN(t, "", 20)
 	if len(cands) != 20 || rep.Gates["sweep_over_ask_cap"] != 0 {
@@ -555,7 +566,6 @@ func directBatch(t *testing.T, cfg string, a components.PrefixAsker, n, maxBatch
 	st := newMemStore()
 	cand := candidateFor(t, "max_ask_batches: 8\n", "batch-direct", a, st, n)
 	e := shippedSweep(t, cfg)
-	cand.e = e
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	// Collect with a wide cap so the full list reaches askInBatches un-pre-capped.
 	wide := shippedSweep(t, "max_ask_batches: 8\n")
@@ -634,5 +644,74 @@ func TestThePlannedBatchCountIsCeilOfOfferedOverTwelve(t *testing.T) {
 	_, info, _, ok := SweepPingSubstitute(key)
 	if !ok || info.Offered != 30 || info.Batches != 3 {
 		t.Fatalf("info = %+v ok=%v, want Offered 30 and Batches 3", info, ok)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Round 2 (#747)
+
+// panicAfterPaidAsker answers (so the model call is PAID for, with real usage) and then the caller panics
+// downstream, in verdict processing. It models the panic that comes AFTER the call: the ask returned, and a
+// bug in what the sweep does with the reply blew up.
+type panicAfterPaidAsker struct {
+	calls atomic.Int64
+	reply string
+}
+
+func (a *panicAfterPaidAsker) Ask(_ context.Context, _, ask string) (string, components.PrefixUsage, error) {
+	a.calls.Add(1)
+	// A reply the parser accepts but that carries a label the sweep indexes out of range: the panic is in
+	// the code AFTER the call, not in the model call.
+	return a.reply, okUse, nil
+}
+
+// R1. A panic AFTER a paid model call must not release the asked latch: the ping that follows is plain, and
+// the question is not paid for again on every ping while the panic repeats.
+func TestAPanicAfterAPaidCallKeepsTheThreadAskedSoItIsNotPaidForAgainOnEveryPing(t *testing.T) {
+	resetSweepBatchForTest()
+	st := newMemStore()
+	a := &panicAfterPaidAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`}
+	cand := candidateFor(t, "", "batch-paid-panic", a, st, 5)
+	sweepPanicAfterCallHook = func() { panic("boom after a paid call") }
+	defer func() { sweepPanicAfterCallHook = nil }()
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	cands := cand.collect(rep)
+	res := cand.ask(cands, rep, 0, SweepPingWait{})
+	if a.calls.Load() != 1 {
+		t.Fatalf("fixture: %d asks, want the one paid call", a.calls.Load())
+	}
+	if res.Held || res.Substituted {
+		t.Fatalf("result = %+v, want nothing held and nothing substituted after a panic", res)
+	}
+	if SweepBatchCounters().FailedBy["batch_panic"] != 1 {
+		t.Fatalf("counters = %+v, want the panic counted as a batch failure", SweepBatchCounters())
+	}
+	if !cand.asked.Load() {
+		t.Fatal("the asked latch was released after a panic that came AFTER a paid call: the next ping pays again, and again")
+	}
+	// And the keeper's view: the next ping is plain.
+	key := thread.Key("batch-paid-panic", "")
+	if _, _, reason, ok := SweepPingSubstitute(key); ok || reason != SweepReasonAlreadyAsked {
+		t.Fatalf("next ping: ok=%v reason=%q, want already_asked", ok, reason)
+	}
+	if a.calls.Load() != 1 {
+		t.Fatalf("%d asks in all, want 1: the repeating panic must not be paid for again", a.calls.Load())
+	}
+}
+
+// And a failure that never reached the provider (no stashed prefix) STILL gives the latch back: the
+// panicked count is the only thing that changed.
+func TestAnAskThatNeverLeftTheProcessStillReleasesTheLatch(t *testing.T) {
+	a := &dynAsker{fn: func(int, string) (string, components.PrefixUsage, error) {
+		return "", components.PrefixUsage{}, components.ErrNoPrefix
+	}}
+	resetSweepBatchForTest()
+	st := newMemStore()
+	cand := candidateFor(t, "", "batch-noprefix", a, st, 5)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	cands := cand.collect(rep)
+	cand.ask(cands, rep, 0, SweepPingWait{})
+	if cand.asked.Load() {
+		t.Fatal("an ask that never left the process kept the latch: the next ping could never try again")
 	}
 }

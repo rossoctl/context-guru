@@ -120,8 +120,10 @@ type batchRun struct {
 	prompt, completion, cacheRead, cacheWrite int64
 	costUSD, ms                               float64
 	// answered and failed count the questions by outcome; skipped counts batches never started because
-	// the sweep's context ended first.
-	answered, failed, skipped int
+	// the sweep's context ended first. panicked counts batches that PANICKED: a panic can come after the
+	// model call returned and was paid for, and the recover erases that batch's usage from the result, so
+	// the caller must not read zero usage as "nothing was sent". The sink still holds what was billed.
+	answered, failed, skipped, panicked int
 }
 
 // askInBatches asks the candidates in balanced batches, in sequence, and merges the answers. It is THE
@@ -135,7 +137,7 @@ type batchRun struct {
 // are not asked and are counted as sweep_over_ask_cap.
 //
 // A batch that fails keeps its items out of the merged answer (they were never judged) and is counted by
-// reason. A PANIC in one batch is one failed batch (reason "panic"): the answers already paid for are kept.
+// reason. A PANIC in one batch is one failed batch (reason "batch_panic"): the answers already paid for are kept.
 // A batch never STARTS after the context ended, so k slow batches cannot run past the keeper's outer
 // timeout. No item is judged twice: each candidate is in exactly one batch.
 func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *components.Ctx, cands []sweepCand,
@@ -175,6 +177,9 @@ func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *compone
 		br.gateList = append(br.gateList, r.gates...)
 		if !r.answered {
 			br.failed++
+			if r.raised("sweep_batch_panic") {
+				br.panicked++
+			}
 			reason := batchFailReason(r)
 			noteBatchFailed(reason)
 			br.events["sweep_batch_failed_"+trimReason(reason)]++
@@ -191,8 +196,10 @@ func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *compone
 	return br
 }
 
-// askOneBatch asks ONE batch, with its own recover: a panic here is a failed batch (reason "panic") and
-// does not lose the batches before it. The usage of a batch that panicked is unknown and is not booked.
+// askOneBatch asks ONE batch, with its own recover: a panic here is a failed batch (reason "batch_panic")
+// and does not lose the batches before it. The recover erases this batch's result, so its usage is not in
+// the sums; the caller counts the panic (batchRun.panicked) and keeps the thread marked asked, and the
+// cost is still booked from the sink, which saw the call.
 func (e *ExtractSweep) askOneBatch(req *bschemas.BifrostChatRequest, c *components.Ctx, b askBatch,
 	opt askOpts) (drop []int, r sweepResult, ms float64) {
 
@@ -271,14 +278,6 @@ func SweepBatchCounters() SweepBatchStats {
 	return SweepBatchStats{Batches: sweepAskBatches.Load(), Failed: sweepBatchFailedAll.Load(),
 		Skipped: sweepBatchSkipped.Load(), OverCap: sweepOverAskCapBatch.Load(), FailedBy: by}
 }
-
-// ResetSweepBatchForTest clears the batching ledger. For the host's tests, which drive a whole sweep and
-// read the counters.
-func ResetSweepBatchForTest() { resetSweepBatchForTest() }
-
-// NoteSweepBatchSkippedForTest books n skipped batches in the ledger, so the host's tests can check that
-// /stats publishes the counter without staging a sweep that runs out of time.
-func NoteSweepBatchSkippedForTest(n int) { sweepBatchSkipped.Add(int64(n)) }
 
 func resetSweepBatchForTest() {
 	sweepAskBatches.Store(0)

@@ -907,6 +907,9 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	}
 
 	verdicts, parsed := extract.ParseVerdicts(reply)
+	if sweepPanicAfterCallHook != nil {
+		sweepPanicAfterCallHook() // a test panics here, AFTER the model call was paid for
+	}
 	r.answered = parsed
 	if dump != nil {
 		dump.Reply, dump.ViaTool, dump.Parsed = reply, usage.ViaTool, parsed

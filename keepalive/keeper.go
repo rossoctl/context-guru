@@ -1707,8 +1707,9 @@ type Stats struct {
 	SweepAskBatches    int64            `json:"sweep_ask_batches"`
 	SweepBatchFailed   int64            `json:"sweep_batch_failed"`
 	SweepBatchFailedBy map[string]int64 `json:"sweep_batch_failed_by,omitempty"`
-	// SweepBatchSkipped counts batches never started because the sweep's deadline passed. SweepBatchOverCap
-	// counts candidates left unasked because fewer batches were allowed. SweepBatchesLowered counts sweeps
+	// SweepBatchSkipped counts batches never started because the sweep's deadline passed (the per-request
+	// event is sweep_batch_skipped_deadline). SweepBatchOverCap counts EVERY candidate left unasked by a
+	// limit: max_ask_batches, or the cost ceiling lowering the count. SweepBatchesLowered counts sweeps
 	// where the per-ping cost ceiling admitted fewer questions than planned.
 	SweepBatchSkipped   int64 `json:"sweep_batch_skipped"`
 	SweepBatchOverCap   int64 `json:"sweep_batch_over_cap"`

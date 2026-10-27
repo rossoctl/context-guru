@@ -334,6 +334,23 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 	if one <= 0 { // unpriced: the old behaviour, nothing to compare, nothing to lower
 		return planned
 	}
+	// NO CAP admits every planned batch. Policy.Ceiling() returns +Inf for a negative MaxUSDPerPing ("no
+	// ceiling", which somebody has to type on purpose). Dividing +Inf by a cost and converting it to int is
+	// implementation-defined (MinInt64 on gc); the clamp below would turn that into "zero batches", so the
+	// one policy that asks for no cap would get no sweep at all.
+	//
+	// A ceiling of zero or less (or NaN) keeps the meaning the old check had: every positive cost exceeds
+	// it, so nothing is admitted. Policy.Ceiling() never returns one (it resolves zero to the default), so
+	// this is only a guard for a direct caller. It is EXPLICIT because int(NaN) and int(-Inf) are
+	// implementation-defined: on gc they happen to be negative, which the clamp below also turns into zero,
+	// so a test on this platform cannot tell this guard from that accident. The guard keeps the answer
+	// right on a platform where the conversion differs.
+	if math.IsInf(ceiling, 1) {
+		return planned
+	}
+	if !(ceiling > 0) {
+		return 0
+	}
 	n := int(ceiling / one)
 	if n > planned {
 		n = planned

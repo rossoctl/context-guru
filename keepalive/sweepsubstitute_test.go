@@ -907,3 +907,62 @@ func TestStatsPublishesTheBatchCountersFromOneSnapshot(t *testing.T) {
 		t.Errorf("sweep_batch_skipped = %d, want the 3 the ledger holds", got)
 	}
 }
+
+// R2. "No ceiling" must not refuse every sweep. Policy.Ceiling() returns +Inf for a negative MaxUSDPerPing;
+// int(+Inf / cost) is MinInt64 on gc, which a clamp turned into zero batches.
+func TestAnInfiniteCeilingAdmitsEveryPlannedBatch(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+	for _, planned := range []int{1, 2, 4, 8} {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, planned, math.Inf(1)); got != planned {
+			t.Errorf("a ceiling of +Inf admits %d of %d planned batches, want all of them", got, planned)
+		}
+	}
+	// The policy that asks for it, end to end.
+	pol := Policy{MaxUSDPerPing: -1}
+	if !math.IsInf(pol.Ceiling(), 1) {
+		t.Fatalf("fixture: Policy{-1}.Ceiling() = %v, want +Inf", pol.Ceiling())
+	}
+	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, pol.Ceiling()); got != 4 {
+		t.Errorf("the no-cap policy admits %d of 4 batches", got)
+	}
+}
+
+// A ceiling of zero or less keeps the meaning the old check had: every positive cost exceeds it, so nothing
+// is admitted. Policy.Ceiling() never returns one (zero resolves to the default), so this guards a direct caller.
+func TestAZeroOrNegativeOrNaNCeilingAdmitsNothing(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+	for _, ceiling := range []float64{0, -1, math.Inf(-1), math.NaN()} {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, ceiling); got != 0 {
+			t.Errorf("a ceiling of %v admits %d batches, want 0", ceiling, got)
+		}
+	}
+	if (Policy{}).Ceiling() != DefaultMaxUSDPerPing {
+		t.Errorf("a zero MaxUSDPerPing resolves to %v, want the default %v", (Policy{}).Ceiling(), DefaultMaxUSDPerPing)
+	}
+}
+
+// End to end: a no-cap policy asks every planned batch.
+func TestANoCapPolicyAsksEveryBatchEndToEnd(t *testing.T) {
+	offload.ResetSweepBatchForTest()
+	k, _, clock := testKeeper(t)
+	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 20000}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(48))
+	pol := kaPolicy()
+	pol.MaxUSDPerPing = -1 // no cap
+	at := clock.now()
+	for _, d := range []time.Duration{-time.Second, 0} {
+		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+	}
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	if got := asker.calls.Load(); got != 4 {
+		t.Fatalf("a no-cap policy asked %d questions, want all 4 planned", got)
+	}
+	if k.sweepOverBudget.Load() != 0 || k.sweepBatchesLowered.Load() != 0 {
+		t.Errorf("over-budget %d lowered %d, want 0 and 0", k.sweepOverBudget.Load(), k.sweepBatchesLowered.Load())
+	}
+}

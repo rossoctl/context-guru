@@ -557,7 +557,12 @@ left most old outputs unasked. Now a list longer than 12 is **split into balance
 - **A batch never starts after the sweep's deadline.** The keeper's timeout (300 s) bounds the whole sweep and each
   question has its own 90 s bound, so `k` slow questions could add up past it. The rest are skipped
   (`sweep_batch_skipped`) and the ones already answered are kept.
-- **A panic in one batch is one failed batch** (`panic`): the answers before it are kept.
+- **A panic in one batch is one failed batch** (`batch_panic`): the answers before it are kept. The thread stays
+  marked asked (the batch's model call may already have been paid for), so the next ping is plain and a repeating
+  panic does not pay again on every ping.
+- The ceiling's answer guess is 4,000 output tokens per question. A real 12-verdict reply is about 7,000, so the ceiling
+  **under-prices one answer by about 1.8x** (and the number is left as it was). Read the per-ping ceiling with that
+  tolerance, and remember it is now multiplied by the number of batches.
 - The keeper's second-line stop (a question that wrote more than it read) judges the usage **summed** over the batches.
   A write-heavy batch can be masked by another batch's read. The per-batch cache rule still gates each batch.
 
@@ -570,7 +575,9 @@ and not the whole sweep.
 At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
 `sweep_model_declined`, `sweep_no_inventory`, `sweep_already_asked`, `sweep_no_candidate`,
 `sweep_hold_no_tool_id`, `sweep_ask_batches`, `sweep_batch_failed` (with `sweep_batch_failed_by`, the reason),
-`sweep_batch_skipped`, `sweep_batch_over_cap`, `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
+`sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
+`sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
+candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
 `keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
