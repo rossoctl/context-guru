@@ -105,8 +105,13 @@ fi
 
 # Where start-proxy.sh puts the log (#251): the state directory, not TMPDIR. Derived here rather
 # than asked of start-proxy.sh because this prints a recovery path for a human, typically when the
-# proxy is DOWN and there is nothing to query.
-LOG="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/proxy-${PORT}.log"
+# proxy is DOWN and there is nothing to query. The mkdir fallback to TMPDIR is copied from the
+# starter's own derivation, byte for byte: without it the two scripts disagree about where the log
+# is exactly when the state directory cannot be made, and this one prints a path that does not
+# exist.
+LOG_DIR="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}"
+LOG="${LOG_DIR}/proxy-${PORT}.log"
 STARTER="${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh"
 
 # The recovery command DELEGATES to start-proxy.sh instead of restating its command line.
