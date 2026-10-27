@@ -108,6 +108,11 @@ func newHostedFixtureOpts(t *testing.T, upstreamName, dialect, keyEnv string, tw
 	}
 	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, opts)
 	t.Cleanup(f.h.Close)
+	// Registered after the sink's t.Setenv, so it runs before it (cleanups are LIFO): by
+	// the time the env points anywhere else, no feedback send is still in flight to read
+	// it. Without this, a straggler from this test's own POST lands in the next test's
+	// sink (issue #213).
+	t.Cleanup(f.h.waitMailForTest)
 	f.mux = f.h.Mux()
 	return f
 }

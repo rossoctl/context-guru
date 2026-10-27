@@ -298,6 +298,10 @@ type Handler struct {
 	// running — see metricsHandler.
 	metricsInflight singleflight.Group
 
+	// mailWG tracks the feedback-delivery goroutines a POST starts, so a test can wait
+	// for every send still in flight before its mail sink goes away (see waitMailForTest).
+	mailWG sync.WaitGroup
+
 	// lastSessionMu guards lastSession.
 	lastSessionMu sync.Mutex
 	// lastSession is the session id of the most recent REAL (non-ping) request this

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -61,18 +62,23 @@ func TestMutatedAndGateDeclinesAreExported(t *testing.T) {
 // TestExtractEconomicsAreExported. NetValueUSD was -$0.7085 live and appeared only in
 // /stats, which nothing scrapes and nothing alerts on.
 func TestExtractEconomicsAreExported(t *testing.T) {
+	// Baseline-relative: the registry ExtractSnapshot reads is process-global, and other
+	// tests in this binary record into it — so an absolute `1` here passes a -count=1 run
+	// and fails -count=2 on the same machine (#192).
+	before := metrics.ExtractSnapshot(0, 0, 0, 0)
 	metrics.RecordExtractionSuppressed("extract_llm", "gate:not_worth_it")
 	metrics.RecordExtractionCacheLookup("extract_llm", true)
 	h := New(nil, nil, metrics.NewAggregator(), Options{})
 	body := h.renderMetrics()
 	for _, want := range []string{
 		`cg_extract_calls_total{outcome="made"}`,
-		`cg_extract_calls_total{outcome="avoided"} 1`,
-		`cg_extract_calls_total{outcome="suppressed"} 1`,
+		fmt.Sprintf(`cg_extract_calls_total{outcome="avoided"} %d`, before.CallsAvoided+1),
+		fmt.Sprintf(`cg_extract_calls_total{outcome="suppressed"} %d`, before.CallsSuppressed+1),
 		"cg_extract_cost_usd ",
 		"cg_extract_net_value_usd ",
 		"cg_extract_latency_ms ",
-		`cg_extract_gate_declines_total{reason="gate:not_worth_it"} 1`,
+		fmt.Sprintf(`cg_extract_gate_declines_total{reason="gate:not_worth_it"} %d`,
+			before.Reasons["gate:not_worth_it"]+1),
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing from /metrics:\n  %s", want)
