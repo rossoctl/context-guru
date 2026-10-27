@@ -39,13 +39,13 @@ func TestStreamedUsageReadsTheTrueSplit(t *testing.T) {
 			start(`{"input_tokens":12,"cache_read_input_tokens":0,"cache_creation_input_tokens":7361,"output_tokens":1}`) +
 				delta(`{"output_tokens":3}`),
 			split{12, 0, 7361, 3}},
+		{"6 a stream with only a start (no delta)",
+			start(`{"input_tokens":717,"cache_read_input_tokens":6656,"output_tokens":1}`),
+			split{717, 6656, 0, 1}},
 		{"7 output keeps the larger count when a later event reports less",
 			start(`{"input_tokens":717,"cache_read_input_tokens":6656,"output_tokens":9}`) +
 				delta(`{"input_tokens":717,"cache_read_input_tokens":6656,"output_tokens":3}`),
 			split{717, 6656, 0, 9}},
-		{"6 a stream with only a start (no delta)",
-			start(`{"input_tokens":717,"cache_read_input_tokens":6656,"output_tokens":1}`),
-			split{717, 6656, 0, 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u, why, _ := parseSSEUsageWhy([]byte(tc.sse))
