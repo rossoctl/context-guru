@@ -2,6 +2,7 @@ package offload
 
 import (
 	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -482,6 +483,46 @@ type ratioTracker struct {
 	// ponytail: unbounded map keyed by session; the store's own TTL/LRU bounds sessions in
 	// practice, so prune here only if a long-lived proxy shows growth.
 	explored map[string]int
+	// refusedAt is when the stash reserve last refused a payload for this component, and the
+	// zero time once a splice has landed since (#214). It is the component's own view of
+	// reserve health, fed by the stash's refusal in commitMark: metadata only, no new global.
+	refusedAt time.Time
+	// now is the clock. nil means time.Now. A test seam.
+	now func() time.Time
+}
+
+// reserveRefuseWindow is how long a refusal keeps exploration off when no splice lands in
+// between. The stash TTL (#204) frees the reserve on its own, so the window must stay short:
+// it only has to cover the burst in which a trial call would be refused.
+const reserveRefuseWindow = 60 * time.Second
+
+func (r *ratioTracker) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// noteRefused records that the stash reserve refused a payload just now.
+func (r *ratioTracker) noteRefused() {
+	r.mu.Lock()
+	r.refusedAt = r.clock()
+	r.mu.Unlock()
+}
+
+// noteSpliced records that a removal landed through commitMark. In full mode the reserve then
+// took a payload, so it is not full. In a degraded marker mode no reserve write happens, but
+// noteRefused is never set there either, so the call is a no-op. Same-session replays do not
+// call it: commitRefresh never refuses, so a replay is no evidence about room.
+func (r *ratioTracker) noteSpliced() {
+	r.mu.Lock()
+	r.refusedAt = time.Time{}
+	r.mu.Unlock()
+}
+
+// reserveRefusingLocked reports a refusal inside the window with no splice since. Caller holds mu.
+func (r *ratioTracker) reserveRefusingLocked() bool {
+	return !r.refusedAt.IsZero() && r.clock().Sub(r.refusedAt) < reserveRefuseWindow
 }
 
 // observe records one attempted extraction: removedTok of totalTok (0 removed on a miss).
@@ -534,7 +575,7 @@ const shrinkPriorTokens = 8000
 // much an extraction can remove and still be accepted. Measured ratios were ~0.10-0.12.
 const maxLearnedRatio = 0.60
 
-// exploring reports whether the tracker still lacks the evidence to estimate a ratio, and
+// exploringWhy reports whether the tracker still lacks the evidence to estimate a ratio, and
 // consumes one exploration slot if so.
 //
 // This closes the SECOND deadlock of the same shape as the flat-cost one (see callCost).
@@ -548,20 +589,29 @@ const maxLearnedRatio = 0.60
 // The budget is PER SESSION: each session's traffic can differ, and a process-wide budget
 // would be exhausted by the first session and leave every later one unable to revise its
 // prior — the same off-switch failure at a larger scale.
-func (r *ratioTracker) exploring(session string) bool {
+//
+// While the reserve is refusing (#214), no slot is granted: a trial call's output would be
+// refused, so it would be pure waste, and the tracker cannot learn from a refused result.
+//
+// The second result is true when a slot was withheld only because the reserve is refusing. A
+// withheld slot is not consumed, so exploration resumes when the reserve frees.
+func (r *ratioTracker) exploringWhy(session string) (explore, skippedReserveFull bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.total >= minRatioSampleTokens {
-		return false // enough evidence; no need to spend on learning
+		return false, false // enough evidence; no need to spend on learning
 	}
 	if r.explored == nil {
 		r.explored = map[string]int{}
 	}
 	if r.explored[session] >= maxExploreCalls {
-		return false
+		return false, false
+	}
+	if r.reserveRefusingLocked() {
+		return false, true
 	}
 	r.explored[session]++
-	return true
+	return true, false
 }
 
 // maxExploreCalls bounds the exploration budget PER SESSION. Small on purpose: enough to
