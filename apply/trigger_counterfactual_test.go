@@ -276,7 +276,10 @@ func TestUpperFrozenModeStaysConservative(t *testing.T) {
 	p, _ := cfg.Build(nil)
 	st := store.NewMemory(store.Options{})
 	tracker := modes.NewTracker(0)
-	o := apply.Opts{Provider: bschemas.Anthropic, Session: bobSession, Tracker: tracker}
+	// A clock from before the tracker started, so turn 1 is not inside the restart grace
+	// (#496) and its boundary starts unknown, as this test models.
+	o := apply.Opts{Provider: bschemas.Anthropic, Session: bobSession, Tracker: tracker,
+		Now: time.Unix(1_700_000_000, 0)}
 
 	o.Body = compactBody(t, "grow", 30)
 	r1 := apply.BodyOpts(context.Background(), p, st, o)

@@ -231,6 +231,37 @@ func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
 	}
 }
 
+// Issue #496. The tracker's records die with the process; the provider's cache entries do not.
+// A tracker younger than restartGraceMs reads an unknown key as all cached, like a dropped key,
+// so a proxy restart cannot let components rewrite a live thread's cached prefix. The idle
+// clock stays unknown (prevAtMs 0), so nothing reads cold off a fabricated age.
+func TestAYoungTrackerReadsAnUnknownKeyAsAllCached(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds() // started 1 minute ago
+	if n, at := tr.TurnAt("unknown", 925, t0); n != 925 || at != 0 {
+		t.Fatalf("young tracker, unknown key = (%d, %d), want (925, 0): all cached, idle unknown", n, at)
+	}
+	// The same answer with a parent that has no record of its own: no usable parent.
+	if n, at := tr.TurnFrom("side", "nobody", 925, t0); n != 925 || at != 0 {
+		t.Fatalf("young tracker, unknown key with a parent = (%d, %d), want (925, 0)", n, at)
+	}
+}
+
+// Past the grace an unknown key is a new thread again, as before: no entry the restart forgot
+// can still be alive after the longest cache lifetime.
+func TestAnOldTrackerReadsAnUnknownKeyAsNew(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - 2*time.Hour.Milliseconds() // started 2 hours ago
+	if n, at := tr.TurnAt("unknown", 925, t0); n != 0 || at != 0 {
+		t.Fatalf("old tracker, unknown key = (%d, %d), want (0, 0): a new thread, as today", n, at)
+	}
+	if n, at := tr.TurnFrom("side", "nobody", 925, t0); n != 0 || at != 0 {
+		t.Fatalf("old tracker, unknown key with a parent = (%d, %d), want (0, 0)", n, at)
+	}
+}
+
 // At the bound, keys idle past StaleAfter expire first, all at once, before a live key is evicted.
 // Here b was used AFTER a, so least-recently-used alone would evict a, the live one.
 func TestStaleKeysExpireBeforeLiveOnes(t *testing.T) {

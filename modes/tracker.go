@@ -82,6 +82,14 @@ const DefaultMaxKeys = 4096
 // default keep-alive span.
 const StaleAfter = 6 * time.Hour
 
+// restartGraceMs is how long after the tracker starts an unknown key is read as all-cached
+// rather than as a new thread. The tracker's records die with the process; the provider's cache
+// entries do not. After a restart, a live thread's first request finds no record, and a 0
+// boundary would let every component rewrite a prefix the provider still holds (#496). The
+// grace lasts the longest cache lifetime, 1 hour: past it, no entry a restart forgot can still
+// be alive, so an unknown key is a new thread again.
+const restartGraceMs = int64(time.Hour / time.Millisecond)
+
 // Tracker holds the cached-prefix boundary per key (a session, or one thread of a session), each
 // key's state guarded by one lock so concurrent turns cannot interleave a read and a write.
 type Tracker struct {
@@ -89,6 +97,10 @@ type Tracker struct {
 	m   map[string]turn
 	max int    // bound on tracked keys; 0 => default
 	seq uint64 // use counter: each turn stamps its key, and the smallest stamp is evicted first
+	// startedAtMs is when this tracker was created, in unix milliseconds: a proxy restart's
+	// marker. An unknown key inside restartGraceMs of it reads as all-cached (#496). 0 (a
+	// Tracker built without NewTracker) gets no grace, which is the old behaviour.
+	startedAtMs int64
 	// dropped holds a hash of every key the tracker evicted or expired, bounded at 4x max. A
 	// later request on such a key gets the WHOLE request as its boundary (nothing may change),
 	// not 0. 0 would let every component rewrite a prefix the provider may still hold — the
@@ -115,8 +127,13 @@ func NewTracker(maxKeys int) *Tracker {
 	if maxKeys <= 0 {
 		maxKeys = DefaultMaxKeys
 	}
-	return &Tracker{m: map[string]turn{}, max: maxKeys, dropped: map[uint64]struct{}{}}
+	return &Tracker{m: map[string]turn{}, max: maxKeys, startedAtMs: time.Now().UnixMilli(), dropped: map[uint64]struct{}{}}
 }
+
+// SetStartedAt sets the tracker's start time (unix milliseconds). NewTracker stamps the real
+// clock; a test can set a past time to build a tracker BEYOND its restart grace (#496) without
+// waiting for the hour to pass.
+func (t *Tracker) SetStartedAt(ms int64) { t.startedAtMs = ms }
 
 // Turn records that this session's current turn carries n normalized messages and
 // returns the PREVIOUS turn's count — the cached-prefix boundary the request must be
@@ -157,6 +174,12 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 // A key the tracker dropped (evicted or expired), or a new key whose parent was dropped, gets
 // prevLen = n: the whole request is treated as cached, so nothing changes on this one turn, and
 // the next turn has a real record again.
+//
+// The same answer serves a proxy restart (#496): a key with no record, no drop and no usable
+// parent reads as all-cached while the tracker is younger than restartGraceMs, because the
+// process forgot the record, not the provider the prefix. A restart's cost is one turn: a
+// brand-new thread's first request cannot be changed either. Past the grace an unknown key is a
+// new thread again, as before.
 func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -167,6 +190,7 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 	case t.wasDropped(key):
 		prevLen = n
 	case parent == "":
+		prevLen = t.graceLocked(n, nowMs)
 	default:
 		if p, pok := t.m[parent]; pok {
 			prevLen, prevAtMs = min(p.n, n), p.at
@@ -175,6 +199,8 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 			// reads: all cached, as for a dropped key of its own. Peek only, so the parent's own
 			// next request still reads as dropped too.
 			prevLen = n
+		} else {
+			prevLen = t.graceLocked(n, nowMs)
 		}
 	}
 	if !ok && len(t.m) >= t.max {
@@ -189,6 +215,25 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64) (prevLen int,
 	t.seq++
 	t.m[key] = turn{n: n, at: at, used: t.seq}
 	return prevLen, prevAtMs
+}
+
+// graceLocked is the boundary for a key with no record, no drop and no usable parent: n when
+// the tracker started less than restartGraceMs ago (a restart that forgot a live thread, #496),
+// 0 as before once that window is past. prevAtMs stays 0 either way: the idle clock is unknown,
+// so nothing may read cold off it.
+//
+// nowMs <= 0 (the legacy Turn path, which records no time) gets no grace: there is no clock to
+// measure the restart against, and the request path always supplies one. A caller clock BEHIND
+// the start (a test's fixed past timestamp) is not a restart either: it reads as past the grace,
+// which keeps fake-clock callers on the old behaviour.
+func (t *Tracker) graceLocked(n int, nowMs int64) int {
+	if t.startedAtMs == 0 || nowMs <= 0 {
+		return 0
+	}
+	if d := nowMs - t.startedAtMs; d >= 0 && d < restartGraceMs {
+		return n
+	}
+	return 0
 }
 
 // pruneLocked makes room for one new key. It first expires every key idle past StaleAfter
