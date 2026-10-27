@@ -11,6 +11,7 @@ description: Home screen. Whether the local context-guru proxy is running and th
 to a snapshot file, and reply with the path only:
 
 ```bash
+set -o pipefail  # a failed curl must fail the pipeline, not write an empty snapshot through jq
 OUT="$(mktemp "${TMPDIR:-/tmp}/context-guru-stats-${PORT}.XXXXXX")"
 if command -v jq >/dev/null 2>&1; then
   curl -fsS "http://127.0.0.1:${PORT}/stats" | jq . >"$OUT"
