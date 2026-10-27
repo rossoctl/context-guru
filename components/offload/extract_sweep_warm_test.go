@@ -1945,3 +1945,234 @@ func TestTheWarmSweepOuterTimeoutFitsSeveralBatches(t *testing.T) {
 		t.Fatalf("the warm sweep asked %d of 3 batches: the OUTER bound must be the keeper's, not one question's", got)
 	}
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Diagnosis of the live run t94 (#720): why a refused answer showed no reason.
+
+// requestReferencingOutputs sends the next request with an assistant turn that quotes the identifiers of the
+// first n tool outputs. A reference made AFTER the question is what the recheck calls "referenced": the
+// output is still needed. The prefix is untouched, so this stays a WARM, unchanged-prefix apply that reaches
+// the gate (changing an output's text would change its message print and send the request down the cold
+// apply's changed-prefix path instead, which has no gate).
+func (r *warmRig) requestReferencingOutputs(n int) (*bschemas.BifrostChatRequest, *components.Report) {
+	r.t.Helper()
+	req := r.conv(r.step)
+	prev := r.conv(r.step - 1)
+	r.step++
+	var refs []string
+	for i := 0; i < n; i++ {
+		refs = append(refs, fmt.Sprintf("handler_%d_timeout_ms in src/api/users_%d.py:42", i, i))
+	}
+	req.Input = append(req.Input, assistantMsg("I will raise "+strings.Join(refs, " and ")+" now"), userMsg("ok"))
+	c := warmCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.PrevBilledInput = int(r.ratio * float64(localTokens(prev.Input)))
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := r.e.Offload(req, rep, c); err != nil {
+		r.t.Fatal(err)
+	}
+	return req, rep
+}
+
+// ⭐ FIX 1. The recheck's reasons are booked BEFORE the gate, on the row and in the decision. Before, they
+// were booked at the end of applyHeldFrom, which a refusal never reaches: a refused answer showed no reason
+// for what the recheck had thrown out.
+func TestARefusedWarmApplyBooksWhyTheRecheckDroppedTheJudgesDrops(t *testing.T) {
+	r := newWarmRig(t, "w-recheck", warmCfg, payingTail(), 1.0)
+	r.toHeld() // the judge proposes all 3 outputs as drops
+	_, rep := r.requestReferencingOutputs(3)
+	if rep.Events[eventAppliedWarm] != 0 {
+		t.Fatalf("fixture: nothing may apply (events %v)", rep.Events)
+	}
+	if rep.Events["sweep_apply_dropped_referenced_later"] != 3 {
+		t.Errorf("events = %v, want sweep_apply_dropped_referenced_later = 3 on the row of a REFUSED apply", rep.Events)
+	}
+	ds := decisionsOf("apply")
+	if len(ds) != 1 {
+		t.Fatalf("apply decisions = %+v, want one", SweepWarmCounters().RecentDecisions)
+	}
+	d := ds[0]
+	if d.Accept || d.Reason != "no_valid_drop" || d.Proposed != 3 || d.Dropped["referenced_later"] != 3 {
+		t.Fatalf("decision = %+v, want a refusal no_valid_drop with proposed 3 and dropped referenced_later 3", d)
+	}
+}
+
+// A partial invalidation is recorded too, on an answer the gate then accepts or refuses on what is left.
+func TestAPartialRecheckLossIsRecordedWithItsReason(t *testing.T) {
+	r := newWarmRig(t, "w-recheck2", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	_, rep := r.requestReferencingOutputs(1)
+	if rep.Events["sweep_apply_dropped_referenced_later"] != 1 {
+		t.Fatalf("events = %v, want referenced_later = 1", rep.Events)
+	}
+	ds := decisionsOf("apply")
+	if len(ds) != 1 || ds[0].Proposed != 3 || ds[0].Dropped["referenced_later"] != 1 {
+		t.Fatalf("decisions = %+v, want proposed 3 and one referenced_later", SweepWarmCounters().RecentDecisions)
+	}
+}
+
+// An accepted apply records its reasons too (none dropped: the map is empty, proposed is the count).
+func TestAnAcceptedWarmApplyRecordsWhatItProposedAndThatNothingWasDropped(t *testing.T) {
+	r := newWarmRig(t, "w-recheck3", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	_, rep := r.request(nil)
+	if rep.Events[eventAppliedWarm] != 3 {
+		t.Fatalf("fixture: want 3 applied (events %v)", rep.Events)
+	}
+	ds := decisionsOf("apply")
+	if len(ds) != 1 || !ds[0].Accept || ds[0].Proposed != 3 || len(ds[0].Dropped) != 0 {
+		t.Fatalf("decisions = %+v, want an accept with proposed 3 and nothing dropped", SweepWarmCounters().RecentDecisions)
+	}
+}
+
+// ⭐ FIX 2. The judge proposing NOTHING is not "no valid drop": there was nothing to recheck.
+func TestAnAnswerThatProposedNoDropIsLabeledNoDropProposed(t *testing.T) {
+	keepAll := &batchAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		var parts []string
+		for _, l := range askLabelRe.FindAllStringSubmatch(ask, -1) {
+			parts = append(parts, `{"i":`+l[1]+`,"needed_by":"a","quote":"","verdict":"keep"}`)
+		}
+		return "[" + strings.Join(parts, ",") + "]", components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
+	}}
+	r := bigWarmRig(t, "w-noprop", 8, keepAll)
+	for i := 0; i < 3; i++ {
+		r.request(nil)
+	}
+	r.forward()
+	if !r.held() {
+		t.Fatalf("fixture: a kept-everything answer must still be held (%+v)", SweepWarmCounters())
+	}
+	r.request(nil)
+	ds := decisionsOf("apply")
+	if len(ds) != 1 || ds[0].Reason != "no_drop_proposed" || ds[0].Proposed != 0 {
+		t.Fatalf("decisions = %+v, want no_drop_proposed with proposed 0", SweepWarmCounters().RecentDecisions)
+	}
+	if SweepWarmCounters().Reasons["no_drop_proposed"] != 1 || SweepWarmCounters().Reasons["no_valid_drop"] != 0 {
+		t.Errorf("gate reasons = %v, want no_drop_proposed once and no_valid_drop never", SweepWarmCounters().Reasons)
+	}
+}
+
+// ⭐ FIX 3. A request with FEWER messages than the held answer judged is a different conversation: the answer
+// is dropped at once and counted, instead of blocking a new question until the next apply.
+func TestAHeldAnswerIsDroppedWhenTheConversationShrinks(t *testing.T) {
+	r := newWarmRig(t, "w-shrink", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	// The agent starts over: a conversation of 4 messages.
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("a fresh start"), assistantMsg("ok"), userMsg("go"), assistantMsg("sure")}}
+	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
+	c := warmCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.PrevBilledInput = 1000
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := r.e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if r.held() {
+		t.Fatal("the held answer for the old conversation is still held")
+	}
+	if SweepWarmCounters().HeldShrunk != 1 {
+		t.Fatalf("counters = %+v, want held_shrunk = 1", SweepWarmCounters())
+	}
+	ds := decisionsOf("apply")
+	if len(ds) != 1 || ds[0].Reason != "conversation_shrunk" || ds[0].Proposed != 3 || ds[0].Accept {
+		t.Fatalf("decisions = %+v, want a conversation_shrunk refusal carrying proposed 3", SweepWarmCounters().RecentDecisions)
+	}
+	// And it is NOT the gate's: no gate decision was made on an answer that no longer applies.
+	if c := SweepWarmCounters(); c.GateAccept+c.GateRefuse != 0 {
+		t.Errorf("the gate decided on a voided answer: %+v", c)
+	}
+	// Nothing was applied to the new conversation.
+	for _, i := range toolIndices(req) {
+		if expand.HasPlaceholder(schema.MessageText(req.Input[i])) {
+			t.Fatal("a drop was applied to a different conversation")
+		}
+	}
+}
+
+// A conversation that did NOT shrink keeps its answer (the guard fires only on a shorter request).
+func TestAHeldAnswerSurvivesAConversationThatGrew(t *testing.T) {
+	r := newWarmRig(t, "w-noshrink", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	r.request(nil)
+	if SweepWarmCounters().HeldShrunk != 0 {
+		t.Fatalf("counters = %+v, want held_shrunk = 0 for a conversation that grew", SweepWarmCounters())
+	}
+}
+
+// ⭐ FIX 5. Fabricated quotes are counted per batch position, with how many candidates and verdicts each
+// carried, so the next run can tell a batch effect from a model effect.
+func TestFabricatedQuotesAreCountedPerBatchPosition(t *testing.T) {
+	resetSweepBatchForTest()
+	// Batch 0 answers with honest empty quotes; batch 1 answers every verdict with a quote that is in no message.
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		var parts []string
+		for _, l := range askLabelRe.FindAllStringSubmatch(ask, -1) {
+			q := ""
+			if n == 1 {
+				q = "a sentence that appears nowhere in the conversation at all"
+			}
+			needed := "none"
+			if q != "" {
+				needed = "a"
+			}
+			parts = append(parts, `{"i":`+l[1]+`,"needed_by":"`+needed+`","quote":"`+q+`","verdict":"keep"}`)
+		}
+		return "[" + strings.Join(parts, ",") + "]", okUse, nil
+	}}
+	askN(t, a, "", 20, SweepPingWait{}) // 2 batches of 10
+	by := SweepBatchCounters().ByIndex
+	if len(by) != 2 {
+		t.Fatalf("by-index stats = %+v, want 2 batch positions", by)
+	}
+	if by[0].Asked != 1 || by[0].Items != 10 || by[0].Judged != 10 || by[0].Fabricated != 0 {
+		t.Errorf("batch 0 = %+v, want asked 1, items 10, judged 10, fabricated 0", by[0])
+	}
+	if by[1].Asked != 1 || by[1].Items != 10 || by[1].Judged != 10 || by[1].Fabricated != 10 {
+		t.Errorf("batch 1 = %+v, want asked 1, items 10, judged 10, fabricated 10", by[1])
+	}
+}
+
+// A batch that FAILED is not tallied as judged: it has no verdicts.
+func TestAFailedBatchIsNotCountedAsJudged(t *testing.T) {
+	resetSweepBatchForTest()
+	a := &dynAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+		if n == 0 {
+			return "", components.PrefixUsage{}, errors.New("boom")
+		}
+		return dropAll(ask), okUse, nil
+	}}
+	askN(t, a, "", 20, SweepPingWait{})
+	by := SweepBatchCounters().ByIndex
+	if len(by) != 2 || by[0].Asked != 0 || by[0].Judged != 0 || by[1].Asked != 1 || by[1].Judged != 10 {
+		t.Fatalf("by-index stats = %+v, want batch 0 untouched (it failed) and batch 1 judged 10", by)
+	}
+}
+
+// The boundary of the shrink rule: a request with EXACTLY as many messages as the answer judged is the same
+// conversation (nothing was added yet), so the answer is kept. Only a SHORTER one voids it.
+func TestAHeldAnswerIsKeptWhenTheRequestHasExactlyAsManyMessagesAsItJudged(t *testing.T) {
+	r := newWarmRig(t, "w-boundary", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	warmMu.Lock()
+	judged := warmThreads[r.key()].held.Judged
+	warmMu.Unlock()
+	// The conversation the answer was asked about, resent unchanged: exactly `judged` messages.
+	req := r.conv(r.step - 1)
+	if len(req.Input) != judged {
+		t.Fatalf("fixture: the resent conversation has %d messages, the answer judged %d", len(req.Input), judged)
+	}
+	c := warmCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.PrevBilledInput = int(r.ratio * float64(localTokens(req.Input)))
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := r.e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if SweepWarmCounters().HeldShrunk != 0 {
+		t.Fatalf("counters = %+v: an equal-length request must not void the answer", SweepWarmCounters())
+	}
+	// It is APPLIED (the gate decided), not voided.
+	if len(decisionsOf("apply")) != 1 || decisionsOf("apply")[0].Reason == "conversation_shrunk" {
+		t.Fatalf("decisions = %+v, want the gate's own decision", SweepWarmCounters().RecentDecisions)
+	}
+}
