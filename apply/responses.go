@@ -536,7 +536,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(ttl, ttlKind))
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {

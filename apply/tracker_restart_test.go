@@ -68,11 +68,15 @@ func extract(t *testing.T, res apply.Result) *components.Report {
 // zero, so the request runs on the real clock the tracker started on). It returns the tracker
 // too, so a test can send a second request on the same thread.
 func runRestart(t *testing.T, p *components.Pipeline, body []byte, age time.Duration) (apply.Result, *modes.Tracker) {
+	return runRestartOn(t, p, body, age, bschemas.Anthropic)
+}
+
+func runRestartOn(t *testing.T, p *components.Pipeline, body []byte, age time.Duration, provider bschemas.ModelProvider) (apply.Result, *modes.Tracker) {
 	t.Helper()
 	tr := modes.NewTracker(0)
 	tr.SetStartedAt(time.Now().Add(-age).UnixMilli())
 	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
-		Provider: bschemas.Anthropic, CacheMode: "on", Tracker: tr,
+		Provider: provider, CacheMode: "on", Tracker: tr,
 		Body: body, Models: components.ModelSpec{Incoming: restartModel{}},
 	})
 	return res, tr
@@ -228,5 +232,59 @@ func TestAnExtendedTierRequestStaysProtectedLongerAfterARestart(t *testing.T) {
 	}
 	if len(rep.ChangedIdx) != 0 {
 		t.Errorf("extract_llm changed messages %v deep in a prefix the provider still holds", rep.ChangedIdx)
+	}
+}
+
+// The owner's rule for OpenAI: every OpenAI request gets the 30-minute minimum as its grace,
+// whatever CacheLifetime says about the model. gpt-5.5 predates GPT-5.6, so its lifetime reads
+// Unknown — the cold gate must not act on that — but its prefixes survive too, so the grace
+// uses the documented minimum all the same. 20 minutes after the start is inside 30 minutes;
+// 31 minutes is past it.
+func TestAnOlderOpenAIRequestGetsTheThirtyMinuteGrace(t *testing.T) {
+	cfg := pipe(t, "pipeline: [extract_llm]\ncomponents:\n"+
+		"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, "+
+		"allow_on_caching_backend: true, trigger: {min_request_frac: 0}}\n")
+	p, err := cfg.Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same 925-message shape in the chat-completions dialect: the user turn, then 462
+	// tool_call/tool-result pairs.
+	msgs := []map[string]any{{"role": "user", "content": "go"}}
+	for i := 0; i < 462; i++ {
+		id := fmt.Sprintf("call_%d", i)
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "tool_calls": []map[string]any{
+				{"id": id, "type": "function", "function": map[string]any{"name": "Read", "arguments": "{}"}}}},
+			map[string]any{"role": "tool", "tool_call_id": id,
+				"content": fmt.Sprintf("output %d\n%s", i, strings.Repeat("payload line\n", 600))})
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5", "metadata": map[string]any{"taskId": "restart-496-openai"}, "messages": msgs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, _ := runRestartOn(t, p, body, 20*time.Minute, bschemas.OpenAI)
+	if res.Messages != 925 {
+		t.Fatalf("normalized message count = %d, want 925 (the fixture changed shape)", res.Messages)
+	}
+	if res.MaxCachedIdx != 924 {
+		t.Fatalf("20 minutes past the start, OpenAI 30-minute grace: MaxCachedIdx = %d, want 924 (the whole prompt is the cached part)", res.MaxCachedIdx)
+	}
+	rep := extract(t, res)
+	if rep.Gates["cached_prefix"] == 0 {
+		t.Errorf("extract_llm gated nothing on cached_prefix (gates %v): it was free to compact the prefix", rep.Gates)
+	}
+	if len(rep.ChangedIdx) != 0 {
+		t.Errorf("extract_llm changed messages %v deep in a prefix the provider still holds", rep.ChangedIdx)
+	}
+
+	// Past the 30-minute grace the thread is new, as before the PR.
+	res31, _ := runRestartOn(t, p, body, 31*time.Minute, bschemas.OpenAI)
+	if res31.MaxCachedIdx != -1 {
+		t.Fatalf("31 minutes past the start, OpenAI 30-minute grace: MaxCachedIdx = %d, want -1 (a new thread, as today)", res31.MaxCachedIdx)
 	}
 }
