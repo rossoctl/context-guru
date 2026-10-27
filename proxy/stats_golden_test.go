@@ -129,6 +129,11 @@ var statsGoldenTopLevel = []string{
 	"sse_buffered",
 	"sse_buffered_pct",
 	"sse_expand_after_stream",
+	// The adjudication half of that leak, split out so the pair can name its tool (#174).
+	// Added to the reviewed contract rather than loosening the assertion: while the two
+	// share one key, an operator reading "the peek leaked" cannot tell a splice that gave
+	// up on an answerable turn from the deliberate co-call deferral.
+	"sse_adjudicate_after_stream",
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",

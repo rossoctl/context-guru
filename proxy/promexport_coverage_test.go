@@ -219,14 +219,15 @@ var notExportedWhy = map[string]string{
 	// off `s` for the reason this map's preamble gives: the /stats handler fills the field AFTER
 	// renderMetrics takes its snapshot, so a promLine off `s` would export a permanent 0 while
 	// passing this test.
-	"ExpandPrefixFlips":     "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
-	"UpstreamMsAvgBypassed": "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
-	"SSETTFBMsAvgBuf":       "NOT EXPORTED YET — buffered responses' time-to-last-byte",
-	"SSEExpandAfterStream":  "NOT EXPORTED YET — the SSE peek's price; alert candidate",
-	"AttemptedTokens":       "NOT EXPORTED YET — the honest savings denominator",
-	"FrozenTokens":          "NOT EXPORTED YET — what cache-awareness left alone",
-	"SavingsPctAttempted":   "NOT EXPORTED YET — saved/attempted, the ratio that does not trend to 0",
-	"SavingsPctNewInput":    "NOT EXPORTED YET — saved/(fresh+cache_write+saved)",
+	"ExpandPrefixFlips":        "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
+	"UpstreamMsAvgBypassed":    "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
+	"SSETTFBMsAvgBuf":          "NOT EXPORTED YET — buffered responses' time-to-last-byte",
+	"SSEExpandAfterStream":     "NOT EXPORTED YET — the SSE peek's price; alert candidate",
+	"SSEAdjudicateAfterStream": "NOT EXPORTED YET — the other half of the peek's price, split from SSEExpandAfterStream (#174); export the pair together or the alert cannot say which tool leaked",
+	"AttemptedTokens":          "NOT EXPORTED YET — the honest savings denominator",
+	"FrozenTokens":             "NOT EXPORTED YET — what cache-awareness left alone",
+	"SavingsPctAttempted":      "NOT EXPORTED YET — saved/attempted, the ratio that does not trend to 0",
+	"SavingsPctNewInput":       "NOT EXPORTED YET — saved/(fresh+cache_write+saved)",
 }
 
 // TestExpandUnresolvedSeriesRender: both reasons are present with a value even at zero (a

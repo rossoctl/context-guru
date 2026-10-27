@@ -1673,8 +1673,30 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// EVERY way this request can end has to end it with a complete turn, and these are the
 	// bytes that do it. prevWithheld keeps the round before's, because a continuation round
 	// that carries no terminator of its own leaves the earlier round's message_stop as the
-	// only one the client will ever get.
+	// only one the client will ever get. called is hoisted with them for the same reason: a
+	// round that ends the request without running pass (an upstream failure, a JSON round
+	// after a stream) is still holding the previous round's tool_use, and that is the leak
+	// countLeak has to attribute.
 	var withheld, prevWithheld []byte
+	var called []string
+	// countLeak attributes a proxy tool_use this loop handed the client, BY TOOL (#174). pass
+	// reports the names it withheld, so every hand-back knows what it is handing back —
+	// including the two bail sites that never parse the turn (a failed SSE aggregation, a
+	// spent round cap), which is why the split was once deferred as impossible. A round can
+	// leak BOTH tools at once, so both are counted: the either/or a boolean `found` could not
+	// express was the original defect.
+	countLeak := func(called []string) {
+		if h.agg == nil {
+			return
+		}
+		for _, name := range called {
+			if name == adjudicate.ToolName {
+				h.agg.RecordSSEAdjudicateAfterStream()
+			} else {
+				h.agg.RecordSSEExpandAfterStream()
+			}
+		}
+	}
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1790,8 +1812,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// model's turn — so end the turn with the events the splice withheld
 				// instead. The client sees the model's own call, which is the same fail-open
 				// as every other round the loop cannot finish.
-				if withheld != nil && h.agg != nil {
-					h.agg.RecordSSEExpandAfterStream()
+				if withheld != nil {
+					countLeak(called)
 				}
 				sp.handBack(withheld)
 				sp.terminate(withheld)
@@ -1845,7 +1867,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			return
 		}
 		var respBody []byte
-		found := false // this round called the expand tool
 		switch {
 		case isSSE && provider == bschemas.Anthropic:
 			// Forward the events as they arrive and stop at the expand call, rather than
@@ -1859,10 +1880,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
-			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
 			resp.Body.Close()
 			switch {
-			case found && sp.blocks == 0:
+			case len(called) > 0 && sp.blocks == 0:
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -1872,7 +1893,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			case !sseBuffered:
 				sseFirstByte = sp.first
 			}
-			lg.Debug("cg.sse_splice", "round", round, "expand_call", found,
+			lg.Debug("cg.sse_splice", "round", round, "proxy_calls", strings.Join(called, ","),
 				"blocks_sent", sp.blocks, "bytes", len(respBody))
 		case isSSE && wire == "responses" && expand.HasMarkersInMessages(body):
 			// Responses' terminal event includes the complete output array. Buffer
@@ -1915,13 +1936,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if isSSE && sp != nil && withheld == nil {
-			// The whole round is already on the wire. Either it never called expand, or it
-			// ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
-			// that second case the client has our tool_use, which is the leak the counter
-			// exists for.
-			if found && h.agg != nil {
-				h.agg.RecordSSEExpandAfterStream()
-			}
+			// The whole round is already on the wire. Either it never called a proxy tool, or
+			// it ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
+			// that second case the client has our tool_use, which is the leak these counters
+			// exist for.
+			countLeak(called)
 			sp.terminate(prevWithheld)
 			return
 		}
@@ -1935,18 +1954,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				writeRaw(w, resp, respBody)
 				return
 			}
-			// KNOWN CONFLATION, recorded rather than fixed. This counts "the peek withheld a
-			// proxy tool_use and handed it back", but the metric is named for expand, so an
-			// adjudicate leak (the co-call deferral below) lands in the expand bucket. Not split
-			// here for three reasons: the field is /stats-only and reaches no dashboard or alert
-			// (notExportedWhy calls it "NOT EXPORTED YET"); two of the three bail sites — a round
-			// that failed SSE aggregation, and a spent maxExpandRounds — cannot attribute the leak
-			// at all, because nothing has parsed the turn yet; and a leak can be BOTH at once, so
-			// the honest split is two counters and a new exported family with its own render and
-			// vacuity guard, which is a metrics change rather than this PR's subject. Filed
-			// separately; until then, read this counter as "proxy tool_use reached the client".
-			if withheld != nil && h.agg != nil {
-				h.agg.RecordSSEExpandAfterStream()
+			// The leak is attributed BY TOOL (#174): pass reports which proxy tools the round
+			// named, so an adjudicate leak lands in sse_adjudicate_after_stream rather than
+			// the expand bucket it used to share — this used to be recorded as a known
+			// conflation because the two bail sites that never parse the turn were thought
+			// unattributable, but the peek knows the name before any parsing happens. Both
+			// counters stay /stats-only until the family is exported (notExportedWhy), and
+			// the pair is what an alert would read.
+			if withheld != nil {
+				countLeak(called)
 			}
 			sp.handBack(withheld)
 			// Idempotent via sp.ended: if those events closed the turn this is a no-op, and

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -174,19 +175,21 @@ const sseRetainMaxBytes = 16 << 20
 // the round's whole event stream — forwarded and withheld together — because the
 // continuation loop reconstructs the assistant turn from all of it. withheld is the
 // deciding event and everything after it: the caller either answers it or hands it back.
+// called is WHICH proxy tools the round named, in order of first appearance and deduplicated:
+// the caller counts a leaked tool_use by tool (#174), which a bare `found` could not tell it.
 //
 // Past sseRetainMaxBytes it returns whole=nil: the turn can no longer be rebuilt, so nothing
-// can be intercepted, and everything is forwarded as it arrives. found still reports whether
-// the response called expand, because the client then receives that call and the caller has
-// to count it.
+// can be intercepted, and everything is forwarded as it arrives. called still reports which
+// proxy tools the response named, because the client then receives those calls and the caller
+// has to count them.
 //
 // ONE REQUIRED NAME plus a variadic tail, rather than a bare `proxyTools ...string`. A bare variadic
 // compiles with NO names at all, and an empty withhold set silently disables this entire defence:
-// startsProxyToolCall can never match, found stays false, cut stays -1, and every proxy-injected
+// startsProxyToolCall can never match, called stays empty, cut stays -1, and every proxy-injected
 // tool_use streams straight to the client while the call site reads as though it were protected. The
 // two-argument signature this grew out of made that unrepresentable; this keeps that property while
 // still taking a set.
-func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...string) (whole, withheld []byte, found bool) {
+func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...string) (whole, withheld []byte, called []string) {
 	proxyTools := append([]string{proxyTool}, moreProxyTools...)
 	br := bufio.NewReader(body)
 	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events.
@@ -201,8 +204,10 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 		e, err := readSSEEvent(br, &ev)
 		if len(e) > 0 {
 			sent := false
-			if startsProxyToolCall(e, proxyTools) {
-				found = true
+			if name := proxyToolCallName(e, proxyTools); name != "" {
+				if !slices.Contains(called, name) {
+					called = append(called, name)
+				}
 				if !over && cut < 0 {
 					cut = buf.Len()
 				}
@@ -226,13 +231,13 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 		}
 		if err != nil {
 			if over {
-				return nil, nil, found
+				return nil, nil, called
 			}
 			whole = buf.Bytes()
 			if cut < 0 {
-				return whole, nil, found
+				return whole, nil, called
 			}
-			return whole, whole[cut:], found
+			return whole, whole[cut:], called
 		}
 	}
 }
@@ -388,24 +393,31 @@ func sseEventPayload(ev []byte) string {
 // "not found" and the agent loses a turn. Unlike expand, an agent call to the adjudication tool is
 // never useful, so there is nothing on the other side of the trade.
 func startsProxyToolCall(ev []byte, proxyTools []string) bool {
+	return proxyToolCallName(ev, proxyTools) != ""
+}
+
+// proxyToolCallName is startsProxyToolCall's answering half: WHICH injected tool the block calls,
+// or "". pass needs the name, not only the fact, so it can hand the caller the attribution a
+// leaked tool_use is counted by (#174) — a boolean found collapsed the two tools into one bucket.
+func proxyToolCallName(ev []byte, proxyTools []string) string {
 	if !bytes.Contains(ev, []byte("content_block_start")) {
-		return false // cheap reject: the parse below is the expensive half
+		return "" // cheap reject: the parse below is the expensive half
 	}
 	p := gjson.Parse(sseEventPayload(ev))
 	if p.Get("type").String() != "content_block_start" {
-		return false
+		return ""
 	}
 	cb := p.Get("content_block")
 	if cb.Get("type").String() != "tool_use" {
-		return false
+		return ""
 	}
 	name := cb.Get("name").String()
 	for _, t := range proxyTools {
 		if t != "" && name == t {
-			return true
+			return t
 		}
 	}
-	return false
+	return ""
 }
 
 // terminate closes the client's turn if nothing has. A continuation round is not obliged to
