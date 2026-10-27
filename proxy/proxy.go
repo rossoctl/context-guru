@@ -1775,8 +1775,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// The session id is derived HERE rather than on the request path, so observe keeps
 			// paying only the enqueue for its measurement — the property modes.go documents.
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
-				if sid := apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"),
-					provider, body); sid != "" {
+				// The id the shadow pipeline derives (post-transform), not the raw body's: see
+				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
+					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 				}
 			}
