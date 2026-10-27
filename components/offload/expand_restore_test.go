@@ -93,8 +93,8 @@ func TestFixedRestoreKeepsTheCompactionAtTheOriginalPosition(t *testing.T) {
 				if first == tc.body || len(ids) == 0 {
 					t.Fatalf("turn 1 did not compact the output behind a marker, so there is nothing to keep: %.120q", first)
 				}
-				MarkKeptVerbatim(st, tc.body)
 				c := ctxFor(st, false)
+				MarkKeptVerbatim(st, c.Session, tc.body)
 				if restored {
 					c.Restored = map[string]string{contentKey(tc.body): ids[0]}
 				}
@@ -135,7 +135,7 @@ func TestTheSpanGuardProtectsARestoredOriginalInEitherForm(t *testing.T) {
 	const id = "0123456789abcdef"
 	c := &components.Ctx{Store: store.NewMemory(store.Options{}),
 		Restored: map[string]string{contentKey(body): id}}
-	MarkKeptVerbatim(c.Store, body)
+	MarkKeptVerbatim(c.Store, "s", body)
 	if isKeptVerbatim(c, contentKey(body)) {
 		t.Fatal("a restored original still reads as kept-verbatim, so every offloader would flip it")
 	}

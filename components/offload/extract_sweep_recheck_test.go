@@ -117,7 +117,7 @@ func TestRecheckDropsAVerdictForEachReasonAndOnlyThen(t *testing.T) {
 		req := refConversation(3)
 		c := cold()
 		c.Store = newMemStore() // its own store: the mark must not leak into the other cases
-		c.Store.Put(keptKey(contentKey(text(3))), []byte("1"))
+		c.Store.Put(keptKey("recheck", contentKey(text(3))), []byte("1"))
 		res := recheckHeld(c, req, h, e.minTokens)
 		if reasonsOf(res)[RecheckExpanded] != 1 || len(res.Valid) != 2 {
 			t.Fatalf("want 1 expanded and 2 valid, got valid=%d %v", len(res.Valid), reasonsOf(res))
