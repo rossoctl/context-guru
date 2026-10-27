@@ -85,7 +85,17 @@ esac
 PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-off}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 BIN="${CONTEXT_GURU_BIN:-context-guru-proxy}"
-LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT:-unresolved}.log"
+# The log lives in the STATE directory, not TMPDIR (#251). Every other artefact this script writes
+# (pidfile, fingerprint, owner, dashboard DB) is scoped by CONTEXT_GURU_STATE, and the log was the
+# one that was not: pinning the state dir isolated everything but the log, so independent runs on
+# one machine shared ${TMPDIR}/context-guru-proxy-<port>.log — an append-only file with no per-run
+# boundary, whose "last lines" a failure report then read as this run's evidence. Resolved from the
+# same expression STATE uses in section (1b), with the same mkdir fallback to TMPDIR for a state
+# directory that cannot be made; resolved HERE because the gate's breadcrumbs below write to the log
+# before section (1b) needs STATE itself.
+LOG_DIR="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}"
+LOG="${LOG_DIR}/proxy-${PORT:-unresolved}.log"
 # See --emit-facts below. Off by default: the hook path's output is read by a person.
 EMIT_FACTS=0
 HEALTH="http://127.0.0.1:${PORT}/healthz"
@@ -254,7 +264,7 @@ case "$PORT_ARG" in
   *[!0-9]*) note "ignoring --port '$PORT_ARG': not a number" ;;
   *)
     PORT="$PORT_ARG"
-    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    LOG="${LOG_DIR}/proxy-${PORT}.log"
     HEALTH="http://127.0.0.1:${PORT}/healthz"
     ;;
 esac
@@ -301,7 +311,7 @@ fi
 if [ -z "$PORT" ]; then
   if [ "$FORCE" = 1 ]; then
     PORT="8787"
-    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    LOG="${LOG_DIR}/proxy-${PORT}.log"
     HEALTH="http://127.0.0.1:${PORT}/healthz"
   else
     printf '%s declined: no install routes this directory and no port is configured\n' \
@@ -325,8 +335,16 @@ case "${ANTHROPIC_BASE_URL:-}" in
     # no-op statement, the script ran unrouted and exited here without a word — no output, no log,
     # no pidfile. Three rounds of guessing followed, and the fix was only found by reading this
     # branch in the source. One line costs nothing and answers it immediately.
+    #
+    # The URL is logged with its userinfo (user:pass@) replaced and its query dropped entirely, the
+    # way settings.py's redact_url protects credentials everywhere else it prints a base URL (#251):
+    # the diagnostic value is the port mismatch — the scheme, host and path — not the credentials a
+    # URL can carry. The query goes whole rather than selectively masked, because a query can carry
+    # a credential under a name no list of credential-looking words catches.
+    url_=$(printf '%s' "${ANTHROPIC_BASE_URL:-unset}" \
+      | sed -E -e 's#(//)[^/@?]*@#\1<credentials not shown>@#' -e 's#[?#].*##')
     printf '%s declined: ANTHROPIC_BASE_URL=%s does not name port %s; pass --force to start anyway\n' \
-      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${ANTHROPIC_BASE_URL:-unset}" "$PORT" >>"$LOG" 2>/dev/null
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$url_" "$PORT" >>"$LOG" 2>/dev/null
     exit 0 ;;
 esac
 fi
@@ -1020,6 +1038,18 @@ liveness check on pid %s, which cannot tell a proxy that bound from one that is 
   return 1
 }
 
+# A per-run boundary in the log, and section (5) shows only lines after it (#251). The log is
+# append-only across starts by design (the one-hour-key recovery reads rejections an earlier attempt
+# in THIS run wrote), and `tail -n 5` on a fresh failure with nothing written yet used to print
+# whatever an EARLIER run left — worst case a previous successful run's lines, read as evidence for
+# this failure. The marker is written only when a launch is about to be attempted, so the already-up
+# and declined paths leave no trace they do not already leave. Same byte-offset discipline as
+# ATTEMPT_LOG_START below, which scopes the per-attempt reads the same way.
+RUN_LOG_START=$(wc -c <"$LOG" 2>/dev/null | tr -d ' ') || RUN_LOG_START=0
+: "${RUN_LOG_START:=0}"
+printf '%s run start: pid=%s port=%s preset=%s\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$" "$PORT" "$PRESET" >>"$LOG" 2>/dev/null
+
 if attempt_launch; then
   exit 0
 fi
@@ -1049,8 +1079,11 @@ fi
 # binary before this comment was written); stripping the backslashes before grepping is what
 # makes the pattern below see the quote that is actually there.
 rejected_preset=""
+# From the run-start marker onward only (#251): the log is append-only and shared across starts, so
+# an earlier run's rejection must not make this run drop the user's preset — the same rule
+# TestAFailureReportShowsOnlyThisRunsLogLines holds for the failure report's tail.
 if [ -s "$LOG" ]; then
-  rejected_preset=$(sed 's/\\//g' "$LOG" 2>/dev/null \
+  rejected_preset=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' \
                        | grep -o 'unknown preset "[^"]*"' | tail -1 \
                        | sed -E 's/unknown preset "(.*)"/\1/')
 fi
@@ -1130,7 +1163,9 @@ fi
 # on "no preset was rejected" made it unreachable in exactly the case where the log holds the
 # most information: after a preset fallback whose own retry failed differently.
 if [ -s "$LOG" ]; then
-  unescaped=$(sed 's/\\//g' "$LOG" 2>/dev/null)
+  # From the run-start marker onward only (#251), same as the preset grep above: a stale line from
+  # an earlier run must not name a cause this run never hit.
+  unescaped=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g')
   if printf '%s\n' "$unescaped" | grep -qE 'unknown (strategy|baseline strategy|upstream) "'; then
     # Sibling config errors this plugin cannot fall back from — a strategy or upstream name has
     # no safe universal substitute the way `off` is for a preset — but a NAMED cause is still
@@ -1147,8 +1182,12 @@ fi
 note "the proxy did not come up on port ${PORT}; this session's requests will fail until it does."
 note "log: ${LOG}"
 note "fix it with /context-guru:status, or stop routing with /context-guru:uninstall."
-if [ -s "$LOG" ]; then
+# Only THIS run's lines, from the run-start marker onward (#251): an append-only log shared across
+# starts otherwise lets a fresh failure with nothing written yet report an earlier run's output —
+# a previous SUCCESSFUL run's lines being the worst case, because they read as "the proxy is fine"
+# during a failure. Nothing after the marker prints nothing, which is the honest report.
+if [ -s "$LOG" ] && [ -n "$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null)" ]; then
   note "last lines:"
-  tail -n 5 "$LOG" | sed 's/^/context-guru:   /'
+  tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | tail -n 5 | sed 's/^/context-guru:   /'
 fi
 exit 0
