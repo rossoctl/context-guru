@@ -74,6 +74,24 @@ type ExtractSweep struct {
 	// maxAskBatches is how many batches one sweep asks (max_ask_batches).
 	maxAskBatches int
 
+	// warm turns on the WARM path (#491): the sweep also asks while the cache is live, holds the answer
+	// in memory, and applies it on a later warm request only if the economic gate says it pays. OFF by
+	// default and in no preset. See extract_sweep_warm.go.
+	warm bool
+	// warmEveryN is the fewest warm requests of a thread between two warm questions.
+	warmEveryN int
+	// warmMinAge is how many model turns old an output must be to be a warm candidate.
+	warmMinAge int
+	// warmMaxTurns caps the warm turns the gate may expect.
+	warmMaxTurns int
+	// warmMinMassFrac: ask only when the removable mass is at least this share of the conversation.
+	warmMinMassFrac float64
+	// warmGatePriceModel, when set, prices the warm gate's saving and rewrite with THAT model's rates
+	// instead of the request's. A DIAGNOSTIC setting: see warmGateRates.
+	warmGatePriceModel string
+	// warmExpectedTurns, when > 0, is the session length the warm gate assumes (warm_expected_turns).
+	warmExpectedTurns int
+
 	mode markerMode
 }
 
@@ -138,6 +156,23 @@ type extractSweepConfig struct {
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
 	// MaxAskBatches is how many batches of 12 one sweep asks (0 = 4, at most 8). See extract_sweep_batch.go.
 	MaxAskBatches int `yaml:"max_ask_batches"`
+	// Warm turns on the warm path (#491). OFF by default and in no preset. See ExtractSweep.warm.
+	Warm bool `yaml:"warm"`
+	// WarmEveryN is the fewest warm requests of a thread between two warm questions (0 = 30).
+	WarmEveryN int `yaml:"warm_every_n"`
+	// WarmMinAgeTurns is how many model turns old an output must be to be a warm candidate (0 = 30).
+	WarmMinAgeTurns int `yaml:"warm_min_age_turns"`
+	// WarmMaxTurns caps the warm turns the economic gate may expect a thread to still have (0 = 60).
+	WarmMaxTurns int `yaml:"warm_max_turns"`
+	// WarmMinMassFrac: ask only when the removable candidate mass is at least this share of the conversation (0 = 0.20).
+	WarmMinMassFrac float64 `yaml:"warm_min_mass_frac"`
+	// WarmGatePriceModel is a DIAGNOSTIC: price the warm gate with this model's rates (for a run on a model
+	// the price table prices at $0). Unset by default and in no preset.
+	WarmGatePriceModel string `yaml:"warm_gate_price_model"`
+	// WarmExpectedTurns, when > 0, is how many warm turns the session is expected to run in all: the gate
+	// then expects max(this - turns so far, 0) more. 0 (the default) = unset: the turns left are estimated
+	// from the billed growth per turn up to the cut.
+	WarmExpectedTurns int `yaml:"warm_expected_turns"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -302,6 +337,21 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	if cfg.MaxAskBatches > maxAskBatchesCap {
 		cfg.MaxAskBatches = maxAskBatchesCap
 	}
+	if cfg.WarmEveryN <= 0 {
+		cfg.WarmEveryN = defaultWarmEveryN
+	}
+	if cfg.WarmMinAgeTurns <= 0 {
+		cfg.WarmMinAgeTurns = defaultWarmMinAgeTurns
+	}
+	if cfg.WarmMaxTurns <= 0 {
+		cfg.WarmMaxTurns = defaultWarmMaxTurns
+	}
+	if m := strings.TrimSpace(cfg.WarmGatePriceModel); m != "" && cfg.Warm {
+		noteWarmGatePriceModel(m)
+	}
+	if cfg.WarmMinMassFrac <= 0 || cfg.WarmMinMassFrac > 1 {
+		cfg.WarmMinMassFrac = defaultWarmMinMassFrac
+	}
 	// Evidence is ON unless the operator wrote `evidence: false`.
 	evidence := cfg.Evidence == nil || *cfg.Evidence
 	return &ExtractSweep{
@@ -310,6 +360,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 		evidence: evidence, shadow: cfg.Shadow,
 		minLaterTurns: cfg.MinLaterTurns, keepRecheckTurns: cfg.KeepRecheckTurns,
 		maxAskBatches: cfg.MaxAskBatches,
+		warm:          cfg.Warm, warmEveryN: cfg.WarmEveryN, warmMinAge: cfg.WarmMinAgeTurns, warmMaxTurns: cfg.WarmMaxTurns, warmMinMassFrac: cfg.WarmMinMassFrac, warmGatePriceModel: strings.TrimSpace(cfg.WarmGatePriceModel), warmExpectedTurns: cfg.WarmExpectedTurns,
 	}, nil
 }
 
@@ -516,6 +567,11 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// with an unchanged prefix gets only the replays, which are byte-identical to what it sent before.
 	keys, n := e.coldStep(req, rep, c)
 	changed += n
+	// THE WARM PATH (#491), when switched on. It runs after the cold step so the replays are already in.
+	if e.warm {
+		wk, wn := e.warmStep(req, rep, c)
+		keys, changed = append(keys, wk...), changed+wn
+	}
 	return keys, nil
 }
 
@@ -536,6 +592,9 @@ type sweepCand struct {
 	// `toolu_d2`, so the contract told the model to locate content by a key that cannot be found
 	// anywhere. See #123. Empty when the dialect carries no id, in which case nothing is claimed.
 	toolID string
+	// extra is a warm-path evidence clause (#491), added to the candidate's inventory line. Empty for
+	// the ping, so the ping's question is byte-for-byte what it was.
+	extra string
 }
 
 // sweepResult is one adjudication's outcome, carried back to the SERIAL phase.
@@ -644,6 +703,12 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		}
 		if e.evidence {
 			it.Evidence = renderEvidence(byIdx[cands[k].i], laterModelTurns(req, cands[k].i))
+		}
+		if cands[k].extra != "" {
+			if it.Evidence != "" {
+				it.Evidence += "; "
+			}
+			it.Evidence += cands[k].extra
 		}
 		items = append(items, it)
 	}
@@ -1170,6 +1235,21 @@ func init() {
 		},
 		{Key: "max_ask_batches", Type: components.FieldInt, Default: defaultMaxAskBatches, Min: 1,
 			Hint: "How many batches of 12 outputs one sweep asks. Default 4, at most 8 (a larger value reads as 8, below 1 as 4). A list longer than 12 is split into balanced batches (16 gives 8+8, 23 gives 12+11) and asked one after the other over the same cached prefix, each judged on its own; a batch that fails (error, refused cache read, truncated or unparseable reply) keeps its outputs and the other batches still count. All answers are merged into one held answer, so the next cold request does one recheck and one cut. Each batch is one more question, so it costs one more answer. Candidates beyond 12 x max_ask_batches (the smallest) are not asked and are counted as sweep_over_ask_cap. A list of 12 or fewer is one question, as before."},
+		{Key: "warm", Type: components.FieldBool,
+			Hint: "The WARM path (#491). Unset = FALSE, and not in any preset. On a warm request of a thread, at most once every warm_every_n requests, and only when old outputs could pay back a rewrite, the sweep asks its question AFTER the request was forwarded (the agent sees no added delay) and holds the answer in process memory only (never in the Store). On a later warm request the answer is rechecked, then an economic gate decides: apply only if the saving over the expected warm turns is more than the cache rewrite it forces, with every size taken from the provider's billed count. A refused answer is dropped. Applied warm drops use the cold apply's markers, stash and drop records, and are counted apart. A restart loses a waiting answer, which fails open."},
+		{Key: "warm_every_n", Type: components.FieldInt, Default: defaultWarmEveryN, Min: 1,
+			Hint: "Warm path: the fewest warm requests of a thread between two warm questions. Default 30. Counted per thread; a cold request restarts the count."},
+		{Key: "warm_min_age_turns", Type: components.FieldInt, Default: defaultWarmMinAgeTurns, Min: 1,
+			Hint: "Warm path: how many model turns old an output must be to be offered. Default 30. A younger output has not had the time to be superseded, and a removal of it would sit near the end of the prompt, so it would rewrite little but save little."},
+		{Key: "warm_max_turns", Type: components.FieldInt, Default: defaultWarmMaxTurns, Min: 1,
+			Hint: "Warm path: the cap on the warm turns the economic gate may expect a thread to still have. The gate expects as many turns as the thread has already run warm, up to this cap, weighted by why the thread is waiting. Default 60, twice warm_every_n: a run is a poor guide past about two question intervals, and a larger cap would let one long run excuse a very large rewrite."},
+		{Key: "warm_expected_turns", Type: components.FieldInt, Default: 0, Min: 0,
+			Hint: "Warm path: how many warm turns the session is expected to run in all. When set (above 0) the gate expects max(this - warm turns so far, 0) more. Unset (0) by default: the gate then assumes the session runs until its CUT (the cache_aware_summarizer or summarize trigger's fraction of the window when one is in the pipeline, else the full window) and expects (cut - the current billed prompt) / (the average billed growth per turn on this thread) more turns. If the growth is unknown or not positive, or the window is only a family guess, it falls back to the warm turns so far. warm_max_turns caps N in every case, and the wait-cause weight applies on top."},
+		{Key: "warm_min_mass_frac", Type: components.FieldFloat, Default: defaultWarmMinMassFrac, Min: 0,
+			Hint: "Warm path: ask only when the removable candidate mass (outputs old enough and over the floor) is at least this share of the conversation. Default 0.20. On recorded sessions one sweep paid only when (tokens removed) x (turns left) was at least 11.5 x (conversation - tokens removed), and the best single sweep fell near 40% of the session, so a sweep of under a fifth almost never covers the rewrite it forces. A value outside (0, 1] reads as the default."},
+		{Key: "warm_gate_price_model", Type: components.FieldString,
+			Hint: "DIAGNOSTIC, unset by default and in no preset. Price the warm gate's saving and rewrite with THIS model's rates (for example claude-opus-5) instead of the request's model. For a test run on a model the price table prices at $0, where the gate would see saving = rewrite = 0 and refuse everything. It is used only in the gate's decision: the dashboard and /stats keep pricing the real model. Logged once at start and shown in /stats as keepalive.sweep_warm.gate_price_model, so a run with it is never mistaken for a normal run."},
+
 		markerModeField(),
 	})
 }

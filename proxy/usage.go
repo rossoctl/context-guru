@@ -344,10 +344,23 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 				continue
 			}
 			found = true
-			out.FreshInput = max64(out.FreshInput, one.FreshInput)
-			out.CacheRead = max64(out.CacheRead, one.CacheRead)
-			out.CacheWrite = max64(out.CacheWrite, one.CacheWrite)
-			out.CacheWrite1h = max64(out.CacheWrite1h, one.CacheWrite1h)
+			// THE INPUT TIERS COME FROM THE LAST EVENT THAT CARRIES AN INPUT COUNT, as one set. They were
+			// merged field by field with max(), which is wrong when two events report the input in different
+			// units. A litellm gateway streaming an Anthropic-shaped response puts the TOTAL prompt in
+			// message_start (`input_tokens` 7373, no cache fields) and the true split in message_delta
+			// (`input_tokens` 717, `cache_read_input_tokens` 6656). max() took 7373 fresh AND 6656 read, so
+			// billed input counted the read twice (14,029 for a prompt of 7,373) and PrevBilledInput, which
+			// the summarizer trigger and the warm gate read, was about 2x too large.
+			//
+			// Replacing is safe for the other shapes: a real Anthropic stream has the tiers in message_start
+			// and an output-only message_delta, so no later event carries an input count and message_start's
+			// values stay; and where a delta repeats the same input fields, the replacement is the same
+			// numbers. A cache MISS reports the total again in the delta with zero cache fields, which gives
+			// the same answer. Output keeps max(): the delta carries the final count.
+			if hasInputCount(u) {
+				out.FreshInput, out.CacheRead = one.FreshInput, one.CacheRead
+				out.CacheWrite, out.CacheWrite1h = one.CacheWrite, one.CacheWrite1h
+			}
 			out.Output = max64(out.Output, one.Output)
 		}
 	}
@@ -358,6 +371,13 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	// alertable, an all-zero block is not, and no block at all is `absent` because that is what
 	// `worst` starts as.
 	return out, worst, worstPayload
+}
+
+// hasInputCount reports whether a usage block carries an input count at all (Anthropic or Responses
+// `input_tokens`, OpenAI `prompt_tokens`), as opposed to an output-only block such as Anthropic's streaming
+// message_delta.
+func hasInputCount(u gjson.Result) bool {
+	return u.Get("input_tokens").Exists() || u.Get("prompt_tokens").Exists()
 }
 
 // responseUsage picks the right parser for a response's content type. The returned

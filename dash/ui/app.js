@@ -2195,6 +2195,8 @@ const REASON_TEXT = {
   empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
   sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
   sweep_applied_cold: 'dropped on a cold request', sweep_applied_changed_prefix: 'dropped after a changed prefix',
+  sweep_applied_warm: 'dropped on a warm request (gate passed)', sweep_false_ref_warm: 'warm drop, then used by a later turn',
+  sweep_warm_gate_accept: 'warm gate: applied', sweep_warm_removed_tokens: 'warm sweep: tokens removed (billed)', sweep_warm_rewrite_tokens: 'warm sweep: tokens rewritten (billed)', sweep_warm_expected_turns: 'warm sweep: warm turns the gate expected', sweep_warm_deep: 'warm sweep: drop deeper than the look-back (whole conversation rewritten)', sweep_warm_refused_removed_tokens: 'warm sweep refused: tokens it would remove (billed)', sweep_warm_refused_rewrite_tokens: 'warm sweep refused: tokens it would rewrite (billed)', sweep_warm_refused_expected_turns: 'warm sweep refused: warm turns the gate expected', sweep_warm_refused_deep: 'warm sweep refused: drop deeper than the look-back', sweep_warm_too_new: 'too new for a warm question',
   sweep_false_ref: 'dropped, then used by a later turn', sweep_apply_declined: 'drop refused (kept in full)',
   sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
   over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',

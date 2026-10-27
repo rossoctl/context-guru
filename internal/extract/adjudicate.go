@@ -232,6 +232,9 @@ func BuildPrefixAsk(items []AdjudicationItem) string {
 	if anyEvidence(items) {
 		b.WriteString(adjudicationEvidence)
 	}
+	if anyFileEvidence(items) {
+		b.WriteString(adjudicationFileEvidence)
+	}
 	b.WriteString("\n\nThe conversation above is your own. Read the tool outputs from it directly.\n")
 	b.WriteString("\nTOOL OUTPUTS UNDER CONSIDERATION. Refer to them by these labels only:\n")
 	for _, it := range items {
@@ -513,6 +516,27 @@ func transcriptHasQuote(transcript, q string) bool {
 func anyEvidence(items []AdjudicationItem) bool {
 	for _, it := range items {
 		if it.Evidence != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// adjudicationFileEvidence teaches the model to read the file clause the warm path adds (#491). It is
+// written only when an item carries the clause, so the question the ping asks is unchanged.
+const adjudicationFileEvidence = `
+FILE READS. An output that read a file also carries "file_read=yes" and two counts from the tool calls
+that came after it: "later_edits" (calls that edited the same file) and "later_rereads" (calls that read
+it again). A file the agent went on to edit is usually still needed to know what the edit must match. A
+later re-read means the agent chose to fetch the content again. These counts come from tool names and
+tool input paths only. They are a hint, like the index, and your own reading of the conversation decides.`
+
+// FileEvidenceMarker is the text that marks a file clause in an item's Evidence.
+const FileEvidenceMarker = "file_read=yes"
+
+func anyFileEvidence(items []AdjudicationItem) bool {
+	for _, it := range items {
+		if strings.Contains(it.Evidence, FileEvidenceMarker) {
 			return true
 		}
 	}

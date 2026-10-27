@@ -20,6 +20,13 @@
 #
 # A trailing `*` matches a family. The longest match wins, so a specific id always
 # beats the family it belongs to regardless of order in this file.
+#
+# `window` (optional) is the model's context window in tokens, for a model the public map
+# does not list (a preview id, or a model behind a gateway such as a GLM). An operator's
+# table is authoritative, so the window counts as EXACT: a trigger that scales with the
+# window (a summarizer's min_request_frac, the warm sweep's turns-left estimate) then runs
+# instead of declining on a guess. Example:
+#   - {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 400000}
 
 cache_read_frac: 0.1
 cache_write_frac: 1.25
