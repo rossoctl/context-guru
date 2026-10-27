@@ -125,9 +125,12 @@
 {#- Mermaid is loaded only on the pages that actually contain a diagram, and is
     themed from the same CSS custom properties as the rest of the page. It is the
     one asset this site does not serve itself: the bundle is 3.5 MB, too heavy to
-    vendor into the repo for 20 diagrams. -#}
+    vendor into the repo for 20 diagrams. The version is pinned exactly, for the
+    same reason requirements-docs.txt bounds its versions rather than floating
+    them: an upstream 11.x release can break every diagram page with no commit in
+    this repo. Bump it deliberately, with a look at the upstream changelog. -#}
 <script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs";
   window.cgMermaid = mermaid;
   window.cgRenderMermaid();
 </script>

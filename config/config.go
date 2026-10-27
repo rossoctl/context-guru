@@ -433,9 +433,15 @@ var presets = map[string][]string{
 	// request, and no model is called. The loudest objection to putting a proxy on the
 	// wire — "you are editing my agent's context" — does not apply to it.
 	//
-	// It is also the best-evidenced single component in the repo: -34.1% cost and 0% ->
-	// 96.7% prefix-cache hit in an isolated A/B (docs/results/context-guru.md), which is
-	// why the funnel leads with the cache rather than the offloaders.
+	// It is also the best-evidenced single component in the repo, and the evidence is NARROW:
+	// -34.1% mean cost is one Terminal-Bench task (fix-code-vulnerability) measured three times
+	// on Claude Code CLI traffic at Sonnet 5 rates, and 0% -> 96.7% prefix-cache hit is the
+	// two-session A/B beside it (docs/components/caching.md). The figure does not transfer:
+	// Agent-SDK traffic carries no volatile-tail marker, so cachesplit acted=0 on all of it
+	// (docs/results/terminal-bench-comparison.md), and this service's own interactive window
+	// credited the split $0.03 (docs/results/measured-2026-08.md). The funnel still leads with
+	// the cache because its claim is verifiable by reading one line, not because it is the
+	// biggest lever.
 	//
 	// Deliberately NOT `safe` (format -> textclean -> searchfold -> cachesplit): those are
 	// lossless in meaning but they still rewrite the JSON, so "we do not touch your
@@ -685,21 +691,32 @@ components:
 	// warm requests, ~4,124 written tokens per turn), so it is worth the cache-WRITE rate,
 	// not the request-level cache-READ rate the gate used to apply to everything.
 	//
-	// min_tokens: 8000 is that path's floor, and it is DERIVED, not chosen. Measured on real
+	// min_tokens: 3000 is that path's floor, and it is DERIVED, not chosen. Measured on real
 	// warm sessions through a local proxy, an extraction call costs ~$0.015-0.018 and the cost
 	// is OUTPUT-dominated — trimming the prompt barely moves it (context_messages 7 -> 2 -> 0
 	// gave $0.0149 / $0.0159 / $0.0179 per call). Including the 1-in-5 call that is rejected
-	// outright and pays full price for nothing, cost per ACCEPTED call was $0.0193. At the
-	// cache-write rate that needs 4,060 saved tokens to break even, and the observed reduction
-	// on accepted tail calls was ~65%, so the candidate has to be ~6,250 tokens. 8,000 carries
-	// the margin.
+	// outright and pays full price for nothing, cost per ACCEPTED call was $0.0193. Against
+	// that, a saved token is worth the cache-WRITE rate times the amortization prior, and the
+	// prior is turn-aware (reuses 12 on a long transcript): ~$9.31/MTok, so a call needs
+	// ~2,073 saved tokens, which at the observed ~65% reduction needs a ~3,190-token candidate.
+	// The 873-call per-band measurement agrees from the loss side: candidates under 2,000
+	// tokens cost more per MTok saved than a token is worth even on a top-decile session, so
+	// 2,000 is the measured lower bound and the shipped 3,000 clears it. The bands are the
+	// authority, not this comment:
+	// TestHousellmFloorClearsTheBandsThatLoseAtEveryK (config/config_more_test.go).
 	//
-	// Below that floor the path is measurably a LOSS, which is why the floor is not lower:
+	// An earlier revision of this derivation used 8,000, priced WITHOUT the amortization, and
+	// was wrong twice over: the arithmetic ignored that a saved token is re-served many turns,
+	// and on this workload tool outputs top out near 7,399 tokens — only 1 of 132 production
+	// candidates reached 8,000, so that floor disabled the path rather than bounded it.
+	// TestHousellmDoesNotAttemptTheTailBelowBreakEven (components/all/xglobal_test.go) pins
+	// the floor's effect from the loss side.
+	//
+	// Below the floor the path is measurably a LOSS, which is why the floor is not lower:
 	// at min_tokens 1000 real sessions made 5 warm calls, accepted 4, saved 8,718 tokens for
 	// $0.0771 — net -$0.036. Every one of those calls was allowed by the EXPLORATION budget
 	// (2 per session) rather than by the arithmetic, so a low floor buys exploration waste and
-	// not savings. At 8,000 the same corpus makes zero warm calls and loses nothing, while the
-	// cold sweep still returns net +$0.062. context_messages is 2 for the same reason it is
+	// not savings. context_messages is 2 for the same reason it is
 	// cheap: the tail call carries the candidate, not the conversation.
 	//
 	// allow_on_caching_backend IS DELIBERATELY ABSENT, and it is now VESTIGIAL rather than

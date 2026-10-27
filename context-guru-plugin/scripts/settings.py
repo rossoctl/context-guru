@@ -3643,7 +3643,8 @@ def canonical_strategy(name: str) -> str:
 #   byte-for-byte, and the only thing that happens is that your prompt cache is kept warm.
 #
 # It used to be `cache`, i.e. cachesplit alone, on the strength of a -34.1% figure that came from
-# SWE-bench CLI traffic and does not describe interactive use (#263). The measurements that do:
+# a Terminal-Bench task on Claude Code CLI traffic and does not describe interactive use (#263).
+# The measurements that do:
 # with cachesplit OFF a real session's first request still read 45,805 tokens from cache and only
 # 8,499 more moved when it was on (apply/prefixsplit_test.go), and its production credit over the
 # measured window was $0.03 against keep-alive's +$125. So the component that earns the install is
