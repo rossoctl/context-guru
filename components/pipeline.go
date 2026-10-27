@@ -83,6 +83,17 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 		return rr
 	}
 	rr.TokensBefore = schema.MessagesTokens(req)
+	// The cut fraction of this pipeline, for a component that estimates the turns left before a cut. Only
+	// ENABLED components count: a summarizer that is configured but off for this request cuts nothing.
+	if c.CutFrac <= 0 {
+		for _, comp := range p.comps {
+			if cf, ok := comp.(CutFracProvider); ok && comp.Enabled(c) {
+				if f := cf.CutFrac(); f > 0 && (c.CutFrac <= 0 || f < c.CutFrac) {
+					c.CutFrac = f
+				}
+			}
+		}
+	}
 	// ONE snapshot for the whole run, kept in step with req.Input as components land
 	// (see runOne). Cloning the entire transcript per component was ~20% of the rewrite
 	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its

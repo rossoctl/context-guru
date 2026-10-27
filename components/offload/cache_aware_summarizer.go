@@ -609,6 +609,10 @@ func (CacheAwareSummarizer) Name() string                 { return "cache_aware_
 func (CacheAwareSummarizer) Enabled(*components.Ctx) bool { return true }
 func (*CacheAwareSummarizer) NeedsModel() bool            { return true }
 
+// CutFrac is the trigger fraction of the window at which this component cuts the conversation
+// (components.CutFracProvider).
+func (s *CacheAwareSummarizer) CutFrac() float64 { return s.trigger.MinRequestFrac }
+
 // InstructionRole exposes the resolved role so /stats and a probe can report which channel this
 // arm actually used; with `auto` it cannot be read off the config alone.
 func (s *CacheAwareSummarizer) InstructionRole() string { return string(s.instructionRole) }

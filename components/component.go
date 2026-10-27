@@ -417,6 +417,15 @@ func ParseMode(s string) (Mode, error) {
 	return ModeSync, fmt.Errorf("mode must be sync|observe, got %q", s)
 }
 
+// CutFracProvider is implemented by a component that cuts the conversation when billed input reaches a
+// fraction of the window: cache_aware_summarizer and summarize (their trigger's min_request_frac). The
+// pipeline asks each once per run and hands the SMALLEST positive value to the components that run after
+// it as Ctx.CutFrac, so a cache-rewrite gate can estimate how many turns are left before the conversation
+// is cut without reaching into a sibling component. 0 means "no fraction".
+type CutFracProvider interface {
+	CutFrac() float64
+}
+
 // Ctx is the per-request runtime handed to every component.
 type Ctx struct {
 	Ctx     context.Context
@@ -620,6 +629,10 @@ type Ctx struct {
 	// own position differs from len(RawInput), rather than hash the wrong span under a matching
 	// nil-ness check alone.
 	RawInput []schemas.ChatMessage
+	// CutFrac is the smallest trigger fraction of the window at which a component of THIS pipeline cuts
+	// the conversation (CutFracProvider), or 0 when none does. Set by Pipeline.Run. A cache-rewrite gate
+	// reads it to estimate the turns left before the cut.
+	CutFrac float64
 	// WireGroup names, for each req.Input index, the ORIGINAL wire message it came from (#457).
 	// On Anthropic traffic several normalized messages can share one wire message — a
 	// tool_result's synthetic role=tool message and a sibling text block beside it (mid-turn
