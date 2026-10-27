@@ -3179,9 +3179,14 @@ func TestAFailureReportShowsOnlyThisRunsLogLines(t *testing.T) {
 	dir, state := t.TempDir(), t.TempDir()
 	port := freePort(t)
 	// The stale evidence an earlier run left behind, including the base URL that made #251 a
-	// disclosure and not just a misleading report.
+	// disclosure and not just a misleading report. The preset and strategy rejections are there so
+	// this test also holds the two whole-log reads that used to sit beside the tail: an earlier
+	// run's "unknown preset"/"unknown strategy" must not make this run fall back to preset off or
+	// name a cause this run never hit, which is why this run asks for a preset other than off.
 	logPath := filepath.Join(state, "proxy-"+port+".log")
-	stale := "STALE LINE from a previous run, ANTHROPIC_BASE_URL=https://user:secret@gateway.corp.example/v1\n"
+	stale := "STALE LINE from a previous run, ANTHROPIC_BASE_URL=https://user:secret@gateway.corp.example/v1\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown preset \\\"house\\\"\" from an earlier run\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown strategy \\\"ghost\\\"\" from an earlier run\n"
 	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -3191,13 +3196,21 @@ func TestAFailureReportShowsOnlyThisRunsLogLines(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/usr/bin/env bash\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir, "CLAUDE_PLUGIN_OPTION_PRESET=medium")
 	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
 	if !strings.Contains(out, "the proxy did not come up") {
 		t.Fatalf("the failure report never ran, so this test asserted nothing:\n%s", out)
 	}
 	if strings.Contains(out, "STALE LINE") || strings.Contains(out, "gateway.corp.example") {
 		t.Errorf("the failure report showed an earlier run's lines as this run's evidence:\n%s", out)
+	}
+	// The two whole-log reads the report sits between: a stale preset rejection must not fall this
+	// run back to `off` (this run asked for medium), and a stale strategy rejection must not name a
+	// cause this run never hit.
+	for _, stale := range []string{"house", "ghost", "does not know preset", "rejected the configuration"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("an earlier run's rejection reached this run's diagnosis (%q):\n%s", stale, out)
+		}
 	}
 	// The report points at the log where this run actually writes it: the state directory, so
 	// CONTEXT_GURU_STATE isolates it (the TMPDIR pin above is the location it must NOT name).

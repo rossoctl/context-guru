@@ -1076,8 +1076,11 @@ fi
 # binary before this comment was written); stripping the backslashes before grepping is what
 # makes the pattern below see the quote that is actually there.
 rejected_preset=""
+# From the run-start marker onward only (#251): the log is append-only and shared across starts, so
+# an earlier run's rejection must not make this run drop the user's preset — the same rule
+# TestAFailureReportShowsOnlyThisRunsLogLines holds for the failure report's tail.
 if [ -s "$LOG" ]; then
-  rejected_preset=$(sed 's/\\//g' "$LOG" 2>/dev/null \
+  rejected_preset=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' \
                        | grep -o 'unknown preset "[^"]*"' | tail -1 \
                        | sed -E 's/unknown preset "(.*)"/\1/')
 fi
@@ -1157,7 +1160,9 @@ fi
 # on "no preset was rejected" made it unreachable in exactly the case where the log holds the
 # most information: after a preset fallback whose own retry failed differently.
 if [ -s "$LOG" ]; then
-  unescaped=$(sed 's/\\//g' "$LOG" 2>/dev/null)
+  # From the run-start marker onward only (#251), same as the preset grep above: a stale line from
+  # an earlier run must not name a cause this run never hit.
+  unescaped=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g')
   if printf '%s\n' "$unescaped" | grep -qE 'unknown (strategy|baseline strategy|upstream) "'; then
     # Sibling config errors this plugin cannot fall back from — a strategy or upstream name has
     # no safe universal substitute the way `off` is for a preset — but a NAMED cause is still
