@@ -103,6 +103,12 @@ func ValidateShapeFor(provider schemas.ModelProvider, msgs []schemas.ChatMessage
 // it, which is the adjacency the provider actually enforces. A groups slice whose length
 // disagrees with msgs (an earlier component changed the count; see summarizeSpan's own
 // defensive collapse of the same condition) is ignored rather than trusted.
+//
+// The grouped scan assumes the message AFTER a call STARTS a wire group — a call never
+// shares a group with the message that follows it. apply's normalize guarantees this (an
+// assistant message is one whole-message slot, so a new group begins right after it). A
+// grouping that does not hold that property gets a silently wrong scan, so a caller must
+// build groups the way normalize does.
 func ValidateShapeGrouped(provider schemas.ModelProvider, msgs []schemas.ChatMessage, groups []int) []ShapeViolation {
 	if len(groups) != len(msgs) {
 		groups = nil
