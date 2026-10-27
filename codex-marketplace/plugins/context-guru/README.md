@@ -76,7 +76,7 @@ recorded-process cleanup as a fallback.
 | Task | Command |
 |---|---|
 | Check routing and proxy health | `$context-guru-status` |
-| Print raw proxy statistics JSON | `$context-guru-status --stats` |
+| Save raw proxy statistics JSON to a file, print its path | `$context-guru-status --stats` |
 | Check for a proxy update | `$context-guru-update` |
 | Install a proxy update | `~/.local/state/context-guru-codex/context-guru-update` from an ordinary shell |
 | Plan removal and show instructions | `$context-guru-uninstall` |

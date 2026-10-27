@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tempfile
 import time
 import urllib.request
 from types import SimpleNamespace
@@ -606,10 +605,15 @@ def status(args):
             return 1
         # Written to a file and only the path printed (#411): the document is ~10 KB, and printing
         # it had the agent echo it into its reply a second time. The file holds the exact bytes the
-        # proxy sent, which a printed copy cannot promise.
-        handle, path = tempfile.mkstemp(prefix=f"context-guru-stats-{port}-", suffix=".json")
-        with os.fdopen(handle, "wb") as file:
-            file.write(body)
+        # proxy sent, which a printed copy cannot promise. Inside the same error handling as the
+        # fetch above: an unwritable TMPDIR reports and returns 1, like every other failure here.
+        try:
+            handle, path = tempfile.mkstemp(prefix=f"context-guru-stats-{port}-", suffix=".json")
+            with os.fdopen(handle, "wb") as file:
+                file.write(body)
+        except OSError as error:
+            print(f"context-guru status --stats: {error}", file=sys.stderr)
+            return 1
         print(path)
         return 0
     up = bool(port and healthy(port))
