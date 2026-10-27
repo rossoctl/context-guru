@@ -382,8 +382,14 @@ func (m memHeld) get(string) (heldAnswer, bool) {
 		return heldAnswer{}, false
 	}
 	if time.Since(t.heldAt) > warmHeldMaxAge || heldAge(*t.held, time.Now()) > warmHeldMaxAge {
+		// Same split as warmHold: a CARRIED (refused) set that ages out is carried_expired, an answer never
+		// refused that goes stale is held_expired.
+		if t.heldTried {
+			sweepWarmCarriedExpired.Add(int64(countDrops(*t.held)))
+		} else {
+			sweepWarmHeldExpired.Add(1)
+		}
 		t.held = nil
-		sweepWarmHeldExpired.Add(1)
 		return heldAnswer{}, false
 	}
 	return *t.held, true
