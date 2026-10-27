@@ -430,8 +430,8 @@ type Event struct {
 	// nonzero cachesplit_saved_usd identifies exactly the rows that qualified, and
 	// split_stable_tokens, cache_read and cache_write are all stored beside it, so the
 	// figure can be recomputed from the row. (It is NOT recoverable from
-	// cache_miss_reason, which reads "hit" on every qualifying row — AttributeCache
-	// short-circuits on cache_read > 0 before it ever considers a cold start.)
+	// cache_miss_reason, which reads "hit" on every qualifying row — a qualifying row's
+	// read covers the previous prompt, so the partial-read rule (#496) leaves it a hit.)
 	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
@@ -1178,9 +1178,17 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 //
 // cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
 // "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string) {
+//
+// prevPromptTokens is that previous same-model request's whole prompt (fresh input + cache read
+// + cache write), 0 when none is known. A read alone is not a hit (#496): Claude Code keeps the
+// system prompt and tools under a separate breakpoint, so a request that re-wrote the rest of
+// the prompt still reads 35k-51k tokens. A PARTIAL read — under half the previous prompt, with
+// more written than read — re-wrote most of the prompt, so it is a miss and takes the chain
+// below like any other. Old rows are not migrated; they keep the label they got.
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string, prevPromptTokens int64) {
+	partialRead := prevPromptTokens > 0 && e.CacheRead*2 < prevPromptTokens && e.CacheWrite > e.CacheRead
 	switch {
-	case e.CacheRead > 0:
+	case e.CacheRead > 0 && !partialRead:
 		e.CacheMissReason = CacheHit
 	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart

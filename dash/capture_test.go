@@ -134,7 +134,7 @@ func TestAttributeCacheBuckets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &Event{CacheRead: tc.read, CacheWrite: 1000}
-			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, causeIf(tc.prefixChanged))
+			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, causeIf(tc.prefixChanged), 0)
 			if e.CacheMissReason != tc.want {
 				t.Errorf("got %q, want %q", e.CacheMissReason, tc.want)
 			}
