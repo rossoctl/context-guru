@@ -670,6 +670,16 @@ var extractInflight singleflight.Group
 // inflightDeduped counts calls avoided because an identical extraction was already running.
 var inflightDeduped atomic.Int64
 
+// beforeInflightJoinForTest, set only by tests, runs immediately before a candidate joins
+// extractInflight — past the concurrency semaphore, one statement before the Do call.
+// Which candidates become followers is otherwise a scheduling race the test can only hope
+// to win: the model replies in microseconds, so the leader can drop the key before the
+// other goroutines reach Do, and under load (or -cpu 1) they often do. Parking the model
+// keeps the key held, and this line is the last point a test can observe before
+// singleflight parks a waiter — a test that waits for every candidate here, then releases
+// the leader, arranges the followers rather than hoping for them.
+var beforeInflightJoinForTest func()
+
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
@@ -1306,6 +1316,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				res, sum, strategy, why string
 				executed                bool
 			)
+			if beforeInflightJoinForTest != nil {
+				beforeInflightJoinForTest()
+			}
 			sfv, _, _ := extractInflight.Do(extract.ResultKey(cands[k].id, e.modelName, extCfg),
 				func() (any, error) {
 					executed = true
