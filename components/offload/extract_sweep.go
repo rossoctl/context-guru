@@ -618,6 +618,9 @@ type sweepResult struct {
 	// ("keep everything"). It separates a question that was answered from one that failed, which both
 	// return no drops. The ping-time ask holds an answer only when this is set.
 	answered bool
+	// judgedCount is how many verdicts were judged, and fabricatedCount how many of them carried a quote that
+	// is not in the transcript. Per question, so a batched sweep can say which batch the fabrications came from.
+	judgedCount, fabricatedCount int
 }
 
 func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
@@ -1073,8 +1076,10 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		seen[v.Label] = true
 		content := cands[v.Label].content
 		a := extract.Judge(v, flat)
+		r.judgedCount++
 		if a.QuoteFabricated {
 			r.gate("sweep_quote_fabricated")
+			r.fabricatedCount++
 		}
 		if a.CriterionMissing {
 			r.gate("sweep_criterion_missing")

@@ -151,6 +151,7 @@ var (
 	sweepWarmAsked, sweepWarmHeld, sweepWarmFailed, sweepWarmFired atomic.Int64
 	sweepWarmNotWorth, sweepWarmNoBilled, sweepWarmThreadBusy      atomic.Int64
 	sweepWarmModelDeclined, sweepWarmHeldExpired, sweepWarmPanics  atomic.Int64
+	sweepWarmHeldShrunk                                            atomic.Int64
 	sweepWarmNotRegistered, sweepWarmThreadsFull                   atomic.Int64
 	sweepWarmAlreadyAsked, sweepWarmNoInventory                    atomic.Int64
 	sweepWarmPriceModelUnknown                                     atomic.Int64
@@ -168,7 +169,7 @@ type SweepWarmStats struct {
 	// NotWorth: checks where the candidates could not pay back. NoBilled: checks skipped because the
 	// provider's billed size was not known yet. ThreadBusy, ModelDeclined, ConcurrencyFull: questions
 	// not sent, for the same reasons as at the ping. HeldExpired: waiting answers dropped for age.
-	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
+	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, HeldShrunk, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
 	// GatePriceModel is the diagnostic warm_gate_price_model, "" in a normal run.
 	GatePriceModel string
 	// GateAccept and GateRefuse count the economic gate's verdicts; Reasons splits the refusals.
@@ -193,7 +194,7 @@ func (w SweepWarmStats) Any() bool {
 		return true
 	}
 	return w.Fired+w.Asked+w.Held+w.Failed+w.NotWorth+w.NoBilled+w.ThreadBusy+w.ModelDeclined+
-		w.ConcurrencyFull+w.HeldExpired+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
+		w.ConcurrencyFull+w.HeldExpired+w.HeldShrunk+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
 		w.GateAccept+w.GateRefuse+w.Panics > 0 || len(w.Gates) > 0
 }
 
@@ -240,7 +241,7 @@ func SweepWarmCounters() SweepWarmStats {
 	return SweepWarmStats{TriggerReasons: tr, Recent: warmRecentCopy(), RecentDecisions: warmDecisionsCopy(), Fired: sweepWarmFired.Load(), Asked: sweepWarmAsked.Load(), Held: sweepWarmHeld.Load(),
 		Failed: sweepWarmFailed.Load(), NotWorth: sweepWarmNotWorth.Load(), NoBilled: sweepWarmNoBilled.Load(),
 		ThreadBusy: sweepWarmThreadBusy.Load(), ModelDeclined: sweepWarmModelDeclined.Load(),
-		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
+		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), HeldShrunk: sweepWarmHeldShrunk.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
 		AlreadyAsked: sweepWarmAlreadyAsked.Load(), NoInventory: sweepWarmNoInventory.Load(), Gates: copyWarmGates(),
 		PriceModelUnknown: sweepWarmPriceModelUnknown.Load(), GatePriceModel: gatePriceModel(),
 		GateAccept: sweepWarmGateAccept.Load(), GateRefuse: sweepWarmGateRefuse.Load(), Reasons: rs,
@@ -327,7 +328,7 @@ func resetWarmForTest() {
 	warmGatePriceModelSet = atomic.Value{}
 	for _, c := range []*atomic.Int64{&sweepWarmAsked, &sweepWarmHeld, &sweepWarmFailed, &sweepWarmFired,
 		&sweepWarmNotWorth, &sweepWarmNoBilled, &sweepWarmThreadBusy, &sweepWarmModelDeclined,
-		&sweepWarmHeldExpired, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
+		&sweepWarmHeldExpired, &sweepWarmHeldShrunk, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
 		c.Store(0)
 	}
 }
@@ -583,7 +584,15 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 			d.Accept, d.Reason = ok, reason
 			noteWarmDecision(tkey, d)
 		}()
+		// The recheck's own account, recorded whatever the gate decides below.
+		d.Proposed, d.Dropped = res.proposed, res.reasonCounts()
 		if len(res.Valid) == 0 {
+			// Two different things were both called no_valid_drop. The judge proposing NO drop at all leaves
+			// nothing to recheck (recheckHeld returns at once): that is no_drop_proposed. A proposal the recheck
+			// then threw out in full is no_valid_drop, and d.Dropped says why.
+			if res.proposed == 0 {
+				return false, "no_drop_proposed"
+			}
 			return false, "no_valid_drop"
 		}
 		content, full, bok := warmRatios(c.ModelName, c.PrevBilledInput, prevLocal)
@@ -664,6 +673,11 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	growthFrom, growthTurns := t.growthFrom, t.growthTurns
 	busy := t.asking || t.warmPending()
 	hasHeld := t.held != nil
+	var heldJudged, heldProposed int
+	if hasHeld {
+		heldJudged = t.held.Judged
+		heldProposed, _ = t.held.proposed()
+	}
 	warmMu.Unlock()
 
 	// FAIL OPEN. A panic anywhere below forwards the request as it stands. applyHeldFrom has its own
@@ -677,6 +691,29 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 		}
 	}()
 
+	// A SHRUNK CONVERSATION VOIDS THE HELD ANSWER (#491). The answer is a list of verdicts about the messages of
+	// the conversation as it was when the question was asked (Judged of them). A request with FEWER messages is a
+	// different conversation: the agent compacted, was rewound, or started over (a live run went from 331 to 6
+	// messages while an answer for the old one was still held). The recheck would refuse every drop as
+	// conversation_shorter anyway, but only on the next apply, after the answer had sat in memory and blocked a
+	// new question. Dropped now, counted, and recorded as a decision.
+	if hasHeld {
+		rawNow := req.Input
+		if c.RawInput != nil {
+			rawNow = c.RawInput
+		}
+		if heldJudged > 0 && len(rawNow) < heldJudged {
+			warmMu.Lock()
+			if t := warmFor(tkey); t != nil {
+				t.held = nil
+			}
+			warmMu.Unlock()
+			sweepWarmHeldShrunk.Add(1)
+			noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "conversation_shrunk",
+				Weight: 1, Proposed: heldProposed})
+			hasHeld = false
+		}
+	}
 	if hasHeld {
 		warmMu.Lock()
 		if t := warmFor(tkey); t != nil {
@@ -1161,6 +1198,12 @@ type WarmDecision struct {
 	RatioFull    float64 `json:"ratio_full"`
 	RatioContent float64 `json:"ratio_content"`
 	Deep         bool    `json:"deep"`
+	// Proposed is how many drops the held answer carried into the recheck, and Dropped is what the recheck
+	// removed from them, by reason (output_gone, content_changed, referenced, expanded, conversation_shorter).
+	// Without it a refused apply read as "no valid drop" with no way to say why 59 to 87% of the judge's
+	// drops were gone by the time the gate saw them. Apply stage only.
+	Proposed int            `json:"proposed,omitempty"`
+	Dropped  map[string]int `json:"dropped,omitempty"`
 	// TurnsModel says which model produced Turns: "expected" (warm_expected_turns), "cut" (turns left before
 	// the conversation is cut, from the billed growth per turn) or "so_far_fallback" (the warm turns so
 	// far). TurnsRaw is N before the warm_max_turns cap and the weight; Cut is the billed size the model

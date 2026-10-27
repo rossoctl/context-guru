@@ -889,6 +889,12 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		convBefore = localTokens(req.Input)
 	}
 	res := recheckHeld(c, req, h, e.minTokens)
+	// THE RECHECK'S REASONS ARE BOOKED NOW, BEFORE THE GATE (#491). They used to be booked at the end of this
+	// function, which a refusal never reaches, so a refused answer showed no reason for what the recheck had
+	// thrown out (in a live run 59 to 87% of the judge's drops). Booked once, here, for every path.
+	for reason, n := range res.reasonCounts() {
+		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
+	}
 	// THE WARM GATE (#491). Between the recheck and the first change to the request. A refusal drops
 	// the answer: it was claimed above and the warm source keeps nothing.
 	if warmGated && warm.gate != nil {
@@ -982,9 +988,6 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		}
 	}()
 	addToDropIndex(c.Store, tkey, cks)
-	for reason, n := range res.reasonCounts() {
-		rep.EventN("sweep_apply_dropped_"+trimReason(reason), n)
-	}
 	slog.Info("cg.sweep.applied", "kind", kind, "session", c.Session, "thread", c.Thread,
 		"proposed_valid", len(res.Valid), "applied", len(pending), "held_back", len(later),
 		"dropped_reasons", res.reasonCounts())

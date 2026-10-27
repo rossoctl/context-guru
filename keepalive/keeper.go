@@ -1711,9 +1711,13 @@ type Stats struct {
 	// event is sweep_batch_skipped_deadline). SweepBatchOverCap counts EVERY candidate left unasked by a
 	// limit: max_ask_batches, or the cost ceiling lowering the count. SweepBatchesLowered counts sweeps
 	// where the per-ping cost ceiling admitted fewer questions than planned.
-	SweepBatchSkipped   int64 `json:"sweep_batch_skipped"`
-	SweepBatchOverCap   int64 `json:"sweep_batch_over_cap"`
-	SweepBatchesLowered int64 `json:"sweep_batches_lowered"`
+	SweepBatchSkipped int64 `json:"sweep_batch_skipped"`
+	// SweepBatchByIndex tells the batches apart by their position in a sweep: asked, items carried, verdicts
+	// judged and fabricated quotes. A fabrication rate that differs between batch 0 and the later ones is a
+	// batch effect; the same everywhere, it is the model.
+	SweepBatchByIndex   []offload.SweepBatchIndexStats `json:"sweep_batch_by_index,omitempty"`
+	SweepBatchOverCap   int64                          `json:"sweep_batch_over_cap"`
+	SweepBatchesLowered int64                          `json:"sweep_batches_lowered"`
 	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
 	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
 	// xhigh on. Metadata only: counts, never content, never a session id.
@@ -1739,6 +1743,7 @@ type SweepWarmStats struct {
 	ModelDeclined   int64            `json:"model_declined"`
 	ConcurrencyFull int64            `json:"concurrency_full"`
 	HeldExpired     int64            `json:"held_expired"`
+	HeldShrunk      int64            `json:"held_shrunk"`
 	NotRegistered   int64            `json:"not_registered"`
 	ThreadsFull     int64            `json:"threads_full"`
 	AlreadyAsked    int64            `json:"already_asked"`
@@ -1769,7 +1774,7 @@ func sweepWarmStats() *SweepWarmStats {
 	}
 	return &SweepWarmStats{Fired: w.Fired, Asked: w.Asked, Held: w.Held, Failed: w.Failed, NotWorth: w.NotWorth,
 		NoBilledSize: w.NoBilled, ThreadBusy: w.ThreadBusy, ModelDeclined: w.ModelDeclined,
-		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
+		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
 		NoInventory: w.NoInventory, GatePriceModel: w.GatePriceModel, PriceModelUnknown: w.PriceModelUnknown, Gates: w.Gates, TriggerRefusals: w.TriggerReasons, Recent: w.Recent, RecentDecisions: w.RecentDecisions, GateAccept: w.GateAccept,
 		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics}
 }
@@ -1890,6 +1895,7 @@ func (k *Keeper) Stats() Stats {
 		SweepBatchFailed:                   bc.Failed,
 		SweepBatchFailedBy:                 bc.FailedBy,
 		SweepBatchSkipped:                  bc.Skipped,
+		SweepBatchByIndex:                  bc.ByIndex,
 		SweepBatchOverCap:                  bc.OverCap,
 		SweepBatchesLowered:                k.sweepBatchesLowered.Load(),
 		SweepDrops:                         sweepDropStats(),

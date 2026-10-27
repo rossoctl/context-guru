@@ -187,6 +187,7 @@ func (e *ExtractSweep) askInBatches(req *bschemas.BifrostChatRequest, c *compone
 			continue
 		}
 		br.answered++
+		noteBatchJudged(bi, len(b.cands), r.judgedCount, r.fabricatedCount)
 		base := len(br.judged)
 		br.judged = append(br.judged, b.cands...)
 		for _, k := range drop {
@@ -250,6 +251,40 @@ var (
 	sweepBatchFailedAll  atomic.Int64
 )
 
+// maxBatchIndexStats bounds the per-index tally: max_ask_batches is at most 8.
+const maxBatchIndexStats = 8
+
+// SweepBatchIndexStats is the tally for one batch position.
+type SweepBatchIndexStats struct {
+	Asked, Judged, Fabricated int64
+	// Items is the candidates the batches at this position carried, so Judged/Items shows how many verdicts
+	// came back, and a batch of 5 is not read like a batch of 12.
+	Items int64
+}
+
+var (
+	sweepBatchIdxMu sync.Mutex
+	sweepBatchIdx   [maxBatchIndexStats]SweepBatchIndexStats
+)
+
+// noteBatchFabricated books one batch's judging: how many candidates it carried, how many verdicts were
+// judged and how many carried a quote that is not in the transcript (the sweep_quote_fabricated count).
+func noteBatchJudged(index, items, judged, fabricated int) {
+	if index < 0 {
+		return
+	}
+	if index >= maxBatchIndexStats {
+		index = maxBatchIndexStats - 1
+	}
+	sweepBatchIdxMu.Lock()
+	s := &sweepBatchIdx[index]
+	s.Asked++
+	s.Items += int64(items)
+	s.Judged += int64(judged)
+	s.Fabricated += int64(fabricated)
+	sweepBatchIdxMu.Unlock()
+}
+
 func noteBatchFailed(reason string) {
 	sweepBatchFailedAll.Add(1)
 	sweepBatchFailedMu.Lock()
@@ -260,6 +295,11 @@ func noteBatchFailed(reason string) {
 // SweepBatchStats is the batching ledger for /stats: how many questions were asked in all, how many
 // batches failed, and why.
 type SweepBatchStats struct {
+	// ByIndex tells the batches apart by their position in a sweep: how many were asked, how many verdicts
+	// they judged, and how many of those carried a fabricated quote. A fabrication rate that differs between
+	// the first batch and the later ones is a batch effect; one that is the same everywhere is the model.
+	// ByIndex[0] is the first batch of every sweep. Capped at maxBatchIndexStats entries.
+	ByIndex         []SweepBatchIndexStats
 	Batches, Failed int64
 	// Skipped counts batches never started because the sweep's deadline passed. OverCap counts candidates
 	// left unasked because the limit (max_ask_batches, or the keeper's cost ceiling) allowed fewer batches.
@@ -275,11 +315,26 @@ func SweepBatchCounters() SweepBatchStats {
 	for k, v := range sweepBatchFailedBy {
 		by[k] = v
 	}
-	return SweepBatchStats{Batches: sweepAskBatches.Load(), Failed: sweepBatchFailedAll.Load(),
+	sweepBatchIdxMu.Lock()
+	var idx []SweepBatchIndexStats
+	last := -1
+	for i := range sweepBatchIdx {
+		if sweepBatchIdx[i].Asked > 0 {
+			last = i
+		}
+	}
+	if last >= 0 {
+		idx = append(idx, sweepBatchIdx[:last+1]...)
+	}
+	sweepBatchIdxMu.Unlock()
+	return SweepBatchStats{ByIndex: idx, Batches: sweepAskBatches.Load(), Failed: sweepBatchFailedAll.Load(),
 		Skipped: sweepBatchSkipped.Load(), OverCap: sweepOverAskCapBatch.Load(), FailedBy: by}
 }
 
 func resetSweepBatchForTest() {
+	sweepBatchIdxMu.Lock()
+	sweepBatchIdx = [maxBatchIndexStats]SweepBatchIndexStats{}
+	sweepBatchIdxMu.Unlock()
 	sweepAskBatches.Store(0)
 	sweepBatchSkipped.Store(0)
 	sweepOverAskCapBatch.Store(0)
