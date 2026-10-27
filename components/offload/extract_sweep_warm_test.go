@@ -2662,3 +2662,19 @@ func TestACarryOnRefusalDoesNotMakeTheAnswerYounger(t *testing.T) {
 		t.Fatalf("heldAt moved from %v to %v: a refusal made the carried answer younger", old, got)
 	}
 }
+
+// A merge that evicts carried drops past the cap counts them, so a live run shows the cap biting.
+func TestWarmHoldCountsTheCarriedDropsTheCapEvicts(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	now := time.Now().UnixMilli()
+	var outs []heldOutput
+	for i := 0; i < maxCarriedDrops+5; i++ {
+		outs = append(outs, dropOut(fmt.Sprintf("o%04d", i), 10))
+	}
+	warmHold("cap", heldOf(now-5, 10, outs...))
+	warmHold("cap", heldOf(now, 10, dropOut("new", 10)))
+	if got := SweepWarmCounters().CarriedCapped; got != 6 {
+		t.Fatalf("CarriedCapped = %d, want 6 (261 carried + 1 new - 256)", got)
+	}
+}
