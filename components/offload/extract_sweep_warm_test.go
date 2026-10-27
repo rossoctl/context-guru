@@ -2308,6 +2308,7 @@ func TestACarriedSetOlderThanTheLimitIsDroppedAndCounted(t *testing.T) {
 	warmHold("age", heldOf(old, 40, dropOut("a", 10), dropOut("b", 20)))
 	warmMu.Lock()
 	warmThreads["age"].heldAt = time.Now()
+	warmThreads["age"].heldTried = true // refused once: this IS a carried set
 	warmMu.Unlock()
 	warmHold("age", heldOf(time.Now().UnixMilli(), 50, dropOut("c", 30)))
 	warmMu.Lock()
@@ -2676,5 +2677,54 @@ func TestWarmHoldCountsTheCarriedDropsTheCapEvicts(t *testing.T) {
 	warmHold("cap", heldOf(now, 10, dropOut("new", 10)))
 	if got := SweepWarmCounters().CarriedCapped; got != 6 {
 		t.Fatalf("CarriedCapped = %d, want 6 (261 carried + 1 new - 256)", got)
+	}
+}
+
+// An answer that was never refused and simply went stale is not a carried verdict: it is held_expired, and
+// carried_expired stays at zero.
+func TestAStaleAnswerThatWasNeverRefusedIsNotCountedAsCarriedExpired(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	old := time.Now().Add(-2 * warmHeldMaxAge).UnixMilli()
+	warmHold("stale", heldOf(old, 40, dropOut("a", 10), dropOut("b", 20)))
+	warmMu.Lock()
+	warmThreads["stale"].heldAt = time.Now() // age comes from the question time
+	warmMu.Unlock()
+	warmHold("stale", heldOf(time.Now().UnixMilli(), 50, dropOut("c", 30)))
+	c := SweepWarmCounters()
+	if c.CarriedExpired != 0 || c.HeldExpired != 1 {
+		t.Fatalf("carried_expired=%d held_expired=%d, want 0 and 1", c.CarriedExpired, c.HeldExpired)
+	}
+}
+
+// The shrink void must not remove a FRESH answer that landed between the first read and the void. The hook
+// runs in the trigger path after the read, as a question landing would.
+func TestTheShrinkVoidLeavesAFreshAnswerThatLandedInBetween(t *testing.T) {
+	r := newWarmRig(t, "w-shrink-race", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	warmMu.Lock()
+	old := warmThreads[r.key()].held.Judged
+	warmMu.Unlock()
+	short := 3 // fewer messages than the answer judged
+	if old <= short {
+		t.Fatalf("fixture: answer judged %d messages", old)
+	}
+	warmShrinkHook = func() {
+		warmHold(r.key(), heldOf(time.Now().UnixMilli(), old+50, dropOut("fresh", 10)))
+	}
+	t.Cleanup(func() { warmShrinkHook = nil })
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg("a fresh start"), assistantMsg("ok"), userMsg("go")}}
+	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
+	c := warmCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.PrevBilledInput = 1000
+	if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
+		t.Fatal(err)
+	}
+	warmMu.Lock()
+	h := warmThreads[r.key()].held
+	warmMu.Unlock()
+	if h == nil {
+		t.Fatal("the fresh answer that landed in between was voided")
 	}
 }
