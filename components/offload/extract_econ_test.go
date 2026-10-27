@@ -589,11 +589,14 @@ func TestTheTailIsStillGatedOnItsOwnEconomics(t *testing.T) {
 // The assertion is on the MODEL CALL COUNT, not on the output: both requests must still get a
 // reduced result, and only one of them may pay for it.
 func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
-	// A model that blocks until released, so both goroutines are provably in flight together
-	// — a sleep would make this a timing coincidence rather than a test.
+	// parkingModel parks the LEADER in Complete, so the in-flight key stays held while the
+	// other request's candidate walks up to the single-flight join — a follower by
+	// arrangement, not by timing. Before #748 this test slept 150ms and hoped both requests
+	// were in flight together; under load a straggler joined after the leader finished, made
+	// its own call, and failed the count below (#479 and #162 had the same defect).
+	reply := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
 	release := make(chan struct{})
-	var calls atomic.Int64
-	blocking := blockingModel{calls: &calls, release: release}
+	model := &parkingModel{reply: reply, release: release}
 
 	cfg := "strategy: code\nmin_tokens: 1\neconomic_gate: false\nmodel:\n  source: config\n" +
 		"trigger:\n  min_request_tokens: 1\n"
@@ -610,6 +613,15 @@ func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
 	// cross-session dedup happens while the first extraction is still running.
 	st := store.NewMemory(store.Options{})
 
+	// The hook fires once per candidate, one statement before it joins extractInflight — the
+	// same seam offloadWithParkedLeader uses. One tool result per request, so one candidate
+	// per request and two arrivals total. Same package-global discipline as that helper: no
+	// test here goes parallel, or one test's arrivals would signal another's.
+	const arrivals = 2
+	arrived := make(chan struct{}, arrivals)
+	beforeInflightJoinForTest = func() { arrived <- struct{}{} }
+	t.Cleanup(func() { beforeInflightJoinForTest = nil })
+
 	var wg sync.WaitGroup
 	for _, session := range []string{"session-A", "session-B"} {
 		wg.Add(1)
@@ -619,32 +631,35 @@ func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
 				userMsg("find the keep records"), toolResultMsg(body),
 			}}
 			c := &components.Ctx{Ctx: context.Background(), Session: session, Store: st,
-				Model: components.ModelSpec{Static: blocking}, CtxWindow: 1_000_000}
+				Model: components.ModelSpec{Static: model}, CtxWindow: 1_000_000}
 			var rep components.Report
 			if _, err := e.Offload(req, &rep, c); err != nil {
 				t.Error(err)
 			}
 		}(session)
 	}
-	// Both goroutines are now either waiting on the model or waiting on the leader. Release.
-	time.Sleep(150 * time.Millisecond)
+	// Both requests have now checked the cross-session result cache (a miss: the leader has
+	// not finished), and both candidates are at the join behind a key the parked leader
+	// still holds. Whichever lost the race is a follower as a fact, not a coincidence.
+	for i := 0; i < arrivals; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			// Unblock both Offloads before failing, so the goroutines and the hook cannot
+			// race the cleanup that nils the hook.
+			close(release)
+			wg.Wait()
+			t.Fatalf("only %d of %d requests reached the single-flight join within 10s — "+
+				"a gate or cap trimmed the batch, so this fixture exercises no cross-session "+
+				"follower", i, arrivals)
+		}
+	}
 	close(release)
 	wg.Wait()
 
-	if got := calls.Load(); got != 1 {
+	if got := atomic.LoadInt64(&model.calls); got != 1 {
 		t.Fatalf("two concurrent requests for byte-identical content made %d model calls; "+
 			"single-flight must collapse them to 1 (this race cost 54%% of a measured run's "+
 			"extraction spend)", got)
 	}
-}
-
-type blockingModel struct {
-	calls   *atomic.Int64
-	release chan struct{}
-}
-
-func (m blockingModel) Complete(context.Context, string) (string, error) {
-	m.calls.Add(1)
-	<-m.release
-	return "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n", nil
 }
