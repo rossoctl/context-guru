@@ -140,8 +140,9 @@ func mayCarryPathPrefix(s string) bool {
 // survivors can disagree about the winner: a long single-character directory run is
 // byte-heavy and token-sparse, so factoring it out (foldHitDir) wins bytes while the
 // heading-per-file fold (foldHitPath) wins tokens. Picking by bytes returned the
-// token-worse of the two whenever that divergence appeared, so tokens lead here. A
-// fold that shrinks bytes but grows tokens never wins the pick.
+// token-worse of the two whenever that divergence appeared, so tokens lead here. A fold
+// that shrinks bytes but grows tokens is declined by adopt itself, before the pick ever
+// sees it as a survivor.
 func FoldSearchOutput(s string) string {
 	best := s
 	bestTokens := schema.TextTokens(s)
@@ -153,16 +154,16 @@ func FoldSearchOutput(s string) string {
 		{foldHitDir, unfoldPrefixDir},   // one hit per file: factor the parent dir
 		{foldPathList, unfoldPrefixDir}, // find/ls -1/rg -l: bare paths
 	} {
-		out, ok := adopt(s, c.fold, c.inverse)
+		out, toks, ok := adopt(s, c.fold, c.inverse)
 		if !ok {
 			continue
 		}
-		// TextTokens is memoized by content hash. The INPUT has usually been counted
-		// already — the trigger and the never-worse guard both size the request — so the
-		// bestTokens call above is close to free. Each fold's OUTPUT is a fresh count,
-		// three at most. (adopt itself never counts tokens; it compares bytes.)
-		if toks := schema.TextTokens(out); toks < bestTokens ||
-			(toks == bestTokens && len(out) < len(best)) {
+		// adopt already counted out's tokens for its never-worse check, and the pick
+		// reuses that count: one estimate per candidate, not two. The INPUT has
+		// usually been counted already too — the trigger and the never-worse guard
+		// both size the request, and TextTokens is memoized by content hash — so the
+		// bestTokens call above is close to free.
+		if toks < bestTokens || (toks == bestTokens && len(out) < len(best)) {
 			best, bestTokens = out, toks
 		}
 	}
@@ -188,18 +189,23 @@ func FoldSearchOutput(s string) string {
 // 384 pipeline-level reverts is this same mismatch surfacing one level up, where the
 // never-worse guard has to reject the WHOLE component run because adopt() already accepted
 // a token-losing fold as a byte-shaped win.
-func adopt(in string, fold, inverse func(string) string) (string, bool) {
-	out := fold(in)
+//
+// It returns the adopted fold together with its token count, so a caller that ranks
+// candidates by tokens (FoldSearchOutput) reuses the count adopt already computed for
+// its never-worse check instead of estimating the same output twice. outTokens is the
+// count of out when ok is true; zero otherwise.
+func adopt(in string, fold, inverse func(string) string) (out string, outTokens int, ok bool) {
+	out = fold(in)
 	if len(out) >= len(in) {
-		return in, false
+		return in, 0, false
 	}
-	if schema.TextTokens(out) >= schema.TextTokens(in) {
-		return in, false
+	if outTokens = schema.TextTokens(out); outTokens >= schema.TextTokens(in) {
+		return in, 0, false
 	}
 	if inverse(out) != in {
-		return in, false
+		return in, 0, false
 	}
-	return out, true
+	return out, outTokens, true
 }
 
 // splitHit splits a `path<sep>NNN<sep>…` search hit into its path, where sep is `:`

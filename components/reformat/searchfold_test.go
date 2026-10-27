@@ -61,10 +61,10 @@ func TestFoldRoundTripsEveryCapture(t *testing.T) {
 func TestAdoptDeclinesUnsoundFold(t *testing.T) {
 	in := "a/x.go:1:hit\na/x.go:2:hit\n"
 	lossy := func(string) string { return "a/x.go\n1:hit\n" } // drops a row
-	if out, ok := adopt(in, lossy, unfoldHitPath); ok || out != in {
+	if out, _, ok := adopt(in, lossy, unfoldHitPath); ok || out != in {
 		t.Fatalf("adopted a lossy fold: ok=%v out=%q", ok, out)
 	}
-	if out, ok := adopt(in, foldHitPath, unfoldHitPath); !ok || unfoldHitPath(out) != in {
+	if out, _, ok := adopt(in, foldHitPath, unfoldHitPath); !ok || unfoldHitPath(out) != in {
 		t.Fatalf("declined a sound fold: ok=%v out=%q", ok, out)
 	}
 }
@@ -87,7 +87,7 @@ func TestAdoptDeclinesTokenLosingFold(t *testing.T) {
 	}
 	before := string(in)
 	beforeTok := schema.TextTokens(before)
-	if out, ok := adopt(before, foldHitDir, unfoldPrefixDir); ok {
+	if out, _, ok := adopt(before, foldHitDir, unfoldPrefixDir); ok {
 		t.Fatalf("adopted a token-losing fold: %d -> %d tokens (out=%q)", beforeTok, schema.TextTokens(out), trunc(out))
 	}
 	// FoldSearchOutput must likewise leave the message untouched: no candidate here is a
@@ -161,8 +161,8 @@ func TestThePickBetweenSurvivorsJudgesTokensNotBytes(t *testing.T) {
 	}
 	s := b.String()
 
-	hitPath, okPath := adopt(s, foldHitPath, unfoldHitPath)
-	hitDir, okDir := adopt(s, foldHitDir, unfoldPrefixDir)
+	hitPath, pathToks, okPath := adopt(s, foldHitPath, unfoldHitPath)
+	hitDir, dirToks, okDir := adopt(s, foldHitDir, unfoldPrefixDir)
 	if !okPath || !okDir {
 		t.Fatalf("scenario collapsed: survivors path=%v dir=%v — the pick is only "+
 			"observable when both folds survive", okPath, okDir)
@@ -171,7 +171,6 @@ func TestThePickBetweenSurvivorsJudgesTokensNotBytes(t *testing.T) {
 		t.Fatalf("scenario collapsed: foldHitDir (%d bytes) is not byte-shorter than "+
 			"foldHitPath (%d bytes)", len(hitDir), len(hitPath))
 	}
-	pathToks, dirToks := schema.TextTokens(hitPath), schema.TextTokens(hitDir)
 	if pathToks >= dirToks {
 		t.Fatalf("scenario collapsed: foldHitPath (%d tokens) is not token-shorter than "+
 			"foldHitDir (%d tokens)", pathToks, dirToks)
