@@ -65,7 +65,13 @@ const (
 	// warmHeldMaxAge is how long a waiting answer lives. Past it the answer is dropped, not applied: the
 	// conversation has moved on. It matches the ping registry's bound.
 	warmHeldMaxAge = 30 * time.Minute
-	maxWarmThreads = 256
+
+	// maxCarriedDrops caps how many drop verdicts a thread carries forward between questions (#491). The
+	// questions cover at most 12 x max_ask_batches = 96 outputs each, and a carried set is merged by tool id, so
+	// it cannot grow past the number of old outputs the conversation holds; the cap is a bound on memory, not a
+	// policy. The OLDEST verdicts are the ones that go (they are the likeliest to be stale).
+	maxCarriedDrops = 256
+	maxWarmThreads  = 256
 	// maxBilledRatio bounds the billed-over-local ratio the gate trusts. A figure outside [1, max] came
 	// from another thread's turn or a bad sample, and the gate refuses instead of acting on it.
 	maxBilledRatio = 8.0
@@ -102,6 +108,10 @@ type warmThread struct {
 	pendingAt time.Time
 	held      *heldAnswer
 	heldAt    time.Time
+	// heldTried is set when the gate REFUSED the held answer and its survivors were carried forward. A carried
+	// set is not retried on every warm request (it would be refused again on nearly the same numbers); the
+	// trigger runs instead, asks a new question, and the new answer is merged in (warmHold clears this).
+	heldTried bool
 }
 
 var (
@@ -152,6 +162,8 @@ var (
 	sweepWarmNotWorth, sweepWarmNoBilled, sweepWarmThreadBusy      atomic.Int64
 	sweepWarmModelDeclined, sweepWarmHeldExpired, sweepWarmPanics  atomic.Int64
 	sweepWarmHeldShrunk                                            atomic.Int64
+	sweepWarmCarriedMerged, sweepWarmCarriedOverridden             atomic.Int64
+	sweepWarmCarriedRefused, sweepWarmCarriedExpired               atomic.Int64
 	sweepWarmNotRegistered, sweepWarmThreadsFull                   atomic.Int64
 	sweepWarmAlreadyAsked, sweepWarmNoInventory                    atomic.Int64
 	sweepWarmPriceModelUnknown                                     atomic.Int64
@@ -169,7 +181,7 @@ type SweepWarmStats struct {
 	// NotWorth: checks where the candidates could not pay back. NoBilled: checks skipped because the
 	// provider's billed size was not known yet. ThreadBusy, ModelDeclined, ConcurrencyFull: questions
 	// not sent, for the same reasons as at the ping. HeldExpired: waiting answers dropped for age.
-	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, HeldShrunk, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
+	NotWorth, NoBilled, ThreadBusy, ModelDeclined, ConcurrencyFull, HeldExpired, HeldShrunk, CarriedMerged, CarriedOverridden, CarriedRefused, CarriedExpired, NotRegistered, ThreadsFull, AlreadyAsked, NoInventory, PriceModelUnknown int64
 	// GatePriceModel is the diagnostic warm_gate_price_model, "" in a normal run.
 	GatePriceModel string
 	// GateAccept and GateRefuse count the economic gate's verdicts; Reasons splits the refusals.
@@ -194,7 +206,7 @@ func (w SweepWarmStats) Any() bool {
 		return true
 	}
 	return w.Fired+w.Asked+w.Held+w.Failed+w.NotWorth+w.NoBilled+w.ThreadBusy+w.ModelDeclined+
-		w.ConcurrencyFull+w.HeldExpired+w.HeldShrunk+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
+		w.ConcurrencyFull+w.HeldExpired+w.HeldShrunk+w.CarriedMerged+w.CarriedOverridden+w.CarriedRefused+w.CarriedExpired+w.NotRegistered+w.ThreadsFull+w.AlreadyAsked+w.NoInventory+
 		w.GateAccept+w.GateRefuse+w.Panics > 0 || len(w.Gates) > 0
 }
 
@@ -241,7 +253,7 @@ func SweepWarmCounters() SweepWarmStats {
 	return SweepWarmStats{TriggerReasons: tr, Recent: warmRecentCopy(), RecentDecisions: warmDecisionsCopy(), Fired: sweepWarmFired.Load(), Asked: sweepWarmAsked.Load(), Held: sweepWarmHeld.Load(),
 		Failed: sweepWarmFailed.Load(), NotWorth: sweepWarmNotWorth.Load(), NoBilled: sweepWarmNoBilled.Load(),
 		ThreadBusy: sweepWarmThreadBusy.Load(), ModelDeclined: sweepWarmModelDeclined.Load(),
-		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), HeldShrunk: sweepWarmHeldShrunk.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
+		ConcurrencyFull: sweepWarmConcurrency.Load(), HeldExpired: sweepWarmHeldExpired.Load(), HeldShrunk: sweepWarmHeldShrunk.Load(), CarriedMerged: sweepWarmCarriedMerged.Load(), CarriedOverridden: sweepWarmCarriedOverridden.Load(), CarriedRefused: sweepWarmCarriedRefused.Load(), CarriedExpired: sweepWarmCarriedExpired.Load(), NotRegistered: sweepWarmNotRegistered.Load(), ThreadsFull: sweepWarmThreadsFull.Load(),
 		AlreadyAsked: sweepWarmAlreadyAsked.Load(), NoInventory: sweepWarmNoInventory.Load(), Gates: copyWarmGates(),
 		PriceModelUnknown: sweepWarmPriceModelUnknown.Load(), GatePriceModel: gatePriceModel(),
 		GateAccept: sweepWarmGateAccept.Load(), GateRefuse: sweepWarmGateRefuse.Load(), Reasons: rs,
@@ -268,7 +280,84 @@ func warmHold(key string, h heldAnswer) {
 		return
 	}
 	h.V = heldVersion
-	t.held, t.heldAt = &h, time.Now()
+	// ACCUMULATION (#491). A gate refusal keeps the drops that survived the recheck, in memory, and the NEXT
+	// question's answer is merged with them, so refused drops add up across questions until the gate accepts.
+	// The merge is by tool-use id, each output once, and the NEWER verdict wins, a newer "keep" included.
+	if t.held != nil && (time.Since(t.heldAt) > warmHeldMaxAge || heldAge(*t.held, time.Now()) > warmHeldMaxAge) {
+		sweepWarmCarriedExpired.Add(int64(countDrops(*t.held)))
+		t.held = nil
+	}
+	if t.held != nil {
+		merged, stats := mergeHeld(*t.held, h)
+		sweepWarmCarriedMerged.Add(int64(stats.carriedKept))
+		sweepWarmCarriedOverridden.Add(int64(stats.overridden))
+		h = merged
+	}
+	t.held, t.heldAt, t.heldTried = &h, time.Now(), false
+}
+
+// heldAge is how old the oldest question that still contributes a verdict to this answer is. A carried
+// answer keeps the AskedAtMs of the OLDEST question that fed it (mergeHeld takes the minimum), so a thread
+// cannot keep a verdict alive for ever by being refused again and again.
+func heldAge(h heldAnswer, now time.Time) time.Duration {
+	if h.AskedAtMs <= 0 {
+		return 0
+	}
+	return now.Sub(time.UnixMilli(h.AskedAtMs))
+}
+
+// mergeStats says what a merge did.
+type mergeStats struct {
+	// carriedKept is carried DROP verdicts that survived into the merged answer; overridden is carried
+	// verdicts a newer verdict replaced (including a newer keep); evicted is carried drops cut by the cap.
+	carriedKept, overridden, evicted int
+}
+
+// mergeHeld merges a carried answer (older) with a new one (newer), by tool-use id. Each output appears
+// once. If both judged the same output, the NEWER verdict wins, including a newer "keep". Outputs only the
+// carried answer judged stay as they were. The merged answer takes the NEWER answer's coordinates (Judged and
+// Prints: the conversation as of the newest question), because the recheck compares the whole set against the
+// conversation as it is now, output by output (hash, references), not against the older question's length.
+func mergeHeld(carried, newer heldAnswer) (heldAnswer, mergeStats) {
+	var st mergeStats
+	seen := make(map[string]bool, len(newer.Outputs))
+	for _, o := range newer.Outputs {
+		seen[o.ToolUseID] = true
+	}
+	merged := newer
+	merged.Outputs = nil
+	// Only DROP verdicts are carried. A carried keep says nothing the next recheck needs, and an output that
+	// was kept is simply asked about again.
+	var keep []heldOutput
+	for _, o := range carried.Outputs {
+		if !o.Drop {
+			continue
+		}
+		if seen[o.ToolUseID] {
+			st.overridden++
+			continue
+		}
+		keep = append(keep, o)
+	}
+	if over := len(keep) + len(newer.Outputs) - maxCarriedDrops; over > 0 && len(keep) > 0 {
+		if over > len(keep) {
+			over = len(keep)
+		}
+		keep = keep[over:] // the oldest go first: carried drops are kept in the order they were judged
+		st.evicted = over
+	}
+	st.carriedKept = len(keep)
+	for i := range keep {
+		keep[i].Carried = true
+	}
+	merged.Outputs = append(append(merged.Outputs, keep...), newer.Outputs...)
+	merged.CostUSD = carried.CostUSD + newer.CostUSD
+	// The age limit counts from the OLDEST question that still contributes a verdict. If every carried
+	// verdict was replaced, only the newer question contributes.
+	if st.carriedKept > 0 && carried.AskedAtMs > 0 && (newer.AskedAtMs <= 0 || carried.AskedAtMs < newer.AskedAtMs) {
+		merged.AskedAtMs = carried.AskedAtMs
+	}
+	return merged, st
 }
 
 // memHeld is the warm source for applyHeldFrom: the thread's in-memory answer. It has no Store.
@@ -281,7 +370,7 @@ func (m memHeld) get(string) (heldAnswer, bool) {
 	if !ok || t.held == nil {
 		return heldAnswer{}, false
 	}
-	if time.Since(t.heldAt) > warmHeldMaxAge {
+	if time.Since(t.heldAt) > warmHeldMaxAge || heldAge(*t.held, time.Now()) > warmHeldMaxAge {
 		t.held = nil
 		sweepWarmHeldExpired.Add(1)
 		return heldAnswer{}, false
@@ -328,7 +417,7 @@ func resetWarmForTest() {
 	warmGatePriceModelSet = atomic.Value{}
 	for _, c := range []*atomic.Int64{&sweepWarmAsked, &sweepWarmHeld, &sweepWarmFailed, &sweepWarmFired,
 		&sweepWarmNotWorth, &sweepWarmNoBilled, &sweepWarmThreadBusy, &sweepWarmModelDeclined,
-		&sweepWarmHeldExpired, &sweepWarmHeldShrunk, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
+		&sweepWarmHeldExpired, &sweepWarmHeldShrunk, &sweepWarmCarriedMerged, &sweepWarmCarriedOverridden, &sweepWarmCarriedRefused, &sweepWarmCarriedExpired, &sweepWarmPanics, &sweepWarmNotRegistered, &sweepWarmThreadsFull, &sweepWarmAlreadyAsked, &sweepWarmNoInventory, &sweepWarmPriceModelUnknown, &sweepWarmGateAccept, &sweepWarmGateRefuse, &sweepWarmConcurrency} {
 		c.Store(0)
 	}
 }
@@ -586,6 +675,15 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		}()
 		// The recheck's own account, recorded whatever the gate decides below.
 		d.Proposed, d.Dropped = res.proposed, res.reasonCounts()
+		for _, o := range res.Valid {
+			if o.Carried {
+				d.Carried++
+				d.CarriedTokens += o.Saves
+			} else {
+				d.New++
+				d.NewTokens += o.Saves
+			}
+		}
 		if len(res.Valid) == 0 {
 			// Two different things were both called no_valid_drop. The judge proposing NO drop at all leaves
 			// nothing to recheck (recheckHeld returns at once): that is no_drop_proposed. A proposal the recheck
@@ -673,6 +771,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	growthFrom, growthTurns := t.growthFrom, t.growthTurns
 	busy := t.asking || t.warmPending()
 	hasHeld := t.held != nil
+	heldTried := t.held != nil && t.heldTried
 	var heldJudged, heldProposed int
 	if hasHeld {
 		heldJudged = t.held.Judged
@@ -714,7 +813,10 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			hasHeld = false
 		}
 	}
-	if hasHeld {
+	// A CARRIED set the gate already refused is not retried on every warm request: the trigger runs instead and
+	// asks a new question, whose drops are merged in, and THEN the gate decides on the merged set. A FRESH
+	// answer (never tried) is applied on the next warm request, as before.
+	if hasHeld && !heldTried {
 		warmMu.Lock()
 		if t := warmFor(tkey); t != nil {
 			t.count = 0 // a refused or spent answer must not earn a new question at once
@@ -736,7 +838,8 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 		return nil, 0
 	}
 
-	// The trigger: a rule, then the worth test. The count restarts here whether or not a question follows.
+	// The trigger: a rule, then the worth test. With a CARRIED set (refused drops waiting for more) it still
+	// runs: that is how the set grows. The count restarts here whether or not a question follows.
 	warmMu.Lock()
 	if t = warmFor(tkey); t != nil {
 		t.count = 0
@@ -1204,6 +1307,13 @@ type WarmDecision struct {
 	// drops were gone by the time the gate saw them. Apply stage only.
 	Proposed int            `json:"proposed,omitempty"`
 	Dropped  map[string]int `json:"dropped,omitempty"`
+	// Carried and New split the merged answer the recheck saw: drops carried forward from earlier REFUSED
+	// answers, and drops the newest question proposed (CarriedTokens and NewTokens are their Saves). Merged
+	// D is RemovedLocal, the surviving set the gate priced. Apply stage only.
+	Carried       int `json:"carried,omitempty"`
+	New           int `json:"new,omitempty"`
+	CarriedTokens int `json:"carried_tokens,omitempty"`
+	NewTokens     int `json:"new_tokens,omitempty"`
 	// TurnsModel says which model produced Turns: "expected" (warm_expected_turns), "cut" (turns left before
 	// the conversation is cut, from the billed growth per turn) or "so_far_fallback" (the warm turns so
 	// far). TurnsRaw is N before the warm_max_turns cap and the weight; Cut is the billed size the model
@@ -1279,4 +1389,42 @@ func lastWarmDecision() (WarmDecision, bool) {
 		return WarmDecision{}, false
 	}
 	return warmDecisions[len(warmDecisions)-1], true
+}
+
+// carryRefused puts back, after a gate REFUSAL, the drops of a claimed answer that survived the recheck. The
+// survivors keep their verdicts; everything else (the kept verdicts and the drops the recheck threw out) is
+// left behind. The answer's age is NOT reset: a carried drop is as old as the question that judged it, so a
+// thread cannot keep a verdict alive for ever by being refused (warmHeldMaxAge counts from the oldest
+// question that still contributes). Returns how many drops were carried.
+func carryRefused(src heldSource, tkey string, claimed heldAnswer, res recheckResult) int {
+	m, ok := src.(memHeld)
+	if !ok || len(res.Valid) == 0 {
+		return 0
+	}
+	back := claimed
+	back.Outputs = append([]heldOutput(nil), res.Valid...)
+	warmMu.Lock()
+	defer warmMu.Unlock()
+	t := warmFor(m.key)
+	if t == nil {
+		return 0
+	}
+	if t.held != nil {
+		// A newer answer landed while this one was being applied: merge, newer wins.
+		merged, _ := mergeHeld(back, *t.held)
+		back = merged
+	}
+	back.V = heldVersion
+	t.held = &back
+	t.heldTried = true
+	// heldAt is NOT reset: it is the age the get() below checks, and a refused answer is no younger for having
+	// been refused. (warmHold, for a NEW question, does reset it: that answer is fresh.)
+	sweepWarmCarriedRefused.Add(int64(len(res.Valid)))
+	return len(res.Valid)
+}
+
+// countDrops is how many drop verdicts a held answer carries.
+func countDrops(h heldAnswer) int {
+	n, _ := h.proposed()
+	return n
 }

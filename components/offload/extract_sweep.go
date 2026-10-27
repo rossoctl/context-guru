@@ -765,6 +765,8 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		reply string
 		usage components.PrefixUsage
 		err   error
+		// The text of the body the model read, when the asker reports it (PrefixReadAsker). Empty otherwise.
+		readText string
 		// The ask's own totals. See recordLeg.
 		askMs, askCost float64
 	)
@@ -887,7 +889,16 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 			dump.Trigger = opt.trigger
 		}
 		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
-		if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
+		//
+		// A PrefixReadAsker also returns the text the model read. The quote check below uses it, because the
+		// model can only quote what it was shown; `flat` is one request newer.
+		if ra, ok := c.PrefixAsk.(components.PrefixReadAsker); ok {
+			cc, ch := -1, ""
+			if haveCover {
+				cc, ch = coverCount, coverHash
+			}
+			reply, usage, readText, err = ra.AskRead(ctx, thread.Key(c.Session, c.Thread), cc, ch, askPrompt)
+		} else if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
 			reply, usage, err = ca.AskCovered(ctx, thread.Key(c.Session, c.Thread), coverCount, coverHash, askPrompt)
 		} else {
 			reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
@@ -1075,7 +1086,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		}
 		seen[v.Label] = true
 		content := cands[v.Label].content
-		a := extract.Judge(v, flat)
+		a := extract.Judge(v, quoteSource(readText, flat))
 		r.judgedCount++
 		if a.QuoteFabricated {
 			r.gate("sweep_quote_fabricated")
@@ -1207,6 +1218,15 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 			"req_tokens", schema.MessagesTokens(req), "messages", len(req.Input))
 	}
 	return drop, r
+}
+
+// quoteSource is the text a judge's quote is checked against: what the model read when the asker says so,
+// else the incoming request's transcript. It decides only the fabricated-quote counter.
+func quoteSource(read, flat string) string {
+	if read != "" {
+		return read
+	}
+	return flat
 }
 
 // flattenTranscript renders the agent's own text as one string, for verifying an obligation quote.
