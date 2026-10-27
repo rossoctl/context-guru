@@ -1908,7 +1908,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody); ok {
+		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
@@ -2225,9 +2225,10 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte 
 		}
 	}
 	// The window, not the response: over sniffMax each way this is head+"\n"+tail, which is not a
-	// whole JSON document. responseUsageWhy reports that as `unreadable_body` rather than as an
-	// unrecognised dialect, because the remedy is here and not in any parser.
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes())
+	// whole JSON document. The sniffer says whether it spliced, so responseUsageWhy reports a
+	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
+	// block that was present but rejected stays a dialect finding, whatever the window did.
+	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes(), sn.spliced())
 	return firstByte, u, why, ok
 }
 
