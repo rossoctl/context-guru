@@ -1,0 +1,283 @@
+{
+ "id": "ttl/head-1h/read-after-20-minutes",
+ "description": "headttl holds the 3,000-token head of the request for 1h. Writing it costs the premium over a 5m write, 3,000 x ($6.00 - $3.75) = -$0.00675 (ttlPremium). Twenty minutes later the client's 5m entry would have expired, but the 1h head is read: 3,000 x ($3.75 - $0.30) = +$0.01035 (ttlRescue). The total is +$0.00360.",
+ "source": "more_examples.md#E3",
+ "dims": {
+  "kind": "setting-breakpoint",
+  "position": "system",
+  "cache": "premium-rescue",
+  "ttl": "1h",
+  "lifetime": "exact"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 12000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 20000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.headttl",
+     "at": {
+      "section": "system",
+      "index": 0
+     },
+     "sizeBefore": {
+      "bytes": 12000
+     },
+     "sizeAfter": {
+      "bytes": 12000
+     },
+     "changeId": "headttl:main:sys3a1c"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 12000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 20000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "1h"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "1h",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 8000,
+    "cacheWrite1h": 3000
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 8000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "ttlPremium",
+      "changeId": "headttl:main:sys3a1c",
+      "saved": {
+       "cacheWrite5m": 3000
+      },
+      "caused": {
+       "cacheWrite1h": 3000
+      },
+      "ttl": "1h",
+      "note": "the head is written at 1h, whether or not anyone reads it"
+     }
+    ],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:20:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 12000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 20000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 12000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 20000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "1h"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "1h",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 3000,
+    "cacheWrite": 5500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 8500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "ttlRescue",
+      "changeId": "headttl:main:sys3a1c",
+      "saved": {
+       "cacheWrite5m": 3000
+      },
+      "caused": {
+       "cacheRead": 3000
+      },
+      "ttl": "1h",
+      "note": "the 5m entry would have expired; the 1h head is read"
+     }
+    ]
+   }
+  }
+ ]
+}

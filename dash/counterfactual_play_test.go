@@ -59,7 +59,7 @@ func Play(c opscases.Case) []Played {
 		id, operator string
 		delta        int
 	}
-	var seen []change
+	seen := map[string][]change{} // per session: the old pipeline kept its removals for one session only
 	var out []Played
 
 	var prevAt time.Time
@@ -95,7 +95,9 @@ func Play(c opscases.Case) []Played {
 		for _, op := range s.Add {
 			switch op.Kind {
 			case cf.KindRewrite:
-				seen = append(seen, change{op.ChangeID, op.Operator, op.SizeBefore.Tokens - op.SizeAfter.Tokens})
+				sess := s.Begin.Meta.Session
+				// the fixtures use 4 bytes a token
+				seen[sess] = append(seen[sess], change{op.ChangeID, op.Operator, (op.SizeBefore.Bytes - op.SizeAfter.Bytes) / 4})
 				first[op.ChangeID] = true
 			case cf.KindSpend:
 				if op.Call != nil {
@@ -118,7 +120,7 @@ func Play(c opscases.Case) []Played {
 			CGLLMCostUSD: cgLLM,
 		}
 		var ids []string
-		for _, ch := range seen {
+		for _, ch := range seen[s.Begin.Meta.Session] {
 			gross, unique := max(ch.delta, 0), 0
 			if first[ch.id] {
 				unique = gross
@@ -176,6 +178,9 @@ func expected(c opscases.Case, s opscases.Step) (net int64, byChange map[string]
 		net += picos
 	}
 	for _, e := range s.Expected.Effects { // breaks and rescues are cache effects, not operations
+		if !e.Counted() {
+			continue
+		}
 		picos := rate.Picos(e.Saved) - rate.Picos(e.Caused)
 		byChange[e.ChangeID] += opscases.RoundMicros(picos)
 		net += picos

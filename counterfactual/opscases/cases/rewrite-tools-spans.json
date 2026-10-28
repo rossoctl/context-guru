@@ -202,14 +202,10 @@
       "index": 2
      },
      "sizeBefore": {
-      "bytes": 32000,
-      "tokens": 8000,
-      "tokenizer": "bytes-estimate"
+      "bytes": 32000
      },
      "sizeAfter": {
-      "bytes": 0,
-      "tokens": 0,
-      "tokenizer": "bytes-estimate"
+      "bytes": 0
      },
      "changeId": "tp:decl-set-7f3a",
      "spans": [
@@ -218,14 +214,10 @@
        "from": 2,
        "to": 2,
        "sizeBefore": {
-        "bytes": 14000,
-        "tokens": 3500,
-        "tokenizer": "bytes-estimate"
+        "bytes": 14000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       },
       {
@@ -233,14 +225,10 @@
        "from": 9,
        "to": 9,
        "sizeBefore": {
-        "bytes": 8000,
-        "tokens": 2000,
-        "tokenizer": "bytes-estimate"
+        "bytes": 8000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       },
       {
@@ -248,14 +236,10 @@
        "from": 15,
        "to": 15,
        "sizeBefore": {
-        "bytes": 10000,
-        "tokens": 2500,
-        "tokenizer": "bytes-estimate"
+        "bytes": 10000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       }
      ]
@@ -444,6 +428,7 @@
        "cacheWrite5m": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "first request: nothing is cached"
      }
     ]
@@ -818,6 +803,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "tools come first, so they are before B*"
      }
     ],
@@ -1204,7 +1190,17 @@
        "cacheWrite5m": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "the entry expired"
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
      }
     ]
    }

@@ -101,6 +101,8 @@ type Expected struct {
 	// order it returns them. Only the library writes these, so no step has an input form of them.
 	Effects  []ExpectedEffect   `json:"effects,omitempty"`
 	Unpriced []ExpectedUnpriced `json:"unpriced,omitempty"`
+	// Checks are the names of the checks (§6.5) that must fail on this step. Absent means none fails.
+	Checks []string `json:"checks,omitempty"`
 }
 
 // ExpectedOp is one priced operation.
@@ -110,6 +112,9 @@ type ExpectedOp struct {
 	Saved    cf.TierTokens `json:"saved"`
 	Caused   cf.TierTokens `json:"caused"`
 	Call     *cf.ModelCall `json:"call,omitempty"` // a spend: the host prices it
+	// Estimated is asserted both ways. Every rewrite is converted from bytes (§4.2 rule 7), so it must be
+	// marked; a spend is priced by the host from the call's own usage, so it must not.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // ExpectedEffect is one cache effect. Its range is asserted only when present.
@@ -123,6 +128,11 @@ type ExpectedEffect struct {
 	Saved    cf.TierTokens      `json:"saved"`
 	Caused   cf.TierTokens      `json:"caused"`
 }
+
+// Counted reports whether the effect is part of the bill difference. A break nobody caused (§5.2 row 4,
+// an entry lost early) is in the bill of the client body too, so it is on the record but cancels out of
+// conservation. Design §6.3 does not say this. A break that moves no tokens is unaffected.
+func (e ExpectedEffect) Counted() bool { return !(e.Kind == cf.EffectBreak && e.ChangeID == "") }
 
 // ExpectedUnpriced is an operation the library must report as not priced, and why.
 type ExpectedUnpriced struct {
@@ -203,7 +213,9 @@ func (c Case) StepPicos(s Step) (net int64) {
 		}
 	}
 	for _, e := range s.Expected.Effects {
-		net += c.StepRate(s).Picos(e.Saved) - c.StepRate(s).Picos(e.Caused)
+		if e.Counted() {
+			net += c.StepRate(s).Picos(e.Saved) - c.StepRate(s).Picos(e.Caused)
+		}
 	}
 	return net
 }

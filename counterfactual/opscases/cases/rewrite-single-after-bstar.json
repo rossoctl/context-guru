@@ -274,14 +274,10 @@
       "index": 9
      },
      "sizeBefore": {
-      "bytes": 32000,
-      "tokens": 8000,
-      "tokenizer": "o200k_base"
+      "bytes": 32000
      },
      "sizeAfter": {
-      "bytes": 4000,
-      "tokens": 1000,
-      "tokenizer": "o200k_base"
+      "bytes": 4000
      },
      "changeId": "cg:cmdfilter:c40e"
     }
@@ -385,6 +381,7 @@
        "cacheWrite5m": 7000
       },
       "caused": {},
+      "estimated": true,
       "note": "new content, would have been written"
      }
     ],

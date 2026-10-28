@@ -1,0 +1,357 @@
+{
+ "id": "setting/nil-position/penalty-unknown",
+ "description": "The router lowered effort, but its reporter does not know where the provider renders it, so the setting has no position. The provider read 8,000 tokens and wrote 33,000. With no At the library takes the read the usage shows as the end of the valid prefix: the break covers 32,000 tokens, -$0.11040, and the operation is reported unpriced with penalty_unknown. The figure is a floor, so a host must show it as an estimate (\u00a76.4).",
+ "source": "more_examples.md#F5",
+ "dims": {
+  "kind": "setting",
+  "position": "nil",
+  "cache": "break",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "setting": "effort",
+  "break": "setting"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-set",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "high"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 40000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 40000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-set",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "low"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "setting",
+     "operator": "inference-router",
+     "changeId": "rt:effort-5d70",
+     "settings": {
+      "effort": {
+       "from": "high",
+       "to": "low"
+      }
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 8000,
+    "cacheWrite": 33000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 40000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "rt:effort-5d70",
+      "saved": {
+       "cacheRead": 32000
+      },
+      "caused": {
+       "cacheWrite5m": 32000
+      },
+      "from": {
+       "section": "system",
+       "index": 0
+      },
+      "to": {
+       "section": "messages",
+       "index": 3
+      },
+      "note": "from the read the usage shows; the position of the cause is unknown"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    },
+    "unpriced": [
+     {
+      "opId": "op1",
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  }
+ ]
+}

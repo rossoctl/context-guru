@@ -1,0 +1,235 @@
+{
+ "id": "conservation/client-size-from-result",
+ "description": "Three operators remove 22,000 of the 38,000 tokens the client sent, so the provider bills 16,000. The fill a size gate wants (38,000) is not billed, but it follows from the result with no new field: billed + sum of Saved - sum of Caused = 16,000 + 22,000 - 0. opscases_test.go pins that identity for every case.",
+ "source": "issue_cases.md#555",
+ "dims": {
+  "kind": "rewrite",
+  "position": "afterBStar",
+  "cache": "miss",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "operations": "3"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "new: whether Result should expose the client-side token total (issue 555) or leave the sum to the trigger. The identity holds either way"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 40000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 40000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 40000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 8000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.mask",
+     "at": {
+      "section": "messages",
+      "index": 1
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 4000
+     },
+     "changeId": "cg:mask:aa01"
+    },
+    {
+     "id": "o2",
+     "kind": "rewrite",
+     "operator": "context-guru.mask",
+     "at": {
+      "section": "messages",
+      "index": 2
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 4000
+     },
+     "changeId": "cg:mask:aa02"
+    },
+    {
+     "id": "o3",
+     "kind": "rewrite",
+     "operator": "context-guru.cmdfilter",
+     "at": {
+      "section": "messages",
+      "index": 3
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 24000
+     },
+     "changeId": "cg:cmdfilter:aa03"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 9215220295725055461,
+       "bytes": 4000
+      },
+      {
+       "hash": 12763434788497009144,
+       "bytes": 4000
+      },
+      {
+       "hash": 9703332037203295170,
+       "bytes": 24000
+      },
+      {
+       "hash": 3240782982965814737,
+       "bytes": 8000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 16000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 38000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:mask:aa01",
+      "saved": {
+       "cacheWrite5m": 9000
+      },
+      "caused": {},
+      "estimated": true
+     },
+     {
+      "changeId": "cg:mask:aa02",
+      "saved": {
+       "cacheWrite5m": 9000
+      },
+      "caused": {},
+      "estimated": true
+     },
+     {
+      "changeId": "cg:cmdfilter:aa03",
+      "saved": {
+       "cacheWrite5m": 4000
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  }
+ ]
+}

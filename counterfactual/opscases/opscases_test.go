@@ -1,6 +1,8 @@
 package opscases
 
 import (
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +12,7 @@ import (
 
 // computeImplemented flips to true when Compute prices. Until then the cases are specifications
 // that are checked for shape only. Flip it and every case must pass.
-const computeImplemented = false
+const computeImplemented = true
 
 func TestCasesAreWellFormed(t *testing.T) {
 	cases := All()
@@ -109,7 +111,12 @@ func checkStep(t *testing.T, c Case, i int, s Step) {
 		net += rate.Picos(e.Saved) - rate.Picos(e.Caused)
 	}
 	for _, e := range s.Expected.Effects {
-		net += rate.Picos(e.Saved) - rate.Picos(e.Caused)
+		if e.Counted() {
+			net += rate.Picos(e.Saved) - rate.Picos(e.Caused)
+		}
+	}
+	if slices.Contains(s.Expected.Checks, "conservation") {
+		return // the case states that this step fails the check, so the sums differ on purpose
 	}
 	if got := rate.UsagePicos(b) - rate.UsagePicos(s.Usage); got != net {
 		at("baseline minus billed is %d pico-dollars, but the expected ops net %d", got, net)
@@ -123,11 +130,11 @@ func checkOp(at func(string, ...any), op cf.Operation) {
 	if len(op.Spans) > 0 { // §6.5 check 4
 		var b, a int
 		for _, s := range op.Spans {
-			b += s.SizeBefore.Tokens
-			a += s.SizeAfter.Tokens
+			b += s.SizeBefore.Bytes
+			a += s.SizeAfter.Bytes
 		}
-		if b != op.SizeBefore.Tokens || a != op.SizeAfter.Tokens {
-			at("op %q: spans sum to %d/%d, op says %d/%d", op.ID, b, a, op.SizeBefore.Tokens, op.SizeAfter.Tokens)
+		if b != op.SizeBefore.Bytes || a != op.SizeAfter.Bytes {
+			at("op %q: spans sum to %d/%d, op says %d/%d", op.ID, b, a, op.SizeBefore.Bytes, op.SizeAfter.Bytes)
 		}
 	}
 }
@@ -183,6 +190,9 @@ func compare(t *testing.T, i int, want Expected, got cf.Result) {
 		if (w.Call == nil) != (p.Call == nil) {
 			t.Errorf("step %d op %d: call presence differs", i, j)
 		}
+		if p.Estimated != w.Estimated {
+			t.Errorf("step %d op %d: estimated %v, want %v", i, j, p.Estimated, w.Estimated)
+		}
 	}
 	if len(got.CacheEffects) != len(want.Effects) {
 		t.Fatalf("step %d: %d cache effects, want %d: %+v", i, len(got.CacheEffects), len(want.Effects), got.CacheEffects)
@@ -201,8 +211,24 @@ func compare(t *testing.T, i int, want Expected, got cf.Result) {
 			t.Errorf("step %d effect %d: to %v, want %v", i, j, g.To, *w.To)
 		}
 	}
-	if len(got.Checks) > 0 {
-		t.Errorf("step %d: failed checks %+v", i, got.Checks)
+	var failed []string
+	for _, c := range got.Checks {
+		failed = append(failed, c.Check)
+	}
+	sort.Strings(failed)
+	wantChecks := append([]string(nil), want.Checks...)
+	sort.Strings(wantChecks)
+	if strings.Join(failed, ",") != strings.Join(wantChecks, ",") {
+		t.Errorf("step %d: failed checks %v, want %v", i, failed, wantChecks)
+	}
+	reasons := map[string]bool{}
+	for _, u := range got.Unpriced {
+		reasons[u.OpID+"|"+u.Reason] = true
+	}
+	for _, w := range want.Unpriced {
+		if !reasons[w.OpID+"|"+w.Reason] {
+			t.Errorf("step %d: missing unpriced %q for op %q", i, w.Reason, w.OpID)
+		}
 	}
 }
 
@@ -263,7 +289,7 @@ func TestExamplesPriceAsDocumented(t *testing.T) {
 		t.Errorf("example 6: turn 5 nets %d µ$ at the document's rounding, want 30120 ($0.03012)", got)
 	}
 	for _, c := range byID {
-		if !strings.Contains(c.Source, "examples.md") {
+		if !strings.Contains(c.Source, "examples.md") && !strings.Contains(c.Source, "issue_cases.md") && !strings.Contains(c.Source, "advanced-offload.md") {
 			t.Errorf("%s: source %q does not name its document", c.ID, c.Source)
 		}
 	}
@@ -277,4 +303,27 @@ func roundDoc(picos int64) int64 {
 		q--
 	}
 	return q * 10
+}
+
+// TestClientSizeFollowsFromResult pins the identity the summarizer size gate needs (issue #555): the
+// client body's tokens are the billed tokens plus the tokens the operations saved minus the tokens
+// they caused. Cache effects move tokens between tiers and cancel, and a spend adds none.
+func TestClientSizeFollowsFromResult(t *testing.T) {
+	for _, c := range All() {
+		for i, s := range c.Steps {
+			if s.IsStandalone() || slices.Contains(s.Expected.Checks, "conservation") {
+				continue
+			}
+			var saved, caused int
+			for _, e := range s.Expected.Ops {
+				saved += e.Saved.Input + e.Saved.CacheRead + e.Saved.CacheWrite5m + e.Saved.CacheWrite1h
+				caused += e.Caused.Input + e.Caused.CacheRead + e.Caused.CacheWrite5m + e.Caused.CacheWrite1h
+			}
+			billed := s.Usage.Input + s.Usage.CacheRead + s.Usage.CacheWrite
+			if client := Tokens(s.Begin.Client); client != billed+saved-caused {
+				t.Errorf("%s step %d: client %d tokens, but billed %d + saved %d - caused %d = %d",
+					c.ID, i, client, billed, saved, caused, billed+saved-caused)
+			}
+		}
+	}
 }

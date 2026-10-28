@@ -11,6 +11,10 @@ type Fingerprint struct {
 	Forwarded                               Body      // body as sent upstream
 	ClientBreakpoints, ForwardedBreakpoints []Breakpoint
 	Cached                                  Position // extent cached after its response, in forwarded space
+
+	// splices are the message splices that produced Forwarded from Client, in pipeline order. The
+	// library needs them to map Cached back into client space (§5.1). Not part of the API.
+	splices []MessageSplice
 }
 
 // Body lists every position in hash order: tools, then system, then messages. The slice index is

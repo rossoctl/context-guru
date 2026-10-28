@@ -87,7 +87,7 @@ it is written. The change saves 7,000 × $3.75 = **$0.02625**. The rates are in 
 ```json
 {"kind": "rewrite", "operator": "context-guru.cmdfilter",
  "at": {"section": "messages", "index": 9},
- "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 1000},
+ "sizeBefore": {"bytes": 32000}, "sizeAfter": {"bytes": 4000},
  "changeId": "cg:cmdfilter:c40e"}
 ```
 
@@ -166,10 +166,10 @@ each tool. It is one context operation, because it is one decision:
 {"kind": "rewrite", "operator": "tool-prune",
  "at": {"section": "tools", "index": 2},
  "spans": [
-   {"section": "tools", "from": 2,  "to": 2,  "sizeBefore": {"tokens": 3500}, "sizeAfter": {"tokens": 0}},
-   {"section": "tools", "from": 9,  "to": 9,  "sizeBefore": {"tokens": 2000}, "sizeAfter": {"tokens": 0}},
-   {"section": "tools", "from": 15, "to": 15, "sizeBefore": {"tokens": 2500}, "sizeAfter": {"tokens": 0}}],
- "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 0},
+   {"section": "tools", "from": 2,  "to": 2,  "sizeBefore": {"bytes": 14000}, "sizeAfter": {"bytes": 0}},
+   {"section": "tools", "from": 9,  "to": 9,  "sizeBefore": {"bytes": 8000}, "sizeAfter": {"bytes": 0}},
+   {"section": "tools", "from": 15, "to": 15, "sizeBefore": {"bytes": 10000}, "sizeAfter": {"bytes": 0}}],
+ "sizeBefore": {"bytes": 32000}, "sizeAfter": {"bytes": 0},
  "changeId": "tp:decl-set-7f3a"}
 ```
 
@@ -230,7 +230,7 @@ three carry the same `changeId`, so the host can add the cost and the saving tog
    ```json
    {"id": "op2", "kind": "rewrite", "operator": "context-guru.summarize",
     "at": {"section": "messages", "index": 0},
-    "sizeBefore": {"tokens": 10000}, "sizeAfter": {"tokens": 500},
+    "sizeBefore": {"bytes": 40000}, "sizeAfter": {"bytes": 2000},
     "changeId": "cg:summarize:5d21",
     "messageSplice": {"at": 0, "removed": 3, "inserted": 1}}
    ```
@@ -421,14 +421,14 @@ them.
       "id": "op1", "kind": "rewrite",
       "operator": "context-guru.cmdfilter",
       "at": {"section": "messages", "index": 9},
-      "sizeBefore": {"tokens": 8000}, "sizeAfter": {"tokens": 900},
+      "sizeBefore": {"bytes": 32000}, "sizeAfter": {"bytes": 3600},
       "changeId": "cg:cmdfilter:c40e"
     }
   ]
 }
 ```
 
-To keep the example short, bytes and the cg tokenizer name are left out.
+Sizes are bytes only (4 bytes a token in these examples); the library converts them to tokens.
 
 The three active context operations are not in the envelope. `tool-prune` is the one from
 [example 3](#3-a-rewrite-of-the-tools), where its JSON is shown.
@@ -506,7 +506,7 @@ One context operation and one cache effect describe the change. `coref` reports 
      "id": "op12", "kind": "rewrite",
      "operator": "context-guru.coref",
      "at": {"section": "messages", "index": 5},
-     "sizeBefore": {"tokens": 20000}, "sizeAfter": {"tokens": 50},
+     "sizeBefore": {"bytes": 80000}, "sizeAfter": {"bytes": 200},
      "changeId": "cg:coref:5e2d"
    }
    ```

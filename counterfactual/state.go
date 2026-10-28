@@ -86,3 +86,15 @@ func (r *Request) EndRequest(thread Thread, forwarded Body, breakpoints []Breakp
 	r.start = r.trackers.tracker(ThreadKey(r.Meta.Session, thread)).snapshot()
 	r.ended = true
 }
+
+// replace stores next only if the state is still at version, and gives it version + 1 (R53).
+func (t *Tracker) replace(version uint64, next ThreadState) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state.Version != version {
+		return false
+	}
+	next.Version = version + 1
+	t.state = next
+	return true
+}

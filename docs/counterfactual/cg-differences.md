@@ -29,7 +29,8 @@ is wrong, or they answer different questions. This report lists the disagreement
   turns a case into a `dash.Event`. One assumption in it matters and is repeated below: the first
   request of a change counts as a "unique" removal, and later requests as "replays".
 
-Of nine cases, **four agree** with cg to the micro-dollar and **five differ**. The cases that
+Of nine cases, **four agree** with cg to the micro-dollar and **five differ**
+(case 3 only on its per-component line: its request totals agree). The cases that
 agree are listed in section 8 so the reader knows what was not found wrong.
 
 ## 2. Terms
@@ -93,7 +94,7 @@ is 12,000. Four requests follow in time:
 *The spec's rule, step by step, per request.*
 
 **Request A.** The provider can read only up to the end of `system` (4,000 tools + 4,000 system = 8,000
-tokens), because the first message has changed. It writes the other 4,000 tokens: the summary, the 3,500-token tail and a new
+tokens), because the first message has changed. It writes the other 4,000 tokens: the 500-token summary, the 3,000-token tail and a new
 500-token message. Without the summary the provider would have read all 21,000 cached tokens and
 written the 500 new ones.
 
@@ -103,7 +104,7 @@ written the 500 new ones.
 | Bill with the summary | 8,000 × $0.30 + 4,000 × $3.75 | 17,400 |
 | Summarizer call | 10,000 × $1.00 + 500 × $5.00 (summarizer rates) | −12,500 |
 | Saving of the removed tokens | 9,500 × $0.30 (they would have been read) | +2,850 |
-| Cache break | 3,500 × ($3.75 − $0.30): summary and tail written, not read | −12,075 |
+| Cache break | 3,500 × ($3.75 − $0.30): summary (500) and tail (3,000) written, not read | −12,075 |
 | **Request A, net** | 2,850 − 12,075 − 12,500 | **−21,725** |
 
 Check: baseline − billed bill = 8,175 − 17,400 = −9,225 = 2,850 − 12,075. The call is separate.
@@ -180,7 +181,7 @@ Four other edits are still active from earlier turns (the tools removal, the add
 The 19,010 tokens are 11,060 + 50 + 7,900. The 2,000 new tokens are written in both bills, so they
 cancel. Request 7 as a whole, with the other four edits: 29,400 − 83,377.5 = **−53,977.5 µ$**.
 
-At this saving rate `coref` needs about 11 more hot turns (65,584.5 ÷ 5,985) to repay the break.
+At this saving rate `coref` needs about 10 more hot turns after this one (59,599.5 ÷ 5,985) to repay its net cost.
 
 ### What cg computed
 
@@ -313,7 +314,8 @@ after the change (the proposed rule, not yet decided, see below):
 
 4,200 − 41,000 = −36,800. At the large model's rates the break would be 40,000 × ($3.75 − $0.30) =
 −138,000 instead. The choice matters by a factor of 3.75, and it is **open question 10** of the
-design.
+design. Also, −36,800 compares the bill against a baseline that never existed. Against "stayed on
+the large model" the net would be −25,250, which mixes the break with the difference in rates.
 
 **What cg computed.** 0. cg's baseline for this request is 41,000, the same as the bill.
 `AttributeCache` (`dash/event.go:1096-1100`) sends a model it has not seen to `cold_start`, and its
@@ -354,7 +356,8 @@ only as a filter parameter in `dash/api.go:1188`.
 
 **Where the problem is.** As in case 4, cg does not model it. **Unverified in this case:** that a
 real model renders effort ahead of the messages only. I took that from `cached-prefix.md`, which says
-it varies by model, and I did not test a real model.
+it varies by model, and I did not test a real model. Public documentation establishes only that a change to thinking
+parameters breaks the cache, not where `effort` is rendered, so this premise is an assumption.
 
 ---
 
@@ -375,9 +378,9 @@ for a plain removal of new or cached-and-read content, the two rules give the sa
 - **The expected figures are by hand.** `Compute` does not exist. If a figure here is wrong, the case
   file is wrong, and the spec's rule should be re-read. Every case passes the conservation check and
   its document total, which catches arithmetic errors but not a wrong rule.
-- **The tests use a flat 4 bytes per token** and a single tokenizer factor of 1. cg normally
-  multiplies counted tokens by a model-specific factor (1.69 for Sonnet and Opus,
-  `internal/tokens/billedfactor.go`). The test model name avoids it. Real figures would differ.
+- **The tests use a flat 4 bytes per token.** The library converts every size with the request's own
+  ratio, so cg's model-specific factor (1.69 for Sonnet and Opus, `internal/tokens/billedfactor.go`) is
+  not an input. Real ratios differ from 4, and no case tests another ratio yet.
 - **The adapter `Play` is mine.** It feeds `dash.Event.Price` the "unique versus replayed" split that
   the real pipeline computes in `FromTrace`. A different split would change cg's figure in cases 1
   and 2.

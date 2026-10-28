@@ -1,0 +1,577 @@
+{
+ "id": "rewrite+spend/extract-llm-sweep/ask-then-cold-apply/5m",
+ "description": "A spent 8,000-token tool output (message 1) sits in a 17,500-token thread. At minute 6:20 the keep-alive ping is replaced by the sweep's ask: the previous turn's forwarded body plus a 400-token question, so it reads 17,500 tokens from the warm cache and renews the entry (400 input, 17,500 read, 200 output: -$0.00945). The model says drop; the verdict is held and changes no request while the cache is warm, because a removal inside the cached prefix would be a break. The keep-alive ends and the entry expires. The next request arrives 23 minutes later, past the 5m TTL of both the last request and the ask, so no rescue is credited and nothing is cached: the held verdict is applied and the 7,900 removed tokens (8,000 to a 100-token descriptor with a <<cg:HASH>> marker) are priced as cache writes, 7,900 x $3.75 = +$0.02963. The ask and the removal share one ChangeID. Total +$0.02018.",
+ "source": "advanced-offload.md#extract_llm_sweep",
+ "dims": {
+  "kind": "rewrite+spend",
+  "position": "beforeBStar",
+  "cache": "hit-ask-miss",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true",
+  "sweep": "true"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "sw-0",
+     "session": "s3",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 9551738790548624536,
+       "bytes": 32000
+      },
+      {
+       "hash": 6814467217468663557,
+       "bytes": 4000
+      },
+      {
+       "hash": 9677973917383267395,
+       "bytes": 4000
+      },
+      {
+       "hash": 10865264820623669454,
+       "bytes": 4000
+      },
+      {
+       "hash": 13717712691099558060,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 9551738790548624536,
+       "bytes": 32000
+      },
+      {
+       "hash": 6814467217468663557,
+       "bytes": 4000
+      },
+      {
+       "hash": 9677973917383267395,
+       "bytes": 4000
+      },
+      {
+       "hash": 10865264820623669454,
+       "bytes": 4000
+      },
+      {
+       "hash": 13717712691099558060,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 17000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 17000,
+     "cacheWrite1h": 0
+    },
+    "ops": []
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "sw-1",
+     "session": "s3",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:40Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 9551738790548624536,
+       "bytes": 32000
+      },
+      {
+       "hash": 6814467217468663557,
+       "bytes": 4000
+      },
+      {
+       "hash": 9677973917383267395,
+       "bytes": 4000
+      },
+      {
+       "hash": 10865264820623669454,
+       "bytes": 4000
+      },
+      {
+       "hash": 13717712691099558060,
+       "bytes": 4000
+      },
+      {
+       "hash": 4750690556184317325,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 9551738790548624536,
+       "bytes": 32000
+      },
+      {
+       "hash": 6814467217468663557,
+       "bytes": 4000
+      },
+      {
+       "hash": 9677973917383267395,
+       "bytes": 4000
+      },
+      {
+       "hash": 10865264820623669454,
+       "bytes": 4000
+      },
+      {
+       "hash": 13717712691099558060,
+       "bytes": 4000
+      },
+      {
+       "hash": 4750690556184317325,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 17000,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 17000,
+     "cacheWrite": 500,
+     "cacheWrite1h": 0
+    },
+    "ops": []
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "sw-ask-1",
+    "session": "s3",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:06:20Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "context-guru.extract_llm_sweep",
+      "changeId": "cg:extract_llm_sweep:7a1c",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 400,
+        "cacheRead": 17500,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 200
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "cg:extract_llm_sweep:7a1c",
+      "saved": {},
+      "caused": {},
+      "note": "the ask, sent in place of the ping: priced by the host, 9,450 micro-dollars",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 400,
+        "cacheRead": 17500,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 200
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "sw-2",
+     "session": "s3",
+     "model": "agent-model",
+     "at": "2026-03-02T09:30:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 9551738790548624536,
+       "bytes": 32000
+      },
+      {
+       "hash": 6814467217468663557,
+       "bytes": 4000
+      },
+      {
+       "hash": 9677973917383267395,
+       "bytes": 4000
+      },
+      {
+       "hash": 10865264820623669454,
+       "bytes": 4000
+      },
+      {
+       "hash": 13717712691099558060,
+       "bytes": 4000
+      },
+      {
+       "hash": 4750690556184317325,
+       "bytes": 2000
+      },
+      {
+       "hash": 11238561085071509551,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 7
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op2",
+     "kind": "rewrite",
+     "operator": "context-guru.extract_llm_sweep",
+     "at": {
+      "section": "messages",
+      "index": 1
+     },
+     "sizeBefore": {
+      "bytes": 32000
+     },
+     "sizeAfter": {
+      "bytes": 400
+     },
+     "changeId": "cg:extract_llm_sweep:7a1c"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11082120457913512007,
+       "bytes": 8000
+      },
+      {
+       "hash": 73852678605638302,
+       "bytes": 12000
+      },
+      {
+       "hash": 4033878237378396318,
+       "bytes": 400
+      },
+      {
+       "hash": 13167493770851323923,
+       "bytes": 4000
+      },
+      {
+       "hash": 3576025604526856081,
+       "bytes": 4000
+      },
+      {
+       "hash": 15130030896118671616,
+       "bytes": 4000
+      },
+      {
+       "hash": 6712233093324819026,
+       "bytes": 4000
+      },
+      {
+       "hash": 1392015838983154547,
+       "bytes": 2000
+      },
+      {
+       "hash": 1427282473809535701,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 7
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact",
+     "lastPing": "2026-03-02T09:06:20Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 6
+     }
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 10100,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "cold",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 18000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:extract_llm_sweep:7a1c",
+      "saved": {
+       "cacheWrite5m": 7900
+      },
+      "caused": {},
+      "estimated": true,
+      "note": "the held verdict is applied on the cold request; the output would have been written"
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
+     }
+    ]
+   }
+  }
+ ]
+}

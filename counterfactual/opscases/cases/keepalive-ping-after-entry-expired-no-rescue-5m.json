@@ -1,0 +1,393 @@
+{
+ "id": "keepalive/ping-after-entry-expired/no-rescue/5m",
+ "description": "Turn 1 caches 10,000 tokens. The keeper pings at 320 seconds, after the entry expired at 300: the ping reads nothing and writes the 10,000 tokens again (10,000 x $3.75 + 10 x $3.00 + 1 x $15.00 per million = -$0.03755). The next request arrives at 700 seconds, 380 after the ping: past the TTL again. The entry gap is above the TTL, so the phase is cold, no rescue is credited, and the window is only the ping's cost. The expiry is on the record as a break that moves no token.",
+ "source": "more_examples.md#B2",
+ "dims": {
+  "kind": "rescue",
+  "position": "beforeBStar",
+  "cache": "no-rescue",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-b2",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 10000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 10000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "ping-320",
+    "session": "s-b2",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:05:20Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "keeper",
+      "changeId": "ka:main:w-b2",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 0,
+        "cacheWrite": 10000,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "ka:main:w-b2",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 0,
+        "cacheWrite": 10000,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-b2",
+     "model": "agent-model",
+     "at": "2026-03-02T09:11:40Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      },
+      {
+       "hash": 12943432748918056218,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      },
+      {
+       "hash": 12943432748918056218,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact",
+     "lastPing": "2026-03-02T09:05:20Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 5
+     },
+     "pingWindow": "ka:main:w-b2"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 10500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "cold",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 10500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; moves no token"
+     }
+    ]
+   }
+  }
+ ]
+}

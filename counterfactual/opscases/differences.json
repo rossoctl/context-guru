@@ -113,5 +113,351 @@
    }
   ],
   "total": true
+ },
+ {
+  "case": "boundary/state-lost-reads-cache",
+  "kind": "differs",
+  "reason": "design \u00a75.2 (a read in the usage is evidence) and \u00a76.4: with no history the request reads 18,500 tokens, so the replayed replacement is priced as a read and penalty_unknown is added. cg prices a first removal at the write rate (uniqueRate) whatever the usage read, so it books 5,500 x $3.75 where the spec books 5,500 x $0.30.",
+  "allow": [
+   {
+    "step": 0
+   },
+   {
+    "step": 0,
+    "change": "cg:extract:1a40"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/searchfold-inside-prefix/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 row 1 and \u00a76.2: searchfold changes a message inside the cached prefix. The spec prices the 2,500 removed tokens as a read and charges the 14,500-token break to searchfold. cg prices a first removal as a write and has no break term, so the sign is wrong (issue 496: the dashboard showed a hit).",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:searchfold:6b02"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/decision-flips-inside-prefix/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 rows 1 and 4 and \u00a74.5: request 2 breaks the cache inside the prefix and cg books a write-rate gain; request 4 returns the original inside the prefix and cg books a small credit where the spec charges a 6,000-token break to the ended change (open question 12).",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:dedup:4c18"
+   },
+   {
+    "step": 3
+   },
+   {
+    "step": 3,
+    "change": "cg:dedup:4c18"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/replay-at-new-position/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 row 1 and \u00a76.2: the second occurrence is compacted at depth, inside the cached prefix. The spec prices it as a read with a break; cg prices a first removal as a write with no break.",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "cg:extract_llm:b9f1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/break-then-payback-turns/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 row 1 and \u00a76.2: coref's first request breaks the cache. The spec nets -63,375 and cg +74,625, the same wrong sign as the coref case in examples.md#7. The later hot replays and the cold turn agree.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:coref:7a03"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/fixed-restore-cost/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a76.2 (added tokens): a restore grows the body, and the spec books it as Caused by position (written once, then read). cg clamps a negative gross to zero (ComponentSavedUSD) and Play passes max(delta, 0), so the restore costs nothing and the mask is credited in full every turn (issue 481).",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "cg:restore:2c9e"
+   },
+   {
+    "step": 3
+   },
+   {
+    "step": 3,
+    "change": "cg:restore:2c9e"
+   },
+   {
+    "step": 4
+   },
+   {
+    "step": 4,
+    "change": "cg:restore:2c9e"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/restore-in-place/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a74.5 and \u00a75.2 row 1: the original goes back in place, the mask ends, and the provider holds the marker, so 6,000 tokens move from read to write. cg has no term for an ended change: it keeps crediting the mask (+1,350) and books no break (issue 481, open question).",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "cg:mask:8d11"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "split/delivered/stable-half-read",
+  "kind": "notCovered",
+  "reason": "design \u00a74.4 (split) and \u00a76.2: Play does not feed cg's cachesplit credit (CachesplitSavedUSD), which cg books outside the per-component figures, so the adapter shows 0. The case is the contrast for split/reported-not-delivered and is not evidence about cg's cachesplit logic.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:cachesplit:e4d1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "keepalive/ping-on-1h-entry/no-rescue/1h",
+  "kind": "differs",
+  "reason": "design \u00a74.4 condition 2: the entry gap is measured against the TTL of the breakpoint that wrote the entry, here 1h, so a 9-minute return is no rescue. cg credits the 34,500 \u00b5$ because the floor it compares with is the 5m TTL (keepaliveCreditFloorMs). The play adapter does not pass the event's CacheTTL, so this case shows the default floor, not a measured 1h session; the spec's own row announces the difference (\u00a710.2).",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "ka:main:w-b4"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "keepalive/ping/minimum-lifetime/no-rescue",
+  "kind": "differs",
+  "reason": "design \u00a74.4 condition 2 and R45: a minimum lifetime proves no expiry, so no rescue. cg credits the return after the 30-minute floor for GPT-5.6+ (keepaliveCreditFloorMs), and the play adapter leaves Provider unset, so cg falls back to its 5m floor and credits the 35-minute gap. Either way cg books a rescue the spec refuses; the spec's own row announces it (\u00a710.2).",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "ka:main:w-oa"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/after-last-breakpoint/input/5m",
+  "kind": "differs",
+  "reason": "design \u00a76.2 tier table: tokens after the last client breakpoint L are input, not cache write. cg prices a first removal at the write rate (uniqueRate) with no notion of L, so it books 7,000 x $3.75 where the spec books 7,000 x $3.00.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:cmdfilter:c1d0"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/no-breakpoint/input/5m",
+  "kind": "differs",
+  "reason": "design \u00a76.2 tier table, last row: with no breakpoint in the body every token is input. cg prices a first removal at the write rate, so it books the saving at $3.75 where the spec books $3.00.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:cmdfilter:c2e7"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/two-spans-two-tiers/hot/5m",
+  "kind": "differs",
+  "reason": "design \u00a74.3 and \u00a76.2: a change with spans is priced span by span, here one read span and one write span, and the removal inside the cached prefix breaks the cache (\u00a75.2 row 1). cg prices a first removal at one rate, the write rate, and has no break, so it books a gain of 32,625 \u00b5$ where the spec books a loss of 43,275 \u00b5$.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:failed_run:c3f2"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/expand-first-injection/break-once/5m",
+  "kind": "differs",
+  "reason": "design \u00a74.2 rule 3 and \u00a76.2: an injected declaration is a cost, and a change to tools breaks the whole prefix once. cg reports no cost for the expand tool and has no break, so it books 0 where the spec books -66,675 \u00b5$ on the injecting turn and -90 \u00b5$ on every later one. The reporting of the expand tool is itself open (more_examples.md section 5).",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:expand:d2f1"
+   },
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "cg:expand:d2f1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "rewrite/toolschema-mid-session/break-then-saving/5m",
+  "kind": "differs",
+  "reason": "design \u00a75.2 row 1 and \u00a76.2: trimming a cached tool declaration breaks the whole prefix once, then saves a read on every later turn. cg has no break and prices the first removal as a write, so it books +7,500 \u00b5$ on the turn that the spec books -82,200 \u00b5$.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:toolschema:d3b7"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "setting/web-search-toggle/break-from-system",
+  "kind": "notCovered",
+  "reason": "design \u00a75.2 row 3: a break caused by a setting change. cg has no such concept: it books nothing for a setting, as in setting/model-change/break.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "rt:websearch-1d2f"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "setting/nil-position/penalty-unknown",
+  "kind": "notCovered",
+  "reason": "design \u00a74.2 rule 4 and \u00a76.4: a setting with no position falls back to the read the usage shows and adds penalty_unknown. cg has no setting break and no unpriced list, so it books nothing.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "rt:effort-5d70"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "ttl/head-1h/never-read",
+  "kind": "notCovered",
+  "reason": "design \u00a74.4 (ttlPremium): the 1h write premium is a cost on every request that writes the head. cg's headttl credit is booked outside the per-component figures, and the play adapter does not feed it, so cg shows 0. Not evidence about cg's headttl logic.",
+  "allow": [
+   {
+    "step": 0
+   },
+   {
+    "step": 0,
+    "change": "headttl:main:sys3a1c"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "ttl/head-1h/read-after-20-minutes",
+  "kind": "notCovered",
+  "reason": "design \u00a74.4 (ttlPremium and ttlRescue): both legs of a 1h head. cg books the headttl credit outside the per-component figures and the play adapter does not feed it, so cg shows 0. Not evidence about cg's headttl logic.",
+  "allow": [
+   {
+    "step": 0
+   },
+   {
+    "step": 0,
+    "change": "headttl:main:sys3a1c"
+   },
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "headttl:main:sys3a1c"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "ttl/head-1h/read-after-3-minutes",
+  "kind": "notCovered",
+  "reason": "design \u00a74.4 (ttlPremium): the premium is paid and nothing pays it back. cg books the headttl credit outside the per-component figures and the play adapter does not feed it, so cg shows 0. Not evidence about cg's headttl logic.",
+  "allow": [
+   {
+    "step": 0
+   },
+   {
+    "step": 0,
+    "change": "headttl:main:sys3a1c"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "unpriced/unknown-kind-and-unreported-edit",
+  "kind": "differs",
+  "reason": "design \u00a76.5 checks 1 and 6 and R19: a body edit that no operation reports leaves the sum and conservation checks failing, and an unknown kind is unpriced. cg has no such checks and books 1,500 \u00b5$ for the gap between the client and forwarded sizes; the mechanism was not traced.",
+  "allow": [
+   {
+    "step": 1
+   }
+  ],
+  "total": true
  }
 ]

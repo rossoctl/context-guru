@@ -259,14 +259,10 @@
       "index": 0
      },
      "sizeBefore": {
-      "bytes": 40000,
-      "tokens": 10000,
-      "tokenizer": "o200k_base"
+      "bytes": 40000
      },
      "sizeAfter": {
-      "bytes": 2000,
-      "tokens": 500,
-      "tokenizer": "o200k_base"
+      "bytes": 2000
      },
      "changeId": "cg:summarize:5d21",
      "messageSplice": {
@@ -375,6 +371,7 @@
        "cacheRead": 9500
       },
       "caused": {},
+      "estimated": true,
       "note": "would have been read"
      }
     ],
@@ -394,9 +391,9 @@
       },
       "to": {
        "section": "messages",
-       "index": 4
+       "index": 2
       },
-      "note": "the summary and the tail are written, not read"
+      "note": "the summary and the tail are written, not read; to is in forwarded space (\u00a76.2)"
      }
     ],
     "boundary": {
@@ -562,6 +559,7 @@
        "cacheRead": 9500
       },
       "caused": {},
+      "estimated": true,
       "note": "applied again; the summary is cached now"
      }
     ],
@@ -736,7 +734,17 @@
        "cacheWrite5m": 9500
       },
       "caused": {},
+      "estimated": true,
       "note": "the entry expired"
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
      }
     ]
    }

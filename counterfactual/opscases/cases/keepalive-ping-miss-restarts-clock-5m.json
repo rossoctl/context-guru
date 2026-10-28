@@ -1,0 +1,326 @@
+{
+ "id": "keepalive/ping-miss-restarts-clock/5m",
+ "description": "The entry (20,000 tokens) expired before the ping at minute 6, so the ping read 0 and wrote it again. Turn 1 arrives at minute 9: past the TTL measured from turn 0, inside it measured from the ping. The entry gap runs from LastPing, so the phase is hot and the rescue is credited: 20,000 x ($3.75 - $0.30) = +$0.06900. The ping costs 20,000 x $3.75 + 10 x $3.00 + 1 x $15.00 = -$0.07505, so the window nets -$0.00605: a ping that missed pays for itself at the read price only.",
+ "source": "issue_cases.md#580",
+ "dims": {
+  "kind": "rescue",
+  "position": "beforeBStar",
+  "cache": "rescue",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true",
+  "ping": "missed-and-wrote"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a74.4 rule 4 takes the smaller of what the last ping READ and what the request read. A ping that missed read 0 but re-created the entry, so read literally the rescue is 0. This case credits the extent the ping covered (PingRead). The rule needs to say so",
+  "design \u00a74.1 defines PingRead as the extent the ping READ, which is nil for a ping that missed; this case sets it to messages[0] so that row 2 of the phase table matches. Both need amending"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-kp",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 72000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 72000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 20000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 20000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "ping-360",
+    "session": "s-kp",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:06:00Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "keeper",
+      "changeId": "ka:main:w2",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 0,
+        "cacheWrite": 20000,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "ka:main:w2",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 0,
+        "cacheWrite": 20000,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-kp",
+     "model": "agent-model",
+     "at": "2026-03-02T09:09:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 72000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 72000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact",
+     "lastPing": "2026-03-02T09:06:00Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 0
+     },
+     "pingWindow": "ka:main:w2"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 20000,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 20500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "rescue",
+      "changeId": "ka:main:w2",
+      "saved": {
+       "cacheWrite5m": 20000
+      },
+      "caused": {
+       "cacheRead": 20000
+      },
+      "to": {
+       "section": "messages",
+       "index": 0
+      },
+      "note": "the ping missed and wrote the entry: the entry is alive from minute 6"
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -594,8 +594,8 @@ and can be reported as unpriced (R19).
 7. **A context operator reports bytes only. The library calculates the tokens.**
    Removed tokens are not in the forwarded body, so the library takes the bytes from the context
    operation's own `Size` and converts them. The conversion uses the request's own ratio: the
-   bytes of the client body divided by the billed input tokens of the request (input + cache read +
-   cache write). If the request has no usage, the library uses a fixed fallback ratio. The library
+   bytes of the forwarded body divided by the billed input tokens of the request (input + cache read +
+   cache write). The provider bills the forwarded body, so the ratio is taken on it. If the request has no usage, the library uses a fixed fallback ratio. The library
    marks every priced result that uses this conversion as `Estimated`. No operator names a tokenizer,
    so two operators give the same tokens for the same bytes.
 8. **The engine reports a change that `apply` writes, under the context operator that decided it.**

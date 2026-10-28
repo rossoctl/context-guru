@@ -195,14 +195,10 @@
       "index": 2
      },
      "sizeBefore": {
-      "bytes": 32000,
-      "tokens": 8000,
-      "tokenizer": "bytes-estimate"
+      "bytes": 32000
      },
      "sizeAfter": {
-      "bytes": 0,
-      "tokens": 0,
-      "tokenizer": "bytes-estimate"
+      "bytes": 0
      },
      "changeId": "tp:decl-set-7f3a",
      "spans": [
@@ -211,14 +207,10 @@
        "from": 2,
        "to": 2,
        "sizeBefore": {
-        "bytes": 14000,
-        "tokens": 3500,
-        "tokenizer": "bytes-estimate"
+        "bytes": 14000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       },
       {
@@ -226,14 +218,10 @@
        "from": 9,
        "to": 9,
        "sizeBefore": {
-        "bytes": 8000,
-        "tokens": 2000,
-        "tokenizer": "bytes-estimate"
+        "bytes": 8000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       },
       {
@@ -241,14 +229,10 @@
        "from": 15,
        "to": 15,
        "sizeBefore": {
-        "bytes": 10000,
-        "tokens": 2500,
-        "tokenizer": "bytes-estimate"
+        "bytes": 10000
        },
        "sizeAfter": {
-        "bytes": 0,
-        "tokens": 0,
-        "tokenizer": "bytes-estimate"
+        "bytes": 0
        }
       }
      ]
@@ -262,14 +246,10 @@
       "index": 27
      },
      "sizeBefore": {
-      "bytes": 0,
-      "tokens": 0,
-      "tokenizer": "o200k_base"
+      "bytes": 0
      },
      "sizeAfter": {
-      "bytes": 1200,
-      "tokens": 300,
-      "tokenizer": "o200k_base"
+      "bytes": 1200
      },
      "changeId": "cg:expand:91b0"
     }
@@ -453,6 +433,7 @@
        "cacheWrite5m": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -461,6 +442,7 @@
       "caused": {
        "cacheWrite5m": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      }
     ]
@@ -823,6 +805,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -831,6 +814,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      }
     ],
@@ -1031,14 +1015,10 @@
       "index": 3
      },
      "sizeBefore": {
-      "bytes": 16000,
-      "tokens": 4000,
-      "tokenizer": "o200k_base"
+      "bytes": 16000
      },
      "sizeAfter": {
-      "bytes": 240,
-      "tokens": 60,
-      "tokenizer": "o200k_base"
+      "bytes": 240
      },
      "changeId": "cg:mask:2a77"
     }
@@ -1234,6 +1214,7 @@
        "cacheWrite5m": 3940
       },
       "caused": {},
+      "estimated": true,
       "note": "mask"
      },
      {
@@ -1242,6 +1223,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -1250,6 +1232,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      }
     ],
@@ -1664,6 +1647,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -1672,6 +1656,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      },
      {
@@ -1680,6 +1665,7 @@
        "cacheRead": 3940
       },
       "caused": {},
+      "estimated": true,
       "note": "mask"
      }
     ],
@@ -1900,14 +1886,10 @@
       "index": 9
      },
      "sizeBefore": {
-      "bytes": 32000,
-      "tokens": 8000,
-      "tokenizer": "o200k_base"
+      "bytes": 32000
      },
      "sizeAfter": {
-      "bytes": 3600,
-      "tokens": 900,
-      "tokenizer": "o200k_base"
+      "bytes": 3600
      },
      "changeId": "cg:cmdfilter:c40e"
     }
@@ -2123,6 +2105,7 @@
        "cacheWrite5m": 7100
       },
       "caused": {},
+      "estimated": true,
       "note": "cmdfilter"
      },
      {
@@ -2131,6 +2114,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -2139,6 +2123,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      },
      {
@@ -2147,6 +2132,7 @@
        "cacheRead": 3940
       },
       "caused": {},
+      "estimated": true,
       "note": "mask"
      }
     ],
@@ -2585,6 +2571,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -2593,6 +2580,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      },
      {
@@ -2601,6 +2589,7 @@
        "cacheRead": 3940
       },
       "caused": {},
+      "estimated": true,
       "note": "mask"
      },
      {
@@ -2609,6 +2598,7 @@
        "cacheRead": 7100
       },
       "caused": {},
+      "estimated": true,
       "note": "cmdfilter"
      }
     ],
@@ -2845,14 +2835,10 @@
       "index": 5
      },
      "sizeBefore": {
-      "bytes": 80000,
-      "tokens": 20000,
-      "tokenizer": "o200k_base"
+      "bytes": 80000
      },
      "sizeAfter": {
-      "bytes": 200,
-      "tokens": 50,
-      "tokenizer": "o200k_base"
+      "bytes": 200
      },
      "changeId": "cg:coref:5e2d"
     }
@@ -3084,6 +3070,7 @@
        "cacheRead": 19950
       },
       "caused": {},
+      "estimated": true,
       "note": "coref"
      },
      {
@@ -3092,6 +3079,7 @@
        "cacheRead": 8000
       },
       "caused": {},
+      "estimated": true,
       "note": "prune"
      },
      {
@@ -3100,6 +3088,7 @@
       "caused": {
        "cacheRead": 300
       },
+      "estimated": true,
       "note": "expand: an added declaration is a cost"
      },
      {
@@ -3108,6 +3097,7 @@
        "cacheRead": 3940
       },
       "caused": {},
+      "estimated": true,
       "note": "mask"
      },
      {
@@ -3116,6 +3106,7 @@
        "cacheRead": 7100
       },
       "caused": {},
+      "estimated": true,
       "note": "cmdfilter"
      }
     ],

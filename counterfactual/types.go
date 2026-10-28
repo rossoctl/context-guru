@@ -120,11 +120,10 @@ type SettingChange struct {
 	At   *Position `json:"at,omitempty"`
 }
 
-// Size is a token count and the tokenizer that produced it.
+// Size is bytes only. A context operator does not count tokens: the library converts bytes to
+// tokens (§4.2 rule 7).
 type Size struct {
-	Bytes     int    `json:"bytes,omitempty"`     // required on rewrite; the sum check compares it with the Body sizes (§6.5)
-	Tokens    int    `json:"tokens"`              // required on rewrite (rule 7)
-	Tokenizer string `json:"tokenizer,omitempty"` // "bytes-estimate" when estimated
+	Bytes int `json:"bytes,omitempty"` // required on rewrite; the sum check compares it with the Body sizes (§6.5)
 }
 
 // MessageSplice describes a change to the message list.

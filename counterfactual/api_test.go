@@ -21,18 +21,25 @@ func TestRequestRecordsTheCallsInOrder(t *testing.T) {
 	}
 }
 
-func TestComputeStubPricesNothingAndKeepsState(t *testing.T) {
+func TestComputeWithNoUsagePricesNothing(t *testing.T) {
 	ts := NewTrackers()
 	r := ts.BeginRequest(RequestMeta{Session: "s1"}, Body{}, nil)
 	r.Add(Operation{ID: "a", Kind: KindRewrite})
 	r.EndRequest(Thread{ID: "main"}, Body{}, nil, EntryFacts{})
 
 	res := r.Compute(Usage{})
-	if len(res.Ops) != 1 || len(res.Unpriced) != 1 || res.Unpriced[0].Reason != ReasonNotImplemented {
-		t.Fatalf("stub result = %+v", res)
+	if len(res.Ops) != 1 || !hasUnpriced(res, ReasonNoUsage) {
+		t.Fatalf("result = %+v, want the op unpriced with no_usage", res)
 	}
-	if got := ts.tracker(ThreadKey("s1", Thread{ID: "main"})).snapshot().Version; got != 0 {
-		t.Fatalf("stub changed ThreadState.Version to %d", got)
+}
+
+func TestComputeWithoutEndRequestPricesNothing(t *testing.T) {
+	ts := NewTrackers()
+	r := ts.BeginRequest(RequestMeta{Session: "s1"}, Body{}, nil)
+	r.Add(Operation{ID: "a", Kind: KindRewrite})
+	res := r.Compute(Usage{Input: 10})
+	if !hasUnpriced(res, ReasonEndRequestMissing) {
+		t.Fatalf("result = %+v, want end_request_missing", res)
 	}
 }
 

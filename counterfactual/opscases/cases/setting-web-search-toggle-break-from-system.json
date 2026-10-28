@@ -1,0 +1,378 @@
+{
+ "id": "setting/web-search-toggle/break-from-system",
+ "description": "A router turns web search on for request 5. Anthropic renders the toggle into the system prompt, so the tools stay valid and the system and messages do not: with a breakpoint on tools the provider reads 5,000 tokens and writes the other 36,000. The setting carries system[0]. 35,000 x ($3.75 - $0.30) = -$0.12075.",
+ "source": "more_examples.md#F2",
+ "dims": {
+  "kind": "setting",
+  "position": "system",
+  "cache": "break",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "setting": "web_search",
+  "break": "setting"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body.",
+  "design \u00a74.2 setting rules: system[0] carries a breakpoint of its own, so the last breakpoint strictly before it is the one on tools. The case adds that breakpoint; with only system and last-message breakpoints the read would be 0"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-set",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "tools",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "tools",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 40000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 40000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-set",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "tools",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "setting",
+     "operator": "inference-router",
+     "changeId": "rt:websearch-1d2f",
+     "settings": {
+      "web_search": {
+       "from": "off",
+       "to": "on",
+       "at": {
+        "section": "system",
+        "index": 0
+       }
+      }
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "tools",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 5000,
+    "cacheWrite": 36000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 40000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "rt:websearch-1d2f",
+      "saved": {
+       "cacheRead": 35000
+      },
+      "caused": {
+       "cacheWrite5m": 35000
+      },
+      "from": {
+       "section": "tools",
+       "index": 0
+      },
+      "to": {
+       "section": "messages",
+       "index": 3
+      },
+      "note": "35,000 tokens move from read to write"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}
