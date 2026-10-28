@@ -106,6 +106,8 @@ type capture struct {
 	// savings is the handler's counterfactual tracker (nil in legacy mode); cfReq is this
 	// request's record (nil when it was skipped); cfDone guards a double finish.
 	savings *savingsTracker
+	// mode is Options.Savings: only "shadow" logs the two figures at finish.
+	mode string
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	cfReq  *cf.Request
@@ -132,7 +134,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		llm:     &cheapmodel.Sink{},
 		unique:  map[string]int{},
 		waits:   h.waits,
-		savings: h.savings, pings: h.opts.Pings,
+		savings: h.savings, mode: h.opts.Savings, pings: h.opts.Pings,
 	}
 }
 
@@ -623,6 +625,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
 	}
 	e.Price(price, usageOK && priced)
+	if c.mode == SavingsShadow && e.HasCounterfactual() {
+		logShadow(e, price)
+	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
 		cgPrice, cgPriced := price, priced
 		if c.pricer != nil && cgModel != "" && cgModel != c.model {
