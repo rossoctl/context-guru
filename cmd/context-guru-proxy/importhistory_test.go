@@ -8,9 +8,11 @@ import (
 	"time"
 )
 
-// `context-guru-proxy import-history` is how install.sh imports pre-install history once: the release
-// ships this one binary, so the import has to live in it. It must run and EXIT, never start serving.
-func TestImportHistoryIsASubcommandThatRunsAndExits(t *testing.T) {
+// The history import is removed. `context-guru-proxy import-history` stays as a no-op that EXITS 0,
+// because an older install.sh still calls it during a plugin/proxy version mismatch: dropping the
+// name would let it fall through to the proxy's own parsing and start serving, which hangs the install.
+// It must import nothing.
+func TestImportHistoryIsANoOpThatExits(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "projects", "-p")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -23,12 +25,20 @@ func TestImportHistoryIsASubcommandThatRunsAndExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := filepath.Join(t.TempDir(), "d.db")
+
 	out, code, exited := runMain(t, 20*time.Second,
 		"CG_TEST_MAIN_ARGS=import-history -db "+db+" -home "+home+" -apply")
+
 	if !exited {
 		t.Fatalf("import-history started serving instead of exiting:\n%s", out)
 	}
-	if code != 0 || !strings.Contains(out, "APPLIED — 1 requests imported") {
-		t.Fatalf("code=%d, want 0 and one imported request; output:\n%s", code, out)
+	if code != 0 || strings.Contains(out, "imported") && strings.Contains(out, "APPLIED") {
+		t.Fatalf("code=%d, want 0 and nothing imported; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "removed") {
+		t.Errorf("import-history does not say it was removed:\n%s", out)
+	}
+	if _, err := os.Stat(db); err == nil {
+		t.Errorf("import-history created a database at %s; a no-op must not", db)
 	}
 }

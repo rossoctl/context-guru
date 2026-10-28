@@ -5,39 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"time"
 )
 
-// Reading Claude Code's own session transcripts, so the dashboard can report on traffic that
-// predates its own installation.
+// Reading Claude Code's own session transcripts (~/.claude/projects/<encoded-cwd>/<session>.jsonl).
 //
-// WHY THIS EXISTS. A user installs this proxy after months of working with Claude Code and the
-// dashboard starts from zero: every request before install day is invisible, so the first thing
-// they see is an empty page and the capability report has no evidence to reason from. Claude Code
-// writes a transcript of every session under ~/.claude/projects/<encoded-cwd>/<session>.jsonl,
-// and those files exist whether or not this proxy ever ran. Measured on one real machine: 4,053
-// requests over 12 days that the proxy never saw, against 3,959 that it did.
-//
-// THE SOURCE IS DELIBERATELY NOT OURS, and that is the only reason it can answer the question.
-// Every other figure in this dashboard comes from traffic that passed through the proxy; a request
-// made before the proxy existed can only be recovered from something else's record of it. Three
-// consequences follow, and they shape everything below:
-//
-//   - The format is not ours to rely on. A transcript holds entry types this code has never heard
-//     of, and more will appear. Anything unrecognised is skipped, never fatal.
-//   - The file may be mid-write. A session still running has a torn last line, which is normal
-//     rather than corrupt.
-//   - It only exists on the user's own machine. A hosted proxy has nothing to read, the same limit
-//     skillDescriptions documents, and must not pretend otherwise.
-//
-// WHAT IT CANNOT GIVE US, which decides what the import may claim. A transcript records the usage
-// the provider billed, the model, the working directory and every tool CALLED — but not the tools
-// DECLARED on each request. Measured: a declaration list appears twice in 6,000 entries, as a
-// `prompt_snapshot` attachment, not per request. So an imported row can answer "what did this
-// cost" and can never answer "what was I carrying and not using", which is the one thing the
-// waste report is about. The import informs the inventory; it must never produce a verdict.
+// Its one use now is the project picker: projectgroups.go reads each session's working folders from
+// here to group them into projects. The history import that also read these files is removed, so no
+// figure on the dashboard comes from a transcript.
 
 // TranscriptTurn is one billed request, as another program recorded it.
 type TranscriptTurn struct {
@@ -251,39 +226,4 @@ func transcriptCalled(e *transcriptEntry) ([]string, map[string]bool) {
 		out = append(out, name)
 	}
 	return out, skills
-}
-
-// TranscriptFiles lists every session transcript on this machine, oldest first.
-//
-// `home` overrides the home directory, for tests. A missing projects directory is the normal state
-// of a machine where Claude Code has not run, not an error worth failing an import over.
-func TranscriptFiles(home string) []string {
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		home = h
-	}
-	all, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
-	// Regular files only: a symlink under the projects directory could point anywhere.
-	var paths []string
-	for _, p := range all {
-		fi, err := os.Lstat(p)
-		di, derr := os.Lstat(filepath.Dir(p))
-		if err == nil && derr == nil && fi.Mode().IsRegular() && di.IsDir() {
-			paths = append(paths, p)
-		}
-	}
-	// Oldest first, so a progress report reads chronologically and an interrupted import has
-	// covered a contiguous span rather than a scatter.
-	sort.Slice(paths, func(i, j int) bool {
-		fi, erri := os.Stat(paths[i])
-		fj, errj := os.Stat(paths[j])
-		if erri != nil || errj != nil {
-			return paths[i] < paths[j]
-		}
-		return fi.ModTime().Before(fj.ModTime())
-	})
-	return paths
 }

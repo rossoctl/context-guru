@@ -77,15 +77,6 @@ func (a *API) insights(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		/* The measured/imported split of this window. Best-effort: a failed query yields no
-		 * statement rather than failing the report, which is the right trade for a warning —
-		 * though it does mean a reader cannot distinguish "nothing imported" from "could not
-		 * tell", so the query is cheap enough to be expected to succeed. */
-		cov, covErr := db.CoverageFor(f)
-		var coverage *InsightsCoverage
-		if covErr == nil {
-			coverage = cov
-		}
 		doc := ShapeInsights(rep, InsightsOptions{
 			Qualified: qualified,
 			// diskHome, not "": the test home must reach this walk too, or the insights
@@ -99,11 +90,6 @@ func (a *API) insights(w http.ResponseWriter, r *http.Request) {
 			// document state which narrowing produced them.
 			Project:     f.Project,
 			ProjectNone: f.ProjectNone,
-			// How much of this window the proxy actually watched. An imported day contributes
-			// spend and no carriage, so the waste figures describe the measured part only — and
-			// the document has to say that rather than letting a tripled request count beside an
-			// unchanged waste figure read as "the extra history was cheap".
-			Coverage: coverage,
 		})
 
 		// The per-item timeline, when asked for. Opt-in because it is two int arrays per item over

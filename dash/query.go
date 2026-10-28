@@ -53,13 +53,6 @@ type Filter struct {
 	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
 	// dashboard opens on — not "the unattributed ones", since absence is not a value.
 	Project string
-	// Source selects rows of one kind: SourceImported for recovered history. Unset means BOTH,
-	// which is the view the dashboard opens on.
-	Source string
-	// SourceMeasured selects the rows the proxy measured itself. Separate from an empty Source
-	// for the same reason ProjectNone is separate from an empty Project: a measured row stores
-	// "", so absence could not also mean "only those" without making one meaning unreachable.
-	SourceMeasured bool
 	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
 	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
 	// here (it is what every pre-migration row and every client that does not state a directory
@@ -165,12 +158,6 @@ func (f Filter) where() (string, []any) {
 	// from the field being unset, and so would silently mean "every project".
 	if f.ProjectNone {
 		add("r.project = ''")
-	}
-	if f.Source != "" {
-		add("r.source = ?", f.Source)
-	}
-	if f.SourceMeasured {
-		add("r.source = ''")
 	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
@@ -1639,27 +1626,6 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		out = append(out, &g)
 	}
 	return out, rows.Err()
-}
-
-// CoverageFor is the measured/imported split of a window.
-//
-// Asked of the REQUESTS rather than of the inventory, because an inventory row has no source: the
-// declarations table is keyed by digest and shared across requests, so "was this watched" is a
-// property of the traffic and only a request query can answer it.
-func (d *DB) CoverageFor(f Filter) (*InsightsCoverage, error) {
-	where, args := f.where()
-	var out InsightsCoverage
-	err := d.sql.QueryRow(`SELECT
-		COALESCE(SUM(CASE WHEN r.source = '' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN r.source <> '' THEN 1 ELSE 0 END), 0),
-		COALESCE(COUNT(DISTINCT CASE WHEN r.source <> ''
-			THEN date(r.ts/1000, 'unixepoch', 'localtime') END), 0)
-		FROM requests r WHERE `+where, args...).
-		Scan(&out.MeasuredRequests, &out.ImportedRequests, &out.ImportedDays)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // facetQueries are the distinct-value lists that populate the filter dropdowns.

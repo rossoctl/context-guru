@@ -1,8 +1,6 @@
 package dash
 
 import (
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,20 +57,5 @@ func TestAnOversizedLineIsReportedAsTruncation(t *testing.T) {
 	}
 	if len(turns) != 1 {
 		t.Errorf("turns = %d; want the 1 read before the oversize line", len(turns))
-	}
-}
-
-// S5: neither a symlinked file nor a symlinked directory is read.
-func TestTranscriptFilesSkipSymlinks(t *testing.T) {
-	home := t.TempDir()
-	real := writeJSONL(t, home, "-real", "s1", msgLine("s1", "m1", "/p", 1000, 5, 5))
-	outside := t.TempDir()
-	os.WriteFile(filepath.Join(outside, "x.jsonl"), []byte(msgLine("x", "m", "/q", 1000, 5, 5)+"\n"), 0o644)
-	proj := filepath.Join(home, ".claude", "projects")
-	os.Symlink(real, filepath.Join(proj, "-real", "link.jsonl"))
-	os.Symlink(outside, filepath.Join(proj, "-linkdir"))
-	files := TranscriptFiles(home)
-	if len(files) != 1 || files[0] != real {
-		t.Errorf("files = %v; want only %s", files, real)
 	}
 }

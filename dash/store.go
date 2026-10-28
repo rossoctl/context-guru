@@ -674,20 +674,7 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 	var deleted int64
 	if maxAge > 0 {
 		cutoff := now.Add(-maxAge).UnixMilli()
-		// IMPORTED HISTORY IS EXEMPT FROM THE AGE RULE, and that exemption is the difference
-		// between the import being useful and being pointless.
-		//
-		// Imported rows are old BY DEFINITION — being old is the only reason to import them — so
-		// an age rule that applies to them deletes the whole import on the next janitor pass.
-		// Observed: a live import wrote 5,379 rows and the next pass deleted 5,362, leaving the
-		// seventeen that happened to fall inside the seven-day window. The dashboard then showed
-		// a one-week span and looked as though the import had found almost nothing.
-		//
-		// Age is simply the wrong question for them. A measured row ages out because the traffic
-		// behind it keeps coming and the recent rows are the ones that matter; an imported row is
-		// a one-off recovery of something nobody can re-fetch once it is gone. The BYTE rule
-		// below still applies to both, because disk pressure is real regardless of provenance.
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ? AND source = ''`, cutoff)
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
 		if err != nil {
 			return deleted, err
 		}
