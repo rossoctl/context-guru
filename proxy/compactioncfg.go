@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -164,7 +165,11 @@ func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) c
 			}
 		}
 	}
-	return compactionpoint.For(model)
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	return h.resolveCompactionPoint(ctx, body, window)
 }
 
 // clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which

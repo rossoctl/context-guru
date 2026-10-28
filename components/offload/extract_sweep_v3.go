@@ -12,6 +12,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -183,16 +184,36 @@ func v3Fill(c int, small, large float64) float64 {
 	return small + (large-small)*float64(c-v3FillLoC)/float64(v3FillHiC-v3FillLoC)
 }
 
+// Where C came from (V3Stats.CSource, V3Cut.CSource).
+const (
+	cSourceCutFrac    = "cutfrac"    // CutFrac x the effective context, a summarizer is in the pipeline
+	cSourceCompaction = "compaction" // the compaction point: operator, measured or assumed
+	cSourceWindow     = "window"     // the model's context window
+)
+
 // v3CutPoint is C, or 0 when it is unknown. It needs an exact window (the same rule as the turns model).
-func (e *ExtractSweep) v3CutPoint(c *components.Ctx) int {
+// It also says where C came from.
+//
+// The sweet spot is a share of the EFFECTIVE context: where the client acts, not the window. So:
+//
+//	CutFrac x the effective context  when a summarizer is in the pipeline,
+//	the compaction point             when its source is operator, measured or assumed,
+//	the window                       otherwise.
+//
+// A compaction point whose source is window_fallback is the window under another name: the table had no entry
+// and said "C is the whole window". It is treated as the window, and reported as "window".
+func (e *ExtractSweep) v3CutPoint(c *components.Ctx) (cut int, source string) {
 	if c == nil || !c.CtxWindowExact || c.CtxWindow <= 0 {
-		return 0
+		return 0, ""
 	}
-	cut := c.FillDenominator()
+	cut, source = c.CtxWindow, cSourceWindow
+	if c.CompactionPoint > 0 && c.CompactionPointSource != string(compactionpoint.WindowFallback) {
+		cut, source = c.CompactionPoint, cSourceCompaction
+	}
 	if c.CutFrac > 0 {
-		cut = int(c.CutFrac * float64(cut))
+		cut, source = int(c.CutFrac*float64(cut)), cSourceCutFrac
 	}
-	return cut
+	return cut, source
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -548,7 +569,7 @@ type v3In struct {
 func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string, in v3In) (keys []string, changed int) {
 	P := c.PrevBilledInputThread
-	C := e.v3CutPoint(c)
+	C, cSource := e.v3CutPoint(c)
 
 	var asked, waiting bool
 	warmMu.Lock()
@@ -588,9 +609,11 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 		}
 		return nil, 0
 	}
+	noteV3CSource(cSource)
 	if float64(P) < v3Fill(C, e.fillSmall, e.fillLarge)*float64(C) {
 		if paced {
 			noteV3Refuse("not_in_sweet_spot")
+			noteV3Refusal(tkey, "not_in_sweet_spot", P, C, cSource)
 		}
 		return nil, 0
 	}
@@ -606,7 +629,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 	plan := e.v3Plan(c, req)
 	apply := func(useMem bool) ([]string, int) {
 		src := e.newV3Held(c, tkey, plan, raw, useMem)
-		return e.v3Apply(src, req, rep, c, tkey, in, P, C)
+		return e.v3Apply(src, req, rep, c, tkey, in, P, C, cSource)
 	}
 	resetCount := func() {
 		warmMu.Lock()
@@ -680,6 +703,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 // v3CutRec is what one accepted cut leaves in the ledger.
 type v3CutRec struct {
 	p, c, d          int
+	cSource          string
 	dShareP, pShareC float64
 	rules            map[string]int
 	judge            int
@@ -687,11 +711,11 @@ type v3CutRec struct {
 }
 
 func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
-	tkey string, in v3In, P, C int) (keys []string, changed int) {
+	tkey string, in v3In, P, C int, cSource string) (keys []string, changed int) {
 	wa := &warmApply{}
 	inner := e.warmGate(c, req, in.run, in.growthFrom, in.growthTurns, in.prevLocal, wa)
 	var cut v3CutRec
-	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, src, &cut)
+	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, cSource, src, &cut)
 	if src.useMem {
 		// An answer is being used (applied or refused). It is no longer "the judge gave no answer".
 		warmMu.Lock()
@@ -705,7 +729,7 @@ func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, re
 		if !cut.set {
 			// A changed-prefix apply: the gates did not run (the provider rewrites from the change anyway), but
 			// the cut is a cut. It is counted, and it starts the growth wait.
-			cut = v3CutRec{p: P, c: C, pShareC: float64(P) / float64(C), judge: wn, set: true}
+			cut = v3CutRec{p: P, c: C, cSource: cSource, pShareC: float64(P) / float64(C), judge: wn, set: true}
 		}
 		e.v3CutDone(tkey, cut)
 	}
@@ -724,7 +748,7 @@ func (e *ExtractSweep) v3CutDone(tkey string, cut v3CutRec) {
 
 // v3Gate is gate 3 (a meaningful drop) in front of gate 4 (payback, #720's gate).
 func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) (bool, string), wa *warmApply,
-	c *components.Ctx, tkey string, prevLocal, P, C int, src *v3Held, cut *v3CutRec) func(recheckResult, []bschemas.ChatMessage) (bool, string) {
+	c *components.Ctx, tkey string, prevLocal, P, C int, cSource string, src *v3Held, cut *v3CutRec) func(recheckResult, []bschemas.ChatMessage) (bool, string) {
 	return func(res recheckResult, raw []bschemas.ChatMessage) (bool, string) {
 		var dBilled int
 		measured := false
@@ -736,11 +760,12 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 		}
 		if measured {
 			wa.dShareP, wa.pShareC = float64(dBilled)/float64(P), float64(P)/float64(C)
+			wa.cutPoint, wa.cSource = C, cSource
 			if float64(dBilled) < e.minDropFrac*float64(P) {
 				noteV3Refuse("drop_too_small")
 				noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "drop_too_small", Weight: 1,
 					RemovedLocal: res.validTokens(), RemovedBilled: dBilled, Proposed: res.proposed, Dropped: res.reasonCounts(),
-					DShareP: wa.dShareP, PShareC: wa.pShareC})
+					DShareP: wa.dShareP, PShareC: wa.pShareC, CutPoint: C, CSource: cSource})
 				return false, "drop_too_small"
 			}
 		}
@@ -751,7 +776,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 			}
 			return false, reason
 		}
-		*cut = v3CutRec{p: P, c: C, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
+		*cut = v3CutRec{p: P, c: C, cSource: cSource, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
 		for _, o := range res.Valid {
 			if r, isRule := src.ruleOf[o.ToolUseID]; isRule {
 				cut.rules[r]++
@@ -773,6 +798,7 @@ type V3Cut struct {
 	Selector   string  `json:"selector"`
 	P          int     `json:"billed_prompt"`
 	C          int     `json:"cut_point"`
+	CSource    string  `json:"c_source"`
 	D          int     `json:"dropped_billed"`
 	DShareP    float64 `json:"d_share_of_p"`
 	PShareC    float64 `json:"p_share_of_c"`
@@ -789,14 +815,17 @@ type V3Stats struct {
 	RuleDrops  map[string]int64 `json:"rule_drops,omitempty"`
 	JudgeDrops int64            `json:"judge_drops,omitempty"`
 	// HybridRulesOnly counts hybrid attempts that went ahead on the rules alone: the judge gave no answer.
-	HybridRulesOnly int64   `json:"hybrid_rules_only,omitempty"`
-	Cuts            int64   `json:"cuts"`
-	Recent          []V3Cut `json:"recent_cuts,omitempty"`
+	HybridRulesOnly int64 `json:"hybrid_rules_only,omitempty"`
+	Cuts            int64 `json:"cuts"`
+	// CSource counts the sweet-spot checks by where C came from: cutfrac (a summarizer's fraction of the effective
+	// context), compaction (the compaction point: operator, measured or assumed) or window (the model's window).
+	CSource map[string]int64 `json:"c_source,omitempty"`
+	Recent  []V3Cut          `json:"recent_cuts,omitempty"`
 }
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return len(s.Refused) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return len(s.Refused) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -819,6 +848,23 @@ func noteV3HybridRulesOnly() {
 	v3Mu.Unlock()
 }
 
+// noteV3CSource counts where C came from, once per sweet-spot check.
+func noteV3CSource(source string) {
+	v3Mu.Lock()
+	if v3Ledger.CSource == nil {
+		v3Ledger.CSource = map[string]int64{}
+	}
+	v3Ledger.CSource[source]++
+	v3Mu.Unlock()
+}
+
+// noteV3Refusal puts a "not in the sweet spot" refusal in the decision log with the numbers, so P, C and where
+// C came from can be read. It runs at the pace of the question, like the counter.
+func noteV3Refusal(tkey, reason string, p, c int, cSource string) {
+	noteWarmDecision(tkey, WarmDecision{Stage: "sweet_spot", Accept: false, Reason: reason, Weight: 1,
+		PShareC: float64(p) / float64(c), CutPoint: c, CSource: cSource})
+}
+
 func noteV3Cut(tkey string, r v3CutRec, selector string) {
 	rd := 0
 	v3Mu.Lock()
@@ -833,7 +879,7 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 	v3Ledger.JudgeDrops += int64(r.judge)
 	v3Ledger.Cuts++
 	v3Ledger.Recent = append(v3Ledger.Recent, V3Cut{Thread: threadLabel(tkey), AtMs: time.Now().UnixMilli(), Selector: selector,
-		P: r.p, C: r.c, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: rd, JudgeDrops: r.judge})
+		P: r.p, C: r.c, CSource: r.cSource, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: rd, JudgeDrops: r.judge})
 	if len(v3Ledger.Recent) > maxV3Recent {
 		v3Ledger.Recent = v3Ledger.Recent[len(v3Ledger.Recent)-maxV3Recent:]
 	}
@@ -847,6 +893,12 @@ func v3Counters() V3Stats {
 		out.Refused = map[string]int64{}
 		for k, v := range v3Ledger.Refused {
 			out.Refused[k] = v
+		}
+	}
+	if len(v3Ledger.CSource) > 0 {
+		out.CSource = map[string]int64{}
+		for k, n := range v3Ledger.CSource {
+			out.CSource[k] = n
 		}
 	}
 	if len(v3Ledger.RuleDrops) > 0 {
@@ -935,8 +987,8 @@ func (e *ExtractSweep) v3ColdCut(c *components.Ctx, req *bschemas.BifrostChatReq
 			cut.judge++
 		}
 	}
-	if C := e.v3CutPoint(c); C > 0 {
-		cut.c, cut.pShareC = C, float64(cut.p)/float64(C)
+	if C, src := e.v3CutPoint(c); C > 0 {
+		cut.c, cut.pShareC, cut.cSource = C, float64(cut.p)/float64(C), src
 	}
 	e.v3CutDone(tkey, cut)
 }
