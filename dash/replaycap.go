@@ -235,13 +235,18 @@ func sameConv(a, b *capRow) bool {
 // the session and the model, its transcript is smaller, and the turns interleave. On the
 // large real dataset most drops were that, not a compaction.
 func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
+	return walkReplayCapWith(rows, window, bootstrapPoint)
+}
+
+// walkReplayCapWith is walkReplayCap with the compaction point resolver stated.
+func walkReplayCapWith(rows []capRow, window windowFn, point pointFn) *ReplayLedger {
 	out := newReplayLedger()
 	for start := 0; start < len(rows); {
 		end := start + 1
 		for end < len(rows) && rows[end].Tenant == rows[start].Tenant && rows[end].Session == rows[start].Session {
 			end++
 		}
-		walkCapSession(rows[start:end], window, out)
+		walkCapSession(rows[start:end], window, point, out)
 		start = end
 	}
 	return out
@@ -253,7 +258,7 @@ func newReplayLedger() *ReplayLedger {
 
 // walkCapSession runs the rule over one session's rows, ordered by (model, ts, id). The session is
 // the unit because a compaction request and the turn it shrinks need not share a model.
-func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
+func walkCapSession(rows []capRow, window windowFn, point pointFn, out *ReplayLedger) {
 	var compaction []int64
 	for _, r := range rows {
 		if r.Bypassed || r.AgentCompaction {
@@ -265,20 +270,20 @@ func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
 		for end < len(rows) && sameConv(&rows[start], &rows[end]) {
 			end++
 		}
-		walkCapConversation(rows[start:end], window, compaction, out)
+		walkCapConversation(rows[start:end], window, point, compaction, out)
 		start = end
 	}
 }
 
 // capConversationPoint is C for one conversation: the user's own setting when a row recorded one
 // (the newest such row, because the setting can change between sessions), else the table (#948).
-func capConversationPoint(conv []capRow) compactionpoint.Point {
+func capConversationPoint(conv []capRow, point pointFn, window int) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
 		if compactionpoint.IsClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 {
 			return compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
 		}
 	}
-	return compactionpoint.For(conv[0].Model)
+	return point(conv[0].Model, window)
 }
 
 // compactionBetween reports whether any of the (unsorted) timestamps lies in [from, to].
@@ -312,7 +317,7 @@ const (
 	capClientCompaction
 )
 
-func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, out *ReplayLedger) {
+func walkCapConversation(conv []capRow, window windowFn, point pointFn, compactionTS []int64, out *ReplayLedger) {
 	model := conv[0].Model
 	out.Conversations++
 	w, exact := window(model)
@@ -325,7 +330,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 		out.WindowUnknownCovered++
 		w = assumedWindowFor(model, w)
 	}
-	cpt := capConversationPoint(conv)
+	cpt := capConversationPoint(conv, point, w)
 	limit := float64(cpt.Tokens(w))
 	ceil := limit / float64(w)
 	// One entry per model and source, so the two maps never disagree: a table conversation writes
@@ -534,7 +539,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 				c.FirstUSD = c.USD * firstShare(&ev, pr, priced, c.Component, c.Gross, c.Unique)
 			}
 		}
-		walkCapSession(buf, window, out)
+		walkCapSession(buf, window, operatorPoint(ctx, windows), out)
 		buf = buf[:0]
 	}
 	for rs.Next() {
