@@ -794,7 +794,8 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 		}
 		return protected
 	}}
-	before := v3MarkedIDs(req)
+	var before map[string]bool
+	src.onClaim = func() { before = v3MarkedIDs(c, req) }
 	keys, changed = e.applyHeldFrom(src, nil, req, rep, c, tkey)
 	if changed > 0 {
 		// Sweep v3: a cold or changed-prefix apply is a cut. It is counted and it starts the growth wait.

@@ -669,7 +669,8 @@ A cut is one big removal, made late, when the conversation is near the point whe
   question is out. If the judge gives no answer, the rules go alone, through the same gates (`hybrid_rules_only`).
 
 The same rules cover the keep-alive ping question and the cold apply. With `selector: rule` the ping stays a plain ping (no
-model call; counted as `ping_refused_rule`). With `judge` or `hybrid` the ping question never offers a protected output, and
+model call, and no copy of the conversation is kept, so the ping counts as `sweep_no_candidate`; `ping_refused_rule` fires only for a
+candidate left from before a config change). With `judge` or `hybrid` the ping question never offers a protected output, and
 in `hybrid` it does not offer a rule-decided one. A stored answer applied on a cold request skips protected outputs
 (`cold_protected_filtered`), so an answer made before a config change cannot drop them. A cold or changed-prefix apply counts
 as a cut and starts the growth wait.

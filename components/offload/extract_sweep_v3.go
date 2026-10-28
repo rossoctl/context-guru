@@ -399,6 +399,8 @@ type v3Held struct {
 	claimed   bool
 	// claimedIDs are the drops the claim handed out, for the cold cut's split.
 	claimedIDs []string
+	// onClaim runs once, when a claim hands out an answer and before the apply changes a message.
+	onClaim func()
 }
 
 // newV3Held builds the source. raw is the agent's own conversation: the hash and the prints are measured on
@@ -470,6 +472,9 @@ func (v *v3Held) claim(string) (heldAnswer, bool) {
 	h, ok := v.combine(ans, have)
 	if ok {
 		v.claimed = true
+		if v.onClaim != nil {
+			v.onClaim()
+		}
 		for _, o := range h.Outputs {
 			if o.Drop {
 				v.claimedIDs = append(v.claimedIDs, o.ToolUseID)
@@ -522,7 +527,9 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 		t.v3Asked = false
 	}
 	warmMu.Unlock()
-	before := v3MarkedIDs(req)
+	// The marked set is read when the claim wins, before the apply changes any message, and not before.
+	var before map[string]bool
+	src.onClaim = func() { before = v3MarkedIDs(c, req) }
 	keys, changed = e.applyHeldFrom(src, &warmApply{}, req, rep, c, tkey)
 	if changed > 0 {
 		e.v3ColdCut(c, req, tkey, src.claimedIDs, before, src.ruleOf)
@@ -867,6 +874,8 @@ type v3Filtered struct {
 	heldSource
 	plan    func() map[string]bool
 	claimed *[]string
+	// onClaim runs when a claim hands out an answer, before the apply changes a message.
+	onClaim func()
 }
 
 func (f v3Filtered) strip(h heldAnswer, ok, claim bool) (heldAnswer, bool) {
@@ -874,6 +883,9 @@ func (f v3Filtered) strip(h heldAnswer, ok, claim bool) (heldAnswer, bool) {
 		return h, ok
 	}
 	protected := f.plan()
+	if claim && f.onClaim != nil {
+		f.onClaim()
+	}
 	kept := make([]heldOutput, 0, len(h.Outputs))
 	for _, o := range h.Outputs {
 		if protected[o.ToolUseID] {
@@ -903,6 +915,10 @@ func (f v3Filtered) claim(k string) (heldAnswer, bool) {
 // v3ColdCut books a cold or changed-prefix apply as a cut and starts the growth wait. The applied drops are
 // split into rule drops and judge drops through ruleOf, as the warm gate does: an id counts as applied when it
 // was a claimed drop and its message carries a marker now that it did not carry before.
+//
+// ruleOf is EMPTY on every production path today: a cold answer never carries rule verdicts (the rules decide
+// at the warm request, from the request in hand), so every cold drop is a judge drop. The split stays so a
+// future path that does hand rule verdicts to a cold apply is counted right.
 func (e *ExtractSweep) v3ColdCut(c *components.Ctx, req *bschemas.BifrostChatRequest, tkey string, claimed []string,
 	before map[string]bool, ruleOf map[string]string) {
 	cut := v3CutRec{p: c.PrevBilledInputThread, rules: map[string]int{}, set: true}
@@ -910,7 +926,7 @@ func (e *ExtractSweep) v3ColdCut(c *components.Ctx, req *bschemas.BifrostChatReq
 		if before[id] {
 			continue
 		}
-		if i, ok := rawToolMessage(req.Input, id); !ok || !strings.Contains(schema.MessageText(req.Input[i]), "<<cg:") {
+		if i, ok := rawToolMessage(req.Input, id); !ok || !carriesRealMarker(c, schema.MessageText(req.Input[i])) {
 			continue
 		}
 		if r, isRule := ruleOf[id]; isRule {
@@ -926,10 +942,10 @@ func (e *ExtractSweep) v3ColdCut(c *components.Ctx, req *bschemas.BifrostChatReq
 }
 
 // v3MarkedIDs is the set of tool ids whose message carries a marker already.
-func v3MarkedIDs(req *bschemas.BifrostChatRequest) map[string]bool {
+func v3MarkedIDs(c *components.Ctx, req *bschemas.BifrostChatRequest) map[string]bool {
 	out := map[string]bool{}
 	for _, i := range toolIndices(req) {
-		if strings.Contains(schema.MessageText(req.Input[i]), "<<cg:") {
+		if carriesRealMarker(c, schema.MessageText(req.Input[i])) {
 			out[toolCallID(req.Input[i])] = true
 		}
 	}

@@ -741,12 +741,15 @@ func TestV3ColdCutSplitsRuleDropsFromJudgeDrops(t *testing.T) {
 		txt := schema.MessageText(req.Input[i]) + "\n<<cg:zz>>"
 		req.Input[i].Content = &bschemas.ChatMessageContent{ContentStr: &txt}
 	}
-	before := v3MarkedIDs(req)
+	st := newMemStore()
+	st.Put("zz", []byte("original"))
+	cx := warmCtx("v3-split", st)
+	before := v3MarkedIDs(cx, req)
 	marked("t_ra1")
 	marked("t_rb")
 	marked("t_ls") // claimed, but marked before: not a drop of this apply
 	before["t_ls"] = true
-	e.v3ColdCut(warmCtx("v3-split", newMemStore()), req, "k-split", []string{"t_ra1", "t_rb", "t_ls", "t_go1"}, before,
+	e.v3ColdCut(cx, req, "k-split", []string{"t_ra1", "t_rb", "t_ls", "t_go1"}, before,
 		map[string]string{"t_ra1": ruleFileReread})
 	v := v3Counters()
 	if v.RuleDrops[ruleFileReread] != 1 || v.JudgeDrops != 1 || v.Cuts != 1 {
