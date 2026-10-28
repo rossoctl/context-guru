@@ -14,24 +14,30 @@ import (
 // the message count has no Changes (Task 5's splice ops), and every report after it indexes a
 // req.Input that no longer lines up with wire, so those changes are dropped, never guessed.
 func OpsFromRun(rr components.RunReport, wire []int, applied bool) (ops []cf.Operation, dropped int) {
+	return opsFromRun(rr, wire, applied, nil)
+}
+
+// opsFromRun is OpsFromRun plus keep: when non-nil, a change whose req.Input index it rejects is
+// counted as dropped. The equal-count writeback passes the set of messages that really reached the
+// forwarded body, so an operation never describes a rewrite that is not on the wire.
+func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx int) bool) (ops []cf.Operation, dropped int) {
 	countChanged := false
 	for _, r := range rr.Components {
 		if r.Skipped || r.Reverted {
 			continue
 		}
 		for _, c := range r.Changes {
-			if wire == nil || countChanged || c.Idx < 0 || c.Idx >= len(wire) {
+			if wire == nil || countChanged || c.Idx < 0 || c.Idx >= len(wire) || (keep != nil && !keep(c.Idx)) {
 				dropped++
 				continue
 			}
-			sz := func(n int) cf.Size { return cf.Size{Bytes: n} }
 			ops = append(ops, cf.Operation{
 				Kind:       cf.KindRewrite,
 				Operator:   "context-guru." + r.Component,
 				DryRun:     !applied || r.Mode == components.ModeObserve,
 				At:         cf.Position{Section: cf.SectionMessages, Index: wire[c.Idx]},
-				SizeBefore: sz(c.BytesBefore),
-				SizeAfter:  sz(c.BytesAfter),
+				SizeBefore: cf.Size{Bytes: c.BytesBefore},
+				SizeAfter:  cf.Size{Bytes: c.BytesAfter},
 				ChangeID:   "cg:" + r.Component + ":" + c.Hash,
 			})
 		}

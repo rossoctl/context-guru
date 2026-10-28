@@ -775,9 +775,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
-	if rr != nil {
-		// applied: the rewritten body is the one forwarded, which is every mode but observe.
-		tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wireGroups(slots), mode != components.ModeObserve)
+	// Operations are published only once the writeback has settled and we know which rewrites
+	// reached the forwarded body (Trace.Ops never describes a rewrite that is not on the wire).
+	// applied: the rewritten body is the one forwarded, which is every mode but observe.
+	wire, applied := wireGroups(slots), mode != components.ModeObserve
+	// giveUp is every return that forwards the original body: no operation is real.
+	giveUp := func() {
+		tr.Ops = nil
+		if rr != nil {
+			ops, d := opsFromRun(*rr, wire, applied, nil)
+			tr.OpsDropped = len(ops) + d
+		}
 	}
 	if debug && rr != nil {
 		logDecisions(lg, rr)
@@ -802,9 +810,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
 		}
-		if !ok {
-			tr.OpsDropped += len(tr.Ops) // the rebuild declined: the original is forwarded
-			tr.Ops = nil
+		if ok && rr != nil {
+			tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wire, applied)
+		} else {
+			giveUp()
 		}
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
@@ -861,6 +870,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		return bi, rel, cur, true
 	}
+	// written: the req.Input indices whose content change really went into an edit.
+	written := map[int]bool{}
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
@@ -877,15 +888,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			bi, rel, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			nb, err := sjson.SetBytes(cur, rel, newText)
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			edits[bi] = nb
 			changed = true
+			written[i] = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
 			if _, was := touched[i]; trustTouched && !was {
@@ -894,6 +908,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if bytes.Equal(post, s.pre) {
@@ -902,6 +917,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			bi, _, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if !s.lossless() {
@@ -927,6 +943,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// that splice, at the cost of copying the whole body.
 			edits[bi] = post
 			changed = true
+			written[i] = true
 			var pm bschemas.ChatMessage
 			_ = json.Unmarshal(s.pre, &pm)
 			changes = append(changes,
@@ -953,11 +970,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
 		if !ok {
 			res.Body = body
-			tr.OpsDropped += len(tr.Ops) // the original is forwarded: nothing was saved
-			tr.Ops = nil
+			giveUp()
 			return res
 		}
 		out = nb
+	}
+	if rr != nil {
+		tr.Ops, tr.OpsDropped = opsFromRun(*rr, wire, applied, func(idx int) bool { return written[idx] })
 	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {

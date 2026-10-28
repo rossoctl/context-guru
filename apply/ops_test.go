@@ -58,3 +58,26 @@ func TestOpsFromRun_NilWireDropsEverything(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 }
+
+func TestOpsFromRun_CountChangedRule(t *testing.T) {
+	ch := func(h string) []components.Change {
+		return []components.Change{{Idx: 0, BytesBefore: 10, BytesAfter: 1, Hash: h}}
+	}
+	mid := components.RunReport{Components: []components.Report{
+		{Component: "a", Changes: ch("1")},
+		{Component: "sum", CountChanged: true},
+		{Component: "b", Changes: ch("2")},
+	}}
+	ops, dropped := OpsFromRun(mid, []int{0}, true)
+	if len(ops) != 1 || ops[0].ChangeID != "cg:a:1" || dropped != 1 {
+		t.Fatalf("CountChanged in the middle: ops = %+v dropped = %d", ops, dropped)
+	}
+	last := components.RunReport{Components: []components.Report{
+		{Component: "a", Changes: ch("1")},
+		{Component: "sum", CountChanged: true},
+	}}
+	ops, dropped = OpsFromRun(last, []int{0}, true)
+	if len(ops) != 1 || dropped != 0 {
+		t.Fatalf("CountChanged last: ops = %+v dropped = %d", ops, dropped)
+	}
+}
