@@ -138,7 +138,7 @@ func Play(c opscases.Case) []Played {
 		e.SinceLastMs = since
 		e.KeepAlivePings = pings
 		e.KeepAliveRefreshed = pingRead
-		e.AttributeCache(requests > 0, requests > 0, since, ttl.Milliseconds(), false)
+		e.AttributeCache(requests > 0, requests > 0, since, ttl.Milliseconds(), "")
 		e.Price(price, true)
 
 		// cg books the keep-alive and cachesplit credits in their own columns, outside
