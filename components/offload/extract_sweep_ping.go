@@ -258,6 +258,10 @@ var (
 // registerPing snapshots this request's conversation for the keeper. Deferred from Offload so it sees
 // the conversation as the component leaves it, replays included.
 func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChatRequest) {
+	// Sweep v3 with selector rule: the ping question is always refused, so keep no copy of the conversation.
+	if e.v3 && e.selector == selectorRule {
+		return
+	}
 	if c == nil || c.Session == "" || c.PrefixAsk == nil || c.Store == nil || c.Bypass ||
 		c.Mode == components.ModeObserve || req == nil || len(req.Input) == 0 {
 		return
