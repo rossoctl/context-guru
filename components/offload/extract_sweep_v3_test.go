@@ -1,9 +1,7 @@
 package offload
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -189,6 +187,7 @@ func TestV3RuleSelectorCutsOnceAtTheSweetSpotAndMakesNoModelCall(t *testing.T) {
 func TestV3NotInTheSweetSpotIsRefusedAndPassesAtTheSpot(t *testing.T) {
 	r := newV3Rig(t, "v3-spot", v3Rule)
 	r.request(0)
+	r.request(100_000)
 	req, rep := r.request(100_000)
 	if rep.Events[eventAppliedWarm] != 0 || len(dropped(req)) != 0 || r.refused("not_in_sweet_spot") != 1 {
 		t.Fatalf("below the spot: events %v refused %v", rep.Events, v3Counters().Refused)
@@ -594,5 +593,103 @@ func TestV3DefaultConfigIsUnchangedFromTheWarmPath(t *testing.T) {
 	}
 }
 
-var _ = context.Background
-var _ = fmt.Sprintf
+// ---- the keep-alive ping question and the Store answer (round 1) ----
+
+func TestV3PingQuestionNeverOffersAProtectedOutput(t *testing.T) {
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 1\n")
+	key, _ := registered(t, e, "v3-ping-prot", pingAsker(), newMemStore(), refConversation(3))
+	_, info, reason, ok := SweepPingSubstitute(key)
+	if !ok || info.Offered != 2 {
+		t.Fatalf("ping offered %d (ok %v, reason %q), want 2: the newest output is protected", info.Offered, ok, reason)
+	}
+}
+
+func TestV3RuleSelectorMakesNoModelCallAtThePing(t *testing.T) {
+	resetV3ForTest()
+	asker := pingAsker()
+	e := shippedSweep(t, v3Rule)
+	key, _ := registered(t, e, "v3-ping-rule", asker, newMemStore(), refConversation(3))
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if ok || dispatch != nil || reason != SweepReasonV3Rule {
+		t.Fatalf("selector rule offered a ping question: ok %v reason %q", ok, reason)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 0 {
+		t.Fatalf("selector rule made %d model calls at the ping", n)
+	}
+	if v3Counters().Refused["ping_refused_rule"] != 1 {
+		t.Fatalf("the refusal is not counted: %+v", v3Counters())
+	}
+}
+
+func TestV3HybridPingDoesNotOfferRuleDecidedOutputs(t *testing.T) {
+	e := shippedSweep(t, v3Hybrid)
+	c := warmCtx("v3-ping-hyb", newMemStore())
+	cand := e.snapshotCandidate(c, v3Conv(tCalls(), 8))
+	cands := cand.collect(&components.Report{Component: "extract_llm_sweep"})
+	for _, cd := range cands {
+		if cd.toolID == "t_ra1" || cd.toolID == "t_go1" {
+			t.Fatalf("a rule-decided output was offered at the ping: %s", cd.toolID)
+		}
+	}
+	if len(cands) != 4 {
+		t.Fatalf("offered %d, want the 4 outputs no rule decides", len(cands))
+	}
+}
+
+// A stored answer (made before a config change, or by a ping) that names a protected output must not drop it.
+func TestV3ColdApplyOfAStoredAnswerSkipsProtectedOutputs(t *testing.T) {
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-cold-prot", refConversation(3))
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 1\n")
+	req := refConversation(3)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, coldCtx("v3-cold-prot", st)); err != nil {
+		t.Fatal(err)
+	}
+	if got := dropped(req); len(got) != 2 || got["toolu_wire_2"] {
+		t.Fatalf("dropped = %v, want toolu_wire_0 and _1 only: _2 is the newest and protected", got)
+	}
+	if v3Counters().Refused["cold_protected_filtered"] != 1 {
+		t.Fatalf("the filter is not counted: %+v", v3Counters())
+	}
+}
+
+func TestV3ACountedCutOnAColdApplyStartsTheGrowthWait(t *testing.T) {
+	resetWarmForTest()
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-cold-cut", refConversation(3))
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 0\n")
+	c := coldCtx("v3-cold-cut", st)
+	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint, c.PrevBilledInputThread = 1_000_000, true, 200_000, 150_000
+	if _, err := e.Offload(refConversation(3), &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
+		t.Fatal(err)
+	}
+	warmMu.Lock()
+	await := warmThreads[thread.Key("v3-cold-cut", "")].v3Await
+	warmMu.Unlock()
+	if v3Counters().Cuts != 1 || !await {
+		t.Fatalf("cuts %d await %v: a cold cut must be counted and start the wait", v3Counters().Cuts, await)
+	}
+}
+
+func TestV3PacedRefusalsAreCountedOncePerQuestionInterval(t *testing.T) {
+	r := newV3Rig(t, "v3-pace", v3Rule)
+	for i := 0; i < 3; i++ {
+		r.request(0) // no billed size: nothing counted, even at the pace
+	}
+	if v3Counters().Refused["not_in_sweet_spot"] != 0 {
+		t.Fatal("a request with P = 0 was counted")
+	}
+	for i := 0; i < 6; i++ {
+		r.request(100_000)
+	}
+	if got := r.refused("not_in_sweet_spot"); got != 2 {
+		t.Fatalf("not_in_sweet_spot = %d, want 2 over 6 requests with warm_every_n 3", got)
+	}
+}
+
+func TestV3RuleDropsRecordTheirOwnTokenCount(t *testing.T) {
+	p, e, req := v3PlanOf(t, v3Rule, []v3T{{"a", "Read", tReadArgs("/w/a"), v3Out("a")}, {"b", "Read", tReadArgs("/w/a"), v3Out("b")}})
+	src := e.newV3Held(warmCtx("v3-tok", newMemStore()), "k", p, req.Input, false)
+	if len(src.rules) != 1 || src.rules[0].Tokens != schema.TextTokens(v3Out("a")) || src.rules[0].Tokens <= src.rules[0].Saves {
+		t.Fatalf("rule output = %+v, want Tokens = the output's own size, above Saves", src.rules)
+	}
+}

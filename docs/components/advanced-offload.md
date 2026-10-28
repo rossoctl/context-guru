@@ -668,6 +668,12 @@ A cut is one big removal, made late, when the conversation is near the point whe
 - `hybrid`: the rules, then the judge on what the rules did not decide. It is **one** cut: nothing is applied while the
   question is out. If the judge gives no answer, the rules go alone, through the same gates (`hybrid_rules_only`).
 
+The same rules cover the keep-alive ping question and the cold apply. With `selector: rule` the ping stays a plain ping (no
+model call; counted as `ping_refused_rule`). With `judge` or `hybrid` the ping question never offers a protected output, and
+in `hybrid` it does not offer a rule-decided one. A stored answer applied on a cold request skips protected outputs
+(`cold_protected_filtered`), so an answer made before a config change cannot drop them. A cold or changed-prefix apply counts
+as a cut and starts the growth wait.
+
 The rules read tool names, input paths and commands from the request in flight. They store nothing.
 
 - `file_reread`: a file read whose same path was read again later, or edited or written later.
@@ -678,9 +684,11 @@ Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), out
 (globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
 expanded in this session.
 
+`not_in_sweet_spot` and `cut_point_unknown` are counted once per `warm_every_n` warm requests.
+
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
 `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
-`no_rule_drops`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (D as a share of P,
+`no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (D as a share of P,
 P as a share of C).
 
 ### How many warm turns are left (`warm_expected_turns`)

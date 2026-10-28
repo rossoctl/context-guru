@@ -11,7 +11,6 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -78,7 +77,7 @@ type v3Config struct {
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
-// settings do. A v3 setting without warm: true is an error: the gates live in the warm path.
+// settings do. Without warm: true a v3 setting does nothing.
 func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 	out := v3Config{selector: selectorJudge}
 	switch cfg.Selector {
@@ -263,6 +262,7 @@ type v3Hit struct {
 	idx          int
 	toolID, rule string
 	saves        int
+	tokens       int
 }
 
 // v3Plan is what the rules and the protection say about one conversation.
@@ -359,7 +359,7 @@ func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatReques
 		if saves <= 0 {
 			continue
 		}
-		p.rules = append(p.rules, v3Hit{idx: i, toolID: id, rule: rule, saves: saves})
+		p.rules = append(p.rules, v3Hit{idx: i, toolID: id, rule: rule, saves: saves, tokens: tk})
 		p.ruleIdx[i] = true
 	}
 	return p
@@ -407,7 +407,7 @@ func (e *ExtractSweep) newV3Held(c *components.Ctx, tkey string, plan v3Plan, ra
 		}
 		v.ruleOf[h.toolID] = h.rule
 		v.rules = append(v.rules, heldOutput{ToolUseID: h.toolID, Hash: outputHash(raw[ri]),
-			Tokens: h.saves, Saves: h.saves, Drop: true})
+			Tokens: h.tokens, Saves: h.saves, Drop: true})
 	}
 	return v
 }
@@ -504,7 +504,15 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 	plan := e.v3Plan(c, req)
 	plan.rules = nil
 	src := e.newV3Held(c, tkey, plan, raw, true)
-	return e.applyHeldFrom(src, &warmApply{}, req, rep, c, tkey)
+	keys, changed = e.applyHeldFrom(src, &warmApply{}, req, rep, c, tkey)
+	if changed > 0 {
+		cut := v3CutRec{p: c.PrevBilledInputThread, judge: changed, set: true}
+		if C := e.v3CutPoint(c); C > 0 {
+			cut.c, cut.pShareC = C, float64(cut.p)/float64(C)
+		}
+		e.v3CutDone(tkey, cut)
+	}
+	return keys, changed
 }
 
 type v3In struct {
@@ -532,6 +540,10 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 		t.v3Baseline, t.v3Await = P, false
 	}
 	asked = t.v3Asked
+	// The "not yet" refusals are counted once per warm_every_n warm requests, so they read as reasons and not
+	// as one per request. Its own counter: the question's pace counter (count) resets only when a question is asked.
+	t.v3Reqs++
+	paced := t.v3Reqs%e.warmEveryN == 0
 	if t.v3Baseline > 0 && C > 0 {
 		if P < t.v3Baseline { // the prompt shrank (a compaction, a rewind): a new round
 			t.v3Baseline = 0
@@ -540,18 +552,24 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 		}
 	}
 	warmMu.Unlock()
-	if in.cold {
-		return nil, 0
-	}
 	if warmTriggerHook != nil {
 		warmTriggerHook()
 	}
-	if C <= 0 || P <= 0 {
-		noteV3Refuse("cut_point_unknown")
+	// The first request of a thread has no billed size yet: nothing to count. The two "not yet" refusals are
+	// counted at the pace of the question (warm_every_n), so they read as reasons and not as one per request.
+	if P <= 0 {
+		return nil, 0
+	}
+	if C <= 0 {
+		if paced {
+			noteV3Refuse("cut_point_unknown")
+		}
 		return nil, 0
 	}
 	if float64(P) < v3Fill(C, e.fillSmall, e.fillLarge)*float64(C) {
-		noteV3Refuse("not_in_sweet_spot")
+		if paced {
+			noteV3Refuse("not_in_sweet_spot")
+		}
 		return nil, 0
 	}
 	if waiting {
@@ -652,16 +670,34 @@ func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, re
 	inner := e.warmGate(c, req, in.run, in.growthFrom, in.growthTurns, in.prevLocal, wa)
 	var cut v3CutRec
 	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, src, &cut)
-	wk, wn := e.applyHeldFrom(src, wa, req, rep, c, tkey)
-	if wn > 0 && cut.set {
+	if src.useMem {
+		// An answer is being used (applied or refused). It is no longer "the judge gave no answer".
 		warmMu.Lock()
 		if t := warmFor(tkey); t != nil {
-			t.v3Await, t.v3Baseline, t.v3Asked = true, 0, false
+			t.v3Asked = false
 		}
 		warmMu.Unlock()
-		noteV3Cut(tkey, cut, e.selector)
+	}
+	wk, wn := e.applyHeldFrom(src, wa, req, rep, c, tkey)
+	if wn > 0 {
+		if !cut.set {
+			// A changed-prefix apply: the gates did not run (the provider rewrites from the change anyway), but
+			// the cut is a cut. It is counted, and it starts the growth wait.
+			cut = v3CutRec{p: P, c: C, pShareC: float64(P) / float64(C), judge: wn, set: true}
+		}
+		e.v3CutDone(tkey, cut)
 	}
 	return wk, wn
+}
+
+// v3CutDone books an applied cut and starts the growth wait.
+func (e *ExtractSweep) v3CutDone(tkey string, cut v3CutRec) {
+	warmMu.Lock()
+	if t := warmFor(tkey); t != nil {
+		t.v3Await, t.v3Baseline, t.v3Asked = true, 0, false
+	}
+	warmMu.Unlock()
+	noteV3Cut(tkey, cut, e.selector)
 }
 
 // v3Gate is gate 3 (a meaningful drop) in front of gate 4 (payback, #720's gate).
@@ -806,4 +842,37 @@ func resetV3ForTest() {
 	v3Mu.Unlock()
 }
 
-var _ = thread.Key
+// v3Filtered is a held source that never hands out a protected output. The cold apply reads the Store with
+// it when v3 is on: an answer stored before a config change, or by a ping question, may name an output that
+// is protected now. Defense in depth; the question itself does not offer protected outputs either.
+type v3Filtered struct {
+	heldSource
+	protected map[string]bool
+}
+
+func (f v3Filtered) strip(h heldAnswer, ok, count bool) (heldAnswer, bool) {
+	if !ok {
+		return h, ok
+	}
+	kept := make([]heldOutput, 0, len(h.Outputs))
+	for _, o := range h.Outputs {
+		if f.protected[o.ToolUseID] {
+			if count {
+				noteV3Refuse("cold_protected_filtered")
+			}
+			continue
+		}
+		kept = append(kept, o)
+	}
+	h.Outputs = kept
+	return h, true
+}
+
+func (f v3Filtered) get(k string) (heldAnswer, bool) {
+	h, ok := f.heldSource.get(k)
+	return f.strip(h, ok, false)
+}
+func (f v3Filtered) claim(k string) (heldAnswer, bool) {
+	h, ok := f.heldSource.claim(k)
+	return f.strip(h, ok, true)
+}

@@ -67,6 +67,8 @@ const (
 	SweepReasonConcurrencyFull SweepPingReason = "concurrency_full"
 	// SweepReasonNoAsker: the route has no prefix asker.
 	SweepReasonNoAsker SweepPingReason = "no_asker"
+	// SweepReasonV3Rule: sweep v3 with selector rule makes no model call, so the ping is plain.
+	SweepReasonV3Rule SweepPingReason = "v3_rule"
 	// SweepReasonPanic: the question panicked and was recovered. The ping stays plain, and the
 	// conversation is marked asked so the next ping is plain too. A panic inside ONE batch is caught per
 	// batch (reason batch_panic): the other batches' answers are kept, and the conversation is still marked
@@ -405,6 +407,11 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 		sweepPingNoCandidate.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonNoCandidate, false
 	}
+	// SWEEP V3: with selector rule there is no model call at all, so the ping stays a plain ping.
+	if cand.e.v3 && cand.e.selector == selectorRule {
+		noteV3Refuse("ping_refused_rule")
+		return nil, SweepPingInfo{}, SweepReasonV3Rule, false
+	}
 	if cand.asked.Load() {
 		sweepPingAlreadyAsked.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonAlreadyAsked, false
@@ -494,7 +501,7 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	}
 	// Sweep v3: the judge is not asked about a protected output, nor (hybrid) about one a rule decided.
 	var v3p v3Plan
-	if cand.warm && e.v3 {
+	if e.v3 {
 		v3p = e.v3Plan(c, req)
 	}
 	for _, i := range toolIndices(req) {
