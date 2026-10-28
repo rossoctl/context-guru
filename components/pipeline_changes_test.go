@@ -138,3 +138,64 @@ func TestRunOne_RevertedRunRecordsNoChanges(t *testing.T) {
 		t.Fatalf("reverted report = %+v", rep)
 	}
 }
+
+// T3: two different message texts give different hashes.
+func TestRunOne_DifferentTextGivesDifferentHash(t *testing.T) {
+	run := func(s string) string {
+		return NewPipeline([]Component{shrink{}}, nil).Run(twoMsgReq(s), testCtx()).Components[0].Changes[0].Hash
+	}
+	a, b := run(strings.Repeat("word      ", 400)), run(strings.Repeat("other     ", 400))
+	if a == b {
+		t.Fatalf("hash %q for two different texts", a)
+	}
+}
+
+// stampTail is a Reformat that appends a marker to the tool message only when on is true: an
+// earlier component whose output varies between turns.
+type stampTail struct{ on bool }
+
+func (stampTail) Name() string      { return "stamp" }
+func (stampTail) Enabled(*Ctx) bool { return true }
+func (s stampTail) Reformat(req *schemas.BifrostChatRequest, _ *Report, _ *Ctx) error {
+	if s.on {
+		t := msgText(req.Input[1])
+		setText(&req.Input[1], t[:len(t)-10]) // drop the last word: smaller, so never-worse keeps it
+	}
+	return nil
+}
+
+// M2: a later component's hash is of the text the CLIENT sent, so it does not change when an
+// earlier component starts acting on the same message between turns.
+func TestRunOne_HashIsOfTheClientTextNotTheEarlierComponentsOutput(t *testing.T) {
+	big := strings.Repeat("word      ", 400)
+	hashOf := func(on bool) string {
+		rr := NewPipeline([]Component{stampTail{on: on}, shrink{}}, nil).Run(twoMsgReq(big), testCtx())
+		last := rr.Components[len(rr.Components)-1]
+		if len(last.Changes) != 1 || last.Changes[0].Idx != 1 {
+			t.Fatalf("on=%v: shrink changes = %+v", on, last.Changes)
+		}
+		if on && (len(rr.Components[0].Changes) != 1 || rr.Components[0].Changes[0].Hash != last.Changes[0].Hash) {
+			t.Fatalf("both components must hash the client text: %+v vs %+v", rr.Components[0].Changes, last.Changes)
+		}
+		return last.Changes[0].Hash
+	}
+	if off, on := hashOf(false), hashOf(true); off != on {
+		t.Fatalf("shrink hash changed with the earlier component: %q vs %q", off, on)
+	}
+}
+
+// T5: the removed messages are separated in the splice hash, so ["ab","c"] and ["a","bc"] differ.
+func TestSpliceOf_HashSeparatesMessages(t *testing.T) {
+	keep := msgOf(schemas.ChatMessageRoleUser, "keep")
+	h := func(a, b string) string {
+		in := []schemas.ChatMessage{keep, msgOf(schemas.ChatMessageRoleTool, a), msgOf(schemas.ChatMessageRoleTool, b), keep}
+		c, ok := spliceOf(in, []schemas.ChatMessage{keep, keep})
+		if !ok {
+			t.Fatal("no splice")
+		}
+		return c.Hash
+	}
+	if h("ab", "c") == h("a", "bc") {
+		t.Fatal("the splice hash runs the messages together")
+	}
+}

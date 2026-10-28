@@ -102,11 +102,14 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 	// messages were re-cloned unchanged six times over.
 	snap := schema.CloneMessages(req.Input)
 	own := ownOutputs(req)
+	// clientHash is the hash of each changed message's text as the client sent it, filled by the
+	// first component that changes the message (see changesOf).
+	clientHash := map[int]string{}
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c, &snap, own)
+		rep := p.runOne(comp, req, c, &snap, own, clientHash)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -130,7 +133,7 @@ func safeEmit(fn func()) {
 // snap is the run's live snapshot: on entry it holds an independent deep copy of
 // req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
 // what changed, or the lot after a revert or a count change).
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool) (rep Report) {
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool, clientHash map[int]string) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := *snap
 	// revert installs the snapshot and re-establishes an independent one, because
@@ -215,11 +218,15 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		}
 		// After restoreOwn: it can rewrite req.Input once changedIdx has run.
 		rep.CountChanged = len(before) != len(req.Input)
-		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx)
+		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx, clientHash)
 		if rep.CountChanged {
 			if c, ok := spliceOf(before, req.Input); ok {
 				rep.Changes = []Change{c}
 			}
+			// Indices before and after a count change do not line up, so the client hashes no
+			// longer name the right messages. Every later change is dropped by the savings code
+			// anyway (apply.OpsFromRun); clearing keeps a stale hash from being reused.
+			clear(clientHash)
 		}
 		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
@@ -234,8 +241,12 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 	return rep
 }
 
-// changesOf sizes each changed message and hashes its pre-run text.
-func changesOf(before, after []schemas.ChatMessage, idx []int) []Change {
+// changesOf sizes each changed message and hashes its text AS THE CLIENT SENT IT. clientHash
+// holds that hash for every message an earlier component of the run already changed; the first
+// component to change a message sees the client's own text in before, so it records the hash. The
+// hash therefore does not depend on what earlier components did: if one of them starts or stops
+// acting between turns, a later component keeps the same ChangeID (counterfactual replay).
+func changesOf(before, after []schemas.ChatMessage, idx []int, clientHash map[int]string) []Change {
 	if len(idx) == 0 {
 		return nil
 	}
@@ -245,9 +256,15 @@ func changesOf(before, after []schemas.ChatMessage, idx []int) []Change {
 			continue
 		}
 		bt, at := schema.MessageText(before[i]), schema.MessageText(after[i])
-		sum := sha256.Sum256([]byte(bt))
-		out = append(out, Change{Idx: i, BytesBefore: len(bt), BytesAfter: len(at),
-			Hash: hex.EncodeToString(sum[:6])})
+		h, ok := clientHash[i]
+		if !ok {
+			sum := sha256.Sum256([]byte(bt))
+			h = hex.EncodeToString(sum[:6])
+			if clientHash != nil {
+				clientHash[i] = h
+			}
+		}
+		out = append(out, Change{Idx: i, BytesBefore: len(bt), BytesAfter: len(at), Hash: h})
 	}
 	return out
 }
@@ -273,15 +290,22 @@ func spliceOf(before, after []schemas.ChatMessage) (Change, bool) {
 	}
 	var bb, ba int
 	h := sha256.New()
-	for _, m := range removed {
+	// A 0x00 byte separates the messages, so ["ab","c"] and ["a","bc"] hash apart.
+	for k, m := range removed {
 		t := schema.MessageText(m)
 		bb += len(t)
+		if k > 0 {
+			h.Write([]byte{0})
+		}
 		h.Write([]byte(t))
 	}
-	for _, m := range inserted {
+	for k, m := range inserted {
 		t := schema.MessageText(m)
 		ba += len(t)
 		if len(removed) == 0 {
+			if k > 0 {
+				h.Write([]byte{0})
+			}
 			h.Write([]byte(t))
 		}
 	}
