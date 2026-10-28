@@ -544,7 +544,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
+			// Read ONCE, used twice: the restart grace the boundary consults and the cold
+			// decision below are one fact — this request's cache lifetime — and must not be
+			// derived twice (see ttlTier for the last time two readers disagreed).
+			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -588,8 +593,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// the agent compacts its own context (metaSessionKeys survives that, the derived
 			// sha256(system+firstUser) does not — see explicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
-			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			if lifetimeKind == CacheLifetimeExact {
 				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
 				ttl = sessionTTL(st, turnKey, ttl)
@@ -647,7 +650,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
 			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
 			// suffix re-write this whole design exists to avoid.
-			o.Tracker.TurnAt(turnKey, len(norm), nowMs)
+			//
+			// The grace is 0 because the boundary this call returns is discarded: a bypassed
+			// request changes nothing, so there is nothing to protect.
+			o.Tracker.TurnAt(turnKey, len(norm), nowMs, 0)
 		} else {
 			defer putLen(st, turnKey, len(norm))
 		}

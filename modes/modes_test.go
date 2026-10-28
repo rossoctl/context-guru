@@ -150,13 +150,13 @@ func TestTrackerEvictsLeastRecentlyUsed(t *testing.T) {
 	tr := NewTracker(hot + 1)
 	now := int64(1_700_000_000_000)
 	for i := 0; i < hot; i++ {
-		tr.TurnAt("hot"+strconv.Itoa(i), 5, now)
+		tr.TurnAt("hot"+strconv.Itoa(i), 5, now, 0)
 	}
 	for round := 0; round < 100; round++ {
 		now++
-		tr.TurnAt("new"+strconv.Itoa(round), 5, now)
+		tr.TurnAt("new"+strconv.Itoa(round), 5, now, 0)
 		for i := 0; i < hot; i++ {
-			if prevLen, prevAt := tr.TurnAt("hot"+strconv.Itoa(i), 5, now); prevAt == 0 || prevLen != 5 {
+			if prevLen, prevAt := tr.TurnAt("hot"+strconv.Itoa(i), 5, now, 0); prevAt == 0 || prevLen != 5 {
 				t.Fatalf("round %d: hot key %d was evicted while still in use", round, i)
 			}
 		}
@@ -171,29 +171,29 @@ func TestTrackerEvictsLeastRecentlyUsed(t *testing.T) {
 func TestTurnFromInheritsTheParentRecordReadOnly(t *testing.T) {
 	tr := NewTracker(0)
 	t0 := int64(1_700_000_000_000)
-	tr.TurnAt("main", 8, t0)
+	tr.TurnAt("main", 8, t0, 0)
 	before := CompactionResets()
 
-	if n, at := tr.TurnFrom("side", "main", 9, t0+1000); n != 8 || at != t0 {
+	if n, at := tr.TurnFrom("side", "main", 9, t0+1000, 0); n != 8 || at != t0 {
 		t.Fatalf("side request: (%d, %d), want the parent's (8, %d)", n, at, t0)
 	}
 	// A fork shorter than its parent diverged inside the parent's prefix: freeze all of it.
-	if n, _ := tr.TurnFrom("fork", "main", 5, t0+2000); n != 5 {
+	if n, _ := tr.TurnFrom("fork", "main", 5, t0+2000, 0); n != 5 {
 		t.Fatalf("short fork: boundary %d, want its own length 5", n)
 	}
 	if got := CompactionResets() - before; got != 0 {
 		t.Fatalf("an inherited read counted %d compaction resets", got)
 	}
 	// Read only: main's next turn is measured against its own 8 and its own time.
-	if n, at := tr.TurnAt("main", 10, t0+3000); n != 8 || at != t0 {
+	if n, at := tr.TurnAt("main", 10, t0+3000, 0); n != 8 || at != t0 {
 		t.Fatalf("main after its children: (%d, %d), want (8, %d)", n, at, t0)
 	}
 	// Once the key has its own record, the parent no longer counts.
-	if n, _ := tr.TurnFrom("side", "main", 12, t0+4000); n != 9 {
+	if n, _ := tr.TurnFrom("side", "main", 12, t0+4000, 0); n != 9 {
 		t.Fatalf("side's second request: boundary %d, want its own 9", n)
 	}
 	// An unknown parent, or none, is a plain new key.
-	if n, at := tr.TurnFrom("orphan", "nobody", 4, t0); n != 0 || at != 0 {
+	if n, at := tr.TurnFrom("orphan", "nobody", 4, t0, 0); n != 0 || at != 0 {
 		t.Fatalf("orphan: (%d, %d), want (0, 0)", n, at)
 	}
 }
@@ -203,14 +203,14 @@ func TestTurnFromInheritsTheParentRecordReadOnly(t *testing.T) {
 func TestDroppedKeyReadsAsAllCached(t *testing.T) {
 	tr := NewTracker(1)
 	t0 := int64(1_700_000_000_000)
-	tr.TurnAt("a", 5, t0)
-	tr.TurnAt("b", 3, t0+1) // evicts a
-	if n, at := tr.TurnAt("a", 7, t0+2); n != 7 || at != 0 {
+	tr.TurnAt("a", 5, t0, 0)
+	tr.TurnAt("b", 3, t0+1, 0) // evicts a
+	if n, at := tr.TurnAt("a", 7, t0+2, 0); n != 7 || at != 0 {
 		t.Fatalf("evicted key came back as (%d, %d), want (7, 0): all cached, idle unknown", n, at)
 	}
 	// It has a real record again, so the turn after is normal.
-	tr.TurnAt("c", 1, t0+3) // evicts the LRU, b
-	if n, _ := tr.TurnAt("c", 2, t0+4); n != 1 {
+	tr.TurnAt("c", 1, t0+3, 0) // evicts the LRU, b
+	if n, _ := tr.TurnAt("c", 2, t0+4, 0); n != 1 {
 		t.Fatalf("c: boundary %d, want 1", n)
 	}
 }
@@ -221,13 +221,81 @@ func TestDroppedKeyReadsAsAllCached(t *testing.T) {
 func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
 	tr := NewTracker(1)
 	t0 := int64(1_700_000_000_000)
-	tr.TurnAt("main", 8, t0)
-	tr.TurnAt("other", 3, t0+1) // evicts main
-	if n, at := tr.TurnFrom("side", "main", 9, t0+2); n != 9 || at != 0 {
+	tr.TurnAt("main", 8, t0, 0)
+	tr.TurnAt("other", 3, t0+1, 0) // evicts main
+	if n, at := tr.TurnFrom("side", "main", 9, t0+2, 0); n != 9 || at != 0 {
 		t.Fatalf("side of an evicted parent: (%d, %d), want (9, 0): all cached, idle unknown", n, at)
 	}
-	if n, _ := tr.TurnAt("main", 10, t0+3); n != 10 {
+	if n, _ := tr.TurnAt("main", 10, t0+3, 0); n != 10 {
 		t.Fatalf("evicted parent's own next request: boundary %d, want 10 (all cached)", n)
+	}
+}
+
+// Issue #496, the owner's rule. The tracker's records die with the process; the provider's
+// cache entries do not. An unknown key whose first request arrives less than that request's
+// cache lifetime after the tracker started reads as all cached, like a dropped key, so a
+// proxy restart cannot let components rewrite a live thread's cached prefix. The grace is per
+// thread and lasts the request's own lifetime — 5 minutes, 30 minutes on OpenAI GPT-5.6+,
+// 1 hour on the extended tier — not a global window. The idle clock stays unknown (prevAtMs
+// 0), so nothing reads cold off a fabricated age.
+func TestAnUnknownKeyInsideItsCacheLifetimeReadsAsAllCached(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	cases := []struct {
+		name    string
+		started time.Duration // how long before t0 the tracker started
+		grace   time.Duration // the request's cache lifetime
+		want    int
+	}{
+		{"1 minute after start, 5 minute lifetime", time.Minute, 5 * time.Minute, 925},
+		{"6 minutes after start, 5 minute lifetime", 6 * time.Minute, 5 * time.Minute, 0},
+		{"6 minutes after start, 1 hour lifetime", 6 * time.Minute, time.Hour, 925},
+		{"20 minutes after start, 30 minute lifetime", 20 * time.Minute, 30 * time.Minute, 925},
+		{"31 minutes after start, 30 minute lifetime", 31 * time.Minute, 30 * time.Minute, 0},
+	}
+	for _, c := range cases {
+		tr := NewTracker(0)
+		tr.startedAtMs = t0 - c.started.Milliseconds()
+		if n, at := tr.TurnAt("unknown", 925, t0, c.grace); n != c.want || at != 0 {
+			t.Fatalf("%s: unknown key = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
+		}
+		// The same answer with a parent that has no record of its own: no usable parent.
+		if n, at := tr.TurnFrom("side", "nobody", 925, t0, c.grace); n != c.want || at != 0 {
+			t.Fatalf("%s: unknown key with a parent = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
+		}
+	}
+}
+
+// The grace covers only the thread's FIRST request after the restart: that request writes the
+// record, and the thread's second request follows the normal Boundary rule — growth keeps the
+// recorded boundary, a shrink resets — even while the grace is still running.
+func TestASecondRequestUsesTheRecordNotTheGrace(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	if n, _ := tr.TurnAt("k", 925, t0, 5*time.Minute); n != 925 {
+		t.Fatalf("first request = %d, want 925 (inside the grace)", n)
+	}
+	if n, _ := tr.TurnAt("k", 930, t0+1000, 5*time.Minute); n != 925 {
+		t.Fatalf("second request, grown = %d, want 925 (the recorded boundary)", n)
+	}
+	if n, _ := tr.TurnAt("k", 900, t0+2000, 5*time.Minute); n != 0 {
+		t.Fatalf("second request, shrunk = %d, want 0 (a compaction resets the boundary)", n)
+	}
+}
+
+// The host can switch the grace off (the proxy's --restart-grace=false): an eval that sends
+// whole transcripts to a fresh proxy must measure compaction, not the grace. A young tracker
+// with the grace off reads an unknown key as a new thread, the old behaviour.
+func TestASwitchedOffGraceTurnsTheRestartProtectionOff(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds() // started 1 minute ago: inside the lifetime
+	tr.SetRestartGrace(false)
+	if n, at := tr.TurnAt("unknown", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+		t.Fatalf("young tracker, grace off, unknown key = (%d, %d), want (0, 0): the old behaviour", n, at)
+	}
+	if n, at := tr.TurnFrom("side", "nobody", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+		t.Fatalf("young tracker, grace off, unknown key with a parent = (%d, %d), want (0, 0)", n, at)
 	}
 }
 
@@ -237,17 +305,17 @@ func TestStaleKeysExpireBeforeLiveOnes(t *testing.T) {
 	tr := NewTracker(3)
 	now := int64(1_700_000_000_000) + StaleAfter.Milliseconds()*2
 	stale := now - StaleAfter.Milliseconds() - 1
-	tr.TurnAt("a", 4, now)
-	tr.TurnAt("b", 4, stale)
-	tr.TurnAt("c", 4, stale)
-	tr.TurnAt("d", 4, now+1) // the tracker is full: b and c expire
+	tr.TurnAt("a", 4, now, 0)
+	tr.TurnAt("b", 4, stale, 0)
+	tr.TurnAt("c", 4, stale, 0)
+	tr.TurnAt("d", 4, now+1, 0) // the tracker is full: b and c expire
 	if n := tr.Sessions(); n != 2 {
 		t.Fatalf("tracker holds %d keys, want 2 (both stale keys expired)", n)
 	}
-	if n, at := tr.TurnAt("a", 5, now+2); n != 4 || at != now {
+	if n, at := tr.TurnAt("a", 5, now+2, 0); n != 4 || at != now {
 		t.Fatalf("live key a was dropped: (%d, %d)", n, at)
 	}
-	if n, _ := tr.TurnAt("b", 6, now+3); n != 6 {
+	if n, _ := tr.TurnAt("b", 6, now+3, 0); n != 6 {
 		t.Fatalf("expired key b: boundary %d, want 6 (all cached), not 0", n)
 	}
 }

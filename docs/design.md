@@ -312,8 +312,12 @@ job.
 boundary above which offloaders may mutate (`Ctx.MaxCachedIdx`). It is read and updated in one
 locked call per turn, closing a race where two concurrent turns of one session could otherwise leave
 the boundary describing neither. A boundary that's too high lets an offloader mutate content the
-provider already cached, forcing a cache-write of the suffix; the boundary only ever grows, since an
-agent re-sending a shorter transcript must not shrink it.
+provider already cached, forcing a cache-write of the suffix; a shorter transcript under the same
+key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
+there. After a proxy restart the tracker's records are gone but the provider's cache entries are
+not, so an unknown key reads as all-cached until its first request after the restart, for that
+request's own cache lifetime (5 minutes, 30 minutes on OpenAI GPT-5.6+, 1 hour on the extended
+tier); the host can switch the rule off (`--restart-grace=false`).
 
 ### Fail-open per mode
 

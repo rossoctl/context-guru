@@ -35,7 +35,7 @@ func TestAPingThatRefreshedTheEntryShortensItsAge(t *testing.T) {
 				t.Fatalf("entry age = %d ms, want %d", age, tc.wantAge)
 			}
 			e := &dash.Event{CacheWrite: 221_557}
-			e.AttributeCache(true, true, age, ttlMs, causeIf(e.CacheWrite > 0))
+			e.AttributeCache(true, true, age, ttlMs, causeIf(e.CacheWrite > 0), 0)
 			if e.CacheMissReason != tc.wantReason {
 				t.Errorf("verdict = %q, want %q", e.CacheMissReason, tc.wantReason)
 			}

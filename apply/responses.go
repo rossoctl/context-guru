@@ -526,6 +526,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
 	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
+	// lifetime below are one fact — this request's cache lifetime.
+	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	maxCachedIdx, idleMs := -1, int64(-1)
 	if cacheAware && !serverHeldHistory {
 		nowMs := o.nowMs()
@@ -533,7 +536,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
@@ -555,7 +558,6 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	if mode == "" {
 		mode = components.ModeSync
 	}
-	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	if !cacheAware {
 		ttl, ttlKind = 0, CacheLifetimeUnknown
 	}

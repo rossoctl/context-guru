@@ -140,6 +140,10 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 	defer up.Close()
 	h, rec := dashHandler(t, up.URL, dash.Options{CaptureContent: true, ContentCap: 1 << 16,
 		ContentMaxPerRequest: 10})
+	// A tracker started two hours ago: this test models steady-state traffic, and a
+	// just-started tracker would hold the request inside the restart grace (#496), where the
+	// first request of a thread reads all-cached and nothing is attempted.
+	h.tracker.SetStartedAt(time.Now().Add(-2 * time.Hour).UnixMilli())
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
