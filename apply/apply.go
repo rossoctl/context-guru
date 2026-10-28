@@ -2128,6 +2128,11 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	if len(plan) == 0 {
 		return res
 	}
+	// Either branch below changes the forwarded body after Trace.Ops was computed: the fallback
+	// forwards the pre-pipeline body, and an insertion shifts the wire index of every later
+	// message. No operation can be trusted to describe the wire any more, so all are dropped.
+	res.Trace.OpsDropped += len(res.Trace.Ops)
+	res.Trace.Ops = nil
 	nb, tokens, ok := plan.insert(wire, res.Body, client)
 	if !ok {
 		res.Body, res.Changed = fallback, true
