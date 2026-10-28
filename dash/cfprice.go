@@ -132,6 +132,14 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 	if len(fig.Unpriced) > 0 {
 		return
 	}
+	// Plausibility bound on the library's INPUT: a request cannot remove more tokens than it had.
+	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
+	// usage that does not match the forwarded body (a wrong bytes-to-tokens ratio) would otherwise
+	// publish an inflated figure. Over the bound, or with TokensBefore unknown (0), the bound cannot
+	// be met or checked and the legacy figures stand. This is a gate, never a rescale of the figure.
+	if e.TokensBefore <= 0 || e.countedSavedTokens() > e.TokensBefore {
+		return
+	}
 	// A library figure for a component the event has no row for would leave the rows short of
 	// the baseline: the sum invariant would break. Keep the legacy figures instead.
 	rows := map[string]bool{}
@@ -141,6 +149,16 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 	for name := range fig.ByComponent {
 		if !rows[name] {
 			return
+		}
+	}
+	// Two rows with one name would each take the full figure and break the sum invariant.
+	seen := map[string]bool{}
+	for _, c := range e.Components {
+		if _, ok := fig.ByComponent[c.Component]; ok {
+			if seen[c.Component] {
+				return
+			}
+			seen[c.Component] = true
 		}
 	}
 	saved := make([]float64, len(e.Components))
@@ -155,4 +173,17 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 		e.Components[i].SavedUSD = saved[i]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+}
+
+// countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
+// CounterfactualFigure.ByComponent: not DryRun, not a spend.
+func (e *Event) countedSavedTokens() int {
+	n := 0
+	for _, o := range e.cfRes.Ops {
+		if o.DryRun || o.Call != nil {
+			continue
+		}
+		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
+	}
+	return n
 }

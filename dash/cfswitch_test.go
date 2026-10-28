@@ -61,6 +61,11 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		},
 		"acted without figure": func(e *Event) { e.Components[1].Acted = true },
 		"figure without row":   func(e *Event) { e.Components = e.Components[1:] },
+		"saved above size":     func(e *Event) { e.TokensBefore = 999 },
+		"size unknown":         func(e *Event) { e.TokensBefore = 0 },
+		"duplicate names": func(e *Event) {
+			e.Components = append(e.Components, CompRow{Component: "mask"})
+		},
 	}
 	for name, mut := range cases {
 		e := switchEvent()
@@ -89,5 +94,14 @@ func TestPriceMode_UnaccountedEventIsNotOverridden(t *testing.T) {
 	e.PriceMode(cfTestPrice, false, SavingsCounterfactual)
 	if e.BaselineCostUSD != 0 || e.Components[0].SavedUSD != 0 {
 		t.Fatalf("overrode an unpriced event: %+v", e)
+	}
+}
+
+func TestPriceMode_SavedEqualToSizeStillOverrides(t *testing.T) {
+	e := switchEvent()
+	e.TokensBefore = 1000 // exactly the 1000 saved tokens
+	e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
+	if !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
+		t.Fatalf("equal to size must not fall back: %+v", e.Components[0])
 	}
 }

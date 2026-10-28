@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,15 +72,18 @@ func anthropicRequest(model string) []byte {
 }
 
 // fakeUpstream returns an Anthropic-shaped response with real usage tiers.
-func fakeUpstream(t *testing.T) *httptest.Server {
+func fakeUpstream(t *testing.T) *httptest.Server { return fakeUpstreamUsage(t, 12, 9000, 1500) }
+
+// fakeUpstreamUsage is fakeUpstream with the prompt usage the caller chooses.
+func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant",
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
 		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
-		  "usage":{"input_tokens":12,"output_tokens":34,
-		           "cache_read_input_tokens":9000,"cache_creation_input_tokens":1500}}`))
+		  "usage":{"input_tokens":%d,"output_tokens":34,
+		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cacheRead, cacheWrite)
 	}))
 }
 

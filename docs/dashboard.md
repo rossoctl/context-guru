@@ -110,6 +110,11 @@ Limits of `counterfactual`:
 - The override is all-or-nothing per event. An event keeps its legacy figures if the library
   result is missing, if the trace dropped any operation, if the tenancy runs in observe mode,
   if any operation is unpriced, or if a component that acted has no library figure.
+- The counterfactual figures are estimates. The library converts the removed bytes to tokens with
+  the request's own billed-token ratio. A figure that implies more removed tokens than the request
+  had (a ratio that does not fit the usage) is rejected, and the event keeps its legacy figures.
+- They can differ from the legacy figures: the library prices removed tokens at the tier their
+  position falls in, and legacy prices them at the rate the request paid.
 - Rows stored under the legacy rule are still repriced with the legacy rule at read time.
 
 ## Tool inventory panel

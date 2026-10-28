@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,60 +152,82 @@ func TestNoUsageMeansNoCounterfactualResult(t *testing.T) {
 	}
 }
 
-// In counterfactual mode the stored component figures and the baseline come from the library's
-// Result when the event qualifies, and equal the legacy-priced copy of the same event when not.
-// shadow and legacy always keep the legacy figures. The harness's request may yield no rewrite
-// operation; the test then covers the fallback arm and the invariant, and the dash tests cover
-// the override arithmetic.
-func TestCounterfactualModeStoresLibraryFiguresOrFallsBack(t *testing.T) {
-	price := fixedPricer{}
-	p, _ := price.Price(nil, "aws/claude-sonnet-5")
-	overridden := 0
-	for _, mode := range []string{"legacy", "shadow", "counterfactual"} {
-		for i, ev := range cfTwoRequests(t, mode) {
-			e := ev
-			e.Components = append([]dash.CompRow(nil), ev.Components...)
-			want := ev
-			want.Components = append([]dash.CompRow(nil), ev.Components...)
-			// want: the same event priced by the legacy rule only.
-			want.Price(p, true)
-			fig := e.CounterfactualFigure(p)
-			qualifies := mode == "counterfactual" && e.HasCounterfactual() && len(fig.Unpriced) == 0
-			if qualifies {
-				for j, c := range e.Components {
-					if c.Acted {
-						if _, ok := fig.ByComponent[c.Component]; !ok {
-							qualifies = false
-						}
-					}
-					_ = j
-				}
-			}
-			if qualifies {
-				overridden++
-				var sum float64
-				for j, c := range e.Components {
-					if d := c.SavedUSD - fig.ByComponent[c.Component]; d > 1e-12 || d < -1e-12 {
-						t.Errorf("%s event %d component %d: SavedUSD %v, library %v", mode, i, j, c.SavedUSD, fig.ByComponent[c.Component])
-					}
-					sum += c.SavedUSD
-				}
-				if d := sum - (e.BaselineCostUSD - e.CostUSD); d > 1e-9 || d < -1e-9 {
-					t.Errorf("%s event %d: components %v != baseline delta %v", mode, i, sum, e.BaselineCostUSD-e.CostUSD)
-				}
-				continue
-			}
-			if e.BaselineCostUSD != want.BaselineCostUSD {
-				t.Errorf("%s event %d: baseline %v, legacy %v", mode, i, e.BaselineCostUSD, want.BaselineCostUSD)
-			}
-			for j := range e.Components {
-				if e.Components[j].SavedUSD != want.Components[j].SavedUSD {
-					t.Errorf("%s event %d component %d: SavedUSD %v, legacy %v", mode, i, j, e.Components[j].SavedUSD, want.Components[j].SavedUSD)
-				}
-			}
+// cfRunUsage posts two requests through a fake upstream that reports the given prompt usage and
+// returns the second recorded event and the byte length of the body the upstream received.
+func cfRunUsage(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, int) {
+	t.Helper()
+	var fwd int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		atomic.StoreInt64(&fwd, int64(len(b)))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
+		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+		  "usage":{"input_tokens":%d,"output_tokens":34,
+		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cr, cw)
+	}))
+	defer up.Close()
+	h, rec, tap := cfHandler(t, up.URL, mode)
+	// Two requests: the first has no previous request to classify cache breaks against, so the
+	// library leaves it with an unpriced "penalty_unknown" and the event keeps its legacy figures.
+	cfPost(t, h, "sess-cf")
+	cfPost(t, h, "sess-cf")
+	waitForRows(t, rec, 2)
+	return tap.all()[1:], int(atomic.LoadInt64(&fwd))
+}
+
+func extractRow(t *testing.T, e dash.Event) dash.CompRow {
+	t.Helper()
+	for _, c := range e.Components {
+		if c.Component == "extract" {
+			return c
 		}
 	}
-	if overridden == 0 {
-		t.Error("no counterfactual event qualified for the override: the override arm is untested")
+	t.Fatal("no extract row")
+	return dash.CompRow{}
+}
+
+// A usage consistent with the forwarded body: the request is billed as ~0.3 token per byte, as
+// real traffic is. Hand derivation of the extract figure:
+//
+//	client body  = len(anthropicRequest)            bytes
+//	forwarded    = len of the body the upstream got  bytes (the extracted stub)
+//	removed      = client - forwarded                bytes
+//	usage        = 20 input + 50 cache write         = 70 tokens
+//	ratio        = 70 tokens / forwarded bytes
+//	saved tokens = removed * 70 / forwarded          (in the Input tier, the removed span was never cached)
+//	SavedUSD     = saved tokens * 2e-6               (fixedPricer Input rate)
+//
+// The library's removed span is the extracted text, slightly smaller than client - forwarded, so
+// the derived figure is checked within 10%.
+func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
+	evs, fwd := cfRunUsage(t, "counterfactual", 20, 0, 50)
+	if len(evs) != 1 {
+		t.Fatalf("events = %d", len(evs))
+	}
+	e := evs[0]
+	client := len(anthropicRequest("aws/claude-sonnet-5"))
+	want := float64(client-fwd) * 70 / float64(fwd) * 2e-6
+	got := extractRow(t, e).SavedUSD
+	if got < want*0.9 || got > want*1.1 {
+		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d)", got, want, client, fwd)
+	}
+	legacy, _ := cfRunUsage(t, "legacy", 20, 0, 50)
+	lg := extractRow(t, legacy[0]).SavedUSD
+	if lg <= 0 || got/lg > 20 || lg/got > 20 {
+		t.Fatalf("library %v and legacy %v differ by more than 20x", got, lg)
+	}
+	t.Logf("library %v legacy %v hand %v", got, lg, want)
+}
+
+// The old fixture: 10,512 prompt tokens for a few-hundred-byte forwarded body. The library's
+// token figure then exceeds the request's size, so PriceMode must fall back to legacy.
+func TestCounterfactualModeAbsurdUsageFallsBackToLegacy(t *testing.T) {
+	cfs, _ := cfRunUsage(t, "counterfactual", 12, 9000, 1500)
+	leg, _ := cfRunUsage(t, "legacy", 12, 9000, 1500)
+	got, want := extractRow(t, cfs[0]).SavedUSD, extractRow(t, leg[0]).SavedUSD
+	if got != want || cfs[0].BaselineCostUSD != leg[0].BaselineCostUSD {
+		t.Fatalf("absurd usage did not fall back: component %v vs legacy %v, baseline %v vs %v",
+			got, want, cfs[0].BaselineCostUSD, leg[0].BaselineCostUSD)
 	}
 }
