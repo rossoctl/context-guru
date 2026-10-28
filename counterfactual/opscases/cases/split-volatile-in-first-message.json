@@ -318,6 +318,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "to": {
        "section": "system",
        "index": 2

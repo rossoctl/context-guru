@@ -1,6 +1,6 @@
 {
  "id": "rewrite/restore-in-place/hot/5m",
- "description": "The variant with fixed_restore off: the expanded original goes back in place. The mask no longer applies, so it saves nothing, but the provider holds the marker form from the earlier requests, so 6,000 tokens move from read to write: -$0.02070, charged to the ended change. The old figure kept crediting the mask here.",
+ "description": "The variant with fixed_restore off: the expanded original goes back in place. The mask no longer applies, so it saves nothing, but the provider holds the marker form from the earlier requests, so 6,000 tokens move from read to write: -$0.02070. The mask has ended, so the break has no ChangeID (\u00a75.2 row 1). The old figure kept crediting the mask here.",
  "source": "issue_cases.md#481",
  "dims": {
   "kind": "rewrite",
@@ -13,7 +13,6 @@
  },
  "rates": "fixture-v1",
  "open": [
-  "design \u00a711 question 12: the rule that finds the end of a change is not defined (request 2: the mask ended and the break is charged to it)",
   "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
  ],
  "steps": [
@@ -467,7 +466,7 @@
     "effects": [
      {
       "kind": "break",
-      "changeId": "cg:mask:8d11",
+      "changeId": "",
       "saved": {
        "cacheRead": 6000
       },
@@ -488,10 +487,7 @@
     "boundary": {
      "section": "messages",
      "index": 2
-    },
-    "checks": [
-     "attribution"
-    ]
+    }
    }
   }
  ]

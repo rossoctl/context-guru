@@ -2,12 +2,14 @@ package counterfactual
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Machine-stable reasons in Result.Unpriced.
 const (
 	ReasonEndRequestMissing = "end_request_missing"
+	ReasonPingResultUnknown = "ping_result_unknown" // a spend whose call has no usage: the host never read a response (§6.3)
 	ReasonUnknownKind       = "unknown_kind"
 	ReasonNegativeSize      = "negative_size"
 	ReasonPenaltyUnknown    = "penalty_unknown" // the boundary is unknown, so no break penalty was charged (§6.4)
@@ -51,9 +53,17 @@ func ComputeStandalone(ops RequestOps) Result {
 		res.Ops = append(res.Ops, priced(op, op.ID))
 		if op.Kind != KindSpend {
 			res.Unpriced = append(res.Unpriced, Unpriced{OpID: op.ID, Reason: ReasonNotSpend})
+		} else if resultUnknown(op) {
+			res.Unpriced = append(res.Unpriced, Unpriced{OpID: op.ID, Reason: ReasonPingResultUnknown})
 		}
 	}
 	return res
+}
+
+// resultUnknown says whether a spend's call has no usage at all: the call was sent and may have been
+// billed, but the host has no response to read the bill from. The cost is then missing, not zero.
+func resultUnknown(op Operation) bool {
+	return op.Kind == KindSpend && op.Call != nil && op.Call.Usage == (CallUsage{})
 }
 
 func (r *Request) notEnded() Result {
@@ -108,6 +118,7 @@ func (r *Request) calc(s ThreadState, usage Usage) (Result, ThreadState) {
 	}
 	c.price(&res)
 	c.checks(&res)
+	c.conservation(&res)
 	return res, c.nextState()
 }
 
@@ -250,15 +261,61 @@ func (c *calcState) forwardPositions() {
 			continue
 		}
 		for _, sp := range it.spans {
-			i, ok := c.client.flat(sp.from)
-			if !ok || (c.s.PrevPrint != nil && c.clientFD <= i) {
+			if sp.before.Bytes == 0 {
+				// Content the operator added: its position is in forwarded space, and the client body has
+				// nothing there. It ends only when the client edited what precedes it (§4.3).
+				if c.s.PrevPrint != nil && c.clientFD < c.insertionPoint(sp.from) {
+					it.ended = true
+				}
+			} else if i, ok := c.client.flat(sp.from); !ok || (c.s.PrevPrint != nil && c.clientFD <= i) {
 				it.ended = true // the client edited at or before it, or compacted (§4.3)
 			}
-			if _, ok := c.toFwd(k, sp.from); !ok {
+			fp, ok := c.toFwd(k, sp.from)
+			if !ok {
+				it.ended = true
+			} else if c.restored(it, sp, fp) {
 				it.ended = true
 			}
 		}
 	}
+}
+
+// restored says whether the operator stopped applying a change that edited an item in place: the
+// forwarded item at the change's position is the client's own item again (same hash), although the
+// change made it smaller or larger. The end is inferred from the bodies, because the operator reports
+// nothing after the first request (§4.5). A change with a splice ends through the splice (toFwd).
+func (c *calcState) restored(it *item, sp span, fp Position) bool {
+	if it.op.DryRun || it.op.MessageSplice != nil || sp.before.Bytes == 0 || sp.before.Bytes == sp.after.Bytes {
+		return false // a DryRun forwards the client's own item by design
+	}
+	ci, ok1 := c.client.flat(sp.from)
+	fi, ok2 := c.fwd.flat(fp)
+	return ok1 && ok2 && c.client.Pos[ci].Hash == c.fwd.Pos[fi].Hash
+}
+
+// insertionPoint is the flat client position where content added at p sits: the position itself, or
+// the end of its section when the client body has fewer items there.
+func (c *calcState) insertionPoint(p Position) int {
+	s := sectionIndex(p.Section)
+	if s < 0 {
+		return 0
+	}
+	return min(c.client.Start[s]+max(p.Index, 0), c.client.sectionEnd(s))
+}
+
+// toFwdSkipping is toFwd without item k's own splice. Content that k inserted is already at its
+// forwarded position: applying the insertion to it would shift it past itself.
+func (c *calcState) toFwdSkipping(k int, p Position) (Position, bool) {
+	for j, it := range c.items {
+		if j == k || it.ended || it.bad != "" || it.op.DryRun {
+			continue
+		}
+		var ok bool
+		if p, ok = apply(p, it.op.MessageSplice, j <= k || !c.sawOriginal(j)); !ok {
+			return p, false
+		}
+	}
+	return p, true
 }
 
 // toFwd maps a client position of item k into the forwarded body. The splices of the items up to
@@ -357,6 +414,8 @@ func (c *calcState) phaseAndBoundary(res *Result) {
 		default:
 			c.phase = PhaseCold
 		}
+	} else if prev != nil && f.TTL > 0 && c.r.Meta.At.Sub(prev.At) <= f.TTL && c.s.Cache.CachePhase == PhaseCold {
+		c.phase = PhaseHot // the previous request cached nothing: hot with an empty extent (§5.2)
 	} else if prev != nil && f.TTL > 0 && f.Lifetime == LifetimeExact && c.r.Meta.At.Sub(prev.At) > f.TTL {
 		c.phase = PhaseCold // the previous request cached nothing, and it would have expired anyway
 	}
@@ -368,7 +427,9 @@ func (c *calcState) phaseAndBoundary(res *Result) {
 
 	switch c.phase {
 	case PhaseHot:
-		c.prevExtCli = mustFlat(prev.Client, prevFwdToClient(prev, prev.Forwarded.position(c.prevExt)))
+		if c.prevExt >= 0 {
+			c.prevExtCli = mustFlat(prev.Client, prevFwdToClient(prev, prev.Forwarded.position(c.prevExt)))
+		}
 		x := readable(min(c.prevExtCli, c.clientFD-1), c.clientBPs)
 		c.bstar = -1
 		for _, cand := range append(append([]bp{{at: c.prevExtCli}}, c.clientBPs...), c.prevClientBPs...) {
@@ -427,6 +488,8 @@ func (c *calcState) cacheEffects(res *Result) {
 	if c.pingHot {
 		c.rescue(res)
 	}
+	c.headTTL(res)
+	c.split(res)
 	switch {
 	case c.unknown || c.s.PrevPrint == nil:
 		return // row 6
@@ -443,7 +506,15 @@ func (c *calcState) cacheEffects(res *Result) {
 		c.addBreak(res, c.readEnd, "")
 		return
 	}
-	predicted := c.ratio.of(c.fwd.cumBytes(readable(mustFlat(c.fwd, c.s.PrevPrint.Forwarded.position(c.prevExt)), c.fwdBPs)))
+	if c.prevExt < 0 {
+		return // nothing was cached, so nothing can have been lost
+	}
+	expect := readable(mustFlat(c.fwd, c.s.PrevPrint.Forwarded.position(c.prevExt)), c.fwdBPs)
+	if c.r.Meta.At.Sub(c.s.PrevPrint.At) > 5*time.Minute {
+		// past the 5m TTL only the entries held at 1h are still alive: a 5m part past the head expired
+		expect = min(expect, c.headEnd())
+	}
+	predicted := c.ratio.of(c.fwd.cumBytes(expect))
 	low := c.usage.CacheRead+128+predicted/50 < predicted // the one-block tolerance (row 4)
 	if !low {
 		return
@@ -535,6 +606,79 @@ func (c *calcState) rescue(res *Result) {
 	c.addEffect(res, e)
 }
 
+// headTTL adds the two legs of a head held at 1h (§4.4): the premium on every request that writes
+// the head at 1h, and the rescue on a request that reads it after the 5m TTL.
+func (c *calcState) headTTL(res *Result) {
+	id := ""
+	for _, it := range c.items {
+		if !it.ended && strings.HasPrefix(it.op.ChangeID, "headttl:") {
+			id = it.op.ChangeID
+		}
+	}
+	if id == "" {
+		return
+	}
+	if n := c.usage.CacheWrite1h; n > 0 {
+		e := CacheEffect{Kind: EffectTTLPremium, ChangeID: id, TTL: "1h", Estimated: true}
+		e.Saved.CacheWrite5m, e.Caused.CacheWrite1h = n, n
+		c.addEffect(res, e)
+	}
+	prev := c.s.PrevPrint
+	if prev == nil || c.s.Cache.TTL != "1h" || c.r.Meta.At.Sub(prev.At) <= 5*time.Minute || c.usage.CacheRead == 0 {
+		return
+	}
+	head := c.headEnd()
+	if head < 0 {
+		return
+	}
+	n := min(c.ratio.of(c.fwd.cumBytes(head)), c.usage.CacheRead)
+	e := CacheEffect{Kind: EffectTTLRescue, ChangeID: id, TTL: "1h", Estimated: true}
+	e.Saved.CacheWrite5m, e.Caused.CacheRead = n, n
+	c.addEffect(res, e)
+}
+
+// split adds the saving of a delivered cachesplit (§4.4): the client body has one system block, the
+// forwarded body two, so the stable half is read when only the volatile tail changed. The tokens are
+// the forwarded prefix before the first difference, capped by what the provider read, less what the
+// client body would have read up to B* anyway.
+func (c *calcState) split(res *Result) {
+	id := ""
+	for _, it := range c.items {
+		if !it.ended && strings.HasPrefix(it.op.ChangeID, "cg:cachesplit:") {
+			id = it.op.ChangeID
+		}
+	}
+	delivered := c.fwd.sectionEnd(1)-c.fwd.Start[1] > c.client.sectionEnd(1)-c.client.Start[1]
+	if id == "" || !delivered || c.phase != PhaseHot || c.fwdFD <= 0 || c.usage.CacheRead == 0 {
+		return
+	}
+	n := min(c.ratio.of(c.fwd.cumBytes(c.fwdFD-1)), c.usage.CacheRead)
+	if c.bstarFwd >= 0 { // the client body would have read up to B* anyway: only the rest is the split's
+		n -= c.ratio.of(c.fwd.cumBytes(c.bstarFwd))
+	}
+	if n <= 0 {
+		return
+	}
+	e := CacheEffect{Kind: EffectSplit, ChangeID: id, Estimated: true}
+	to := c.fwd.position(c.fwdFD - 1)
+	e.To = &to
+	addWrite(&e.Saved, ttlName(c.r.Facts.TTL), n)
+	e.Caused.CacheRead = n
+	c.addEffect(res, e)
+}
+
+// headEnd is the last forwarded position that a 1h breakpoint of the previous request covers; -1
+// when there is none.
+func (c *calcState) headEnd() int {
+	end := -1
+	for _, b := range c.prevFwdBPs {
+		if b.ttl == "1h" && b.at > end {
+			end = b.at
+		}
+	}
+	return end
+}
+
 func (c *calcState) addEffect(res *Result, e CacheEffect) {
 	e.ID = fmt.Sprintf("ce:%d", len(res.CacheEffects)+1)
 	res.CacheEffects = append(res.CacheEffects, e)
@@ -593,6 +737,8 @@ func (c *calcState) price(res *Result) {
 			res.Unpriced = append(res.Unpriced, Unpriced{OpID: it.id, Reason: it.bad})
 		case c.noUsage:
 			res.Unpriced = append(res.Unpriced, Unpriced{OpID: it.id, Reason: ReasonNoUsage})
+		case resultUnknown(it.op):
+			res.Unpriced = append(res.Unpriced, Unpriced{OpID: it.id, Reason: ReasonPingResultUnknown})
 		case it.op.Kind == KindRewrite:
 			p.Estimated = true // the tokens come from the bytes ratio (§4.2 rule 7)
 			for _, sp := range it.spans {
@@ -601,7 +747,17 @@ func (c *calcState) price(res *Result) {
 					addTier(&p.Saved, mustFlat(c.client, sp.from), c.bstar, c.clientBPs, d)
 				} else if d < 0 {
 					fp, _ := c.toFwd(k, sp.from)
-					addTier(&p.Caused, mustFlat(c.fwd, fp), c.bstarFwd, c.fwdBPs, -d)
+					if sp.before.Bytes == 0 && it.op.MessageSplice != nil {
+						fp, _ = c.toFwdSkipping(k, sp.from) // an inserted item sits in the slot its own splice opened
+					}
+					at := mustFlat(c.fwd, fp)
+					if sp.before.Bytes == 0 && c.phase == PhaseHot && c.prevExt >= 0 && at <= c.prevExt && at < c.fwdFD {
+						// content the operator added, which the previous request already forwarded
+						// and cached: the provider reads it, whatever B* says (§6.2)
+						p.Caused.CacheRead += -d
+					} else {
+						addTier(&p.Caused, at, c.bstarFwd, c.fwdBPs, -d)
+					}
 				}
 			}
 		}
@@ -613,6 +769,32 @@ func (c *calcState) price(res *Result) {
 	}
 	res.Ops = append(reported, active...)
 }
+
+// conservation is check 6 (§6.5), in tokens: the tokens the client body would have billed, less the
+// tokens the forwarded body billed, equal what the applied content changes saved less what they
+// caused. A cache effect moves tokens between tiers and nets zero in tokens, so only the content
+// changes count. The byte ratio rounds each span down, so each one may differ by one token.
+func (c *calcState) conservation(res *Result) {
+	if c.noUsage || c.unknown {
+		return
+	}
+	var net, tol int
+	for _, p := range res.Ops {
+		if p.Call != nil || p.DryRun {
+			continue
+		}
+		net += tierSum(p.Saved) - tierSum(p.Caused)
+		tol++
+	}
+	billed := c.usage.Input + c.usage.CacheRead + c.usage.CacheWrite
+	want := c.ratio.of(c.client.cumBytes(len(c.client.Pos)-1)) - billed
+	if d := want - net; d > tol+1 || d < -(tol+1) {
+		res.Checks = append(res.Checks, CheckFailure{Check: "conservation",
+			Detail: fmt.Sprintf("bill difference=%d ops=%d tokens", want, net)})
+	}
+}
+
+func tierSum(t TierTokens) int { return t.Input + t.CacheWrite5m + t.CacheWrite1h + t.CacheRead }
 
 // checks runs the sum, spans and unique-ChangeID checks (§6.5). The order, attribution and
 // conservation checks are not implemented: attribution holds by construction, because the library

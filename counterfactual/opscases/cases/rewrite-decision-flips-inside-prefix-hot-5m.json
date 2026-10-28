@@ -1,6 +1,6 @@
 {
  "id": "rewrite/decision-flips-inside-prefix/hot/5m",
- "description": "Message 5 repeats message 2. Request 1 runs with dedup off. On request 2 dedup turns on and replaces message 5 (2,000 to 100 tokens), which is inside the cached prefix: it saves 1,900 x $0.30 and breaks 2,100 tokens, net -$0.00668. Request 3 replays the same replacement: no break, +$0.00057. On request 4 dedup stops (its settings changed), the original returns inside the cached prefix and 6,000 tokens move from read to write: -$0.02070, charged to dedup's ChangeID although dedup reported nothing.",
+ "description": "Message 5 repeats message 2. Request 1 runs with dedup off. On request 2 dedup turns on and replaces message 5 (2,000 to 100 tokens), which is inside the cached prefix: it saves 1,900 x $0.30 and breaks 2,100 tokens, net -$0.00668. Request 3 replays the same replacement: no break, +$0.00057. On request 4 dedup stops (its settings changed), the original returns inside the cached prefix and 6,000 tokens move from read to write: -$0.02070. Dedup reported nothing, and the change has ended, so the break has no ChangeID (\u00a75.2 row 1).",
  "source": "issue_cases.md#493",
  "dims": {
   "kind": "rewrite",
@@ -13,7 +13,6 @@
  },
  "rates": "fixture-v1",
  "open": [
-  "design \u00a711 question 12: the rule that finds the end of a change is not defined (request 4: the change ended, and the break is charged to it)",
   "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
  ],
  "steps": [
@@ -802,7 +801,7 @@
     "effects": [
      {
       "kind": "break",
-      "changeId": "cg:dedup:4c18",
+      "changeId": "",
       "saved": {
        "cacheRead": 6000
       },
@@ -823,10 +822,7 @@
     "boundary": {
      "section": "messages",
      "index": 8
-    },
-    "checks": [
-     "attribution"
-    ]
+    }
    }
   }
  ]

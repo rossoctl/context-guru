@@ -127,12 +127,14 @@ type ExpectedEffect struct {
 	TTL      string             `json:"ttl,omitempty"`
 	Saved    cf.TierTokens      `json:"saved"`
 	Caused   cf.TierTokens      `json:"caused"`
+	// InBaseline marks a break that the client body would have had too (an entry lost early, a client
+	// edit): it is on the record but cancels out of conservation. A break that an operator left behind
+	// (its change ended) is not in the baseline, so it counts.
+	InBaseline bool `json:"inBaseline,omitempty"`
 }
 
-// Counted reports whether the effect is part of the bill difference. A break nobody caused (§5.2 row 4,
-// an entry lost early) is in the bill of the client body too, so it is on the record but cancels out of
-// conservation. Design §6.3 does not say this. A break that moves no tokens is unaffected.
-func (e ExpectedEffect) Counted() bool { return !(e.Kind == cf.EffectBreak && e.ChangeID == "") }
+// Counted reports whether the effect is part of the bill difference (§6.3).
+func (e ExpectedEffect) Counted() bool { return !e.InBaseline }
 
 // ExpectedUnpriced is an operation the library must report as not priced, and why.
 type ExpectedUnpriced struct {

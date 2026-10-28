@@ -98,9 +98,13 @@ def step(sec, rid, client, fwd, cbp, fbp, add, usage, exp, session="s1", model="
     }
 
 
-def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, note=None):
+def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, note=None, baseline=None):
     """A cache effect the library finds (design 4.4). It has no input form: only Compute writes one."""
     e = {"kind": kind, "changeId": change, "saved": saved or {}, "caused": caused or {}}
+    if baseline is None:  # a break nobody caused is in the client body's bill too, so it cancels out (§6.3)
+        baseline = kind == "break" and change == ""
+    if baseline:
+        e["inBaseline"] = True
     if frm:
         e["from"] = frm
     if to:
@@ -590,7 +594,7 @@ def DIMS(kind, position, cache, **kw):
 
 SNAP_CASES = {"rewrite/searchfold-inside-prefix/hot/5m", "rewrite/decision-flips-inside-prefix/hot/5m",
               "rewrite/replay-at-new-position/hot/5m", "rewrite/break-then-payback-turns/hot/5m",
-              "rewrite/restore-in-place/hot/5m", "state/session-isolation", "state/tenant-collision",
+              "rewrite/restore-in-place/hot/5m", "state/session-isolation",
               "split/marker-not-in-system", "check/changeid-shared-between-operators"}
 
 
@@ -602,8 +606,6 @@ def write_issue(cid, issue, description, dims, steps, open_=None):
     write(case(cid, description, f"{ISSUES}#{issue}", dims, steps, open_=open_), cid.replace("/", "-").replace("+", "-"))
 
 
-Q12 = "design §11 question 12: the rule that finds the end of a change is not defined"
-NOTENANT = "RequestMeta has no tenant field, and ThreadKey is session + thread: the design does not say where a tenant lives"
 
 
 # Case 1 (#580): a ping that missed and wrote the entry restarts the clock.
@@ -724,8 +726,8 @@ def c05():
              prev=(18000, 16100), cbp=bp(8), fbp=bp(8), boundary=P("messages", 7))
     c4 = c3 + [("m9", 1000)]
     s4 = sim(100, "r4", ([], sysb, c4), ([], sysb, c4), [], "hot", prev=(19000, 17100),
-             usage=U(read=13000, write=7000), cbp=bp(9), fbp=bp(9), boundary=P("messages", 8), checks=["attribution"],
-             effects=[effect("break", DD, saved=TT(cacheRead=6000), caused=TT(cacheWrite5m=6000),
+             usage=U(read=13000, write=7000), cbp=bp(9), fbp=bp(9), boundary=P("messages", 8),
+             effects=[effect("break", "", saved=TT(cacheRead=6000), caused=TT(cacheWrite5m=6000), baseline=False,
                              frm=P("messages", 4), to=P("messages", 8),
                              note="dedup stopped replacing message 5: the original returns inside the prefix")])
     write_issue("rewrite/decision-flips-inside-prefix/hot/5m", 493,
@@ -733,9 +735,8 @@ def c05():
                 "message 5 (2,000 to 100 tokens), which is inside the cached prefix: it saves 1,900 x $0.30 and breaks "
                 "2,100 tokens, net -$0.00668. Request 3 replays the same replacement: no break, +$0.00057. On request 4 "
                 "dedup stops (its settings changed), the original returns inside the cached prefix and 6,000 tokens move "
-                "from read to write: -$0.02070, charged to dedup's ChangeID although dedup reported nothing.",
-                DIMS("rewrite", "beforeBStar", "break-hit-break", **{"break": "plugin", "replay": "true"}), [s1, s2, s3, s4],
-                open_=[Q12 + " (request 4: the change ended, and the break is charged to it)"])
+                "from read to write: -$0.02070. Dedup reported nothing, and the change has ended, so the break has no ChangeID (§5.2 row 1).",
+                DIMS("rewrite", "beforeBStar", "break-hit-break", **{"break": "plugin", "replay": "true"}), [s1, s2, s3, s4])
 
 
 # Case 6 (#199): a replay at a new position that was never compacted.
@@ -898,7 +899,9 @@ def c10():
     s = sim(0, "r0", ([], sysb, C), ([], sysb, F), [eop(CH, saved=TT(cacheRead=5500))], "hot",
             add=[rewrite("o1", "context-guru.extract", "messages", 1, 6000, 500, CH)],
             usage=U(read=18500, write=2000), base=U(read=24000, write=2000),
-            unpriced=[{"reason": "penalty_unknown"}], session="s-restart")
+            unpriced=[{"reason": "penalty_unknown"}], session="s-restart",
+            # the provider reads only up to a breakpoint (§5.1), so the 18,500 tokens it read end at one
+            cbp=BP(("system", 0), ("messages", 3), ("messages", 4)), fbp=BP(("system", 0), ("messages", 3), ("messages", 4)))
     write_issue("boundary/state-lost-reads-cache", 47,
                 "The proxy restarted: the Tracker has no history for the thread. The replacement of message 1 (6,000 to "
                 "500 tokens) is replayed from the store at depth, and the provider reads 18,500 tokens, so it holds the "
@@ -950,26 +953,7 @@ def c12():
                 "for it. A's change is active in A's Tracker. B's first request reports the change as new and must be "
                 "priced alone: one op, a write-tier saving, no unique_change failure. ThreadKey includes the session, so "
                 "nothing of A's state reaches B.",
-                DIMS("rewrite", "afterBStar", "miss", sessions="2"), [a0, a1, b0],
-                open_=[Q12 + " (issue 175: the change ends in A when the agent expands the output; this case keeps A's "
-                       "change active, so it tests only that an active change in A does not reach B)"])
-
-
-# Case 13 (#501): two tenants send the same session id.
-def c13():
-    sysb = [("sys", 2000)]
-    A0, B0 = [("m0", 8000)], [("m0b", 20000)]
-    A1 = A0 + [("m1", 1000)]
-    a0 = sim(0, "ra0", ([], sysb, A0), ([], sysb, A0), [], "unknown", session="s-shared", params={"tenant": "A"})
-    b0 = sim(10, "rb0", ([], sysb, B0), ([], sysb, B0), [], "unknown", session="s-shared", params={"tenant": "B"})
-    a1 = sim(40, "ra1", ([], sysb, A1), ([], sysb, A1), [], "hot", prev=(10000, 10000), boundary=P("messages", 0),
-             session="s-shared", params={"tenant": "A"})
-    write_issue("state/tenant-collision", 501,
-                "Tenant A and tenant B send requests under one session id and thread. A's second request must be priced "
-                "against A's first: hot, a read of 10,000 tokens, no break. Under the current key (session + thread) B's "
-                "request replaces A's ThreadState, so A's second request would be compared with B's 22,000-token body "
-                "and show a break that is nobody's.",
-                DIMS("none", "none", "hit", tenants="2"), [a0, b0, a1], open_=[NOTENANT])
+                DIMS("rewrite", "afterBStar", "miss", sessions="2"), [a0, a1, b0])
 
 
 # Cases 14 (#45) and 15 (#567): breakpoint operators that report success.
@@ -984,8 +968,8 @@ def c14():
         fb_idx = 0 if delivered else 1
         s0 = sim(0, "r0", ([], [("sysblk", 3300)], msgs0), ([], [("sysstable", 3000), ("sysvol", 300)], msgs0), [],
                  "unknown", add=[op], cbp=BP(("system", 0), ("messages", 0)), fbp=BP(("system", fb_idx), ("messages", 0)))
-        brk = effect("break", "", to=P("system", 0), note="the client changed its own system block: B* is before it, "
-                     "so the break moves no tokens (§5.1, §6.2)")
+        brk = effect("break", "", note="the client changed its own system block: B* is before it, so the range is "
+                     "empty (To nil) and the break moves no tokens (§4.4, §5.1, §6.2)")
         if delivered:
             usage = U(read=3000, write=6300)
             effects = [effect("split", SPL, saved=TT(cacheWrite5m=3000), caused=TT(cacheRead=3000), to=P("system", 0),
@@ -995,8 +979,9 @@ def c14():
             usage = U(write=9300)
             effects = [brk]
             ops = []
+        # cachesplit runs on every request, so it reports again; the client edit of system[0] ended the active one
         s1 = sim(40, "r1", ([], [("sysblk2", 3300)], msgs1), ([], [("sysstable", 3000), ("sysvol2", 300)], msgs1), ops,
-                 "hot", prev=(8300, 8300), usage=usage, base=U(write=9300),
+                 "hot", prev=(8300, 8300), usage=usage, base=U(write=9300), add=[op],
                  cbp=BP(("system", 0), ("messages", 1)), fbp=BP(("system", fb_idx), ("messages", 1)),
                  effects=effects)
         if delivered:
@@ -1083,9 +1068,7 @@ def c16():
                 "and read on every later hot request (-$0.00150), against the mask's +$0.00135. Each later request nets "
                 "-$0.00015: the compaction's credit is never shown without the restore beside it.",
                 DIMS("rewrite", "afterBStar", "hit", operations="2", restore="fixed"), steps,
-                open_=[BSTAR_SNAP, "design §6.2 does not say how B* maps onto content inserted after it. The restored message "
-                       "is forwarded messages[4], past client B* (messages[3]), so a literal reading prices it as a write; "
-                       "this case prices it as a read on the later turns because only that conserves"])
+                open_=[BSTAR_SNAP])
 
     bpx = lambda last: BP(("system", 0), ("messages", 0), ("messages", last))
     s0 = sim(0, "r0", ([], sysb, base_c), ([], sysb, base_f), [eop(MK16, saved=TT(cacheWrite5m=4500))], "unknown",
@@ -1093,17 +1076,16 @@ def c16():
     s1 = sim(40, "r1", ([], sysb, c1), ([], sysb, f1), [eop(MK16, saved=TT(cacheRead=4500))], "hot", prev=(10000, 5500),
              cbp=bpx(2), fbp=bpx(2), boundary=P("messages", 1))
     s2 = sim(80, "r2", ([], sysb, c2), ([], sysb, c2), [], "hot", prev=(11000, 6500), usage=U(read=5000, write=6500),
-             cbp=bpx(3), fbp=bpx(3), boundary=P("messages", 2), checks=["attribution"],
-             effects=[effect("break", MK16, saved=TT(cacheRead=6000), caused=TT(cacheWrite5m=6000),
+             cbp=bpx(3), fbp=bpx(3), boundary=P("messages", 2),
+             effects=[effect("break", "", saved=TT(cacheRead=6000), caused=TT(cacheWrite5m=6000), baseline=False,
                              frm=P("messages", 0), to=P("messages", 2),
                              note="the original goes back in place: the mask ended and the provider holds the marker")])
     write_issue("rewrite/restore-in-place/hot/5m", 481,
                 "The variant with fixed_restore off: the expanded original goes back in place. The mask no longer "
                 "applies, so it saves nothing, but the provider holds the marker form from the earlier requests, so "
-                "6,000 tokens move from read to write: -$0.02070, charged to the ended change. The old figure kept "
-                "crediting the mask here.",
-                DIMS("rewrite", "beforeBStar", "hit-break", **{"break": "plugin", "restore": "in-place"}), [s0, s1, s2],
-                open_=[Q12 + " (request 2: the mask ended and the break is charged to it)"])
+                "6,000 tokens move from read to write: -$0.02070. The mask has ended, so the break has no ChangeID "
+                "(§5.2 row 1). The old figure kept crediting the mask here.",
+                DIMS("rewrite", "beforeBStar", "hit-break", **{"break": "plugin", "restore": "in-place"}), [s0, s1, s2])
 
 
 # Case 17 (#584): the client shrinks its own body.
@@ -1113,7 +1095,7 @@ def c17():
     m2 = msgs + [("m2", 2000)]
     s1 = sim(40, "r1", (TOOLS_F, SYS3, m2), (TOOLS_F, SYS3, m2), [], "hot", prev=(33000, 33000),
              usage=U(write=27000), base=U(write=27000),
-             effects=[effect("break", "", to=P("tools", 0),
+             effects=[effect("break", "",
                              note="the client dropped tool declarations by itself: no client breakpoint precedes the "
                                   "change, so B* is 0 and the break moves no tokens")])
     write_issue("client-edit/shrink-no-operator", 584,
@@ -1729,7 +1711,7 @@ if __name__ == "__main__":
     for old in os.listdir(OUT):  # the generator owns this directory: drop cases that no longer exist
         if old.endswith(".json"):
             os.remove(os.path.join(OUT, old))
-    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12, c13,
+    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12,
               c14, c15, c16, c17, c18, a1, a2, a3, a4_b3, b1_b2, b4, b5, c1_, c2_, c3_, c5, d2, d3, d4,
               d5, d6, e2, e345, f245, h2, h5):
         f()

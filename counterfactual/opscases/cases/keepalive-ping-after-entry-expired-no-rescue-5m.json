@@ -384,6 +384,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "note": "the entry expired; moves no token"
      }
     ]

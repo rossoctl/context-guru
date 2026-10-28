@@ -70,6 +70,13 @@
      {
       "pos": {
        "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
        "index": 4
       },
       "ttl": "5m"
@@ -136,6 +143,13 @@
       "pos": {
        "section": "system",
        "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
       },
       "ttl": "5m"
      },

@@ -13,8 +13,7 @@
  },
  "rates": "fixture-v1",
  "open": [
-  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body.",
-  "design \u00a76.2 does not say how B* maps onto content inserted after it. The restored message is forwarded messages[4], past client B* (messages[3]), so a literal reading prices it as a write; this case prices it as a read on the later turns because only that conserves"
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
  ],
  "steps": [
   {

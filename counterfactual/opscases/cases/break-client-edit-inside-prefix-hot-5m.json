@@ -523,6 +523,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "to": {
        "section": "messages",
        "index": 9

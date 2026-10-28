@@ -702,7 +702,9 @@ library was allowed to write. That rule was a convention a host could break, so 
 allows it.
 
 A `CacheEffect` has a kind, a prefix range, and a `ChangeID`. The range is `From` to `To`. A nil `From`
-is the start of the prompt, and a nil `To` is the end of the body. Five kinds cover it:
+is the start of the prompt, and a nil `To` is the end of the body. One exception: a `break` with no B\*
+(no client breakpoint at or before the first difference, §5.1) has an empty range. Its `To` is nil, it moves
+no tokens, and the `Saved` and `Caused` tiers are zero. Five kinds cover it:
 
 - **`break`: a prefix is broken.** The provider no longer reads content it read before. `From` is the
   end of what it still reads and `To` is B\* (§6.2). The `ChangeID` is the change that caused it (§5.2),
@@ -1067,6 +1069,11 @@ keyed by `thread.Key(session, thread)`. For each request the host calls four met
 `BeginRequest`, `Add` (once for each reported context operation), `EndRequest`, and `Compute`.
 `Compute` also stores the new thread state. There is no separate commit.
 
+**The key has no tenant.** `ThreadKey` is the session ID and the thread ID. If two tenants can send the
+same session ID, the host makes the session ID unique for each tenant (for example, it prefixes the
+tenant). Otherwise one tenant's request replaces the other's `ThreadState`, and the next request shows a
+break that nobody caused. The library cannot tell the two tenants apart.
+
 **The thread is known only at the end of the pass.** The engine resolves the thread inside
 `apply`, while the plugins run (wiring document, W5.2). So `BeginRequest` opens a record that
 belongs to no thread yet. `EndRequest` names the thread, and only then does the record take a copy
@@ -1215,6 +1222,7 @@ write on a cold turn.
 declaration, a restore) is a cost. Its added tokens take the tier of their position, by the same
 rule: read before B\*, write after B\* and at or before `L`, input after `L`. They are `Caused`, not
 `Saved`.
+If the previous request already forwarded the added content and its prefix is unchanged, the provider reads it: it is priced at the read tier, whatever B\* says. Only the request that first adds it pays the write.
 
 **A break, and the breakpoints.** A break moves content from the read tier to the write tier. The content that moves is:
 
@@ -1271,7 +1279,7 @@ type Result struct {
 
 type Unpriced struct {
     OpID   string
-    Reason string // "unknown_kind", "negative_size", "penalty_unknown", ...; the host adds
+    Reason string // "unknown_kind", "negative_size", "penalty_unknown", "ping_result_unknown", ...; the host adds
                   // "operator_not_allowed" from its own allow-list (wiring document, W5.1)
 }
 
@@ -1331,6 +1339,9 @@ unchanged, and the host prices it with the same resolver as the savings (wiring 
 breaks and state changes, plus `Interaction`, equals the bill of the client body in the state it
 would have had without any context operation, minus the bill of the forwarded body. The library checks
 this in tokens (§6.5, check 6).
+A `break` with no `ChangeID` is in this sum only when the context operators caused it. A break that the client
+body would have had too (an entry lost early, a client edit) is on the record and cancels out. A break
+that a context operator left behind, after its change ended, is not in the baseline, so it counts.
 
 ### 6.4 Unknown boundary
 
@@ -1409,6 +1420,7 @@ missing, report too little and say why.
 |---|---|
 | `counterfactual.Compute` panics | The host recovers, writes no saving for the request, and increments `ops_price_panics`. The request and its spend record are unchanged. |
 | A malformed context operation (unknown kind, negative size) | Goes to `Unpriced` with a reason. The other context operations are priced. |
+| A `spend` whose `Call` has no usage (a ping that timed out: the host sent it and read no response) | `Unpriced` with `ping_result_unknown`. The cost is missing, not zero, so the window must not show its rescue as a net gain. The rescue is still credited from the read on the request that follows (§4.4) |
 | Sum check fails | Pricing goes on. The failure is counted for each plugin on `/v1/pipeline`. |
 | No previous fingerprint for the thread | `Boundary` is nil, §6.4. |
 | Response has no usage | Nothing is priced, as today. |
@@ -1664,22 +1676,24 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
     passes in, so a restart loses them. Whether `ThreadState` is kept in memory or persisted is not
     decided (question 13). Whether the cache state belongs in `ThreadState` at all, or is only derived
     from `PrevPrint` and the gap, is not decided.
-12. **How a context operation ends.** A change is reported once, and `Compute` applies it on the
-    following requests until it is overwritten. `Compute` must find the end by itself, because the
-    context operator reports nothing after the first request. The rule is not defined. This blocks
-    the test cases that cover an ended change, and the rule for an operator that overwrites its own
-    change. Two proposals, not decided:
-    - **A hash for each changed span.** On the first request the Tracker stores, for each span of an
-      active change, the hash of that span's forwarded content (not the cumulative hash: a
-      per-position hash, added to `PosHash`). On each later request, the library maps the span into
-      forwarded space and compares the hash. If it differs, or the position has no forwarded
-      position, the change has ended. This needs no content (R2) and no report from the operator.
-      It also finds a restore: the client content is back at the client position, so the change no
-      longer applies. It does not find a change that ends with identical bytes.
-    - **The operator names its active changes.** On every request each operator sends the list of
-      `ChangeID`s it still applies, about 20 bytes each, not 200 bytes for a full operation. A change
-      that is not in the list has ended. This also answers question 13: a `ChangeID` that the Tracker
-      does not know is a sign that the state was lost.
+12. **How a context operation ends.** Decided: `Compute` infers the end from the bodies and the splice.
+    A change is reported once, and `Compute` applies it on later requests until it ends. It ends when:
+    - **a splice removed its position** (a summary replaced it, or the client compacted), or the client
+      edited at or before it (§4.3, §5.2);
+    - **the client's own item is back at its position.** The forwarded item at the change's position has
+      the same hash as the client item, although the change made it smaller or larger. This is a restore
+      in place. A `DryRun` is exempt, because it forwards the client's item by design;
+    - **for content the operator added** (a size before of zero), the client edited something before
+      its position. Its position is in forwarded space, so the client body having nothing there does not
+      end it.
+
+    A break that a change leaves behind when it ends has no `ChangeID` (§5.2 row 1), because the change
+    is no longer reported or active. It is part of the bill difference (§6.3).
+
+    It does not find a change that ends with bytes identical to the changed form. The sum and
+    conservation checks (§6.5) still catch a wrong guess after the fact. The proposal that the operator
+    names its active `ChangeID`s on each request stays available if this rule proves too weak. It would
+    also answer question 13.
 13. **How the state recovers.** A context operator reports a change once. If the Tracker loses a
     thread's state (a restart, an eviction, a thread created again), the change is not reported
     again, and it stays missing until it ends (§4.6). Options: the Tracker persists its state; the

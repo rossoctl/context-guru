@@ -319,6 +319,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "note": "the entry expired; B* is 0, so the read extent to B* is empty"
      }
     ]

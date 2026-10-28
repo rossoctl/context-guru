@@ -424,6 +424,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "from": {
        "section": "messages",
        "index": 2

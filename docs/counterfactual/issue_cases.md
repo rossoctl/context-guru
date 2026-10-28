@@ -327,19 +327,9 @@ Tracker. The case is the guard: A's `ThreadState` has no effect on B.
 
 ### Case 13: two tenants share a session id (#501)
 
-*ID proposal:* `state/tenant-collision`. *Related:* H3, H4. *Status:* **exposes a gap**.
-
-**Situation.** Tenant A has 3 requests on session `s`, thread `main`. Tenant B then sends 10 requests on
-session `s`, thread `main`. Then tenant A sends a fourth.
-
-**Expected.** A's fourth request is priced as if B had never existed: its `PrevPrint` is A's third, and
-its `Version` is unchanged by B.
-
-**The gap.** `ThreadKey` is `session + "\x00" + thread.ID`. It has **no tenant**. Under the current
-key, B's requests replace A's `ThreadState` and the fourth request compares with B's last one, which is
-the library version of #501's `ReplayProjectedTokens` going from 190 to 1,140. Either the key takes a
-tenant, or the host must put the tenant into `Session`. The design does not say which, and
-`RequestMeta` has no tenant field. This case is expected to fail until that is decided.
+*Status:* **removed.** The library does not know tenants. `ThreadKey` is session + thread, and the host makes
+the session ID unique for each tenant (design §6.1). Two tenants that share a session ID are a host fault,
+so there is nothing for the library to test.
 
 ---
 
@@ -471,7 +461,7 @@ check either way. A content class would add a second expected column.
 | 10 | #47 | Unknown boundary, `penalty_unknown`, gross only | ready |
 | 11 | #555 | Client size from billed + saved − caused | needs decision |
 | 12 | #175 | Session isolation | ready |
-| 13 | #501 | Tenant collision on `ThreadKey` | **exposes a gap** |
+| 13 | #501 | Tenant collision on `ThreadKey` | removed: the host keeps session IDs unique |
 | 14 | #45 | No `split` effect when the breakpoint does not move | ready |
 | 15 | #567 | Marker absent from `system` | ready |
 | 16 | #481 | A restore that grows the body | ready |
@@ -480,7 +470,7 @@ check either way. A content class would add a second expected column.
 
 **Open questions these cases touch.** Q3 (estimates, case 18). Q12 (end of a change, cases 5 and 12).
 New, not yet in the design: how a ping with unknown usage is reported (case 2); whether `Result` exposes
-the client-side token total (case 11); where the tenant lives (case 13).
+the client-side token total (case 11).
 
 **Suggested order.** Cases 1, 3, 8 and 16 first: they use rules the spec already decides and each
 catches a fault that an issue reported. Then 13 and 2, which are the likely design findings.

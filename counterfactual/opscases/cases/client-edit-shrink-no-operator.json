@@ -715,10 +715,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
-      "to": {
-       "section": "tools",
-       "index": 0
-      },
+      "inBaseline": true,
       "note": "the client dropped tool declarations by itself: no client breakpoint precedes the change, so B* is 0 and the break moves no tokens"
      }
     ]

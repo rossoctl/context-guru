@@ -2957,6 +2957,7 @@
       "changeId": "",
       "saved": {},
       "caused": {},
+      "inBaseline": true,
       "note": "a cold request: the break moves no tokens (\u00a75.2 row 5)"
      }
     ]

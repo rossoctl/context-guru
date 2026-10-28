@@ -194,7 +194,24 @@
      }
     ]
    },
-   "add": [],
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.cachesplit",
+     "at": {
+      "section": "system",
+      "index": 0
+     },
+     "sizeBefore": {
+      "bytes": 13200
+     },
+     "sizeAfter": {
+      "bytes": 13200
+     },
+     "changeId": "cg:cachesplit:e4d1"
+    }
+   ],
    "end": {
     "thread": {
      "id": "main"
@@ -266,11 +283,8 @@
       "changeId": "",
       "saved": {},
       "caused": {},
-      "to": {
-       "section": "system",
-       "index": 0
-      },
-      "note": "the client changed its own system block: B* is before it, so the break moves no tokens (\u00a75.1, \u00a76.2)"
+      "inBaseline": true,
+      "note": "the client changed its own system block: B* is before it, so the range is empty (To nil) and the break moves no tokens (\u00a74.4, \u00a75.1, \u00a76.2)"
      }
     ]
    }

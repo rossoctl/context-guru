@@ -12,7 +12,6 @@
  },
  "rates": "fixture-v1",
  "open": [
-  "design \u00a711 question 12: the rule that finds the end of a change is not defined (issue 175: the change ends in A when the agent expands the output; this case keeps A's change active, so it tests only that an active change in A does not reach B)",
   "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
  ],
  "steps": [
