@@ -697,6 +697,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		defer func() {
 			d.Accept, d.Reason = ok, reason
 			d.DShareP, d.PShareC = wa.dShareP, wa.pShareC
+			d.CutPoint, d.CSource = wa.cutPoint, wa.cSource
 			noteWarmDecision(tkey, d)
 		}()
 		// The recheck's own account, recorded whatever the gate decides below.
@@ -1370,6 +1371,9 @@ type WarmDecision struct {
 	// Sweep v3 only: D as a share of P (the billed prompt), and P as a share of C (the cut point).
 	DShareP float64 `json:"d_share_of_p,omitempty"`
 	PShareC float64 `json:"p_share_of_c,omitempty"`
+	// CutPoint is C in billed tokens, and CSource where it came from (cutfrac, compaction, window). v3 only.
+	CutPoint int    `json:"cut_point,omitempty"`
+	CSource  string `json:"c_source,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1389,7 +1393,7 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"rewritten_local", d.RewrittenLocal, "rewritten_billed", d.RewrittenBilled,
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
 		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
-		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC)
+		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource)
 }
 
 func warmDecisionsCopy() []WarmDecision {

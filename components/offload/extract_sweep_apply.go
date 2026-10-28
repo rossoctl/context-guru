@@ -776,6 +776,8 @@ type warmApply struct {
 	deep          bool
 	// Sweep v3: D as a share of P, and P as a share of C, set by the v3 gate.
 	dShareP, pShareC float64
+	cutPoint         int
+	cSource          string
 	gate             func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
 }
 

@@ -653,8 +653,18 @@ of its settings. With none written, the warm path runs exactly as described abov
 A cut is one big removal, made late, when the conversation is near the point where it would be compacted anyway.
 
 1. **Sweet spot.** The sweep tries a cut when `P >= fill(C) x C`.
-   - `P` is the billed prompt of this thread. `C` is the cut point: the summarizer's fraction of the window when one is in the
-     pipeline, else the client's compaction point if known, else the window. `C` needs an exact window.
+   - `P` is the billed prompt of this thread. `C` is the **effective context**: where the client compacts, not the window.
+     `C` is the summarizer's fraction of that point when a summarizer is in the pipeline (`c_source: cutfrac`), else the
+     compaction point when it is known (`compaction`), else the window (`window`). `C` needs an exact window.
+   - A compaction point comes from the operator (`compaction_point` in the `MODEL_PRICES` table), or from the built-in
+     table (measured or assumed). A model with no entry has none: the built-in table calls it `window_fallback`, and v3
+     treats that as the window.
+   - Claude Code compacts a GLM near 167k billed of a 200k window. Without the field the sweet spot is 0.85 x 200k = 170k,
+     which that client never reaches. State it and the sweet spot is 0.85 x 167k = 142k:
+     `- {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}`.
+     `compaction_point` is in billed tokens. It does not change `window`.
+   - The summarizer and the dashboard span read the same figure, so an operator value applies to them too. Nothing changes
+     unless the field is set.
    - `fill(C)` is `fill_small` (0.85) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
 2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
    A refused cut does not start this wait. The sweep asks the judge no question during the wait.
@@ -688,8 +698,8 @@ expanded in this session.
 `not_in_sweet_spot` and `cut_point_unknown` are counted once per `warm_every_n` warm requests.
 
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
-`refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
-`no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (D as a share of P,
+`c_source` (how often C came from `cutfrac`, `compaction` or `window`), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
+`no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
 P as a share of C).
 
 ### How many warm turns are left (`warm_expected_turns`)

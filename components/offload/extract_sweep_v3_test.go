@@ -10,6 +10,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -71,7 +72,10 @@ type v3Rig struct {
 	asker   components.PrefixAsker
 	calls   []v3T
 	step    int
-	c       int // the cut point C
+	c       int // the compaction point in the rig
+	cSource string
+	cutFrac float64
+	window  int
 	noKA    bool
 }
 
@@ -82,7 +86,7 @@ func newV3Rig(t *testing.T, session, cfg string) *v3Rig {
 	t.Cleanup(func() { resetWarmForTest(); resetSweepLedgerForTest() })
 	t.Cleanup(func() { clearSweepPing(thread.Key(session, "")) })
 	return &v3Rig{t: t, e: shippedSweep(t, cfg), session: session, st: newMemStore(), asker: pingAsker(),
-		calls: tCalls(), step: 8, c: 200_000}
+		calls: tCalls(), step: 8, c: 200_000, window: 1_000_000}
 }
 
 // request sends the next request of the thread, with billed prompt P.
@@ -92,7 +96,8 @@ func (r *v3Rig) request(p int) (*bschemas.BifrostChatRequest, *components.Report
 	r.step++
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint = 1_000_000, true, r.c
+	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint = r.window, true, r.c
+	c.CompactionPointSource, c.CutFrac = r.cSource, r.cutFrac
 	c.PrevBilledInput, c.PrevBilledInputThread = p, p
 	if r.noKA {
 		c.CanKeepAlive = func() bool { return false }
@@ -136,21 +141,88 @@ func TestV3FillFollowsTheCutPoint(t *testing.T) {
 
 func TestV3CutPointFollowsTheSummarizerThenTheCompactionPointThenTheWindow(t *testing.T) {
 	e := shippedSweep(t, v3Rule)
-	c := &components.Ctx{CtxWindow: 1_000_000, CtxWindowExact: true}
-	if got := e.v3CutPoint(c); got != 1_000_000 {
-		t.Errorf("window only: C = %d", got)
+	c := &components.Ctx{CtxWindow: 200_000, CtxWindowExact: true}
+	check := func(name string, wantC int, wantSrc string) {
+		t.Helper()
+		if got, src := e.v3CutPoint(c); got != wantC || src != wantSrc {
+			t.Errorf("%s: C = %d (%s), want %d (%s)", name, got, src, wantC, wantSrc)
+		}
 	}
-	c.CompactionPoint = 300_000
-	if got := e.v3CutPoint(c); got != 300_000 {
-		t.Errorf("compaction point: C = %d", got)
-	}
+	check("window only", 200_000, cSourceWindow)
+	c.CompactionPoint, c.CompactionPointSource = 200_000, string(compactionpoint.WindowFallback)
+	check("a window_fallback point is the window", 200_000, cSourceWindow)
+	c.CompactionPoint, c.CompactionPointSource = 167_000, string(compactionpoint.Operator)
+	check("operator point", 167_000, cSourceCompaction)
+	c.CompactionPointSource = string(compactionpoint.Measured)
+	check("measured point", 167_000, cSourceCompaction)
+	c.CompactionPointSource = string(compactionpoint.Assumed)
+	check("assumed point", 167_000, cSourceCompaction)
 	c.CutFrac = 0.5
-	if got := e.v3CutPoint(c); got != 150_000 {
-		t.Errorf("summarizer: C = %d", got)
-	}
+	check("summarizer", 83_500, cSourceCutFrac)
+	c.CutFrac = 0
 	c.CtxWindowExact = false
-	if got := e.v3CutPoint(c); got != 0 {
-		t.Errorf("window not exact: C = %d, want 0", got)
+	check("window not exact", 0, "")
+}
+
+// The sweet spot is a share of the EFFECTIVE context: 0.85 x 167k, not 0.85 x the 200k window.
+func TestV3SweetSpotUsesTheOperatorCompactionPoint(t *testing.T) {
+	r := newV3Rig(t, "v3-eff", v3Rule)
+	r.window, r.c, r.cSource = 200_000, 167_000, string(compactionpoint.Operator)
+	r.request(0)
+	_, rep := r.request(150_000)
+	if rep.Events[eventAppliedWarm] != 2 || r.refused("not_in_sweet_spot") != 0 {
+		t.Fatalf("operator C = 167k: 150k is in the sweet spot (0.85 x 167k = 142k). events %v refused %v", rep.Events, v3Counters().Refused)
+	}
+	// The same figure with no operator value: C is the 200k window, and 150k is under 0.85 x 200k.
+	r = newV3Rig(t, "v3-eff2", v3Rule)
+	r.window, r.c, r.cSource = 200_000, 200_000, string(compactionpoint.WindowFallback)
+	r.request(0)
+	r.request(150_000)
+	r.request(150_000)
+	_, rep = r.request(150_000)
+	if rep.Events[eventAppliedWarm] != 0 || r.refused("not_in_sweet_spot") == 0 {
+		t.Fatalf("window C = 200k: 150k is below 170k. events %v refused %v", rep.Events, v3Counters().Refused)
+	}
+}
+
+func TestV3CSourceIsReportedForEachCase(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		cutFrac   float64
+		point     int
+		want      string
+	}{
+		{"window", string(compactionpoint.WindowFallback), 0, 200_000, cSourceWindow},
+		{"compaction", string(compactionpoint.Operator), 0, 167_000, cSourceCompaction},
+		{"cutfrac", string(compactionpoint.Operator), 0.9, 167_000, cSourceCutFrac},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newV3Rig(t, "v3-src-"+tc.name, v3Rule)
+			r.window, r.c, r.cSource, r.cutFrac = 200_000, tc.point, tc.src, tc.cutFrac
+			r.request(0)
+			r.request(10_000)
+			r.request(10_000)
+			r.request(10_000)
+			v := v3Counters()
+			if v.CSource[tc.want] == 0 || len(v.CSource) != 1 {
+				t.Fatalf("c_source = %v, want only %q", v.CSource, tc.want)
+			}
+			d, ok := lastWarmDecision()
+			if !ok || d.CSource != tc.want || d.CutPoint == 0 {
+				t.Fatalf("the refusal log lacks C and its source: %+v", d)
+			}
+		})
+	}
+}
+
+func TestV3AnAcceptedCutRecordsCAndItsSource(t *testing.T) {
+	r := newV3Rig(t, "v3-cutrec", v3Rule)
+	r.window, r.c, r.cSource = 200_000, 167_000, string(compactionpoint.Operator)
+	r.request(0)
+	r.request(150_000)
+	v := v3Counters()
+	if len(v.Recent) != 1 || v.Recent[0].C != 167_000 || v.Recent[0].CSource != cSourceCompaction {
+		t.Fatalf("recent cuts = %+v", v.Recent)
 	}
 }
 

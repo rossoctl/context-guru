@@ -37,6 +37,8 @@ type tableEntry struct {
 	qualified bool
 	price     Price
 	window    int
+	// compactionPoint is the operator's compaction point in billed tokens, or 0.
+	compactionPoint int
 }
 
 // tableFile is the on-disk shape.
@@ -60,6 +62,11 @@ type tableFileModel struct {
 	// Window optionally overrides the context window for a model the public map
 	// does not list either (a preview id), so fraction triggers still scale.
 	Window int `yaml:"window"`
+	// CompactionPoint optionally states, in BILLED input tokens, where the client compacts this model's
+	// conversation (Claude Code on a GLM compacts near 167k of a 200k window). It is NOT derived from
+	// window and does not change it. Used by internal/compactionpoint, for models its bootstrap table
+	// does not know. 0 = unset.
+	CompactionPoint int `yaml:"compaction_point"`
 	// Note is documentation for whoever edits the file — in particular, which
 	// entries are an operator ESTIMATE (a tier) rather than a published rate.
 	Note string `yaml:"note"`
@@ -102,6 +109,9 @@ func ParseTable(b []byte) (*Table, error) {
 		}
 		prefix := strings.HasSuffix(match, "*")
 		match = strings.TrimSuffix(match, "*")
+		if m.Window < 0 || m.CompactionPoint < 0 {
+			return nil, fmt.Errorf("model price list: %q has a negative window or compaction_point", m.Match)
+		}
 		if m.In < 0 || m.Out < 0 || m.CacheRead < 0 || m.CacheWrite < 0 {
 			return nil, fmt.Errorf("model price list: %q has a negative rate", m.Match)
 		}
@@ -127,7 +137,7 @@ func ParseTable(b []byte) (*Table, error) {
 			p.CacheWrite = p.Input * frac
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
+			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window, compactionPoint: m.CompactionPoint})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -205,6 +215,16 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 func (t *Table) WindowExact(ctx context.Context, model string) (int, bool, bool) {
 	w, ok := t.Window(ctx, model)
 	return w, ok, ok
+}
+
+// CompactionPoint returns the operator's compaction point for a model, in billed input tokens.
+// ok=false when the entry states none, so the bootstrap table of internal/compactionpoint answers.
+func (t *Table) CompactionPoint(_ context.Context, model string) (int, bool) {
+	e, ok := t.lookup(model)
+	if !ok || e.compactionPoint <= 0 {
+		return 0, false
+	}
+	return e.compactionPoint, true
 }
 
 func (t *Table) Window(_ context.Context, model string) (int, bool) {
