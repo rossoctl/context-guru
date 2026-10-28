@@ -804,10 +804,18 @@ func (c *Ctx) Stats() FilterStatsSink {
 // has to. Hash is of the text BEFORE the run: the same content re-sent next turn gets the same
 // hash, which is what lets the savings code recognise a replay (counterfactual ChangeID).
 type Change struct {
-	Idx                     int // index in req.Input
+	Idx                     int // index in req.Input; for a splice, where the splice starts
 	BytesBefore, BytesAfter int
 	Hash                    string
+	// Splice is set, on the one Change of a count-changing run, to the contiguous range of
+	// messages the run replaced. BytesBefore/After are then the bytes of the removed and the
+	// inserted messages.
+	Splice *Splice
 }
+
+// Splice says a run replaced Removed messages of its input, starting at At, with Inserted
+// messages. At is a req.Input index (the same before and after the range).
+type Splice struct{ At, Removed, Inserted int }
 
 // Report is the per-component result, modelled after lean-ctx's ToolOutput
 // token accounting and headroom's record_pipeline_run inputs. The pipeline
@@ -836,10 +844,11 @@ type Report struct {
 	// pipeline. The writeback layer uses them to attribute a discarded change back to
 	// the component that made it (see Pipeline.RecordDiscards).
 	ChangedIdx []int
-	// Changes is ChangedIdx with sizes and a content hash. Empty when CountChanged.
+	// Changes is ChangedIdx with sizes and a content hash. When CountChanged it holds exactly one
+	// Change, with Splice set, describing the replaced range.
 	Changes []Change
-	// CountChanged says the run added or removed messages (a summary, a drop). ChangedIdx and
-	// Changes are empty then, because indices before and after do not line up.
+	// CountChanged says the run added or removed messages (a summary, a drop). ChangedIdx is
+	// empty then, because indices before and after do not line up; Changes carries the splice.
 	CountChanged bool
 	// Discarded counts changes this component made that the WRITEBACK layer then threw
 	// away (bifrost could not round-trip the message, so splicing would have dropped

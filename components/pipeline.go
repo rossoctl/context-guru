@@ -216,6 +216,11 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		// After restoreOwn: it can rewrite req.Input once changedIdx has run.
 		rep.CountChanged = len(before) != len(req.Input)
 		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx)
+		if rep.CountChanged {
+			if c, ok := spliceOf(before, req.Input); ok {
+				rep.Changes = []Change{c}
+			}
+		}
 		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
 		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
@@ -245,6 +250,44 @@ func changesOf(before, after []schemas.ChatMessage, idx []int) []Change {
 			Hash: hex.EncodeToString(sum[:6])})
 	}
 	return out
+}
+
+// spliceOf finds the one contiguous range that differs between before and after, by a common
+// prefix and suffix scan with the same equality changedIdx uses (reflect.DeepEqual). The scan
+// always yields a single range; if the true change was several, the range is wider than needed,
+// which only makes the operation coarser, never wrong. The hash covers the removed messages' text
+// before the run (the inserted text when nothing was removed, so the ChangeID is not constant).
+func spliceOf(before, after []schemas.ChatMessage) (Change, bool) {
+	p := 0
+	for p < len(before) && p < len(after) && reflect.DeepEqual(before[p], after[p]) {
+		p++
+	}
+	s := 0
+	for s < len(before)-p && s < len(after)-p &&
+		reflect.DeepEqual(before[len(before)-1-s], after[len(after)-1-s]) {
+		s++
+	}
+	removed, inserted := before[p:len(before)-s], after[p:len(after)-s]
+	if len(removed) == 0 && len(inserted) == 0 {
+		return Change{}, false
+	}
+	var bb, ba int
+	h := sha256.New()
+	for _, m := range removed {
+		t := schema.MessageText(m)
+		bb += len(t)
+		h.Write([]byte(t))
+	}
+	for _, m := range inserted {
+		t := schema.MessageText(m)
+		ba += len(t)
+		if len(removed) == 0 {
+			h.Write([]byte(t))
+		}
+	}
+	return Change{Idx: p, BytesBefore: bb, BytesAfter: ba,
+		Hash:   hex.EncodeToString(h.Sum(nil)[:6]),
+		Splice: &Splice{At: p, Removed: len(removed), Inserted: len(inserted)}}, true
 }
 
 // reformatKeys gives a Reformat the content-derived dedup keys an Offload gets for free
