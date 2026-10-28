@@ -812,6 +812,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		if ok && rr != nil {
 			tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wire, applied)
+			outMsgs := messagesArray(nb).Array()
+			if !wireSizes(tr.Ops, rawLen(msgs), rawLen(outMsgs), rawTotal(msgs), rawTotal(outMsgs)) {
+				giveUp()
+			}
 		} else {
 			giveUp()
 		}
@@ -977,6 +981,22 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	if rr != nil {
 		tr.Ops, tr.OpsDropped = opsFromRun(*rr, wire, applied, func(idx int) bool { return written[idx] })
+		// The forwarded messages are the inbound ones with each edit swapped in (spliceMessages).
+		outLen := func(i int) (int, bool) {
+			if e, ok := edits[i]; ok {
+				return len(e), true
+			}
+			return rawLen(msgs)(i)
+		}
+		inTotal, outTotal := rawTotal(msgs), rawTotal(msgs)
+		for i, e := range edits {
+			if i >= 0 && i < len(msgs) {
+				outTotal += len(e) - len(msgs[i].Raw)
+			}
+		}
+		if !wireSizes(tr.Ops, rawLen(msgs), outLen, inTotal, outTotal) {
+			giveUp()
+		}
 	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
@@ -2053,6 +2073,25 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 		return 0, "", false
 	}
 	return i, rel, true
+}
+
+// rawLen is the wire length of message i of msgs, for wireSizes.
+func rawLen(msgs []gjson.Result) func(i int) (int, bool) {
+	return func(i int) (int, bool) {
+		if i < 0 || i >= len(msgs) {
+			return 0, false
+		}
+		return len(msgs[i].Raw), true
+	}
+}
+
+// rawTotal is the wire length of every message of msgs.
+func rawTotal(msgs []gjson.Result) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Raw)
+	}
+	return n
 }
 
 // wireGroups builds components.Ctx.WireGroup (#457): for each slot, the wire (body) message

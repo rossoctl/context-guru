@@ -113,32 +113,101 @@ const (
 	SavingsCounterfactual                    // the library's figures, when the event qualifies
 )
 
+// Fallback reasons: why PriceMode kept the legacy figures of an event in SavingsCounterfactual
+// mode. CounterfactualFallback returns one of them ("" when the override applied, or in any other
+// mode).
+const (
+	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
+	FallbackOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
+	FallbackObserve            = "observe"              // the run was observe mode
+	FallbackUnpriced           = "unpriced"             // an operation or effect is unpriced
+	FallbackCheckSum           = "check_sum"            // the library's sum check failed
+	FallbackCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
+	FallbackCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
+	FallbackSizeUnknown        = "size_unknown"         // TokensBefore is 0: the plausibility bound cannot be checked
+	FallbackImplausibleSize    = "implausible_size"     // the library saved more tokens than the request had
+	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
+	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
+	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
+)
+
+// gatedChecks maps each library check (counterfactual/compute.go checks() and conservation()) that
+// means "the operation list or its attribution is wrong" to its fallback reason. A check not in the
+// map is informational: it is logged in cf_shadow and never gates.
+//
+//   - sum: the operations' byte changes per section do not equal the client-minus-forwarded body
+//     bytes. The op list is wrong (an op missing, a change reported twice under two ChangeIDs, sizes
+//     in the wrong unit, thread state lost on restart). Gated.
+//   - unique_change: two live operations share a ChangeID; the figure would follow whichever owner
+//     comes first. Gated.
+//   - spans: an operation's spans do not add up to its own sizes; its per-span tiers are then
+//     priced from numbers that contradict its total. The proxy reports no spans today, so it cannot
+//     fire, but if it does the op list is malformed. Gated.
+//   - conservation: the token form of sum (client tokens minus billed tokens against the net of the
+//     operations). With sum passing it differs only by the ratio's rounding beyond its tolerance, or
+//     by a usage that does not bill the forwarded body; the second case is what the plausibility
+//     bound below catches where it matters. Informational, not gated.
+//   - order, attribution: named in result.go but never emitted by compute.go (attribution holds by
+//     construction). Not gated; would be informational if ever emitted.
+var gatedChecks = map[string]string{
+	"sum":           FallbackCheckSum,
+	"unique_change": FallbackCheckUniqueChange,
+	"spans":         FallbackCheckSpans,
+}
+
+// CounterfactualFallback is the reason PriceMode kept the legacy figures in SavingsCounterfactual
+// mode, or "" when the override applied. In SavingsShadow mode it is the reason counterfactual mode
+// WOULD have fallen back (the figures are not touched), so the shadow log can show it. "" in
+// legacy mode.
+func (e *Event) CounterfactualFallback() string { return e.cfFallback }
+
 // PriceMode is Price, then, in SavingsCounterfactual mode, an override of each component's
 // SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
 // CacheSavedUSD, CostUSD and CGLLMCostUSD always stay as Price set them.
 //
 // The override is all-or-nothing per event, because a partial list would show an unmeasured
 // component as a $0 saving. It applies only when: a Result is attached; no change was dropped
-// from the operation list; the run was not observe mode; no operation or effect is unpriced;
-// and every component that acted has a library figure. Otherwise the legacy figures stand.
+// from the operation list; the run was not observe mode; no operation or effect is unpriced; no
+// gated library check failed; the figure is plausible; and every component that acted has a
+// library figure. Otherwise the legacy figures stand and CounterfactualFallback says why.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode SavingsMode) {
-	if !e.priceLegacy(p, accountingComplete) || mode != SavingsCounterfactual {
+	e.cfFallback = ""
+	if !e.priceLegacy(p, accountingComplete) || mode == SavingsLegacy {
 		return
 	}
-	if e.cfRes == nil || e.cfOpsDropped != 0 || e.cfObserve {
-		return
+	e.cfFallback = e.cfOverride(p, mode == SavingsCounterfactual)
+}
+
+// cfOverride applies the counterfactual override when apply is true, or returns the reason it
+// cannot. With apply false it only returns the reason ("" = it would apply) and changes nothing.
+func (e *Event) cfOverride(p modelinfo.Price, apply bool) string {
+	switch {
+	case e.cfRes == nil:
+		return FallbackNoResult
+	case e.cfOpsDropped != 0:
+		return FallbackOpsDropped
+	case e.cfObserve:
+		return FallbackObserve
+	}
+	for _, c := range e.cfRes.Checks {
+		if r, ok := gatedChecks[c.Check]; ok {
+			return r
+		}
 	}
 	fig := e.CounterfactualFigure(p)
 	if len(fig.Unpriced) > 0 {
-		return
+		return FallbackUnpriced
 	}
 	// Plausibility bound on the library's INPUT: a request cannot remove more tokens than it had.
 	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
 	// usage that does not match the forwarded body (a wrong bytes-to-tokens ratio) would otherwise
 	// publish an inflated figure. Over the bound, or with TokensBefore unknown (0), the bound cannot
 	// be met or checked and the legacy figures stand. This is a gate, never a rescale of the figure.
-	if e.TokensBefore <= 0 || e.countedSavedTokens() > e.TokensBefore {
-		return
+	if e.TokensBefore <= 0 {
+		return FallbackSizeUnknown
+	}
+	if e.countedSavedTokens() > e.TokensBefore {
+		return FallbackImplausibleSize
 	}
 	// A library figure for a component the event has no row for would leave the rows short of
 	// the baseline: the sum invariant would break. Keep the legacy figures instead.
@@ -148,7 +217,7 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 	}
 	for name := range fig.ByComponent {
 		if !rows[name] {
-			return
+			return FallbackFigureWithoutRow
 		}
 	}
 	// Two rows with one name would each take the full figure and break the sum invariant.
@@ -156,7 +225,7 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 	for _, c := range e.Components {
 		if _, ok := fig.ByComponent[c.Component]; ok {
 			if seen[c.Component] {
-				return
+				return FallbackDuplicateName
 			}
 			seen[c.Component] = true
 		}
@@ -165,14 +234,18 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode Savin
 	for i, c := range e.Components {
 		v, ok := fig.ByComponent[c.Component]
 		if !ok && c.Acted {
-			return
+			return FallbackActedWithoutFigure
 		}
 		saved[i] = v
+	}
+	if !apply {
+		return ""
 	}
 	for i := range e.Components {
 		e.Components[i].SavedUSD = saved[i]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	return ""
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed

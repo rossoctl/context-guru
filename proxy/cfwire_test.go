@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
@@ -32,7 +35,13 @@ func (c *cfTap) all() []dash.Event {
 
 func cfHandler(t *testing.T, up, savings string) (*Handler, *dash.Recorder, *cfTap) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	return cfHandlerYAML(t, up, savings, "preset: codesafe\n")
+}
+
+// cfHandlerYAML is cfHandler with the config document spelled out.
+func cfHandlerYAML(t *testing.T, up, savings, yaml string) (*Handler, *dash.Recorder, *cfTap) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,11 +164,17 @@ func TestNoUsageMeansNoCounterfactualResult(t *testing.T) {
 // cfRunUsage posts two requests through a fake upstream that reports the given prompt usage and
 // returns the second recorded event and the byte length of the body the upstream received.
 func cfRunUsage(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, int) {
+	evs, fwd := cfRunUsageBody(t, mode, in, cr, cw)
+	return evs, len(fwd)
+}
+
+// cfRunUsageBody is cfRunUsage returning the forwarded body itself.
+func cfRunUsageBody(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, []byte) {
 	t.Helper()
-	var fwd int64
+	var fwd atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		atomic.StoreInt64(&fwd, int64(len(b)))
+		fwd.Store(b)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
 		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
@@ -173,7 +188,8 @@ func cfRunUsage(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, int) {
 	cfPost(t, h, "sess-cf")
 	cfPost(t, h, "sess-cf")
 	waitForRows(t, rec, 2)
-	return tap.all()[1:], int(atomic.LoadInt64(&fwd))
+	b, _ := fwd.Load().([]byte)
+	return tap.all()[1:], b
 }
 
 func extractRow(t *testing.T, e dash.Event) dash.CompRow {
@@ -187,30 +203,48 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 	return dash.CompRow{}
 }
 
-// A usage consistent with the forwarded body: the request is billed as ~0.3 token per byte, as
-// real traffic is. Hand derivation of the extract figure:
+// A usage consistent with the forwarded body: 70 tokens over the ~490 message bytes of the forwarded
+// body, ~0.14 token per byte (real traffic is 0.25-0.33; what matters is that the usage bills the
+// forwarded body, not a different one). Hand derivation of the extract figure:
 //
-//	client body  = len(anthropicRequest)            bytes
-//	forwarded    = len of the body the upstream got  bytes (the extracted stub)
-//	removed      = client - forwarded                bytes
-//	usage        = 20 input + 50 cache write         = 70 tokens
-//	ratio        = 70 tokens / forwarded bytes
-//	saved tokens = removed * 70 / forwarded          (in the Input tier, the removed span was never cached)
-//	SavedUSD     = saved tokens * 2e-6               (fixedPricer Input rate)
+//	positions    = the body's tools, system and messages elements (proxy cfBodies); here only
+//	               messages, so the envelope (model, max_tokens) is in no position
+//	fwdBytes     = sum of the forwarded message elements' bytes
+//	removed      = client message bytes - forwarded message bytes (one tool_result rewritten)
+//	usage        = 20 input + 50 cache write = 70 tokens
+//	ratio        = 70 tokens / fwdBytes                      (the library's bytes-to-tokens ratio)
+//	saved tokens = floor(before*70/fwdBytes) - floor(after*70/fwdBytes), in the Input tier: the
+//	               removed span was never cached (no previous request cached it)
+//	SavedUSD     = saved tokens * 2e-6                       (fixedPricer Input rate)
 //
-// The library's removed span is the extracted text, slightly smaller than client - forwarded, so
-// the derived figure is checked within 10%.
+// The op sizes are wire bytes, so the derivation is exact up to the two floors (1 token).
+// It runs through the real proxy path, and the Result must carry no failed check: before the op
+// sizes were wire bytes, the sum check failed on every request (M1).
 func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
-	evs, fwd := cfRunUsage(t, "counterfactual", 20, 0, 50)
+	evs, fwd := cfRunUsageBody(t, "counterfactual", 20, 0, 50)
 	if len(evs) != 1 {
 		t.Fatalf("events = %d", len(evs))
 	}
 	e := evs[0]
-	client := len(anthropicRequest("aws/claude-sonnet-5"))
-	want := float64(client-fwd) * 70 / float64(fwd) * 2e-6
+	r, ok := e.Counterfactual()
+	if !ok || len(r.Checks) != 0 {
+		t.Fatalf("Result attached %v, checks %+v: the real path must pass every library check", ok, r.Checks)
+	}
+	if fb := e.CounterfactualFallback(); fb != "" {
+		t.Fatalf("the override must apply, fell back: %s", fb)
+	}
+	msgBytes := func(b []byte) int {
+		n := 0
+		for _, m := range gjson.GetBytes(b, "messages").Array() {
+			n += len(m.Raw)
+		}
+		return n
+	}
+	client, fb := msgBytes(anthropicRequest("aws/claude-sonnet-5")), msgBytes(fwd)
+	want := float64((client-fb)*70/fb) * 2e-6
 	got := extractRow(t, e).SavedUSD
-	if got < want*0.9 || got > want*1.1 {
-		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d)", got, want, client, fwd)
+	if math.Abs(got-want) > 2*2e-6 {
+		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d message bytes)", got, want, client, fb)
 	}
 	legacy, _ := cfRunUsage(t, "legacy", 20, 0, 50)
 	lg := extractRow(t, legacy[0]).SavedUSD
@@ -221,7 +255,9 @@ func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
 }
 
 // The old fixture: 10,512 prompt tokens for a few-hundred-byte forwarded body. The library's
-// token figure then exceeds the request's size, so PriceMode must fall back to legacy.
+// token figure then exceeds the request's size, so PriceMode must fall back to legacy, and for that
+// reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
+// unpriced, so the plausibility bound is what fired, not some earlier gate.
 func TestCounterfactualModeAbsurdUsageFallsBackToLegacy(t *testing.T) {
 	cfs, _ := cfRunUsage(t, "counterfactual", 12, 9000, 1500)
 	leg, _ := cfRunUsage(t, "legacy", 12, 9000, 1500)
@@ -229,5 +265,21 @@ func TestCounterfactualModeAbsurdUsageFallsBackToLegacy(t *testing.T) {
 	if got != want || cfs[0].BaselineCostUSD != leg[0].BaselineCostUSD {
 		t.Fatalf("absurd usage did not fall back: component %v vs legacy %v, baseline %v vs %v",
 			got, want, cfs[0].BaselineCostUSD, leg[0].BaselineCostUSD)
+	}
+	r, ok := cfs[0].Counterfactual()
+	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {
+		t.Fatalf("Result %v: unpriced %+v checks %+v, want a clean Result", ok, r.Unpriced, r.Checks)
+	}
+	saved := 0
+	for _, o := range r.Ops {
+		if !o.DryRun && o.Call == nil {
+			saved += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
+		}
+	}
+	if saved <= cfs[0].TokensBefore {
+		t.Fatalf("counted Saved %d <= TokensBefore %d: the bound would not fire", saved, cfs[0].TokensBefore)
+	}
+	if fb := cfs[0].CounterfactualFallback(); fb != dash.FallbackImplausibleSize {
+		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackImplausibleSize)
 	}
 }

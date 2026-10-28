@@ -74,11 +74,33 @@ func TestShadowLogLinePerRequest(t *testing.T) {
 			if n != 2 {
 				t.Fatalf("shadow mode logged %d cf_shadow lines, want 2:\n%s", n, buf.String())
 			}
-			for _, k := range []string{`"legacy_usd"`, `"cf_usd"`, `"delta_usd"`, `"session":"sess-shadow"`, `"components"`, `"unpriced"`} {
+			// fakeUpstream bills 10,512 tokens for a ~500-byte body: the first event is unpriced (no
+			// previous request), the second implausible.
+			for _, k := range []string{`"legacy_usd"`, `"cf_usd"`, `"delta_usd"`, `"session":"sess-shadow"`, `"components"`, `"unpriced"`,
+				`"recomputed":false`, `"checks":""`, `"fallback":"unpriced"`, `"fallback":"implausible_size"`} {
 				if !strings.Contains(buf.String(), k) {
 					t.Errorf("cf_shadow line lacks %s", k)
 				}
 			}
 		})
+	}
+}
+
+// counterfactual mode logs one cf_fallback line per event it left on the legacy rules, with the
+// reason. The first request of a thread has no previous request (penalty_unknown): unpriced.
+func TestCounterfactualModeLogsTheFallbackReason(t *testing.T) {
+	var buf syncBuf
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	evs, _ := cfRunUsage(t, "counterfactual", 20, 0, 50)
+	if fb := evs[0].CounterfactualFallback(); fb != "" {
+		t.Fatalf("second event fell back: %s", fb)
+	}
+	if n := strings.Count(buf.String(), `"msg":"cf_fallback"`); n != 1 {
+		t.Fatalf("cf_fallback lines = %d, want 1 (the first request):\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), `"reason":"unpriced"`) {
+		t.Fatalf("cf_fallback lacks the reason:\n%s", buf.String())
 	}
 }

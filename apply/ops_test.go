@@ -18,7 +18,7 @@ func TestOpsFromRun_MapsToWirePositionAndSkipsRevertedAndSkipped(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	o := ops[0]
-	if o.Kind != cf.KindRewrite || o.Operator != "context-guru.mask" || o.ChangeID != "cg:mask:aa11" {
+	if o.Kind != cf.KindRewrite || o.Operator != "context-guru.mask" || o.ChangeID != "cg:mask:1:aa11" {
 		t.Fatalf("op = %+v", o)
 	}
 	if o.At != (cf.Position{Section: cf.SectionMessages, Index: 3}) {
@@ -71,7 +71,7 @@ func TestOpsFromRun_CountChangedRule(t *testing.T) {
 		{Component: "a", Changes: ch("1")}, sum(), {Component: "b", Changes: ch("2")},
 	}}
 	ops, dropped := OpsFromRun(mid, []int{0, 1, 2, 3}, true)
-	if len(ops) != 2 || ops[0].ChangeID != "cg:a:1" || ops[1].MessageSplice == nil || dropped != 1 {
+	if len(ops) != 2 || ops[0].ChangeID != "cg:a:0:1" || ops[1].MessageSplice == nil || dropped != 1 {
 		t.Fatalf("CountChanged in the middle: ops = %+v dropped = %d", ops, dropped)
 	}
 	last := components.RunReport{Components: []components.Report{{Component: "a", Changes: ch("1")}, sum()}}
@@ -96,7 +96,7 @@ func TestOpsFromRun_SpliceMapsToWire(t *testing.T) {
 	}
 	o := ops[0]
 	if *o.MessageSplice != (cf.MessageSplice{At: 1, Removed: 1, Inserted: 1}) || o.At.Index != 1 ||
-		o.SizeBefore.Bytes != 8 || o.SizeAfter.Bytes != 2 || o.ChangeID != "cg:sum:ss" {
+		o.SizeBefore.Bytes != 8 || o.SizeAfter.Bytes != 2 || o.ChangeID != "cg:sum:1:ss" {
 		t.Fatalf("op = %+v splice %+v", o, o.MessageSplice)
 	}
 }

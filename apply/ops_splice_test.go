@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
@@ -47,7 +48,12 @@ func TestBodyOptsCountChangeEmitsSplice(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d", res.Trace.Ops, res.Trace.OpsDropped)
 	}
 	s := res.Trace.Ops[0].MessageSplice
-	if s.At != 1 || s.Removed != 2 || s.Inserted != 1 || res.Trace.Ops[0].SizeBefore.Bytes != 2*len(long) {
+	// Wire bytes: the two removed JSON message elements, and the one inserted.
+	in := gjson.Get(body, "messages").Array()
+	out := gjson.GetBytes(res.Body, "messages").Array()
+	if s.At != 1 || s.Removed != 2 || s.Inserted != 1 ||
+		res.Trace.Ops[0].SizeBefore.Bytes != len(in[1].Raw)+len(in[2].Raw) ||
+		res.Trace.Ops[0].SizeAfter.Bytes != len(out[1].Raw) {
 		t.Fatalf("splice = %+v op = %+v", s, res.Trace.Ops[0])
 	}
 }

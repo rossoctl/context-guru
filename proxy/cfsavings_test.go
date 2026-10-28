@@ -8,6 +8,8 @@ import (
 	"time"
 
 	cf "github.com/rossoctl/context-guru/counterfactual"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 func rewriteOp(change string, at, before, after int) cf.Operation {
@@ -178,3 +180,50 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 		t.Fatalf("fresh = %d, recomputed = %d; want at least one non-recomputed result", fresh, recomputed)
 	}
 }
+
+// M2: a ChangeID that changes between turns for the same rewrite (an earlier component started or
+// stopped acting) leaves the old change active and reports the new one: the library prices both,
+// twice the real saving. The sum check catches it, and PriceMode falls back to the legacy figures
+// with reason check_sum, so no inflated override is stored.
+func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
+	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
+	big, nBig := msg("user", strings.Repeat("tool result ", 400))
+	small, nSmall := msg("user", "[masked]")
+	m0, _ := msg("user", "first")
+	m2, _ := msg("assistant", "answer")
+	usage := Usage{FreshInput: 100, CacheRead: 1000}
+	r1 := c.do(1, body(m0, big, m2), body(m0, small, m2), usage, rewriteOp("cg:mask:1:h1", 1, nBig, nSmall))
+	if len(r1.Checks) != 0 {
+		t.Fatalf("first request checks = %+v", r1.Checks)
+	}
+	next := mustMsg("user", "next")
+	r2 := c.do(2, body(m0, big, m2, next), body(m0, small, m2, next), usage, rewriteOp("cg:mask:1:h2", 1, nBig, nSmall))
+	n1, _ := countChange(r2, "cg:mask:1:h1")
+	n2, _ := countChange(r2, "cg:mask:1:h2")
+	if n1 != 1 || n2 != 1 {
+		t.Fatalf("precondition (the double count): h1 priced %d, h2 priced %d", n1, n2)
+	}
+	sum := false
+	for _, ch := range r2.Checks {
+		sum = sum || ch.Check == "sum"
+	}
+	if !sum {
+		t.Fatalf("the sum check must fire on the double count: %+v", r2.Checks)
+	}
+	e := &dash.Event{Model: "m", FreshInput: 100, CacheRead: 1000, OutputTokens: 1, TokensBefore: 100000,
+		Components: []dash.CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 10, SavedUnique: 10}}}
+	leg := *e
+	leg.Components = append([]dash.CompRow(nil), e.Components...)
+	leg.Price(cfPrice, true)
+	e.SetCounterfactual(r2)
+	e.PriceMode(cfPrice, true, dash.SavingsCounterfactual)
+	if fb := e.CounterfactualFallback(); fb != dash.FallbackCheckSum {
+		t.Fatalf("fallback = %q, want %q", fb, dash.FallbackCheckSum)
+	}
+	if e.Components[0].SavedUSD != leg.Components[0].SavedUSD || e.BaselineCostUSD != leg.BaselineCostUSD {
+		t.Fatalf("an inflated override was stored: %v/%v vs legacy %v/%v",
+			e.Components[0].SavedUSD, e.BaselineCostUSD, leg.Components[0].SavedUSD, leg.BaselineCostUSD)
+	}
+}
+
+var cfPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}

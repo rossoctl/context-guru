@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -633,6 +633,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.PriceMode(price, usageOK && priced, dashSavingsMode(c.mode))
 	if c.mode == SavingsShadow && e.HasCounterfactual() {
 		logShadow(e, price)
+	}
+	if c.mode == SavingsCounterfactual && e.CounterfactualFallback() != "" {
+		logFallback(e)
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
 		cgPrice, cgPriced := price, priced

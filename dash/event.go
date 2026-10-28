@@ -127,6 +127,8 @@ type Event struct {
 	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
 	cfOpsDropped int
 	cfObserve    bool
+	// cfFallback is why PriceMode kept the legacy figures (see CounterfactualFallback).
+	cfFallback string
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
