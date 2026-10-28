@@ -1,6 +1,9 @@
 package counterfactual
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // ThreadState is kept between requests and replaced after each one (§6.1).
 type ThreadState struct {
@@ -14,6 +17,19 @@ type ThreadState struct {
 type Tracker struct {
 	mu    sync.Mutex
 	state ThreadState
+	// created is when the Trackers made this Tracker. EvictIdle uses it while the thread has no
+	// previous request (state.PrevPrint is nil).
+	created time.Time
+}
+
+// lastSeen is the time EvictIdle ages the Tracker by: its previous request, else its creation.
+func (t *Tracker) lastSeen() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state.PrevPrint != nil {
+		return t.state.PrevPrint.At
+	}
+	return t.created
 }
 
 // snapshot returns a copy of the thread's state. Callers must not share the slices.
@@ -42,7 +58,7 @@ func (ts *Trackers) tracker(key string) *Tracker {
 	defer ts.mu.Unlock()
 	t, ok := ts.m[key]
 	if !ok {
-		t = &Tracker{}
+		t = &Tracker{created: time.Now()}
 		ts.m[key] = t
 	}
 	return t

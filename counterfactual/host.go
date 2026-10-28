@@ -1,6 +1,9 @@
 package counterfactual
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // BillingFrom wraps a billing mode the host read from the request's credential.
 func BillingFrom(mode BillingMode) Billing { return Billing{Mode: mode} }
@@ -76,10 +79,64 @@ func (ts *Trackers) Fork(session string, parent, child Thread) {
 		return
 	}
 	s := p.snapshot()
+	// The Fingerprint's Body slices stay shared with the parent's. That is safe because no one
+	// mutates them in place: nextState builds a new Fingerprint for every request.
 	if s.PrevPrint != nil {
 		fp := *s.PrevPrint
 		s.PrevPrint = &fp
 	}
 	s.Version = 0
-	ts.m[ThreadKey(session, child)] = &Tracker{state: s}
+	ts.m[ThreadKey(session, child)] = &Tracker{state: s, created: time.Now()}
+}
+
+// Len is the number of Trackers held.
+func (ts *Trackers) Len() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return len(ts.m)
+}
+
+// EvictIdle removes every Tracker whose thread was last seen before before: its previous request
+// (ThreadState.PrevPrint.At), or its creation when it has none. It returns how many it removed.
+//
+// A Request in flight is not affected: it holds its own snapshot (EndRequest), and Compute looks the
+// Tracker up again, so after an eviction it creates a new, empty one, calculates against that
+// (Result.Recomputed, phase unknown) and stores the next state there. Nothing correct is lost when
+// before is older than the cache TTL: past it the library can only find the phase unknown.
+func (ts *Trackers) EvictIdle(before time.Time) int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	n := 0
+	for k, t := range ts.m {
+		if t.lastSeen().Before(before) {
+			delete(ts.m, k)
+			n++
+		}
+	}
+	return n
+}
+
+// EvictOldest removes the Trackers seen longest ago until at most keep remain, and returns how many
+// it removed. It is the hard bound for a process that sees more threads inside the idle window than
+// it can hold.
+func (ts *Trackers) EvictOldest(keep int) int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	over := len(ts.m) - max(keep, 0)
+	if over <= 0 {
+		return 0
+	}
+	type aged struct {
+		key string
+		at  time.Time
+	}
+	all := make([]aged, 0, len(ts.m))
+	for k, t := range ts.m {
+		all = append(all, aged{k, t.lastSeen()})
+	}
+	slices.SortFunc(all, func(a, b aged) int { return a.at.Compare(b.at) })
+	for _, a := range all[:over] {
+		delete(ts.m, a.key)
+	}
+	return over
 }

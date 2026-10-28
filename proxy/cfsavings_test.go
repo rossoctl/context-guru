@@ -227,3 +227,61 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 }
 
 var cfPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}
+
+// M5: begin runs the idle sweep every savingsEvictEvery requests and holds the hard cap.
+func TestSavings_TrackersAreBounded(t *testing.T) {
+	s := newSavingsTracker()
+	now := time.Unix(1_000_000, 0)
+	s.now = func() time.Time { return now }
+	client := body(mustMsg("user", "hi"))
+	open := func(i int, at time.Time) {
+		r := s.begin(cf.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: at, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
+		s.end(r, cf.Thread{ID: fmt.Sprint("t", i)}, client, nil, cfFacts)
+		s.compute(r, Usage{FreshInput: 10})
+	}
+	// Idle sweep: 10 threads last seen 3h ago, then requests from one fresh thread up to the sweep.
+	for i := range 10 {
+		open(i, now.Add(-3*time.Hour))
+	}
+	for i := 10; s.seen.Load() < savingsEvictEvery-1; i++ {
+		r := s.begin(cf.RequestMeta{RequestID: "x", Session: "s", At: now, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
+		s.end(r, cf.Thread{ID: "live"}, client, nil, cfFacts)
+		s.compute(r, Usage{FreshInput: 10})
+	}
+	if s.trackers.Len() != 11 {
+		t.Fatalf("before the sweep Len = %d, want 11", s.trackers.Len())
+	}
+	open(99, now) // the savingsEvictEvery-th begin sweeps
+	if s.trackers.Len() != 2 {
+		t.Fatalf("after the sweep Len = %d, want 2 (live and t99)", s.trackers.Len())
+	}
+}
+
+func TestSavings_TrackersHardCap(t *testing.T) {
+	s := newSavingsTracker()
+	now := time.Unix(1_000_000, 0)
+	s.now = func() time.Time { return now }
+	client := body(mustMsg("user", "hi"))
+	for i := range savingsMaxTrackers + 1 {
+		r := s.begin(cf.RequestMeta{RequestID: "r", Session: "s", At: now.Add(time.Duration(i) * time.Millisecond), Billing: cf.BillingFrom(cf.BillingAPI)}, client)
+		s.end(r, cf.Thread{ID: fmt.Sprint("t", i)}, client, nil, cfFacts)
+		s.compute(r, Usage{FreshInput: 10})
+	}
+	if n := s.trackers.Len(); n != savingsMaxTrackers+1 {
+		t.Fatalf("Len = %d before the next begin", n)
+	}
+	s.begin(cf.RequestMeta{RequestID: "r", Session: "s", At: now, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
+	if n, want := s.trackers.Len(), savingsMaxTrackers-savingsMaxTrackers/10; n != want {
+		t.Fatalf("Len = %d after the cap, want %d", n, want)
+	}
+	// The oldest thread is gone: Fork from it installs nothing, so the child gets no tracker.
+	before := s.trackers.Len()
+	s.trackers.Fork("s", cf.Thread{ID: "t0"}, cf.Thread{ID: "t0-child"})
+	if s.trackers.Len() != before {
+		t.Fatal("the oldest thread t0 survived the cap")
+	}
+	s.trackers.Fork("s", cf.Thread{ID: fmt.Sprint("t", savingsMaxTrackers)}, cf.Thread{ID: "new-child"})
+	if s.trackers.Len() != before+1 {
+		t.Fatal("the newest thread was evicted by the cap")
+	}
+}
