@@ -106,8 +106,10 @@ type capture struct {
 	// savings is the handler's counterfactual tracker (nil in legacy mode); cfReq is this
 	// request's record (nil when it was skipped); cfDone guards a double finish.
 	savings *savingsTracker
-	cfReq   *cf.Request
-	cfDone  bool
+	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
+	pings  *PingStore
+	cfReq  *cf.Request
+	cfDone bool
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -130,7 +132,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		llm:     &cheapmodel.Sink{},
 		unique:  map[string]int{},
 		waits:   h.waits,
-		savings: h.savings,
+		savings: h.savings, pings: h.opts.Pings,
 	}
 }
 

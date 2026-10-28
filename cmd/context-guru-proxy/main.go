@@ -280,7 +280,7 @@ func main() {
 	// `windows` is resolved — rather than reordering boot around a Recorder nothing else here
 	// needs yet. A pointer, so the SAME object threaded into `emitter` right now keeps
 	// working once both fields are set.
-	kaKeepAlive := &dashEmitter{}
+	kaKeepAlive := &dashEmitter{savings: *savingsFlag, pings: proxy.NewPingStore()}
 	// metrics.Slog is deliberately NOT wired in here any more. It emitted one line per
 	// component plus one per run, at INFO, with no tenant and no session on any of them —
 	// so a busy proxy buried its own request lifecycle, and none of it could be correlated
@@ -581,6 +581,7 @@ func main() {
 		Preset:    cfg.Preset,
 		Dashboard: rec, // nil unless --dashboard
 		Savings:   *savingsFlag,
+		Pings:     kaKeepAlive.pings,
 		Mode:      mode, // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
@@ -829,6 +830,11 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer
+	// savings is the proxy's savings mode and pings the store shared with the Handler
+	// (proxy.Options.Pings). In shadow or counterfactual mode each converted ping carries a
+	// counterfactual Result on its event; in legacy mode the event is exactly as before.
+	savings string
+	pings   *proxy.PingStore
 }
 
 // Component and Run are no-ops: dashEmitter exists only to be tee'd in for its
@@ -879,6 +885,11 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
+	if d.savings == proxy.SavingsShadow || d.savings == proxy.SavingsCounterfactual {
+		if res, ok := proxy.PingSavings(r, d.pings); ok {
+			ev.SetCounterfactual(res)
+		}
+	}
 	d.rec.Record(ev)
 }
 

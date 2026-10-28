@@ -54,6 +54,18 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) 
 		t.Parent = cfThreadID(parent)
 		c.savings.trackers.Fork(c.cfReq.Meta.Session, cf.Thread{ID: t.Parent}, t)
 	}
+	c.savings.end(c.cfReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.cfReq.Meta.Session, t))
+}
+
+// entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
+// ping for the thread since its last request is consumed from pings (nil = none) and supplies
+// LastPing and PingWindow.
+//
+// LIMITATION: PingRead stays nil. The library takes its ping-hot branch, and so produces a Rescue
+// effect, only with PingRead, the extent the ping read in forwarded coordinates, and the
+// keeper's report does not carry it. Inventing one would misprice the rescue, so with it nil the
+// library uses LastPing for the gap only.
+func entryFacts(forwarded []byte, pings *PingStore, session string, t cf.Thread) cf.EntryFacts {
 	facts := cf.EntryFacts{TTL: 5 * time.Minute, Lifetime: cf.LifetimeUnknown}
 	for _, bp := range cfBreakpoints(forwarded) {
 		if bp.TTL == "1h" {
@@ -61,5 +73,8 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) 
 			break
 		}
 	}
-	c.savings.end(c.cfReq, t, forwarded, ops, facts)
+	if pf, ok := pings.take(cf.ThreadKey(session, t)); ok {
+		facts.LastPing, facts.PingWindow = pf.LastPing, pf.PingWindow
+	}
+	return facts
 }

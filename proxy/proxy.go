@@ -132,6 +132,11 @@ type Options struct {
 	// is refused by ParseSavings (main) and makes New panic.
 	Savings string
 
+	// Pings is the store the keep-alive emitter writes ping facts to and the next request of the
+	// same thread reads them from (see PingSavings). It must be the same instance on both sides.
+	// nil = none, and pings then feed no request.
+	Pings *PingStore
+
 	// PipelineFor builds a pipeline for a per-request override on /compact
 	// (?preset=… or x-context-guru-pipeline: a,b,c). nil = overrides ignored, the
 	// handler always uses the configured pipeline. Supplied by main (which holds

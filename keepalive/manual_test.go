@@ -260,3 +260,28 @@ func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 		t.Errorf("PingNow on a stopped thread = %v, want ErrNotHeld", err)
 	}
 }
+
+// The report names the idle gap it served: the start of the last real request, as it stood before
+// the ping moved the entry's clock. Both a press and a scheduled ping set it.
+func TestPingReportsCarryTheWindowTheyServed(t *testing.T) {
+	k, sink, clock := manualKeeper(t)
+	recordedAt := clock.now()
+	clock.advance(100 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("scheduled ping fired %d times", n)
+	}
+	reps := sink.all()
+	if len(reps) != 2 {
+		t.Fatalf("reports = %d, want 2", len(reps))
+	}
+	if !reps[0].Manual || !reps[0].Window.Equal(recordedAt) {
+		t.Errorf("manual Window = %v, want %v", reps[0].Window, recordedAt)
+	}
+	// The press restarted the entry's clock at its own start (+100s).
+	if reps[1].Manual || !reps[1].Window.Equal(recordedAt.Add(100*time.Second)) {
+		t.Errorf("scheduled Window = %v, want %v", reps[1].Window, recordedAt.Add(100*time.Second))
+	}
+}

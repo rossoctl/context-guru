@@ -1599,6 +1599,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// column that is blank because nobody filled it in is the same defect at a smaller
 			// scale.
 			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
+			Window:    j.prevStartedAt,
 		})
 	}
 	return cost

@@ -1158,6 +1158,11 @@ type KeepAliveReport struct {
 	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the
 	// summary's call is (#458). Part of CostUSD, not added to it. 0 for every other ping.
 	SweepAnswerUSD float64
+	// Window is the start of the idle gap this ping served: the start of the last upstream
+	// request the entry was kept warm after (kaEntry.startedAt as it stood before this ping
+	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
+	// as belonging to a window.
+	Window time.Time
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter
