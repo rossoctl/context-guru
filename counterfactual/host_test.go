@@ -74,3 +74,28 @@ func TestFork_NoOpCases(t *testing.T) {
 		t.Fatal("Fork overwrote a child that had state")
 	}
 }
+
+func TestAddUnlessActive(t *testing.T) {
+	ts := NewTrackers()
+	th := Thread{ID: "main"}
+	seedThread(ts, "s", th, ThreadState{Active: []Operation{{ChangeID: "c1"}}})
+	req := ts.BeginRequest(RequestMeta{Session: "s"}, Body{}, nil)
+	cases := []struct {
+		name string
+		op   Operation
+		want bool
+	}{
+		{"active rewrite is skipped", Operation{Kind: KindRewrite, ChangeID: "c1"}, false},
+		{"inactive rewrite is added", Operation{Kind: KindRewrite, ChangeID: "c2"}, true},
+		{"dry run is added", Operation{Kind: KindRewrite, ChangeID: "c1", DryRun: true}, true},
+		{"spend is added", Operation{Kind: KindSpend, ChangeID: "c1"}, true},
+		{"empty change id is added", Operation{Kind: KindRewrite}, true},
+	}
+	for _, c := range cases {
+		n := len(req.Ops)
+		got := req.AddUnlessActive(th, c.op)
+		if got != c.want || (len(req.Ops) == n+1) != c.want {
+			t.Errorf("%s: returned %v, ops %d -> %d", c.name, got, n, len(req.Ops))
+		}
+	}
+}

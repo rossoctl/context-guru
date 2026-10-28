@@ -18,11 +18,7 @@ func (s *savingsTracker) begin(meta cf.RequestMeta, client []byte) *cf.Request {
 // ended since is added again, which is how a change after a compaction is priced.
 func (s *savingsTracker) end(req *cf.Request, th cf.Thread, forwarded []byte, ops []cf.Operation, facts cf.EntryFacts) {
 	for _, op := range ops {
-		if op.Kind == cf.KindRewrite && op.ChangeID != "" && !op.DryRun &&
-			s.trackers.IsActive(req.Meta.Session, th, op.ChangeID) {
-			continue
-		}
-		req.Add(op)
+		req.AddUnlessActive(th, op)
 	}
 	req.EndRequest(th, cfBodies(forwarded), cfBreakpoints(forwarded), facts)
 }

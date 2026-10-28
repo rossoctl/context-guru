@@ -82,3 +82,16 @@ func (ts *Trackers) Fork(session string, parent, child Thread) {
 	s.Version = 0
 	ts.m[ThreadKey(session, child)] = &Tracker{state: s}
 }
+
+// AddUnlessActive adds op unless it is a rewrite that thread th still applies again (§4.6), and
+// reports whether it added it. A host that reports a change once calls this for each operation, so
+// the proxy and the agreement test share one replay filter. A DryRun, a spend and an operation
+// without a ChangeID are always added. A change that ended since is added again.
+func (r *Request) AddUnlessActive(th Thread, op Operation) bool {
+	if op.Kind == KindRewrite && op.ChangeID != "" && !op.DryRun &&
+		r.trackers.IsActive(r.Meta.Session, th, op.ChangeID) {
+		return false
+	}
+	r.Add(op)
+	return true
+}
