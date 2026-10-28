@@ -226,10 +226,10 @@ write price, reporting, granularity). It grows as each provider is read.
 | D8 | Which hosts compute dollars from context operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is inside `Compute`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§10), before any host switches. |
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). A change in how the provider bills content that is already there (a cache effect, §4.4) is priced as the difference between two states. |
-| D11 | What happens to a change that a later change ends? | **`Compute` finds that it has ended and stops applying it.** The context operator reports nothing after the first request (D14), so it cannot say that a change ended. No link names the change that ended it. How `Compute` finds the end is **not defined** (§11, question 12). The measurement at each context operator's own input (R29) gives the right price and stops any double count, while the change is in the state. Each change keeps the total it had until then (§4.5). |
+| D11 | What happens to a change that a later change ends? | **`Compute` finds that it has ended and stops applying it.** The context operator reports nothing after the first request (D14), so it cannot say that a change ended. No link names the change that ended it. `Compute` infers the end from the bodies and the splice (§11, question 12). The measurement at each context operator's own input (R29) gives the right price and stops any double count, while the change is in the state. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the engine's `internal/thread`, in both hosts**, carried on the request. The host keeps one fingerprint per thread, keyed by `thread.Key`, and compares each request with its own thread's previous request (wiring document, W5.2). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.1). |
-| D14 | Is `Compute` stateful? | **The library is stateful. `Compute` is deterministic.** A context operator reports a change once, on the first request. `Compute` applies it again on later requests until it ends, so a result depends on earlier requests. The state is a `ThreadState`, kept by the Tracker, one for each thread. `Compute` is a method of the request record. The record takes a copy of the `ThreadState` in `EndRequest`, because the thread is known only after the plugins ran (§6.1). As its last step `Compute` replaces the thread's `ThreadState` with the new one, so the host has nothing to commit and cannot forget to. A failure or a panic leaves the old `ThreadState`. Two requests of one thread at the same time (a retry, parallel calls of one agent) are safe: the replace is guarded by the `Version` of the `ThreadState` (optimistic locking, R53, §6.1). Rejected: a lock from `EndRequest` to `Compute`, because requests of one thread would wait for each other. `Preview` does the same calculation and stores nothing, for pricing an old request again and for a look that must not move the thread forward. A test case is a sequence of requests. Rejected: `Compute` returning the new state and a separate `Commit`. It is purely functional, but a host that forgets the commit gets a wrong figure with no error. Rejected: `Compute` writing the state in the middle of the call, because a failure would leave it half updated. What the state holds, and how a change ends, are open (§11, questions 11 and 12). |
+| D14 | Is `Compute` stateful? | **The library is stateful. `Compute` is deterministic.** A context operator reports a change once, on the first request. `Compute` applies it again on later requests until it ends, so a result depends on earlier requests. The state is a `ThreadState`, kept by the Tracker, one for each thread. `Compute` is a method of the request record. The record takes a copy of the `ThreadState` in `EndRequest`, because the thread is known only after the plugins ran (§6.1). As its last step `Compute` replaces the thread's `ThreadState` with the new one, so the host has nothing to commit and cannot forget to. A failure or a panic leaves the old `ThreadState`. Two requests of one thread at the same time (a retry, parallel calls of one agent) are safe: the replace is guarded by the `Version` of the `ThreadState` (optimistic locking, R53, §6.1). Rejected: a lock from `EndRequest` to `Compute`, because requests of one thread would wait for each other. `Preview` does the same calculation and stores nothing, for pricing an old request again and for a look that must not move the thread forward. A test case is a sequence of requests. Rejected: `Compute` returning the new state and a separate `Commit`. It is purely functional, but a host that forgets the commit gets a wrong figure with no error. Rejected: `Compute` writing the state in the middle of the call, because a failure would leave it half updated. What the state holds is open (§11, question 11). How a change ends is decided (§11, question 12). |
 
 ## 3. Requirements
 
@@ -360,8 +360,8 @@ numbers are not used: those requirements were dropped.
   prices the tiers and sums dollars. This is the rule of the tool-prune accounting (cortex#952).
 - **R35.** A later change can end earlier ones (a summary of reduced messages). The model shows
   this by `Compute` no longer applying the earlier change, not by a link and not by the context
-  operator: after its first report the context operator says nothing about the change. How `Compute`
-  finds the end is open (§11, question 12). The totals of the earlier changes until then do not
+  operator: after its first report the context operator says nothing about the change. `Compute`
+  infers the end (§11, question 12). The totals of the earlier changes until then do not
   change (§4.5).
 
 ### E. Operability
@@ -690,7 +690,7 @@ space on its first request. On a later request the client body can grow only at 
 by a client edit, so its client-space position is still valid until the client edits before it.
 Then the library maps it into forwarded space through this request's splices, as for a reported
 operation. A client edit before an active change, or a client compaction, is a case for the end
-rule (§11, question 12).
+rule (§11, question 12): it ends the change.
 
 ### 4.4 Cache effects
 
@@ -763,8 +763,8 @@ summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` an
 **A change ends when `Compute` stops applying it.** The context operator reports a change once (D14), so
 after that it cannot report that the change ended, and there is no field that names the change
 that ended it. `Compute` has to find the end by itself, and drop the change from the state of the
-thread. **The rule that finds the end is not defined** (§11, question 12). What follows describes
-what must hold once the end is found. It does not say how the end is found.
+thread. **The rule that finds the end is decided** (§11, question 12): `Compute` infers it from the
+bodies and the splice. What follows describes what must hold once the end is found.
 
 1. **The price.** Each request is priced from its own cache result (D6). A change that has ended saves
    nothing on later requests. Its total until then does not change, so a change that did not pay back
@@ -822,10 +822,10 @@ holds for the Tracker. It is the risk of the new rule. What the new design does 
 2. **What the checks do not catch.** A check works on sizes for each section. Two errors of the same
    size in one section cancel out. The checks also do not say which change is wrong. And a failed check
    does not stop pricing: the figure is still produced, with the failure in `Result.Checks`.
-3. **The end rule is not defined.** `Compute` must find by itself that a change has ended, because the
-   context operator reports nothing after the first request. Until that rule exists (§11, question 12),
-   the guard in point 1 is the only protection, and it detects an error after the fact. It does not
-   prevent one.
+3. **The end rule is an inference.** `Compute` must find by itself that a change has ended, because the
+   context operator reports nothing after the first request (§11, question 12). A change that ends
+   with bytes identical to the changed form is not found. For that case the guard in point 1 is the
+   only protection, and it detects an error after the fact. It does not prevent one.
 
 **A lost state does not heal by itself.** This is new, and it is the main cost of the rule. If the
 Tracker loses a thread's state (a restart, an eviction, a thread that is created again), the context
@@ -861,7 +861,7 @@ row 1 adds a break with that `ChangeID`. That is the real cost of leaving observ
 
 So the state grows with the number of changes that are alive in the thread, and not with the number of
 requests. If nothing ever ended, it would grow with the session. That is why the end rule (§11,
-question 12) decides whether the memory is bounded.
+question 12) decides whether the memory is bounded: a change that is not found ending stays.
 
 **What does not change.**
 
@@ -876,8 +876,8 @@ removes the same declarations from every request. It reports the change once. `C
 the removed set and the config, so it is the same for the same config. The Tracker holds the rest.
 
 **A config change of a stateless context operator.** A new `remove` list (for example, a hot reload) gives
-a new `ChangeID`. The old change ends and a new one starts. How `Compute` learns that the old change
-ended is the open end rule (§11, question 12). If the new list removes a declaration
+a new `ChangeID`. The old change ends and a new one starts. `Compute` learns that the old change
+ended by the end rule (§11, question 12). If the new list removes a declaration
 that the old list kept, the forwarded body changes inside the cached prefix. The library then adds
 a break that carries tool-prune's `ChangeID` (§5.2). That is the real cost of the config change.
 
@@ -1681,8 +1681,9 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
     - **a splice removed its position** (a summary replaced it, or the client compacted), or the client
       edited at or before it (§4.3, §5.2);
     - **the client's own item is back at its position.** The forwarded item at the change's position has
-      the same hash as the client item, although the change made it smaller or larger. This is a restore
-      in place. A `DryRun` is exempt, because it forwards the client's item by design;
+      the client item's size again, although the change made it smaller or larger. This is a restore
+      in place. The size is compared, not the hash, because the hashes are cumulative and differ when
+      another change sits earlier in the body. A `DryRun` is exempt, because it forwards the client's item by design;
     - **for content the operator added** (a size before of zero), the client edited something before
       its position. Its position is in forwarded space, so the client body having nothing there does not
       end it.

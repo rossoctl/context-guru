@@ -147,3 +147,45 @@ func TestARewriteThatAddsTokensIsACost(t *testing.T) {
 	}
 	noChecks(t, res)
 }
+
+// A restore is found by size, not by hash: the hashes are cumulative, so an earlier change that is
+// still applied makes the restored item's hash differ from the client's.
+func TestARestoreIsFoundWhileAnEarlierChangeStaysApplied(t *testing.T) {
+	ts := NewTrackers()
+	client := with(msgs(9, 3000), b("m9", 3000))
+	opA := rewrite("opA", "context-guru.mask", "cg:mask:a", msg(2), 3000, 500)
+	opB := rewrite("opB", "context-guru.coref", "cg:coref:b", msg(5), 3000, 500)
+	shrunk := func(restoreB bool) []blk {
+		out := append([]blk(nil), client...)
+		out[2] = b("fa", 500)
+		if !restoreB {
+			out[5] = b("fb", 500)
+		}
+		return out
+	}
+	reqs := []req{
+		{at: t0, client: mk(nil, ex2Sys, client), clientBPs: bps5(sys(0), msg(9)), facts: exact5m,
+			usage: Usage{CacheWrite: 33000}},
+		{at: t0.Add(10 * time.Second), client: mk(nil, ex2Sys, client), clientBPs: bps5(sys(0), msg(9)),
+			ops: []Operation{opA, opB}, fwd: mk(nil, ex2Sys, shrunk(false)), facts: exact5m,
+			usage: Usage{CacheWrite: 28000}},
+		{at: t0.Add(20 * time.Second), client: mk(nil, ex2Sys, client), clientBPs: bps5(sys(0), msg(9)),
+			fwd: mk(nil, ex2Sys, shrunk(true)), facts: exact5m, usage: Usage{CacheRead: 28000, CacheWrite: 2500}},
+	}
+	ids := func() []string {
+		var out []string
+		for _, op := range ts.tracker(ThreadKey("s1", Thread{ID: "main"})).snapshot().Active {
+			out = append(out, op.ID)
+		}
+		return out
+	}
+	reqs[0].run(ts)
+	reqs[1].run(ts)
+	if got := ids(); len(got) != 2 {
+		t.Fatalf("after the report: active %v, want opA and opB", got)
+	}
+	reqs[2].run(ts)
+	if got := ids(); len(got) != 1 || got[0] != "opA" {
+		t.Fatalf("after opB was restored: active %v, want only opA", got)
+	}
+}

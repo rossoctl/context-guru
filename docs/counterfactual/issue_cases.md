@@ -181,8 +181,8 @@ steps 1 to 2; step 3 needs decision (Q12).
   saving of 1,900 tokens at the read tier. This is the "replay is stable" half of #493's proposal.
 - **Step 4:** the content comes back. The forwarded prefix changed inside the cached part again, and
   no operator reports it, because the change **ended**. The expected result is a break with the
-  `ChangeID` of the ended change or an empty one. **That is open question 12** (§4.5): the rule that
-  finds the end of a change is not defined. This step is the test for it.
+  `ChangeID` of the ended change or an empty one. **That is question 12** (§4.5): the end rule infers
+  the end from the bodies. This step is the test for it.
 
 ### Case 6: a replay that lands at depth on content the provider holds in its original form (#199)
 

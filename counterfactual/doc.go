@@ -59,14 +59,19 @@
 //  11. A spend is never priced in tokens: its Call is passed through (D4). A setting is not priced
 //     (R50); it only gives its ChangeID to a break. ComputeStandalone marks any operation that is not
 //     a spend as ReasonNotSpend.
+//  12. The end of an in-place change is inferred (§11 question 12): the forwarded item at its position
+//     has the client item's size again (cumulative hashes cannot be compared when another change sits
+//     earlier), or a splice or a client edit removed the position. cachesplit and headttl are priced as
+//     the split, ttlPremium and ttlRescue effects. Conservation is checked against the bill with a
+//     tolerance of the rounding plus one token.
 //
 // # Not implemented
 //
-// These parts of the design are not implemented. Compute adds no figure for them:
+// These parts of the design are not implemented. Compute adds no figure for them. Compute does not
+// recover from a panic: it leaves the ThreadState unchanged, and the host wraps the call to fail open.
 //
-//   - The split, ttlPremium and ttlRescue effects (cachesplit and headttl, §4.4, §6.2).
 //   - Result.Interaction on a rescued request (§6.2). It is always zero.
-//   - The order and conservation checks (§6.5 checks 2 and 6). The attribution check (5) holds by
+//   - The order check (§6.5 check 2). The attribution check (5) holds by
 //     construction: a break only takes the ChangeID of an operation of the same request.
 //   - The minimum cacheable length and the 20-block lookback (§5.1), and the long-context tier.
 //   - MessageSplice moves message positions only. A rewrite that removes or adds whole tools or
