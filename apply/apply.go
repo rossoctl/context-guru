@@ -549,7 +549,16 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// derived twice (see ttlTier for the last time two readers disagreed).
 			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
+			// The alias session id: the same conversation reaches us under it when the explicit
+			// session header comes and goes (see the clock note below). The restart grace asks
+			// the lookup for the thread's keys under BOTH ids, because a refresh under either
+			// one kept the provider's single entry warm (#766).
+			sys, firstUser := schema.SessionHead(norm)
+			alias := session.Scoped(o.Tenant, "", sys, firstUser)
+			aliasKey := thread.Key(alias, tr.Thread.ID)
+			aliasParentKey := inheritKey(alias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, aliasKey, aliasParentKey,
+				len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -576,8 +585,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
-			sys, firstUser := schema.SessionHead(norm)
-			alias := session.Scoped(o.Tenant, "", sys, firstUser)
 			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
 			}

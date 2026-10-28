@@ -316,10 +316,19 @@ provider already cached, forcing a cache-write of the suffix; a shorter transcri
 key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
 there. After a proxy restart the tracker's records are gone but the provider's cache entries are
 not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
-only while that thread's own last request is inside the request's cache lifetime (5 minutes,
-30 minutes on any OpenAI model, 1 hour on the extended tier). The last-request time comes from the
-dashboard's recorder, which reloads it per thread at startup; with the dashboard off, the fallback
+only while that thread's cached prefix was last refreshed inside the request's cache lifetime
+(5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended tier). A refresh is the
+thread's own last request or a keep-alive ping that read the cache, under either session id the
+conversation uses (an explicit header on some turns, a content-derived id on others). The
+refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
+the dashboard off — and always in observe mode, whose rows carry no session id — the fallback
 is the proxy's start time, and `--restart-grace=false` switches the rule off in every case.
+
+The recorder holds that refresh time in a bounded map. Pruning runs only once it passes 20,000
+entries, by age (two silent hours); if even that frees nothing, the last resort empties the map
+wholesale. Every thread then reads as new until its next request refreshes it again, so the
+first request of a warm thread is editable — a lost saving for one turn, never a wrong rewrite
+in the other direction.
 
 ### Fail-open per mode
 

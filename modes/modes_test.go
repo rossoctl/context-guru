@@ -174,11 +174,11 @@ func TestTurnFromInheritsTheParentRecordReadOnly(t *testing.T) {
 	tr.TurnAt("main", 8, t0, 0)
 	before := CompactionResets()
 
-	if n, at := tr.TurnFrom("side", "main", 9, t0+1000, 0); n != 8 || at != t0 {
+	if n, at := tr.TurnFrom("side", "main", "", "", 9, t0+1000, 0); n != 8 || at != t0 {
 		t.Fatalf("side request: (%d, %d), want the parent's (8, %d)", n, at, t0)
 	}
 	// A fork shorter than its parent diverged inside the parent's prefix: freeze all of it.
-	if n, _ := tr.TurnFrom("fork", "main", 5, t0+2000, 0); n != 5 {
+	if n, _ := tr.TurnFrom("fork", "main", "", "", 5, t0+2000, 0); n != 5 {
 		t.Fatalf("short fork: boundary %d, want its own length 5", n)
 	}
 	if got := CompactionResets() - before; got != 0 {
@@ -189,11 +189,11 @@ func TestTurnFromInheritsTheParentRecordReadOnly(t *testing.T) {
 		t.Fatalf("main after its children: (%d, %d), want (8, %d)", n, at, t0)
 	}
 	// Once the key has its own record, the parent no longer counts.
-	if n, _ := tr.TurnFrom("side", "main", 12, t0+4000, 0); n != 9 {
+	if n, _ := tr.TurnFrom("side", "main", "", "", 12, t0+4000, 0); n != 9 {
 		t.Fatalf("side's second request: boundary %d, want its own 9", n)
 	}
 	// An unknown parent, or none, is a plain new key.
-	if n, at := tr.TurnFrom("orphan", "nobody", 4, t0, 0); n != 0 || at != 0 {
+	if n, at := tr.TurnFrom("orphan", "nobody", "", "", 4, t0, 0); n != 0 || at != 0 {
 		t.Fatalf("orphan: (%d, %d), want (0, 0)", n, at)
 	}
 }
@@ -223,7 +223,7 @@ func TestNewKeyOfADroppedParentReadsAsAllCached(t *testing.T) {
 	t0 := int64(1_700_000_000_000)
 	tr.TurnAt("main", 8, t0, 0)
 	tr.TurnAt("other", 3, t0+1, 0) // evicts main
-	if n, at := tr.TurnFrom("side", "main", 9, t0+2, 0); n != 9 || at != 0 {
+	if n, at := tr.TurnFrom("side", "main", "", "", 9, t0+2, 0); n != 9 || at != 0 {
 		t.Fatalf("side of an evicted parent: (%d, %d), want (9, 0): all cached, idle unknown", n, at)
 	}
 	if n, _ := tr.TurnAt("main", 10, t0+3, 0); n != 10 {
@@ -259,7 +259,7 @@ func TestAnUnknownKeyInsideItsCacheLifetimeReadsAsAllCached(t *testing.T) {
 			t.Fatalf("%s: unknown key = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
 		}
 		// The same answer with a parent that has no record of its own: no usable parent.
-		if n, at := tr.TurnFrom("side", "nobody", 925, t0, c.grace); n != c.want || at != 0 {
+		if n, at := tr.TurnFrom("side", "nobody", "", "", 925, t0, c.grace); n != c.want || at != 0 {
 			t.Fatalf("%s: unknown key with a parent = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
 		}
 	}
@@ -294,7 +294,7 @@ func TestASwitchedOffGraceTurnsTheRestartProtectionOff(t *testing.T) {
 	if n, at := tr.TurnAt("unknown", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("young tracker, grace off, unknown key = (%d, %d), want (0, 0): the old behaviour", n, at)
 	}
-	if n, at := tr.TurnFrom("side", "nobody", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+	if n, at := tr.TurnFrom("side", "nobody", "", "", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("young tracker, grace off, unknown key with a parent = (%d, %d), want (0, 0)", n, at)
 	}
 }
@@ -339,7 +339,7 @@ func TestTheGraceUsesTheThreadsLastRequestNotTheProxyStart(t *testing.T) {
 		}
 		// The first request of a fork whose PARENT is that thread: it reads the parent's
 		// prefix, so the parent's last request is the clock the grace asks about.
-		if n, at := newTr().TurnFrom("side", "known", 925, t0, c.grace); n != c.want || at != 0 {
+		if n, at := newTr().TurnFrom("side", "known", "", "", 925, t0, c.grace); n != c.want || at != 0 {
 			t.Fatalf("%s: fork of the known thread = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
 		}
 	}
@@ -356,8 +356,70 @@ func TestAnUnknownThreadToTheLookupIsReallyNew(t *testing.T) {
 	if n, at := tr.TurnAt("brand-new", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("unknown thread to the lookup = (%d, %d), want (0, 0): really new, no grace", n, at)
 	}
-	if n, at := tr.TurnFrom("side", "nobody", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+	if n, at := tr.TurnFrom("side", "nobody", "", "", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("fork of an unknown parent = (%d, %d), want (0, 0): really new, no grace", n, at)
+	}
+}
+
+// The session id can switch between header and headerless turns of one conversation
+// (session.Scoped), so the lookup may know the thread only under its ALIAS key. The grace asks
+// for both keys and takes the LATER timestamp (#766): a refresh under either id kept the one
+// provider entry warm. The tracker here is young enough that #759's start-time rule alone
+// would protect every case, so only the lookup's answer can tell them apart.
+func TestTheGraceAsksTheAliasKeyToo(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	cases := []struct {
+		name        string
+		primaryAt   int64 // the primary key's last refresh; 0 = the lookup does not know it
+		aliasAt     int64 // the alias key's last refresh; 0 = the lookup does not know it
+		aliasParent int64 // the PARENT's alias-key refresh, for the fork check; 0 = unknown
+		want        int
+	}{
+		{"only the alias knows it, 2 minutes ago", 0, t0 - 2*time.Minute.Milliseconds(), 0, 925},
+		{"only the alias knows it, 7 minutes ago", 0, t0 - 7*time.Minute.Milliseconds(), 0, 0},
+		{"both know it, the alias is later", t0 - 7*time.Minute.Milliseconds(), t0 - 2*time.Minute.Milliseconds(), 0, 925},
+		{"both know it, the primary is later", t0 - 2*time.Minute.Milliseconds(), t0 - 7*time.Minute.Milliseconds(), 0, 925},
+		{"both know it, both expired", t0 - 7*time.Minute.Milliseconds(), t0 - 8*time.Minute.Milliseconds(), 0, 0},
+	}
+	for _, c := range cases {
+		newTr := func() *Tracker {
+			tr := NewTracker(0)
+			tr.startedAtMs = t0 - time.Minute.Milliseconds()
+			tr.SetLastSeen(func(key string) (int64, bool) {
+				switch key {
+				case "primary":
+					if c.primaryAt != 0 {
+						return c.primaryAt, true
+					}
+				case "alias":
+					if c.aliasAt != 0 {
+						return c.aliasAt, true
+					}
+				case "parent-alias":
+					if c.aliasParent != 0 {
+						return c.aliasParent, true
+					}
+				}
+				return 0, false
+			})
+			return tr
+		}
+		if n, at := newTr().TurnFrom("primary", "", "alias", "", 925, t0, 5*time.Minute); n != c.want || at != 0 {
+			t.Fatalf("%s: own key = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
+		}
+	}
+	// The fork of a thread whose PARENT refreshed the cache under the alias id: the fork reads
+	// the parent's prefix, so the parent's alias key is the clock that protects it.
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	tr.SetLastSeen(func(key string) (int64, bool) {
+		if key == "parent-alias" {
+			return t0 - 2*time.Minute.Milliseconds(), true
+		}
+		return 0, false
+	})
+	if n, at := tr.TurnFrom("fork", "parent", "fork-alias", "parent-alias", 925, t0, 5*time.Minute); n != 925 || at != 0 {
+		t.Fatalf("fork of an alias-refreshed parent = (%d, %d), want (925, 0)", n, at)
 	}
 }
 

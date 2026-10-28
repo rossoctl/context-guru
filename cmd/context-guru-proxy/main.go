@@ -396,6 +396,15 @@ func main() {
 		} else {
 			slog.Info("dashboard: recovered session recency across the restart", "sessions", n)
 		}
+		// Recover the restart grace's own clock too (#766): per thread, the last request OR
+		// keep-alive ping that refreshed its cached prefix. SeedSessions must stay ping-free
+		// (attribution), which is why this is a separate seed.
+		if n, err := rec.SeedGraceSessions(time.Now().UnixMilli()); err != nil {
+			slog.Warn("dashboard: could not recover the restart grace clock; threads idle across "+
+				"the restart fall back to the proxy start time", "err", err)
+		} else {
+			slog.Info("dashboard: recovered the restart grace clock across the restart", "threads", n)
+		}
 		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
 			"content_capture", *dashContent)
 	}

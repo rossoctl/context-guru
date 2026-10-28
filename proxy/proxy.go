@@ -374,13 +374,21 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
-	// The restart grace decides by the thread's own last request, not by this process's start
-	// (#766). The recorder holds that time per thread — seeded from the database at startup
-	// (Recorder.SeedSessions, which main.go runs before it builds the handler) and kept current
-	// by each request — and its keys are the tracker's keys. Without a dashboard there is no
-	// such record, and the tracker keeps #759's start-time rule on its own.
-	if opts.Dashboard != nil {
-		tr.SetLastSeen(opts.Dashboard.ThreadLastSeen)
+	// The restart grace decides by the thread's own last cache refresh — its last request or
+	// a keep-alive ping that read the cache — and not by this process's start (#766). The
+	// recorder holds that time per thread — seeded from the database at startup
+	// (Recorder.SeedGraceSessions, which main.go runs before it builds the handler) and kept
+	// current by requests and pings — and its keys are the tracker's keys, under either
+	// session id the conversation uses.
+	//
+	// ENFORCING modes only. In observe mode the dashboard row carries no session id (the
+	// enforced trace is zeroed), so the recorder cannot know any thread and the lookup would
+	// miss every key — reading each warm thread as new, the one answer worse than not asking.
+	// Observe keeps #759's start-time fallback instead, which protects every thread inside
+	// one cache lifetime of the restart. Without a dashboard there is no record in any mode,
+	// and the tracker keeps #759's rule on its own.
+	if opts.Dashboard != nil && opts.Mode != components.ModeObserve {
+		tr.SetLastSeen(opts.Dashboard.ThreadRefreshedAt)
 	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard,

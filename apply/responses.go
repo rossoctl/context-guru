@@ -536,9 +536,15 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
-			maxCachedIdx--
+			// The alias session id (the headerless twin of res.Session, see apply.go's clock
+			// note): the restart grace asks the lookup for the thread's keys under BOTH ids,
+			// because a refresh under either one kept the provider's single entry warm (#766).
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			aliasKey := thread.Key(alias, res.Thread.ID)
+			aliasParentKey := inheritKey(alias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, aliasKey, aliasParentKey,
+				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
+			maxCachedIdx--
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}
