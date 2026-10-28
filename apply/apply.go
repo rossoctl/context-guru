@@ -33,6 +33,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -286,6 +287,10 @@ type Trace struct {
 	Restored, RestoredTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
+	// Ops are the rewrite operations of this request for the savings computation, in pipeline
+	// order, with wire positions. OpsDropped counts changes that could not be placed.
+	Ops        []cf.Operation
+	OpsDropped int
 	// Changes lists each rewritten message's before/after text (clipped).
 	Changes []Change
 }
@@ -770,6 +775,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
+	if rr != nil {
+		// applied: the rewritten body is the one forwarded, which is every mode but observe.
+		tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wireGroups(slots), mode != components.ModeObserve)
+	}
 	if debug && rr != nil {
 		logDecisions(lg, rr)
 	}
@@ -792,6 +801,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// carries tool_result blocks and explicit breakpoints (Anthropic, Bedrock, Vertex): an
 			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
+		}
+		if !ok {
+			tr.OpsDropped += len(tr.Ops) // the rebuild declined: the original is forwarded
+			tr.Ops = nil
 		}
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
@@ -940,6 +953,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
 		if !ok {
 			res.Body = body
+			tr.OpsDropped += len(tr.Ops) // the original is forwarded: nothing was saved
+			tr.Ops = nil
 			return res
 		}
 		out = nb
