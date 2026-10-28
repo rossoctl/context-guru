@@ -87,6 +87,7 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 // bookkeeping (proxy/keepalive.go's record1) price the SAME request shape identically instead
 // of each inlining this formula — the two had drifted apart once already (see issue #382's
 // review) when the keep-alive mechanism was decoupled from dash's event type.
+// dash.tierUSD (dash/cfprice.go) mirrors the 1h rule (2x Input); change both together.
 func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {

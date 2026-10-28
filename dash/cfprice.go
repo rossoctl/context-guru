@@ -21,14 +21,16 @@ func tierUSD(p modelinfo.Price, t cf.TierTokens) float64 {
 // CFFigure is the request's savings in dollars, from the library's tokens. Only dollars are
 // summed; token tiers are never collapsed into one total.
 type CFFigure struct {
-	ByComponent          map[string]float64 // net of the break each component caused
-	DeltaUSD             float64            // sum of ByComponent: the baseline delta
-	KeepAliveSavedUSD    float64            // rescue effects
-	SplitUSD             float64            // cachesplit effects (Saved - Caused); Task 11 decides where it lands
-	TTLUSD               float64            // headttl effects: premium (negative) plus rescue; Task 11 decides where it lands
-	UnattributedBreakUSD float64            // client edits, expired caches: shown, never charged to a component
-	Unpriced             []string           // "opID:reason"; an unpriced operation is not a zero saving
-	Estimated            bool               // any counted operation or effect is an estimate
+	ByComponent map[string]float64 // net of the break each component caused
+	// DeltaUSD is the sum of ByComponent: net of the ATTRIBUTED breaks only. It excludes
+	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
+	DeltaUSD             float64
+	KeepAliveSavedUSD    float64  // rescue effects
+	SplitUSD             float64  // cachesplit effects (Saved - Caused); Task 11 decides where it lands
+	TTLUSD               float64  // headttl effects: premium (negative) plus rescue; Task 11 decides where it lands
+	UnattributedBreakUSD float64  // client edits, expired caches: shown, never charged to a component
+	Unpriced             []string // "opID:reason"; an unpriced operation is not a zero saving
+	Estimated            bool     // any counted operation or effect is an estimate
 }
 
 // CounterfactualFigure prices the attached Result. A DryRun operation is skipped: computed,
@@ -39,13 +41,28 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 	if e.cfRes == nil {
 		return f
 	}
-	owner := map[string]string{} // ChangeID -> component
+	// An unpriced op is also in Ops, with zero tokens (compute.go price()/notEnded()). Counting it
+	// would show "saved $0" for something unmeasured. OpIDs are host-supplied: they may be empty or
+	// duplicated, and an Unpriced entry with an empty OpID can be request-level. So an op is skipped
+	// only when its OpID is in the set AND it carries no tokens: that can never drop a real dollar.
+	unpricedIDs := map[string]bool{}
+	for _, u := range e.cfRes.Unpriced {
+		unpricedIDs[u.OpID] = true
+	}
+	owner := map[string]string{} // ChangeID -> component; empty ChangeIDs are never owners
 	for _, o := range e.cfRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
+		if unpricedIDs[o.OpID] && o.Saved == (cf.TierTokens{}) && o.Caused == (cf.TierTokens{}) {
+			continue
+		}
 		c := strings.TrimPrefix(o.Operator, "context-guru.")
-		owner[o.ChangeID] = c
+		if o.ChangeID != "" {
+			if _, dup := owner[o.ChangeID]; !dup { // first owner wins; the library flags duplicates (unique_change)
+				owner[o.ChangeID] = c
+			}
+		}
 		net := tierUSD(p, o.Saved) - tierUSD(p, o.Caused)
 		f.ByComponent[c] += net
 		f.DeltaUSD += net
@@ -62,7 +79,8 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
 		switch ce.Kind {
 		case cf.EffectBreak:
-			if c, ok := owner[ce.ChangeID]; ok {
+			// An empty ChangeID is a break nobody caused (client edit, cache expiry): unowned.
+			if c, ok := owner[ce.ChangeID]; ok && ce.ChangeID != "" {
 				f.ByComponent[c] += value
 				f.DeltaUSD += value
 			} else {

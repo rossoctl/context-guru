@@ -180,3 +180,71 @@ func TestFigure_InteractionIsAttributedToNobody(t *testing.T) {
 		t.Fatalf("%+v", f)
 	}
 }
+
+func TestFigure_UnpricedOpInOpsIsNotAZeroSaving(t *testing.T) {
+	f := figOf(cf.Result{
+		Ops: []cf.PricedOp{
+			{OpID: "bad", Operator: "context-guru.mask", ChangeID: "c1"},
+			{OpID: "ok", Operator: "context-guru.dedupe", ChangeID: "c2", Saved: cf.TierTokens{Input: 100}},
+		},
+		Unpriced: []cf.Unpriced{{OpID: "bad", Reason: "no_usage"}},
+	})
+	if _, in := f.ByComponent["mask"]; in {
+		t.Fatalf("unpriced op must be absent: %+v", f.ByComponent)
+	}
+	if !cfNear(f.ByComponent["dedupe"], 100*3e-6) || !cfNear(f.DeltaUSD, 100*3e-6) {
+		t.Fatalf("%+v", f)
+	}
+	if !reflect.DeepEqual(f.Unpriced, []string{"bad:no_usage"}) {
+		t.Fatalf("%v", f.Unpriced)
+	}
+}
+
+func TestFigure_EmptyOpIDUnpricedEntryNeverDropsRealTokens(t *testing.T) {
+	f := figOf(cf.Result{
+		Ops:      []cf.PricedOp{{Operator: "context-guru.mask", ChangeID: "c1", Saved: cf.TierTokens{Input: 100}}},
+		Unpriced: []cf.Unpriced{{Reason: "end_request_missing"}},
+	})
+	if !cfNear(f.ByComponent["mask"], 100*3e-6) {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestFigure_EmptyChangeIDBreakIsUnowned(t *testing.T) {
+	f := figOf(cf.Result{
+		Ops: []cf.PricedOp{{Operator: "context-guru.mask", Saved: cf.TierTokens{Input: 100}}},
+		CacheEffects: []cf.CacheEffect{{Kind: cf.EffectBreak,
+			Caused: cf.TierTokens{CacheWrite5m: 100}, Saved: cf.TierTokens{CacheRead: 100}}},
+	})
+	if !cfNear(f.ByComponent["mask"], 100*3e-6) {
+		t.Fatalf("component touched: %+v", f)
+	}
+	if !cfNear(f.UnattributedBreakUSD, 100*3.75e-6-100*0.3e-6) {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestFigure_DuplicateChangeIDKeepsFirstOwner(t *testing.T) {
+	f := figOf(cf.Result{
+		Ops: []cf.PricedOp{
+			{Operator: "context-guru.a", ChangeID: "c1", Saved: cf.TierTokens{Input: 100}},
+			{Operator: "context-guru.b", ChangeID: "c1", Saved: cf.TierTokens{Input: 100}},
+		},
+		CacheEffects: []cf.CacheEffect{{Kind: cf.EffectBreak, ChangeID: "c1", Caused: cf.TierTokens{Input: 10}}},
+	})
+	if !cfNear(f.ByComponent["a"], 100*3e-6-10*3e-6) || !cfNear(f.ByComponent["b"], 100*3e-6) {
+		t.Fatalf("%+v", f.ByComponent)
+	}
+}
+
+func TestFigure_BreakCausedAsOneHourWrite(t *testing.T) {
+	f := figOf(cf.Result{
+		Ops: []cf.PricedOp{{Operator: "context-guru.mask", ChangeID: "c1", Saved: cf.TierTokens{Input: 1000}}},
+		CacheEffects: []cf.CacheEffect{{Kind: cf.EffectBreak, ChangeID: "c1",
+			Caused: cf.TierTokens{CacheWrite1h: 200}, Saved: cf.TierTokens{CacheRead: 200}}},
+	})
+	want := 1000*3e-6 - (200*6e-6 - 200*0.3e-6)
+	if !cfNear(f.ByComponent["mask"], want) {
+		t.Fatalf("got %v want %v", f.ByComponent["mask"], want)
+	}
+}
