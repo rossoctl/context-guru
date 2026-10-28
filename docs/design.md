@@ -315,9 +315,11 @@ the boundary describing neither. A boundary that's too high lets an offloader mu
 provider already cached, forcing a cache-write of the suffix; a shorter transcript under the same
 key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
 there. After a proxy restart the tracker's records are gone but the provider's cache entries are
-not, so an unknown key reads as all-cached until its first request after the restart, for that
-request's own cache lifetime (5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended
-tier); the host can switch the rule off (`--restart-grace=false`).
+not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
+only while that thread's own last request is inside the request's cache lifetime (5 minutes,
+30 minutes on any OpenAI model, 1 hour on the extended tier). The last-request time comes from the
+dashboard's recorder, which reloads it per thread at startup; with the dashboard off, the fallback
+is the proxy's start time, and `--restart-grace=false` switches the rule off in every case.
 
 ### Fail-open per mode
 

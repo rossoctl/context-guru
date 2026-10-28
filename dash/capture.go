@@ -729,6 +729,25 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	return len(seeded), nil
 }
 
+// ThreadLastSeen answers the restart grace's question (modes.Tracker.SetLastSeen): when did
+// this thread's last non-ping request arrive, as far as this recorder knows? key is the shape
+// SeedSessions and ObserveThread use — thread.Key(session, thread) — which is also the key the
+// tracker records its turns under, so the proxy can hand this method to the tracker verbatim.
+//
+// Metadata only: a timestamp per thread, no content. After a restart it comes from
+// SeedSessions' reload of the requests table; in a live process ObserveThread keeps it
+// current. A thread this recorder has never seen, or has pruned after two silent hours, reads
+// as unknown — which the grace treats as a new thread.
+func (r *Recorder) ThreadLastSeen(key string) (atMs int64, ok bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ts, ok := r.lastSeen[key]
+	return ts, ok
+}
+
 // MarkUnique attributes a component's savings to NEW content only, deduping by
 // the content keys the component stashed — the same rule metrics.Aggregator uses,
 // so the dashboard's unique figure and /stats' agree. Returns saved tokens

@@ -90,10 +90,19 @@ type Tracker struct {
 	max int    // bound on tracked keys; 0 => default
 	seq uint64 // use counter: each turn stamps its key, and the smallest stamp is evicted first
 	// startedAtMs is when this tracker was created, in unix milliseconds: a proxy restart's
-	// marker. An unknown key whose first request comes less than that request's cache lifetime
-	// after the start reads as all-cached (#496). 0 (a Tracker built without NewTracker) gets
-	// no grace, which is the old behaviour.
+	// marker. It is the FALLBACK clock of the restart grace: with no last-seen lookup (below),
+	// an unknown key whose first request comes less than that request's cache lifetime after
+	// the start reads as all-cached (#496). 0 (a Tracker built without NewTracker) gets no
+	// grace, which is the old behaviour.
 	startedAtMs int64
+	// lastSeen, when the host sets it (SetLastSeen), answers "when did this key's last non-ping
+	// request arrive?" from state that survived the restart — the dashboard's session map,
+	// seeded from the database at startup. It is the PRIMARY clock of the restart grace (#766):
+	// the thread's own idle gap decides whether its prefix can still be cached, where the
+	// proxy's start time cannot tell a new thread from a long-idle one. Nil (no database,
+	// dashboard off) means the fallback above. Called under t.mu, so it must not call back
+	// into this tracker.
+	lastSeen func(key string) (atMs int64, ok bool)
 	// graceOn is the host's on/off switch for that rule. The length is not ours to choose: each
 	// request carries its own cache lifetime, and the caller passes it to TurnFrom. A benchmark
 	// that sends whole transcripts to a fresh proxy switches the rule off (false) so it measures
@@ -148,6 +157,19 @@ func (t *Tracker) SetRestartGrace(on bool) {
 	t.graceOn = on
 }
 
+// SetLastSeen gives the tracker a "last seen" lookup for the restart grace (#766): the time of
+// a key's last non-ping request, as far as state that survived the restart knows. The proxy
+// sets it from the dashboard recorder, which reloads that time per thread at startup; the
+// library itself must not import dash, so the host hands the function in. With no lookup set
+// (no database, dashboard off), the grace keeps #759's start-time rule. Startup setting, like
+// SetRestartGrace. The lookup runs under the tracker's lock, so it must not call back into the
+// tracker; a panic inside it reads as "no lookup", so a broken lookup cannot fail a request.
+func (t *Tracker) SetLastSeen(f func(key string) (atMs int64, ok bool)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastSeen = f
+}
+
 // Turn records that this session's current turn carries n normalized messages and
 // returns the PREVIOUS turn's count — the cached-prefix boundary the request must be
 // built against. Read and write happen under one lock, which is what removes the race
@@ -189,13 +211,14 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64, grace time.Duration
 // prevLen = n: the whole request is treated as cached, so nothing changes on this one turn, and
 // the next turn has a real record again.
 //
-// The same answer serves a proxy restart (#496): a key with no record, no drop and no usable
-// parent reads as all-cached while the tracker started less than THIS request's cache lifetime
-// ago (the caller passes it as grace), because the process forgot the record, not the provider
-// the prefix. The grace is per thread and ends at that first request, which writes the record:
-// the thread's second request follows the normal rules. A brand-new thread's first request
-// cannot be changed either, for the same lifetime. A first request past the lifetime is a new
-// thread again, as before. The host can switch the rule off (SetRestartGrace).
+// The same answer serves a proxy restart (#496, #766): a key with no record, no drop and no
+// usable parent falls to the restart grace, which asks the host's last-seen lookup (SetLastSeen)
+// for the thread's OWN last non-ping request. Inside this request's cache lifetime (the caller
+// passes it as grace) the key reads as all-cached, because the process forgot the record, not
+// the provider the prefix; past it the thread is expired — cold, not new. A key the lookup does
+// not know is a really new thread: nothing is cached, so its first request is editable as
+// usual. Without a lookup (no database, dashboard off), #759's start-time rule answers instead,
+// and the host can switch the grace off entirely (SetRestartGrace).
 func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -206,7 +229,7 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64, grace time.Du
 	case t.wasDropped(key):
 		prevLen = n
 	case parent == "":
-		prevLen = t.graceLocked(n, nowMs, grace)
+		prevLen = t.graceLocked(key, n, nowMs, grace)
 	default:
 		if p, pok := t.m[parent]; pok {
 			prevLen, prevAtMs = min(p.n, n), p.at
@@ -216,7 +239,9 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64, grace time.Du
 			// next request still reads as dropped too.
 			prevLen = n
 		} else {
-			prevLen = t.graceLocked(n, nowMs, grace)
+			// The parent's last request is the clock that matters here: this request READS the
+			// parent's prefix, so the grace asks about the parent, not about the key itself.
+			prevLen = t.graceLocked(parent, n, nowMs, grace)
 		}
 	}
 	if !ok && len(t.m) >= t.max {
@@ -233,24 +258,55 @@ func (t *Tracker) TurnFrom(key, parent string, n int, nowMs int64, grace time.Du
 	return prevLen, prevAtMs
 }
 
-// graceLocked is the boundary for a key with no record, no drop and no usable parent: n when
-// the tracker started less than grace — this request's cache lifetime, the longest a
-// restart-forgotten entry of this thread can still be alive (#496) — ago, 0 as before once
-// that window is past. prevAtMs stays 0 either way: the idle clock is unknown, so nothing may
-// read cold off it.
+// graceLocked is the boundary for a key with no record, no drop and no usable parent. With a
+// last-seen lookup (#766) the thread's OWN idle gap decides: n when the lookup's timestamp is
+// less than grace — this request's cache lifetime, the longest a restart-forgotten entry of
+// this thread can still be alive (#496) — in the past, 0 once that window is past (the thread
+// is expired, cold — not new), and 0 for a key the lookup does not know (a really new thread:
+// nothing is cached, so there is nothing to protect). Without a lookup (no database, dashboard
+// off) the fallback is #759's rule: n while the tracker itself started less than grace ago.
+// prevAtMs stays 0 either way: the grace answers a yes/no question, so nothing may read cold
+// off a fabricated age.
 //
 // nowMs <= 0 (the legacy Turn path, which records no time) gets no grace: there is no clock to
 // measure the restart against, and the request path always supplies one. A caller clock BEHIND
-// the start (a test's fixed past timestamp) is not a restart either: it reads as past the grace,
-// which keeps fake-clock callers on the old behaviour.
-func (t *Tracker) graceLocked(n int, nowMs int64, grace time.Duration) int {
-	if !t.graceOn || t.startedAtMs == 0 || nowMs <= 0 || grace <= 0 {
+// the last-seen time (or the start, in the fallback) is not a restart either: it reads as past
+// the grace, which keeps fake-clock callers on the old behaviour.
+func (t *Tracker) graceLocked(key string, n int, nowMs int64, grace time.Duration) int {
+	if !t.graceOn || nowMs <= 0 || grace <= 0 {
+		return 0
+	}
+	if at, known, have := t.lastSeenLocked(key); have {
+		if !known {
+			return 0
+		}
+		if d := nowMs - at; d >= 0 && d < grace.Milliseconds() {
+			return n
+		}
+		return 0
+	}
+	if t.startedAtMs == 0 {
 		return 0
 	}
 	if d := nowMs - t.startedAtMs; d >= 0 && d < grace.Milliseconds() {
 		return n
 	}
 	return 0
+}
+
+// lastSeenLocked asks the host's lookup, fail-open: a panic inside it reads as "no lookup", so
+// the start-time fallback answers instead and a broken lookup cannot fail the request.
+func (t *Tracker) lastSeenLocked(key string) (atMs int64, known, have bool) {
+	if t.lastSeen == nil {
+		return 0, false, false
+	}
+	defer func() {
+		if recover() != nil {
+			atMs, known, have = 0, false, false
+		}
+	}()
+	at, ok := t.lastSeen(key)
+	return at, ok, true
 }
 
 // pruneLocked makes room for one new key. It first expires every key idle past StaleAfter

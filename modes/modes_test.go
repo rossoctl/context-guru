@@ -299,6 +299,94 @@ func TestASwitchedOffGraceTurnsTheRestartProtectionOff(t *testing.T) {
 	}
 }
 
+// Issue #766. #759's grace clock was the proxy's start time, which cannot tell a new thread
+// from a long-idle one — so it froze every unknown key's first request for one cache lifetime
+// after a restart, and an idle thread back after hours still read as protected. With a last-seen
+// lookup (SetLastSeen, which the proxy sets from the dashboard's seeded session map) the
+// thread's OWN last non-ping request decides: inside the lifetime the key reads as all-cached,
+// past it the thread is expired (boundary 0, cold — not new). The tracker here started one
+// minute ago, young enough that #759's start-time rule alone would protect every case below.
+func TestTheGraceUsesTheThreadsLastRequestNotTheProxyStart(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	cases := []struct {
+		name     string
+		lastSeen time.Duration // how long before t0 the thread's last request was
+		grace    time.Duration // the request's cache lifetime
+		want     int
+	}{
+		{"idle 3 hours, back 1 minute after the restart", 3 * time.Hour, 5 * time.Minute, 0},
+		{"last request 2 minutes ago, 5 minute lifetime", 2 * time.Minute, 5 * time.Minute, 925},
+		{"last request 7 minutes ago, 5 minute lifetime", 7 * time.Minute, 5 * time.Minute, 0},
+		{"last request 40 minutes ago, 1 hour lifetime", 40 * time.Minute, time.Hour, 925},
+		{"last request 61 minutes ago, 1 hour lifetime", 61 * time.Minute, time.Hour, 0},
+	}
+	for _, c := range cases {
+		// One fresh tracker per call: the first call records the key, and the fork check must
+		// reach the grace, not the record the call before it wrote.
+		newTr := func() *Tracker {
+			tr := NewTracker(0)
+			tr.startedAtMs = t0 - time.Minute.Milliseconds()
+			tr.SetLastSeen(func(key string) (int64, bool) {
+				if key != "known" {
+					return 0, false
+				}
+				return t0 - c.lastSeen.Milliseconds(), true
+			})
+			return tr
+		}
+		if n, at := newTr().TurnAt("known", 925, t0, c.grace); n != c.want || at != 0 {
+			t.Fatalf("%s: known thread = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
+		}
+		// The first request of a fork whose PARENT is that thread: it reads the parent's
+		// prefix, so the parent's last request is the clock the grace asks about.
+		if n, at := newTr().TurnFrom("side", "known", 925, t0, c.grace); n != c.want || at != 0 {
+			t.Fatalf("%s: fork of the known thread = (%d, %d), want (%d, 0)", c.name, n, at, c.want)
+		}
+	}
+}
+
+// A key the lookup does not know is a really new thread (#766): nothing is cached, so there is
+// nothing to protect, and the first request is editable as usual — no grace, even one minute
+// after the restart, where #759's start-time rule alone would have frozen it.
+func TestAnUnknownThreadToTheLookupIsReallyNew(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	tr.SetLastSeen(func(key string) (int64, bool) { return 0, false })
+	if n, at := tr.TurnAt("brand-new", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+		t.Fatalf("unknown thread to the lookup = (%d, %d), want (0, 0): really new, no grace", n, at)
+	}
+	if n, at := tr.TurnFrom("side", "nobody", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+		t.Fatalf("fork of an unknown parent = (%d, %d), want (0, 0): really new, no grace", n, at)
+	}
+}
+
+// A panicking lookup must not fail the request (#766, fail open): it reads as "no lookup", and
+// #759's start-time fallback answers instead — here one minute after the start, inside the
+// lifetime, so the key is protected.
+func TestAPanickingLookupFallsBackToTheStartTimeRule(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	tr.SetLastSeen(func(key string) (int64, bool) { panic("broken lookup") })
+	if n, at := tr.TurnAt("known", 925, t0, 5*time.Minute); n != 925 || at != 0 {
+		t.Fatalf("panicking lookup = (%d, %d), want (925, 0): the start-time rule answers", n, at)
+	}
+}
+
+// --restart-grace=false turns the grace off in every case (#766): also with a lookup that
+// knows the thread and a last request well inside the lifetime.
+func TestASwitchedOffGraceBeatsTheLastSeenLookupToo(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	tr.SetLastSeen(func(key string) (int64, bool) { return t0 - time.Minute.Milliseconds(), true })
+	tr.SetRestartGrace(false)
+	if n, at := tr.TurnAt("known", 925, t0, 5*time.Minute); n != 0 || at != 0 {
+		t.Fatalf("grace off, recent last-seen = (%d, %d), want (0, 0): never protected", n, at)
+	}
+}
+
 // At the bound, keys idle past StaleAfter expire first, all at once, before a live key is evicted.
 // Here b was used AFTER a, so least-recently-used alone would evict a, the live one.
 func TestStaleKeysExpireBeforeLiveOnes(t *testing.T) {

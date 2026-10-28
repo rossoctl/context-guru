@@ -374,6 +374,14 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
+	// The restart grace decides by the thread's own last request, not by this process's start
+	// (#766). The recorder holds that time per thread — seeded from the database at startup
+	// (Recorder.SeedSessions, which main.go runs before it builds the handler) and kept current
+	// by each request — and its keys are the tracker's keys. Without a dashboard there is no
+	// such record, and the tracker keeps #759's start-time rule on its own.
+	if opts.Dashboard != nil {
+		tr.SetLastSeen(opts.Dashboard.ThreadLastSeen)
+	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard,
 		sent: newSentStash()}
