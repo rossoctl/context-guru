@@ -102,6 +102,8 @@ type ExtractSweep struct {
 	protectTools         map[string]bool
 	protectPaths         []*regexp.Regexp
 	protectLastN         int
+	ruleUnref            bool
+	ruleUnrefMinAge      int
 
 	mode markerMode
 }
@@ -198,6 +200,10 @@ type extractSweepConfig struct {
 	ProtectPaths []string `yaml:"protect_paths"`
 	// ProtectLastN: the newest tool results that are never dropped. nil = 10 when v3 is on.
 	ProtectLastN *int `yaml:"protect_last_n"`
+	// RuleUnreferenced switches on rule (c): drop a tool output that nothing later references. Off by default.
+	// RuleUnreferencedMinAge: how many tool calls newer the output must have (0 = 30).
+	RuleUnreferenced       bool `yaml:"rule_unreferenced"`
+	RuleUnreferencedMinAge int  `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -387,6 +393,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	return &ExtractSweep{
 		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
 		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
@@ -1319,6 +1326,10 @@ func init() {
 			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
 		{Key: "protect_paths", Type: components.FieldStrings,
 			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
+		{Key: "rule_unreferenced", Type: components.FieldBool,
+			Hint: "Sweep v3 rule (c), off by default. Drop a tool output that nothing later in the conversation references: no later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). It is the recheck's referenced_later test, run over the whole later conversation, and it never drops an output that introduced no identifier. It needs selector rule or hybrid, and it obeys every protection. Its drops are counted under unreferenced. Writing it switches the v3 gates on (with warm: true)."},
+		{Key: "rule_unreferenced_min_age", Type: components.FieldInt, Default: defaultRuleUnrefMinAge, Min: 0,
+			Hint: "Sweep v3 rule (c): how many tool calls newer an output must have before it can be dropped as unreferenced. Default 30. An output with fewer has had no chance to be referenced."},
 		{Key: "protect_last_n", Type: components.FieldInt, Default: defaultProtectLastN, Min: 0,
 			Hint: "Sweep v3: the newest N tool results are never dropped. Default 10 when v3 is on; 0 protects none."},
 

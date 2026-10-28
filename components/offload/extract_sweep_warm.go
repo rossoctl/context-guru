@@ -1374,6 +1374,8 @@ type WarmDecision struct {
 	// CutPoint is C in billed tokens, and CSource where it came from (cutfrac, compaction, window). v3 only.
 	CutPoint int    `json:"cut_point,omitempty"`
 	CSource  string `json:"c_source,omitempty"`
+	// RuleD is D by what chose it: a rule name, or judge (v3 only), in billed tokens.
+	RuleD map[string]int `json:"rule_d,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1393,7 +1395,7 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"rewritten_local", d.RewrittenLocal, "rewritten_billed", d.RewrittenBilled,
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
 		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
-		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource)
+		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource, "rule_d", ruleDString(d.RuleD))
 }
 
 func warmDecisionsCopy() []WarmDecision {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
+	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -63,6 +66,11 @@ const (
 
 	ruleFileReread = "file_reread"
 	ruleBuildRerun = "build_rerun"
+	// ruleUnreferenced is rule (c): nothing later references the output (the recheck's referenced_later test).
+	ruleUnreferenced = "unreferenced"
+
+	defaultRuleUnrefMinAge = 30
+	sourceJudge            = "judge"
 
 	maxV3Recent = 50
 )
@@ -76,6 +84,8 @@ type v3Config struct {
 	protectTools         map[string]bool
 	protectPaths         []*regexp.Regexp
 	protectLastN         int
+	ruleUnref            bool
+	ruleUnrefMinAge      int
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
@@ -91,7 +101,7 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		return out, fmt.Errorf("extract_llm_sweep: selector %q is not one of judge, rule, hybrid", cfg.Selector)
 	}
 	if cfg.FillSmall > 0 || cfg.FillLarge > 0 || cfg.MinDropFrac > 0 || len(cfg.ProtectTools) > 0 ||
-		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil {
+		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil || cfg.RuleUnreferenced {
 		out.on = true
 	}
 	if !out.on {
@@ -117,6 +127,10 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		if out.protectLastN < 0 {
 			out.protectLastN = 0
 		}
+	}
+	out.ruleUnref, out.ruleUnrefMinAge = cfg.RuleUnreferenced, cfg.RuleUnreferencedMinAge
+	if out.ruleUnrefMinAge <= 0 {
+		out.ruleUnrefMinAge = defaultRuleUnrefMinAge
 	}
 	out.protectTools = map[string]bool{}
 	for _, n := range cfg.ProtectTools {
@@ -306,6 +320,15 @@ func toolCallID(m bschemas.ChatMessage) string {
 	return ""
 }
 
+// ruleTokens is the tokens the rule drops would remove, by rule, scaled (the content ratio, or 1).
+func (p v3Plan) ruleTokens(scale float64) map[string]int {
+	out := map[string]int{}
+	for _, h := range p.rules {
+		out[h.rule] += int(float64(h.saves) * scale)
+	}
+	return out
+}
+
 // v3Plan computes the protection and, unless the selector is judge, the rule drops, on req.
 func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatRequest) v3Plan {
 	v3PlanBuilds.Add(1)
@@ -351,7 +374,12 @@ func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatReques
 		}
 	}
 	fe := newFileEvidence(req)
-	for _, i := range tools {
+	// Rule (c): the recheck's own signal (coref over the agent's conversation), read once for the whole plan.
+	var unref map[string]bool
+	if e.ruleUnref {
+		unref = unreferencedIDs(c, req, e.minTokens)
+	}
+	for k, i := range tools {
 		if p.protected[i] {
 			continue
 		}
@@ -362,6 +390,8 @@ func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatReques
 			rule = ruleFileReread
 		} else if call.cmd != "" && shellTool(call.name) && buildRun.MatchString(call.cmd) && lastRun[call.cmd] > i {
 			rule = ruleBuildRerun
+		} else if unref[id] && len(tools)-1-k >= e.ruleUnrefMinAge {
+			rule = ruleUnreferenced
 		}
 		if rule == "" || id == "" {
 			continue
@@ -389,6 +419,24 @@ func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatReques
 		p.ruleIdx[i] = true
 	}
 	return p
+}
+
+// unreferencedIDs are the tool ids of outputs that introduced identifiers and that no later turn reused. It is
+// the recheck's signal, from the same code: coref.IndexNovel over the agent's own conversation (RawInput when
+// set), and a Record whose ConsumeLag is -1 (no reference at all). An output with no trackable identifier
+// (Novel 0) is OPAQUE: no evidence either way, never a candidate.
+func unreferencedIDs(c *components.Ctx, req *bschemas.BifrostChatRequest, minTokens int) map[string]bool {
+	raw := req
+	if c != nil && c.RawInput != nil {
+		raw = &bschemas.BifrostChatRequest{Input: c.RawInput}
+	}
+	out := map[string]bool{}
+	for _, r := range coref.IndexNovel(flattenForCoref(raw), minTokens, schema.TextTokens) {
+		if r.ID != "" && r.Novel > 0 && r.ConsumeLag < 0 {
+			out[r.ID] = true
+		}
+	}
+	return out
 }
 
 // fileSuperseded: the file read at message i was read again, or edited, later.
@@ -467,6 +515,14 @@ func (v *v3Held) combine(ans heldAnswer, have bool) (heldAnswer, bool) {
 	}
 	ans.Outputs = outs
 	return ans, true
+}
+
+// ruleFor names what chose a drop, for the drop record: the rule, or the judge.
+func (v *v3Held) ruleFor(id string) string {
+	if r, ok := v.ruleOf[id]; ok {
+		return r
+	}
+	return sourceJudge
 }
 
 func (v *v3Held) get(string) (heldAnswer, bool) {
@@ -644,7 +700,10 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 	// RULES ONLY: no question, no model call.
 	if e.selector == selectorRule {
 		if len(plan.rules) == 0 {
-			noteV3Refuse("no_rule_drops")
+			if paced {
+				noteV3Refuse("no_rule_drops")
+				noteV3SizeRefusal(tkey, "rule_select", "no_rule_drops", P, C, cSource, 0, nil)
+			}
 			return nil, 0
 		}
 		if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, in.prevLocal); ok {
@@ -653,7 +712,10 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 				sum += h.saves
 			}
 			if float64(sum)*content < e.minDropFrac*float64(P) {
-				noteV3Refuse("drop_too_small")
+				if paced {
+					noteV3Refuse("drop_too_small")
+					noteV3SizeRefusal(tkey, "rule_select", "drop_too_small", P, C, cSource, int(float64(sum)*content), plan.ruleTokens(content))
+				}
 				return nil, 0
 			}
 		}
@@ -765,9 +827,15 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 			wa.cutPoint, wa.cSource = C, cSource
 			if float64(dBilled) < e.minDropFrac*float64(P) {
 				noteV3Refuse("drop_too_small")
+				ruleD := map[string]int{}
+				if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, prevLocal); ok {
+					for _, o := range res.Valid {
+						ruleD[src.ruleFor(o.ToolUseID)] += int(float64(o.Saves) * content)
+					}
+				}
 				noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "drop_too_small", Weight: 1,
 					RemovedLocal: res.validTokens(), RemovedBilled: dBilled, Proposed: res.proposed, Dropped: res.reasonCounts(),
-					DShareP: wa.dShareP, PShareC: wa.pShareC, CutPoint: C, CSource: cSource})
+					DShareP: wa.dShareP, PShareC: wa.pShareC, CutPoint: C, CSource: cSource, RuleD: ruleD})
 				return false, "drop_too_small"
 			}
 		}
@@ -823,11 +891,54 @@ type V3Stats struct {
 	// context), compaction (the compaction point: operator, measured or assumed) or window (the model's window).
 	CSource map[string]int64 `json:"c_source,omitempty"`
 	Recent  []V3Cut          `json:"recent_cuts,omitempty"`
+	// Expands counts the first expands of v3 drops by what chose them: a rule name, or judge. With rule_drops and
+	// judge_drops it gives the expand rate per rule and for the judge.
+	Expands map[string]int64 `json:"expands,omitempty"`
+	// RecentRefusals lists the last cut attempts a size gate refused (drop_too_small, no_rule_drops), with D, D/P,
+	// C, where C came from, and D by rule.
+	RecentRefusals []V3Refusal `json:"recent_refusals,omitempty"`
+}
+
+// V3Refusal is one refused cut attempt, in numbers. The thread is a hash label.
+type V3Refusal struct {
+	Thread  string         `json:"thread"`
+	AtMs    int64          `json:"at_ms"`
+	Reason  string         `json:"reason"`
+	P       int            `json:"billed_prompt"`
+	C       int            `json:"cut_point"`
+	CSource string         `json:"c_source"`
+	D       int            `json:"dropped_billed"`
+	DShareP float64        `json:"d_share_of_p"`
+	RuleD   map[string]int `json:"rule_d,omitempty"`
+}
+
+// ruleDString renders D by rule as "rule:tokens,rule:tokens", sorted, for the log line.
+func ruleDString(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+":"+strconv.Itoa(m[k]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// noteV3Expand counts the first expand of a v3 drop by what chose it.
+func noteV3Expand(rule string) {
+	v3Mu.Lock()
+	if v3Ledger.Expands == nil {
+		v3Ledger.Expands = map[string]int64{}
+	}
+	v3Ledger.Expands[rule]++
+	v3Mu.Unlock()
 }
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return len(s.Refused) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -863,8 +974,28 @@ func noteV3CSource(source string) {
 // noteV3Refusal puts a "not in the sweet spot" refusal in the decision log with the numbers, so P, C and where
 // C came from can be read. It runs at the pace of the question, like the counter.
 func noteV3Refusal(tkey, reason string, p, c int, cSource string) {
-	noteWarmDecision(tkey, WarmDecision{Stage: "sweet_spot", Accept: false, Reason: reason, Weight: 1,
-		PShareC: float64(p) / float64(c), CutPoint: c, CSource: cSource})
+	noteV3SizeRefusal(tkey, "sweet_spot", reason, p, c, cSource, 0, nil)
+}
+
+// noteV3SizeRefusal logs one refused cut attempt as a decision line, and keeps it in recent_refusals: D, D/P,
+// P/C, C and where it came from, and D by rule.
+func noteV3SizeRefusal(tkey, stage, reason string, p, c int, cSource string, d int, ruleD map[string]int) {
+	dShare, pShare := 0.0, 0.0
+	if p > 0 {
+		dShare = float64(d) / float64(p)
+	}
+	if c > 0 {
+		pShare = float64(p) / float64(c)
+	}
+	noteWarmDecision(tkey, WarmDecision{Stage: stage, Accept: false, Reason: reason, Weight: 1,
+		RemovedBilled: d, DShareP: dShare, PShareC: pShare, CutPoint: c, CSource: cSource, RuleD: ruleD})
+	v3Mu.Lock()
+	v3Ledger.RecentRefusals = append(v3Ledger.RecentRefusals, V3Refusal{Thread: threadLabel(tkey), AtMs: time.Now().UnixMilli(),
+		Reason: reason, P: p, C: c, CSource: cSource, D: d, DShareP: dShare, RuleD: ruleD})
+	if len(v3Ledger.RecentRefusals) > maxV3Recent {
+		v3Ledger.RecentRefusals = v3Ledger.RecentRefusals[len(v3Ledger.RecentRefusals)-maxV3Recent:]
+	}
+	v3Mu.Unlock()
 }
 
 func noteV3Cut(tkey string, r v3CutRec, selector string) {
@@ -895,6 +1026,13 @@ func v3Counters() V3Stats {
 		out.Refused = map[string]int64{}
 		for k, v := range v3Ledger.Refused {
 			out.Refused[k] = v
+		}
+	}
+	out.RecentRefusals = append([]V3Refusal(nil), v3Ledger.RecentRefusals...)
+	if len(v3Ledger.Expands) > 0 {
+		out.Expands = map[string]int64{}
+		for k, n := range v3Ledger.Expands {
+			out.Expands[k] = n
 		}
 	}
 	if len(v3Ledger.CSource) > 0 {
@@ -956,6 +1094,9 @@ func (f v3Filtered) strip(h heldAnswer, ok, claim bool) (heldAnswer, bool) {
 	h.Outputs = kept
 	return h, true
 }
+
+// ruleFor: an answer in the Store was made by the judge.
+func (f v3Filtered) ruleFor(string) string { return sourceJudge }
 
 func (f v3Filtered) get(k string) (heldAnswer, bool) {
 	h, ok := f.heldSource.get(k)
