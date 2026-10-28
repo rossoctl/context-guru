@@ -54,6 +54,7 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) 
 		t.Parent = cfThreadID(parent)
 		c.savings.trackers.Fork(c.cfReq.Meta.Session, cf.Thread{ID: t.Parent}, t)
 	}
+	// PingRead is left nil: see the LIMITATION note on entryFacts.
 	c.savings.end(c.cfReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.cfReq.Meta.Session, t))
 }
 

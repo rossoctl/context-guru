@@ -266,7 +266,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 			// an ordinary ping would have, so reporting the ping's own budget here would misdescribe
 			// what was actually requested.
 			MaxTokens: 0,
-			Window:    j.prevStartedAt,
+			Window:    j.gapStart,
 		})
 	}
 	return cost

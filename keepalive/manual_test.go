@@ -261,11 +261,11 @@ func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 	}
 }
 
-// The report names the idle gap it served: the start of the last real request, as it stood before
-// the ping moved the entry's clock. Both a press and a scheduled ping set it.
+// The Window of every ping of one idle gap is the start of the last REAL request, whichever path
+// sent the ping and however often it has moved the entry's own clock.
 func TestPingReportsCarryTheWindowTheyServed(t *testing.T) {
 	k, sink, clock := manualKeeper(t)
-	recordedAt := clock.now()
+	gap := clock.now()
 	clock.advance(100 * time.Second)
 	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
 		t.Fatal(err)
@@ -273,15 +273,63 @@ func TestPingReportsCarryTheWindowTheyServed(t *testing.T) {
 	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
 		t.Fatalf("scheduled ping fired %d times", n)
 	}
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("second scheduled ping fired %d times", n)
+	}
 	reps := sink.all()
-	if len(reps) != 2 {
-		t.Fatalf("reports = %d, want 2", len(reps))
+	if len(reps) != 3 {
+		t.Fatalf("reports = %d, want 3", len(reps))
 	}
-	if !reps[0].Manual || !reps[0].Window.Equal(recordedAt) {
-		t.Errorf("manual Window = %v, want %v", reps[0].Window, recordedAt)
+	if gap.IsZero() {
+		t.Fatal("test clock is zero")
 	}
-	// The press restarted the entry's clock at its own start (+100s).
-	if reps[1].Manual || !reps[1].Window.Equal(recordedAt.Add(100*time.Second)) {
-		t.Errorf("scheduled Window = %v, want %v", reps[1].Window, recordedAt.Add(100*time.Second))
+	for i, r := range reps {
+		if !r.Window.Equal(gap) {
+			t.Errorf("report %d (manual=%v) Window = %v, want the real request's start %v", i, r.Manual, r.Window, gap)
+		}
+	}
+}
+
+// A new real request opens a new gap: the next ping's Window is that request's start.
+func TestPingWindowFollowsTheNewestRealRequest(t *testing.T) {
+	k, sink, clock := manualKeeper(t)
+	first := clock.now()
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("fired %d", n)
+	}
+	second := clock.advance(10 * time.Second)
+	recordWithSink(k, sink, sess1, second)
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("fired %d", n)
+	}
+	reps := sink.all()
+	if len(reps) != 2 || !reps[0].Window.Equal(first) || !reps[1].Window.Equal(second) || reps[0].Window.Equal(reps[1].Window) {
+		t.Fatalf("windows %+v", reps)
+	}
+}
+
+// A manual-only hold never moves its clock on a press, and its Window stays the real request's start.
+func TestManualHoldPressKeepsTheGapWindow(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
+	sink := &reportSink{}
+	at := clock.now()
+	pol := offPolicy
+	pol.ManualHold = true
+	for _, d := range []time.Duration{-time.Second, 0} {
+		k.Record(Record{Key: sess1, StartedAt: at.Add(d), Body: []byte(kaBody), Provider: "anthropic",
+			Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
+			UsageOK: true, Policy: pol, Header: kaHeader(), Emitter: sink, Hold: fakeOf(k).hold(sess1)})
+	}
+	clock.advance(60 * time.Second)
+	for i := 0; i < 2; i++ {
+		if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(60 * time.Second)
+	}
+	reps := sink.all()
+	if len(reps) != 2 || !reps[0].Window.Equal(at) || !reps[1].Window.Equal(at) {
+		t.Fatalf("windows %+v, want both %v", reps, at)
 	}
 }

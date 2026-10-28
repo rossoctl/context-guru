@@ -642,3 +642,24 @@ func TestKeepAliveSummaryCallThatDoesNotCommitIsDeferred(t *testing.T) {
 			"(in=281, one ordinary detail row); got in=%d calls=%v", in, calls)
 	}
 }
+
+// A summary-substitute ping reports the same gap Window an ordinary ping does.
+func TestSubstitutePingCarriesTheGapWindow(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	kaCandidate(t, "sess-1", st, &fakeSummaryModel{out: "<summary>x</summary>"})
+	sink := &reportSink{}
+	at := clock.now()
+	recordWithSink(k, sink, sess1, at)
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("fired %d", n)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sink.all()) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	reps := sink.all()
+	if len(reps) != 1 || !reps[0].Window.Equal(at) {
+		t.Fatalf("reports %+v, want one with Window %v", reps, at)
+	}
+}

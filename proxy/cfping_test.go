@@ -127,3 +127,19 @@ func TestEntryFactsConsumesPingFactsOnce(t *testing.T) {
 		t.Fatal("nil store changes nothing")
 	}
 }
+
+func TestNamedThreadKeyRoundTrips(t *testing.T) {
+	st := NewPingStore()
+	r := okReport()
+	r.Thread = "sub-1"
+	if _, ok := PingSavings(r, st); !ok {
+		t.Fatal("not converted")
+	}
+	if f := entryFacts(nil, st, "s", cf.Thread{ID: "main"}); !f.LastPing.IsZero() {
+		t.Fatal("the main thread must not take a named thread's ping")
+	}
+	f := entryFacts(nil, st, "s", cf.Thread{ID: "sub-1"})
+	if f.LastPing.IsZero() || f.PingWindow == "" {
+		t.Fatalf("%+v", f)
+	}
+}

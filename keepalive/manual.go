@@ -112,9 +112,8 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	job := pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref, route: e.route,
 		provider: e.provider, model: e.model, tenant: e.tenant, session: e.session,
 		thread: e.thread, st: e.st, emitter: e.emitter,
-		// The window this press serves starts at the last real request, read before the press
-		// below moves e.startedAt.
-		prevStartedAt: e.startedAt}
+		// The gap this press serves began at the last real request; a press never moves it.
+		gapStart: e.gapStart}
 	endpoint, prefix, agent, preset := e.endpoint, e.prefix, e.agent, e.preset
 	k.mu.Unlock()
 	defer zero(raw)
@@ -191,7 +190,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
 			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
 			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
-			Window: job.prevStartedAt,
+			Window: job.gapStart,
 		})
 	}
 	return res, nil
