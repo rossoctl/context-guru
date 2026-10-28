@@ -53,7 +53,7 @@ Cortex side. This spec answers them as follows.
 | 3b | The plugin's own LLM calls through `core/llmclient`, not in the ledger; the `ibac` judge too | `spend` context operations with the call's billed usage (D4, W4.6). This applies to every plugin that calls a model, not only context-guru (R47). |
 | 3c | Keep-alive: the cost and the benefit land on different requests | a `spend` per ping, a `rescue` cache effect, one `ChangeID` (design §4.4, W4.6). |
 | 4 | Content re-sent every turn: overcount for compaction, correct for tool-prune | `ChangeID` (R22, D1); the tier comes from the position, so tool-prune is priced on every turn and a compaction is not counted again at the full rate (design §4.6). |
-| 5 | Two ways of counting tokens | `Size.Tokenizer`, `bytes-estimate` and `Estimated` (R8); the correction factor is open (design §11, question 3). |
+| 5 | Two ways of counting tokens | None: a context operator reports bytes only, the library converts them with the request's ratio and marks the result `Estimated` (R8, design §4.2 rule 7); the accuracy of the ratio is open (design §11, question 3). |
 | 6 | Credit across several plugins | Each context operator is measured against its own input (R29), and R25 for the same content. |
 | 7 | Observe mode | `DryRun` (R12), never counted in totals. |
 | — | Where the baseline lives, and how changes to it are reviewed | In the `counterfactual` library in context-guru (D2). A change to it changes the case list, and every intended difference is in `differences.json` (design §10.2, §10.4). |

@@ -301,8 +301,8 @@ numbers are not used: those requirements were dropped.
 ### C. Facts for pricing
 
 - **R7.** Each context operation has a position: section and index, in the provider's hash order.
-- **R8.** Sizes are in bytes, and in tokens with the tokenizer named. A context operator with no tokenizer
-  sends a byte estimate and marks it (§4.2 rule 7).
+- **R8.** Sizes are in bytes. A context operator sends no tokens. The library converts bytes to
+  tokens and marks the result `Estimated` (§4.2 rule 7).
 - **R11.** Model-call usage is the provider's billed usage, read from the call's own response by
   the model client the host gives the engine. The engine does not count it (wiring document).
 - **R22.** A change has an ID that is the same on every request that carries it (`ChangeID`).
@@ -515,10 +515,9 @@ type SettingChange struct {
     At *Position
 }
 
+// Size is bytes only. A context operator does not count tokens: the library converts bytes to tokens (§4.2 rule 7).
 type Size struct {
-    Bytes     int    // required on rewrite; the sum check compares it with the Body sizes (§6.5)
-    Tokens    int    // required on rewrite; see rule 7
-    Tokenizer string // the tokenizer that counted Tokens; "bytes-estimate" when estimated
+    Bytes int // required on rewrite; the sum check compares it with the Body sizes (§6.5)
 }
 
 type MessageSplice struct{ At, Removed, Inserted int } // messages only
@@ -592,12 +591,13 @@ and can be reported as unpriced (R19).
    the engine then replays one frozen decision at two positions. These are two changes, so the
    `ChangeID` also takes the ordinal of the occurrence (the first, the second, ... position in the
    client body with that content key). Check 3 (§6.5) then holds.
-7. **The tokens a change saved come from the context operation's own `Size`, not from the forwarded body.**
-   Removed tokens are not in the forwarded body, so nothing else can count them. A context operator with a
-   tokenizer (context-guru) counts them and names the tokenizer. A context operator with none (tool-prune)
-   estimates them from bytes with the ratio of its own input, and sets
-   `Tokenizer = "bytes-estimate"`. The library marks every priced result that uses an estimate as
-   `Estimated`.
+7. **A context operator reports bytes only. The library calculates the tokens.**
+   Removed tokens are not in the forwarded body, so the library takes the bytes from the context
+   operation's own `Size` and converts them. The conversion uses the request's own ratio: the
+   bytes of the client body divided by the billed input tokens of the request (input + cache read +
+   cache write). If the request has no usage, the library uses a fixed fallback ratio. The library
+   marks every priced result that uses this conversion as `Estimated`. No operator names a tokenizer,
+   so two operators give the same tokens for the same bytes.
 8. **The engine reports a change that `apply` writes, under the context operator that decided it.**
    `toolschema`, `toolfilter` and `cachesplit` are marker components: their `Reformat()` does
    nothing, and `apply` performs the rewrite (`apply/envelope.go`, `apply/prefixsplit.go`). `apply`
@@ -1049,16 +1049,14 @@ rescue (§4.4): a rescue is a claim that the entry would have expired.
 
 These are the tokens of content that **was forwarded**: the library needs them for the penalty of a
 cache break (§6.2), which counts forwarded content between the break and B\*. The tokens a change
-**removed** are not in the forwarded body; they come from the context operation's own `Size` (§4.2 rule 7).
+**removed** are not in the forwarded body; their bytes come from the context operation's own `Size`
+(§4.2 rule 7).
 
-Both hosts send bytes for each forwarded position (`Body`), and the library converts them with the
-request's own ratio (billed prompt tokens ÷ forwarded body bytes), as
+Both hosts send bytes for each forwarded position (`Body`) and for each operation (`Size`). The
+library converts both with the request's own ratio (billed prompt tokens ÷ body bytes), as
 `pricing.EstimateTokensFromBytes` does today. Results that use the ratio are marked `Estimated`.
-The proxy has a tokenizer, but it uses the same ratio here, so the two hosts give the same tokens
-for the same bodies. The tokenizer counts only the removed tokens on the operations (§4.2 rule 7).
-The same tokens in both hosts therefore holds when the two hosts receive the same bodies and the
-same operations. It does not hold when one host has a tokenizer count and the other a
-`bytes-estimate` for the same change.
+No host sends a token count, so the same tokens in both hosts holds whenever the two hosts receive
+the same bodies and the same operations.
 
 ## 6. The library
 
@@ -1547,7 +1545,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 | Breakpoints | end of `system` + last message (Claude Code); one after `tools` only; none; one inside the messages before a break |
 | TTL of the next breakpoint | 5m, 1h |
 | Lifetime | `exact` (Anthropic); `minimum` (OpenAI GPT-5.6+); `unknown` |
-| Tokens | counted by a tokenizer; `bytes-estimate`; with and without the proxy's `BilledTokenFactor` |
+| Tokens | request ratio (usage present); fallback ratio (no usage) |
 
 **B. Hand-written cases.** These test how context operations interact, which a cross product cannot do:
 
@@ -1633,10 +1631,11 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
    are the API rate ratios, an estimate. It is not verified whether a subscription response carries
    usage-limit headers that a host could use to measure the weights. If it does, a calibration
    could replace the defaults for each plan.
-3. **The tokenizer correction.** The proxy multiplies its counted tokens by `BilledTokenFactor`
-   (o200k_base to the provider's tokenizer). Cortex uses a bytes ratio. Option: `Input` takes a
-   factor for each tokenizer name, so `counterfactual.Compute` applies the correction in one place. The
-   generated cases test both, with and without the factor.
+3. **Accuracy of the bytes ratio.** The request ratio is an average. Removed content (large JSON
+   tool output) may have fewer bytes per token than the average request. Option: `Size` takes a
+   content class (`text`, `json`, `binary`) and the library keeps a ratio for each class. Decide
+   after measuring the error on real sessions. An optional `Tokens` field on `Size`, which
+   the library would use instead of estimating, is also possible.
 
 4. **Where the previous request's hashes live.** The counterfactual needs the previous request's
    hashes on the same thread. The current design (D12, wiring document) has the host keep one
