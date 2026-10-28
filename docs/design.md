@@ -316,7 +316,7 @@ provider already cached, forcing a cache-write of the suffix; a shorter transcri
 key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
 there. After a proxy restart the tracker's records are gone but the provider's cache entries are
 not, so an unknown key reads as all-cached until its first request after the restart, for that
-request's own cache lifetime (5 minutes, 30 minutes on OpenAI GPT-5.6+, 1 hour on the extended
+request's own cache lifetime (5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended
 tier); the host can switch the rule off (`--restart-grace=false`).
 
 ### Fail-open per mode
