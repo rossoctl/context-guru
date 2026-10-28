@@ -783,18 +783,22 @@ type warmApply struct {
 // drops after the change point). Anything else leaves the answer held and the request unchanged.
 func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string) (keys []string, changed int) {
-	var src heldSource = storeHeld{c.Store}
-	if e.v3 {
-		src = v3Filtered{heldSource: src, protected: e.v3Plan(c, req).protectedID}
+	if !e.v3 {
+		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
 	}
-	keys, changed = e.applyHeldFrom(src, nil, req, rep, c, tkey)
-	if e.v3 && changed > 0 {
-		// Sweep v3: a cold or changed-prefix apply is a cut. It is counted and it starts the growth wait.
-		cut := v3CutRec{p: c.PrevBilledInputThread, judge: changed, set: true}
-		if C := e.v3CutPoint(c); C > 0 {
-			cut.c, cut.pShareC = C, float64(cut.p)/float64(C)
+	var protected map[string]bool
+	var claimed []string
+	src := v3Filtered{heldSource: storeHeld{c.Store}, claimed: &claimed, plan: func() map[string]bool {
+		if protected == nil {
+			protected = e.v3Plan(c, req).protectedID
 		}
-		e.v3CutDone(tkey, cut)
+		return protected
+	}}
+	before := v3MarkedIDs(req)
+	keys, changed = e.applyHeldFrom(src, nil, req, rep, c, tkey)
+	if changed > 0 {
+		// Sweep v3: a cold or changed-prefix apply is a cut. It is counted and it starts the growth wait.
+		e.v3ColdCut(c, req, tkey, claimed, before, nil)
 	}
 	return keys, changed
 }

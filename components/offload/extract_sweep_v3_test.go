@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
@@ -604,20 +605,37 @@ func TestV3PingQuestionNeverOffersAProtectedOutput(t *testing.T) {
 	}
 }
 
-func TestV3RuleSelectorMakesNoModelCallAtThePing(t *testing.T) {
+func TestV3RuleSelectorMakesNoModelCallAtThePingAndKeepsNoCopy(t *testing.T) {
 	resetV3ForTest()
 	asker := pingAsker()
 	e := shippedSweep(t, v3Rule)
 	key, _ := registered(t, e, "v3-ping-rule", asker, newMemStore(), refConversation(3))
-	dispatch, _, reason, ok := SweepPingSubstitute(key)
-	if ok || dispatch != nil || reason != SweepReasonV3Rule {
-		t.Fatalf("selector rule offered a ping question: ok %v reason %q", ok, reason)
+	sweepPingMu.Lock()
+	_, kept := sweepPingCand[key]
+	sweepPingMu.Unlock()
+	if kept {
+		t.Fatal("selector rule kept a copy of the conversation for a ping that is always refused")
+	}
+	dispatch, _, _, ok := SweepPingSubstitute(key)
+	if ok || dispatch != nil {
+		t.Fatal("selector rule offered a ping question")
 	}
 	if n := atomic.LoadInt64(&asker.calls); n != 0 {
 		t.Fatalf("selector rule made %d model calls at the ping", n)
 	}
-	if v3Counters().Refused["ping_refused_rule"] != 1 {
-		t.Fatalf("the refusal is not counted: %+v", v3Counters())
+}
+
+// A candidate registered anyway (a config change) is still refused at the ping.
+func TestV3RuleSelectorRefusesARegisteredPingCandidate(t *testing.T) {
+	resetV3ForTest()
+	asker := pingAsker()
+	key, _ := registered(t, shippedSweep(t, ""), "v3-ping-rule2", asker, newMemStore(), refConversation(3))
+	sweepPingMu.Lock()
+	sweepPingCand[key].e = shippedSweep(t, v3Rule)
+	sweepPingMu.Unlock()
+	_, _, reason, ok := SweepPingSubstitute(key)
+	if ok || reason != SweepReasonV3Rule || v3Counters().Refused["ping_refused_rule"] != 1 || atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("ok %v reason %q refused %v", ok, reason, v3Counters().Refused)
 	}
 }
 
@@ -691,5 +709,70 @@ func TestV3RuleDropsRecordTheirOwnTokenCount(t *testing.T) {
 	src := e.newV3Held(warmCtx("v3-tok", newMemStore()), "k", p, req.Input, false)
 	if len(src.rules) != 1 || src.rules[0].Tokens != schema.TextTokens(v3Out("a")) || src.rules[0].Tokens <= src.rules[0].Saves {
 		t.Fatalf("rule output = %+v, want Tokens = the output's own size, above Saves", src.rules)
+	}
+}
+
+func TestV3AColdRequestWithNoStoredAnswerBuildsNoPlan(t *testing.T) {
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 1\n")
+	before := v3PlanBuilds.Load()
+	req := refConversation(3)
+	if _, err := e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, coldCtx("v3-noplan", newMemStore())); err != nil {
+		t.Fatal(err)
+	}
+	if got := v3PlanBuilds.Load() - before; got != 0 {
+		t.Fatalf("a cold request with no stored answer built %d plans", got)
+	}
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-noplan2", refConversation(3))
+	before = v3PlanBuilds.Load()
+	if _, err := e.Offload(refConversation(3), &components.Report{Component: "extract_llm_sweep"}, coldCtx("v3-noplan2", st)); err != nil {
+		t.Fatal(err)
+	}
+	if got := v3PlanBuilds.Load() - before; got != 1 {
+		t.Fatalf("with a stored answer the plan was built %d times, want 1 (control)", got)
+	}
+}
+
+func TestV3ColdCutSplitsRuleDropsFromJudgeDrops(t *testing.T) {
+	resetV3ForTest()
+	e := shippedSweep(t, v3Rule)
+	req := v3Conv(tCalls(), 2)
+	marked := func(id string) {
+		i, _ := rawToolMessage(req.Input, id)
+		txt := schema.MessageText(req.Input[i]) + "\n<<cg:zz>>"
+		req.Input[i].Content = &bschemas.ChatMessageContent{ContentStr: &txt}
+	}
+	before := v3MarkedIDs(req)
+	marked("t_ra1")
+	marked("t_rb")
+	marked("t_ls") // claimed, but marked before: not a drop of this apply
+	before["t_ls"] = true
+	e.v3ColdCut(warmCtx("v3-split", newMemStore()), req, "k-split", []string{"t_ra1", "t_rb", "t_ls", "t_go1"}, before,
+		map[string]string{"t_ra1": ruleFileReread})
+	v := v3Counters()
+	if v.RuleDrops[ruleFileReread] != 1 || v.JudgeDrops != 1 || v.Cuts != 1 {
+		t.Fatalf("ledger = %+v, want 1 rule drop, 1 judge drop (t_go1 was never marked, t_ls was marked before)", v)
+	}
+}
+
+func TestV3AColdApplyThatChangesNothingStillClearsTheHybridQuestion(t *testing.T) {
+	resetWarmForTest()
+	e := shippedSweep(t, v3Hybrid)
+	tkey := thread.Key("v3-cold-clear", "")
+	warmMu.Lock()
+	warmFor(tkey).v3Asked = true
+	warmMu.Unlock()
+	// A waiting answer that names an output the conversation does not have: the recheck drops it, wn = 0.
+	warmHold(tkey, heldAnswer{V: heldVersion, Thread: tkey, AskedAtMs: time.Now().UnixMilli(), Judged: 3,
+		Outputs: []heldOutput{{ToolUseID: "gone", Hash: "x", Tokens: 100, Saves: 90, Drop: true}}})
+	c := coldCtx("v3-cold-clear", newMemStore())
+	c.CanKeepAlive = nil
+	req := refConversation(3)
+	_, changed := e.v3Dispatch(req, &components.Report{Component: "extract_llm_sweep"}, c, tkey,
+		v3In{cold: true, hasHeld: true})
+	warmMu.Lock()
+	asked := warmThreads[tkey].v3Asked
+	warmMu.Unlock()
+	if changed != 0 || asked {
+		t.Fatalf("changed %d, v3Asked %v: a used answer must clear the question even when nothing changed", changed, asked)
 	}
 }

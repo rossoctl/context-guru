@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -199,6 +200,9 @@ func (e *ExtractSweep) v3CutPoint(c *components.Ctx) int {
 
 type v3Call struct{ name, path, cmd string }
 
+// v3PlanBuilds counts plans built, so a test can show that a request which needs none builds none.
+var v3PlanBuilds atomic.Int64
+
 var cmdKeys = []string{"command", "cmd"}
 
 // callCommand is the command of a shell tool call, with its white space collapsed, or "".
@@ -283,6 +287,7 @@ func toolCallID(m bschemas.ChatMessage) string {
 
 // v3Plan computes the protection and, unless the selector is judge, the rule drops, on req.
 func (e *ExtractSweep) v3Plan(c *components.Ctx, req *bschemas.BifrostChatRequest) v3Plan {
+	v3PlanBuilds.Add(1)
 	p := v3Plan{protectedID: map[string]bool{}, protected: map[int]bool{}, ruleIdx: map[int]bool{}}
 	tools := toolIndices(req)
 	calls := v3Calls(req)
@@ -392,6 +397,8 @@ type v3Held struct {
 	ruleOf    map[string]string
 	protected map[string]bool
 	claimed   bool
+	// claimedIDs are the drops the claim handed out, for the cold cut's split.
+	claimedIDs []string
 }
 
 // newV3Held builds the source. raw is the agent's own conversation: the hash and the prints are measured on
@@ -463,6 +470,11 @@ func (v *v3Held) claim(string) (heldAnswer, bool) {
 	h, ok := v.combine(ans, have)
 	if ok {
 		v.claimed = true
+		for _, o := range h.Outputs {
+			if o.Drop {
+				v.claimedIDs = append(v.claimedIDs, o.ToolUseID)
+			}
+		}
 	}
 	return h, ok
 }
@@ -504,13 +516,16 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 	plan := e.v3Plan(c, req)
 	plan.rules = nil
 	src := e.newV3Held(c, tkey, plan, raw, true)
+	// The answer is used now, applied or not. It is no longer "the judge gave no answer".
+	warmMu.Lock()
+	if t := warmFor(tkey); t != nil {
+		t.v3Asked = false
+	}
+	warmMu.Unlock()
+	before := v3MarkedIDs(req)
 	keys, changed = e.applyHeldFrom(src, &warmApply{}, req, rep, c, tkey)
 	if changed > 0 {
-		cut := v3CutRec{p: c.PrevBilledInputThread, judge: changed, set: true}
-		if C := e.v3CutPoint(c); C > 0 {
-			cut.c, cut.pShareC = C, float64(cut.p)/float64(C)
-		}
-		e.v3CutDone(tkey, cut)
+		e.v3ColdCut(c, req, tkey, src.claimedIDs, before, src.ruleOf)
 	}
 	return keys, changed
 }
@@ -845,24 +860,32 @@ func resetV3ForTest() {
 // v3Filtered is a held source that never hands out a protected output. The cold apply reads the Store with
 // it when v3 is on: an answer stored before a config change, or by a ping question, may name an output that
 // is protected now. Defense in depth; the question itself does not offer protected outputs either.
+//
+// The protected set is built lazily, on the first answer that has an output to check. A cold request with no
+// stored answer builds no plan.
 type v3Filtered struct {
 	heldSource
-	protected map[string]bool
+	plan    func() map[string]bool
+	claimed *[]string
 }
 
-func (f v3Filtered) strip(h heldAnswer, ok, count bool) (heldAnswer, bool) {
-	if !ok {
+func (f v3Filtered) strip(h heldAnswer, ok, claim bool) (heldAnswer, bool) {
+	if !ok || len(h.Outputs) == 0 {
 		return h, ok
 	}
+	protected := f.plan()
 	kept := make([]heldOutput, 0, len(h.Outputs))
 	for _, o := range h.Outputs {
-		if f.protected[o.ToolUseID] {
-			if count {
+		if protected[o.ToolUseID] {
+			if claim {
 				noteV3Refuse("cold_protected_filtered")
 			}
 			continue
 		}
 		kept = append(kept, o)
+		if claim && o.Drop && f.claimed != nil {
+			*f.claimed = append(*f.claimed, o.ToolUseID)
+		}
 	}
 	h.Outputs = kept
 	return h, true
@@ -875,4 +898,40 @@ func (f v3Filtered) get(k string) (heldAnswer, bool) {
 func (f v3Filtered) claim(k string) (heldAnswer, bool) {
 	h, ok := f.heldSource.claim(k)
 	return f.strip(h, ok, true)
+}
+
+// v3ColdCut books a cold or changed-prefix apply as a cut and starts the growth wait. The applied drops are
+// split into rule drops and judge drops through ruleOf, as the warm gate does: an id counts as applied when it
+// was a claimed drop and its message carries a marker now that it did not carry before.
+func (e *ExtractSweep) v3ColdCut(c *components.Ctx, req *bschemas.BifrostChatRequest, tkey string, claimed []string,
+	before map[string]bool, ruleOf map[string]string) {
+	cut := v3CutRec{p: c.PrevBilledInputThread, rules: map[string]int{}, set: true}
+	for _, id := range claimed {
+		if before[id] {
+			continue
+		}
+		if i, ok := rawToolMessage(req.Input, id); !ok || !strings.Contains(schema.MessageText(req.Input[i]), "<<cg:") {
+			continue
+		}
+		if r, isRule := ruleOf[id]; isRule {
+			cut.rules[r]++
+		} else {
+			cut.judge++
+		}
+	}
+	if C := e.v3CutPoint(c); C > 0 {
+		cut.c, cut.pShareC = C, float64(cut.p)/float64(C)
+	}
+	e.v3CutDone(tkey, cut)
+}
+
+// v3MarkedIDs is the set of tool ids whose message carries a marker already.
+func v3MarkedIDs(req *bschemas.BifrostChatRequest) map[string]bool {
+	out := map[string]bool{}
+	for _, i := range toolIndices(req) {
+		if strings.Contains(schema.MessageText(req.Input[i]), "<<cg:") {
+			out[toolCallID(req.Input[i])] = true
+		}
+	}
+	return out
 }
