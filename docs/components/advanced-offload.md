@@ -689,15 +689,24 @@ The rules read tool names, input paths and commands from the request in flight. 
 
 - `file_reread`: a file read whose same path was read again later, or edited or written later.
 - `build_rerun`: a build, test or lint run in a shell tool whose same command (white space collapsed) ran again later.
+- `unreferenced` (rule (c), off by default; `rule_unreferenced: true`): a tool output that nothing later references. It is the
+  recheck's `referenced_later` signal, from the same code (`coref.IndexNovel`), run over the whole later conversation: no
+  later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). An output that
+  introduced no identifier is never chosen. `rule_unreferenced_min_age` (default 30) is how many tool calls newer the output
+  must be. Setting `rule_unreferenced` switches v3 on. It needs `selector: rule` or `hybrid`.
 - An output that already has a `<<cg:...>>` marker, or that the agent expanded, is never chosen.
 
 Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), outputs whose call path matches `protect_paths`
 (globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
 expanded in this session.
 
-`not_in_sweet_spot` and `cut_point_unknown` are counted once per `warm_every_n` warm requests.
+`not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`).
+
+The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.
 
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
+`expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
+expand rate per rule), `recent_refusals` (the last size-gate refusals with D, D/P, P/C, C, `c_source` and D by rule),
 `c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
 `no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
 P as a share of C).

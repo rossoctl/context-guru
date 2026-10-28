@@ -2,6 +2,7 @@ package offload
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
@@ -274,7 +276,8 @@ func TestV3NotInTheSweetSpotIsRefusedAndPassesAtTheSpot(t *testing.T) {
 func TestV3ADropThatIsTooSmallIsRefused(t *testing.T) {
 	r := newV3Rig(t, "v3-small", v3Rule+"min_drop_frac: 0.9\n")
 	r.request(0)
-	req, rep := r.request(175_000)
+	r.request(175_000)
+	req, rep := r.request(175_000) // the third request is on the pace of warm_every_n: the refusal is counted
 	if rep.Events[eventAppliedWarm] != 0 || len(dropped(req)) != 0 || r.refused("drop_too_small") != 1 {
 		t.Fatalf("events %v refused %v", rep.Events, v3Counters().Refused)
 	}
@@ -306,6 +309,7 @@ func TestV3TheWaitHoldsUntilPHasGrownByMinDropFracOfC(t *testing.T) {
 		t.Fatalf("waiting_for_growth = %d, want 2 (%v)", got, v3Counters().Refused)
 	}
 	r.request(base + 30_000) // 0.15 x 200k = 30k: the wait is over
+	r.request(base + 30_000) // the sixth request: on the pace, so the rules' refusal is counted
 	if got := r.refused("waiting_for_growth"); got != 2 {
 		t.Fatalf("waiting_for_growth = %d after the growth, want it still 2", got)
 	}
@@ -849,5 +853,310 @@ func TestV3AColdApplyThatChangesNothingStillClearsTheHybridQuestion(t *testing.T
 	warmMu.Unlock()
 	if changed != 0 || asked {
 		t.Fatalf("changed %d, v3Asked %v: a used answer must clear the question even when nothing changed", changed, asked)
+	}
+}
+
+// ---- rule (c), unreferenced; D by rule; expand per source ----
+
+const v3Unref = v3Rule + "rule_unreferenced: true\nrule_unreferenced_min_age: 1\n"
+
+// unrefCalls: four reads of different files, each output introduces identifiers of its own.
+func unrefCalls() []v3T {
+	var out []v3T
+	for i := 0; i < 4; i++ {
+		out = append(out, v3T{fmt.Sprintf("toolu_wire_%d", i), "Read", tReadArgs(fmt.Sprintf("/w/p%d.txt", i)), refOutput(i)})
+	}
+	return out
+}
+
+func unrefPlan(t *testing.T, cfg string, calls []v3T, tail ...bschemas.ChatMessage) v3Plan {
+	t.Helper()
+	req := v3Conv(calls, 0)
+	req.Input = append(req.Input, tail...)
+	return shippedSweep(t, cfg).v3Plan(warmCtx("v3-unref", newMemStore()), req)
+}
+
+func TestV3UnreferencedDropsOnlyWhatNothingLaterReferences(t *testing.T) {
+	p := unrefPlan(t, v3Unref, unrefCalls())
+	got := ruleIDs(p)
+	// The newest output has no tool call after it: min age 1 keeps it. The other three are dropped.
+	if len(got) != 3 || got["toolu_wire_3"] != "" || got["toolu_wire_0"] != ruleUnreferenced {
+		t.Fatalf("rules = %v, want toolu_wire_0..2 under %q", got, ruleUnreferenced)
+	}
+	// A later model turn reuses an identifier output 1 introduced: it must not be dropped.
+	ref := assistantMsg("raising handler_1_timeout_ms in src/api/users_1.py:42")
+	p = unrefPlan(t, v3Unref, unrefCalls(), ref)
+	got = ruleIDs(p)
+	if _, dropped := got["toolu_wire_1"]; dropped || len(got) != 3 && len(got) != 2 {
+		t.Fatalf("rules = %v: an output referenced later was chosen", got)
+	}
+	if _, dropped := got["toolu_wire_1"]; dropped {
+		t.Fatalf("rules = %v: toolu_wire_1 is referenced later", got)
+	}
+	if got["toolu_wire_0"] != ruleUnreferenced || got["toolu_wire_2"] != ruleUnreferenced {
+		t.Fatalf("rules = %v, the unreferenced outputs must still go", got)
+	}
+}
+
+// The reference may be a tool call's argument too (a path or value passed to a later call).
+func TestV3UnreferencedSeesAReferenceInALaterToolCall(t *testing.T) {
+	calls := unrefCalls()
+	calls = append(calls, v3T{"toolu_wire_9", "Bash", tCmdArgs("grep handler_0_timeout_ms src/api/users_0.py"), "x"})
+	got := ruleIDs(unrefPlan(t, v3Unref, calls))
+	if _, dropped := got["toolu_wire_0"]; dropped {
+		t.Fatalf("rules = %v: toolu_wire_0 is named in a later call", got)
+	}
+}
+
+func TestV3UnreferencedIsOffByDefaultAndNeedsTheSetting(t *testing.T) {
+	if got := ruleIDs(unrefPlan(t, v3Rule, unrefCalls())); len(got) != 0 {
+		t.Fatalf("rule (c) acted with the setting off: %v", got)
+	}
+	if e := shippedSweep(t, v3Base+"rule_unreferenced: true\n"); !e.v3 || !e.ruleUnref || e.ruleUnrefMinAge != 30 {
+		t.Fatalf("rule_unreferenced must switch v3 on with a min age of 30: %+v", e)
+	}
+	if e := shippedSweep(t, warmCfg); e.ruleUnref {
+		t.Fatal("rule (c) is on by default")
+	}
+}
+
+func TestV3UnreferencedMinAgeIsInToolCalls(t *testing.T) {
+	cfg := v3Rule + "rule_unreferenced: true\nrule_unreferenced_min_age: 3\n"
+	got := ruleIDs(unrefPlan(t, cfg, unrefCalls()))
+	if len(got) != 1 || got["toolu_wire_0"] != ruleUnreferenced {
+		t.Fatalf("rules = %v, want only the output 3 tool calls old", got)
+	}
+}
+
+func TestV3UnreferencedObeysEveryProtection(t *testing.T) {
+	t.Run("protect_last_n", func(t *testing.T) {
+		cfg := strings.Replace(v3Unref, "protect_last_n: 0", "protect_last_n: 3", 1)
+		got := ruleIDs(unrefPlan(t, cfg, unrefCalls()))
+		if len(got) != 1 || got["toolu_wire_0"] == "" {
+			t.Fatalf("rules = %v, want only the oldest", got)
+		}
+	})
+	t.Run("protect_tools", func(t *testing.T) {
+		if got := ruleIDs(unrefPlan(t, v3Unref+"protect_tools: ['read']\n", unrefCalls())); len(got) != 0 {
+			t.Fatalf("rules = %v", got)
+		}
+	})
+	t.Run("protect_paths", func(t *testing.T) {
+		got := ruleIDs(unrefPlan(t, v3Unref+"protect_paths: ['p0.txt']\n", unrefCalls()))
+		if _, d := got["toolu_wire_0"]; d || len(got) != 2 {
+			t.Fatalf("rules = %v", got)
+		}
+	})
+	t.Run("marked and expanded", func(t *testing.T) {
+		e := shippedSweep(t, v3Unref)
+		st := newMemStore()
+		st.Put("abc123", []byte("original"))
+		c := warmCtx("v3-unref-m", st)
+		calls := unrefCalls()
+		calls[0].out += "\n<<cg:abc123>>"
+		if got := ruleIDs(e.v3Plan(c, v3Conv(calls, 0))); got["toolu_wire_0"] != "" {
+			t.Fatalf("a marked output was chosen: %v", got)
+		}
+		MarkKeptVerbatim(st, "v3-unref-m", refOutput(1))
+		if got := ruleIDs(e.v3Plan(c, v3Conv(unrefCalls(), 0))); got["toolu_wire_1"] != "" {
+			t.Fatalf("an expanded output was chosen: %v", got)
+		}
+	})
+}
+
+// ⭐ The rule never drops what the recheck would call referenced_later: through a full cut.
+func TestV3UnreferencedCutNeverDropsAReferencedOutput(t *testing.T) {
+	r := newV3Rig(t, "v3-unref-cut", v3Unref)
+	r.calls = unrefCalls()
+	r.request(0)
+	req, rep := r.request(175_000)
+	if rep.Events[eventAppliedWarm] != 3 {
+		t.Fatalf("events %v refused %v", rep.Events, v3Counters().Refused)
+	}
+	if v := v3Counters(); v.RuleDrops[ruleUnreferenced] != 3 || v.JudgeDrops != 0 {
+		t.Fatalf("ledger = %+v, want 3 under %q", v, ruleUnreferenced)
+	}
+	// Same again with a reference to output 1 in the conversation.
+	r2 := newV3Rig(t, "v3-unref-cut2", v3Unref)
+	r2.calls = unrefCalls()
+	r2.request(0)
+	req2 := v3Conv(r2.calls, 9)
+	req2.Input = append(req2.Input, assistantMsg("raising handler_1_timeout_ms in src/api/users_1.py:42"))
+	c := warmCtx(r2.session, r2.st)
+	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint = 1_000_000, true, 200_000
+	c.PrevBilledInput, c.PrevBilledInputThread = 175_000, 175_000
+	c.PrefixAsk = r2.asker
+	if _, err := r2.e.Offload(req2, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := dropped(req2); got["toolu_wire_1"] {
+		t.Fatalf("dropped = %v: toolu_wire_1 is referenced later", got)
+	}
+	_ = req
+}
+
+// ---- the rule-mode refusals: paced, logged, with D by rule ----
+
+func TestV3RuleModeRefusalsArePacedAndLogD(t *testing.T) {
+	r := newV3Rig(t, "v3-rule-log", v3Rule+"min_drop_frac: 0.9\n")
+	r.request(0)
+	for i := 0; i < 6; i++ {
+		r.request(175_000)
+	}
+	if got := r.refused("drop_too_small"); got != 2 {
+		t.Fatalf("drop_too_small = %d over 6 requests with warm_every_n 3, want 2 (paced)", got)
+	}
+	v := v3Counters()
+	if len(v.RecentRefusals) == 0 {
+		t.Fatalf("no recent_refusals: %+v", v)
+	}
+	rf := v.RecentRefusals[len(v.RecentRefusals)-1]
+	if rf.Reason != "drop_too_small" || rf.D <= 0 || rf.DShareP <= 0 || rf.C != 200_000 || rf.CSource == "" ||
+		rf.RuleD[ruleFileReread] <= 0 || rf.RuleD[ruleBuildRerun] <= 0 {
+		t.Fatalf("refusal = %+v, want D, D/P, C, c_source and D by rule", rf)
+	}
+	d, ok := lastWarmDecision()
+	if !ok || d.Reason != "drop_too_small" || len(d.RuleD) != 2 || d.CutPoint != 200_000 {
+		t.Fatalf("decision = %+v", d)
+	}
+	if s := ruleDString(map[string]int{"b": 2, "a": 1}); s != "a:1,b:2" {
+		t.Fatalf("ruleDString = %q", s)
+	}
+}
+
+func TestV3NoRuleDropsIsPacedAndLogged(t *testing.T) {
+	r := newV3Rig(t, "v3-norule-log", v3Rule)
+	r.calls = []v3T{{"a", "Read", tReadArgs("/w/a"), v3Out("a")}} // nothing a rule can choose
+	r.request(0)
+	for i := 0; i < 6; i++ {
+		r.request(175_000)
+	}
+	if got := r.refused("no_rule_drops"); got != 2 {
+		t.Fatalf("no_rule_drops = %d over 6 requests, want 2", got)
+	}
+	if rf := v3Counters().RecentRefusals; len(rf) != 2 || rf[0].Reason != "no_rule_drops" || rf[0].C != 200_000 {
+		t.Fatalf("recent_refusals = %+v", rf)
+	}
+}
+
+// The judge-path drop_too_small decision carries D by source too (judge in a hybrid cut).
+func TestV3GateRefusalCarriesDByRule(t *testing.T) {
+	r := newV3Rig(t, "v3-gate-rd", v3Hybrid+"min_drop_frac: 0.9\n")
+	r.asker = &fakeAsker{err: errors.New("down")}
+	r.request(0)
+	r.request(175_000)
+	r.request(175_000)
+	r.forward()
+	r.request(175_000)
+	d, ok := lastWarmDecision()
+	if !ok || d.Reason != "drop_too_small" || d.RuleD[ruleFileReread] <= 0 {
+		t.Fatalf("decision = %+v, want D by rule on the gate's refusal", d)
+	}
+}
+
+// ---- expand per source ----
+
+func firstMarker(t *testing.T, req *bschemas.BifrostChatRequest, id string) string {
+	t.Helper()
+	i, ok := rawToolMessage(req.Input, id)
+	if !ok {
+		t.Fatalf("no tool message %s", id)
+	}
+	ids := expand.ParseMarkers(schema.MessageText(req.Input[i]))
+	if len(ids) == 0 {
+		t.Fatalf("%s carries no marker", id)
+	}
+	return ids[0]
+}
+
+func TestV3ExpandsAreCountedByTheRuleThatDroppedTheOutput(t *testing.T) {
+	r := newV3Rig(t, "v3-exp-rule", v3Unref)
+	r.calls = unrefCalls()
+	r.request(0)
+	req, _ := r.request(175_000)
+	key := thread.Key("v3-exp-rule", "")
+	m := firstMarker(t, req, "toolu_wire_0")
+	if note := NoteSweepExpand(r.st, m, 100, key); !note.Sweep || !note.First {
+		t.Fatalf("note = %+v", note)
+	}
+	NoteSweepExpand(r.st, m, 100, key) // a second expand of the same drop is not a new one
+	if got := v3Counters().Expands; got[ruleUnreferenced] != 1 || len(got) != 1 {
+		t.Fatalf("expands = %v, want 1 under %q", got, ruleUnreferenced)
+	}
+}
+
+func TestV3JudgeDropExpandsAreCountedApart(t *testing.T) {
+	r := newV3Rig(t, "v3-exp-judge", v3Hybrid)
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(175_000)
+	}
+	r.forward()
+	req, _ := r.request(175_000)
+	key := thread.Key("v3-exp-judge", "")
+	NoteSweepExpand(r.st, firstMarker(t, req, "t_rb"), 100, key)  // chosen by the judge
+	NoteSweepExpand(r.st, firstMarker(t, req, "t_ra1"), 100, key) // chosen by rule file_reread
+	got := v3Counters().Expands
+	if got[sourceJudge] != 1 || got[ruleFileReread] != 1 {
+		t.Fatalf("expands = %v, want 1 judge and 1 %s", got, ruleFileReread)
+	}
+}
+
+func TestV3AColdDropIsRecordedAsTheJudge(t *testing.T) {
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-cold-judge", refConversation(3))
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 0\n")
+	req := refConversation(3)
+	if _, err := e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, coldCtx("v3-cold-judge", st)); err != nil {
+		t.Fatal(err)
+	}
+	NoteSweepExpand(st, firstMarker(t, req, "toolu_wire_0"), 10, thread.Key("v3-cold-judge", ""))
+	if got := v3Counters().Expands; got[sourceJudge] != 1 {
+		t.Fatalf("expands = %v, want the cold judge drop counted under judge", got)
+	}
+}
+
+func TestV3NoRuleIsRecordedWithV3Off(t *testing.T) {
+	resetV3ForTest()
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-off-rec", refConversation(3))
+	req := refConversation(3)
+	if _, err := shippedSweep(t, "").Offload(req, &components.Report{Component: "extract_llm_sweep"}, coldCtx("v3-off-rec", st)); err != nil {
+		t.Fatal(err)
+	}
+	NoteSweepExpand(st, firstMarker(t, req, "toolu_wire_0"), 10, thread.Key("v3-off-rec", ""))
+	if v3Counters().Any() {
+		t.Fatalf("v3 counted an expand with v3 off: %+v", v3Counters())
+	}
+}
+
+// An output that introduced no identifier the index can track is OPAQUE: no evidence either way. Never chosen.
+func TestV3UnreferencedNeverChoosesAnOpaqueOutput(t *testing.T) {
+	var calls []v3T
+	for i := 0; i < 4; i++ {
+		calls = append(calls, v3T{fmt.Sprintf("op_%d", i), "Read", tReadArgs(fmt.Sprintf("/w/o%d.txt", i)), strings.Repeat("the and of to in a is it for on\n", 900)})
+	}
+	if got := ruleIDs(unrefPlan(t, v3Unref, calls)); len(got) != 0 {
+		t.Fatalf("rules = %v: an output with nothing to track was chosen", got)
+	}
+}
+
+func TestV3UnreferencedIsOffUnlessWritten(t *testing.T) {
+	for _, cfg := range []string{v3Rule, v3Hybrid, v3Base + "selector: rule\nprotect_last_n: 0\nmin_drop_frac: 0.2\n"} {
+		if e := shippedSweep(t, cfg); !e.v3 || e.ruleUnref {
+			t.Fatalf("rule (c) is on without the setting: v3 %v ruleUnref %v", e.v3, e.ruleUnref)
+		}
+	}
+}
+
+// The reference is read from the agent's own conversation (RawInput), as the recheck reads it, not from the
+// pipeline's copy: a reference only the raw conversation carries still protects the output.
+func TestV3UnreferencedReadsTheAgentsOwnConversation(t *testing.T) {
+	e := shippedSweep(t, v3Unref)
+	piped := v3Conv(unrefCalls(), 0)
+	raw := v3Conv(unrefCalls(), 0)
+	raw.Input = append(raw.Input, assistantMsg("raising handler_1_timeout_ms in src/api/users_1.py:42"))
+	c := warmCtx("v3-unref-raw", newMemStore())
+	c.RawInput = raw.Input
+	if got := ruleIDs(e.v3Plan(c, piped)); got["toolu_wire_1"] != "" {
+		t.Fatalf("rules = %v: toolu_wire_1 is referenced in the agent's conversation", got)
 	}
 }

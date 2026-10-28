@@ -89,6 +89,9 @@ type sweepDropRec struct {
 	Tokens int    `json:"tokens"`
 	AtMs   int64  `json:"at_ms"`
 	Kind   string `json:"kind"` // "cold", "changed_prefix" or "warm"
+	// Rule says what chose the drop when sweep v3 was on: a rule name, or "judge". Empty otherwise. A name
+	// only, so an expand can be counted per rule. No content.
+	Rule string `json:"rule,omitempty"`
 	// Idents are short hashes of the identifiers the output introduced. A later turn that uses one,
 	// without expanding, is the referenced_later signal.
 	Idents []string `json:"idents,omitempty"`
@@ -446,6 +449,9 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 		if first {
 			rec.Expanded = true
 			putDrop(st, rec)
+			if rec.Rule != "" {
+				noteV3Expand(rec.Rule)
+			}
 			if !note.First {
 				note.First, note.Overlap = true, overlap
 				note.Warm = rec.Kind == dropKindWarm
@@ -740,6 +746,17 @@ func modelAuthoredText(m bschemas.ChatMessage) string {
 	return s
 }
 
+// ruleNamer is implemented by the sweep v3 sources, which know what chose each drop.
+type ruleNamer interface{ ruleFor(toolID string) string }
+
+// ruleOfSource is the rule that chose a drop, or "" for a source that does not say (everything but v3).
+func ruleOfSource(src heldSource, toolID string) string {
+	if rn, ok := src.(ruleNamer); ok {
+		return rn.ruleFor(toolID)
+	}
+	return ""
+}
+
 // pendingDrop is a drop applied to req but not yet recorded.
 type pendingDrop struct {
 	rec    sweepDropRec
@@ -992,7 +1009,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		pending = append(pending, pendingDrop{idx: idx, before: before, rec: sweepDropRec{
 			Thread: tkey, ToolUseID: o.ToolUseID, CK: extract.ContentKey(content), Marker: key,
 			Tokens: saved, AtMs: time.Now().UnixMilli(), Kind: kind,
-			Idents: res.identsOf(o.ToolUseID), Seen: len(raw),
+			Idents: res.identsOf(o.ToolUseID), Seen: len(raw), Rule: ruleOfSource(src, o.ToolUseID),
 		}})
 		changed++
 		if key != "" {
