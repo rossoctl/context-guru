@@ -12,7 +12,7 @@ import (
 )
 
 // This file plays every opscases.Case through the path the proxy uses (Trackers, the shared replay
-// filter Request.AddUnlessActive, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
+// Request.Add (every op, replays included), Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, beside
 // Play, because the helpers it reuses (priceOf, micros, expected, abs) are in that package.
 
@@ -47,7 +47,7 @@ func PlayCF(c opscases.Case) []PlayedCF {
 		req := trackers.BeginRequest(s.Begin.Meta, s.Begin.Client, s.Begin.ClientBreakpoints)
 		var spend int64
 		for _, op := range s.Add {
-			req.AddUnlessActive(s.End.Thread, op)
+			req.Add(op)
 			if op.Kind == cf.KindSpend && op.Call != nil {
 				spend += c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 			}
@@ -223,10 +223,6 @@ var cfKnownDifferences = map[string]struct {
 		At:       []cfPlace{{1, ""}, {1, "inference-router"}},
 		Unattrib: []int{1},
 	},
-	"split/delivered/stable-half-read": {
-		Reason: "the case reports cachesplit again on request 2 while the thread still applies it, so the shared replay filter (§4.6) drops it and no split effect is produced",
-		At:     []cfPlace{{1, ""}},
-	},
 }
 
 // cfLibraryDisagrees are cases where Compute itself returns something other than the case expects.
@@ -245,23 +241,39 @@ func TestProxyPathMatchesOpscases(t *testing.T) {
 			for _, p := range known.At {
 				allowed[cfPlace{p.step, p.comp}] = true
 			}
+			played := PlayCF(c)
+			// Where a case is listed, the gap at each Unattrib step must be exactly the unattributed
+			// break CFFigure reports, and the thread total may differ only by the sum of those.
+			var wantTotalGap int64
+			for _, st := range known.Unattrib {
+				want, _ := expected(c, c.Steps[st])
+				gap := played[st].NetMicro - want
+				if gap == 0 || abs(gap) <= 1 && played[st].Unattrib == 0 {
+					t.Errorf("step %d is listed as unattributed but the net agrees: remove it", st)
+				} else if abs(gap-played[st].Unattrib) > 1 {
+					t.Errorf("step %d: net gap %d µ$ is not the unattributed break %d µ$", st, gap, played[st].Unattrib)
+				}
+				wantTotalGap += played[st].Unattrib
+			}
 			used := map[cfPlace]bool{}
 			for _, x := range diffs {
 				pl := cfPlace{x.step, x.change}
-				if x.step == -1 || allowed[pl] {
-					if listed {
-						used[pl] = true
-						t.Logf("known difference (%s): %s", known.Reason, x.text)
-						continue
-					}
+				if listed && (allowed[pl] || x.step == -1 && len(known.Unattrib) > 0) {
+					used[pl] = true
+					t.Logf("known difference (%s): %s", known.Reason, x.text)
+					continue
 				}
 				t.Error(x.text)
 			}
-			played := PlayCF(c)
-			for _, st := range known.Unattrib {
-				want, _ := expected(c, c.Steps[st])
-				if abs(want-played[st].NetMicro+played[st].Unattrib) > 1 {
-					t.Errorf("step %d: net differs by %d µ$, the unattributed break is %d µ$", st, want-played[st].NetMicro, played[st].Unattrib)
+			if listed && len(known.Unattrib) > 0 {
+				var wantT, gotT int64
+				for i, st := range c.Steps {
+					w, _ := expected(c, st)
+					wantT += w
+					gotT += played[i].NetMicro
+				}
+				if abs((gotT-wantT)-wantTotalGap) > 1 {
+					t.Errorf("thread total gap %d µ$ is not the unattributed sum %d µ$", gotT-wantT, wantTotalGap)
 				}
 			}
 			for pl := range allowed {

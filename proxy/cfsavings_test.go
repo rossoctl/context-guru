@@ -48,7 +48,7 @@ func countChange(res cf.Result, id string) (n int, saved int) {
 	return
 }
 
-func TestSavings_ReportsOnceAndReplaysByTheLibrary(t *testing.T) {
+func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
@@ -70,20 +70,29 @@ func TestSavings_ReportsOnceAndReplaysByTheLibrary(t *testing.T) {
 		t.Fatal("change must stay active after its first request")
 	}
 
-	// (b) the engine replays it: not re-added, still priced exactly once.
+	// (b) the change is reported again while active: it is added, and the library prices it once.
 	client2 := body(m0, big, m2, mustMsg("user", "next"))
 	fwd2 := body(m0, small, m2, mustMsg("user", "next"))
 	req := c.s.begin(cf.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: cf.BillingFrom(cf.BillingAPI)}, client2)
 	c.s.end(req, c.th, fwd2, []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
-	if len(req.Ops) != 0 {
-		t.Fatalf("replayed change was re-added: %d ops", len(req.Ops))
+	if len(req.Ops) != 1 {
+		t.Fatalf("replayed change must be added, req.Ops = %d", len(req.Ops))
 	}
 	res = c.s.compute(req, usage)
 	if len(res.Checks) != 0 {
-		t.Fatalf("checks = %+v", res.Checks)
+		t.Fatalf("checks = %+v (unique_change must not fire)", res.Checks)
 	}
 	if n, _ := countChange(res, id); n != 1 {
 		t.Fatalf("replayed change priced %d times, want 1", n)
+	}
+	once := 0
+	for _, o := range res.Ops {
+		if o.ChangeID == id {
+			once++
+		}
+	}
+	if once != 1 {
+		t.Fatalf("res.Ops holds the change %d times, want 1", once)
 	}
 }
 
@@ -110,7 +119,7 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 		t.Fatal("change must end after a client edit at or before its position")
 	}
 
-	// Request 3 reports the same ChangeID again: it is added and priced.
+	// Request 3 reports the same ChangeID again: it is added and priced (no filter).
 	req := c.s.begin(cf.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: cf.BillingFrom(cf.BillingAPI)}, body(m0b, big, m2))
 	c.s.end(req, c.th, body(m0b, small, m2), []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
 	if len(req.Ops) != 1 {

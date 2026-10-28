@@ -45,8 +45,9 @@ func PingOps(p Ping, b Billing) (RequestOps, PingFacts) {
 		PingFacts{LastPing: p.At, PingWindow: change}
 }
 
-// IsActive reports whether the thread still applies the change again on each request. The host
-// uses it to report a change once and not again while the library still carries it (§4.6).
+// IsActive reports whether the thread still applies the change again on each request. A host
+// need not check it before reporting: the library replaces an active change by a reported one with
+// the same ChangeID. Tests use it to observe thread state.
 func (ts *Trackers) IsActive(session string, t Thread, changeID string) bool {
 	ts.mu.Lock()
 	tr, ok := ts.m[ThreadKey(session, t)]
@@ -81,17 +82,4 @@ func (ts *Trackers) Fork(session string, parent, child Thread) {
 	}
 	s.Version = 0
 	ts.m[ThreadKey(session, child)] = &Tracker{state: s}
-}
-
-// AddUnlessActive adds op unless it is a rewrite that thread th still applies again (§4.6), and
-// reports whether it added it. A host that reports a change once calls this for each operation, so
-// the proxy and the agreement test share one replay filter. A DryRun, a spend and an operation
-// without a ChangeID are always added. A change that ended since is added again.
-func (r *Request) AddUnlessActive(th Thread, op Operation) bool {
-	if op.Kind == KindRewrite && op.ChangeID != "" && !op.DryRun &&
-		r.trackers.IsActive(r.Meta.Session, th, op.ChangeID) {
-		return false
-	}
-	r.Add(op)
-	return true
 }

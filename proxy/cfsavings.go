@@ -13,12 +13,13 @@ func (s *savingsTracker) begin(meta cf.RequestMeta, client []byte) *cf.Request {
 	return s.trackers.BeginRequest(meta, cfBodies(client), cfBreakpoints(client))
 }
 
-// end records the operations, then the thread and the forwarded body. A rewrite whose ChangeID
-// the thread still applies is not added: the library applies it again by itself (§4.6). One that
-// ended since is added again, which is how a change after a compaction is priced.
+// end records the operations, then the thread and the forwarded body. Every op is added, replays
+// included: the library replaces an active change by the reported op with the same ChangeID
+// (counterfactual/compute.go, items()), so a change is priced once and unique_change never fires.
+// Skipping a replay here would lose the op whenever Compute ends the change on this request.
 func (s *savingsTracker) end(req *cf.Request, th cf.Thread, forwarded []byte, ops []cf.Operation, facts cf.EntryFacts) {
 	for _, op := range ops {
-		req.AddUnlessActive(th, op)
+		req.Add(op)
 	}
 	req.EndRequest(th, cfBodies(forwarded), cfBreakpoints(forwarded), facts)
 }
