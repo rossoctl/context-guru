@@ -31,13 +31,27 @@ func cfBodies(raw []byte) cf.Body {
 	return cf.NewBody(tools, system, msgs)
 }
 
-// cfBreakpoints lists every cache_control mark, as a position in the same space as cfBodies.
-// A mark inside a message's content blocks belongs to that message. ttl defaults to "5m".
+// cfBreakpoints lists the cache_control marks, as positions in the same space as cfBodies, one per
+// position. A mark inside a message's content blocks belongs to that message, so an element mark
+// and a block mark (or two block marks) can fall on one position: it is listed once, with the
+// longer TTL (1h over 5m), because the provider keeps the entry for the longest TTL asked for at
+// it. ttl defaults to "5m".
 func cfBreakpoints(raw []byte) []cf.Breakpoint {
 	if !gjson.GetBytes(raw, "messages").IsArray() {
 		return nil
 	}
 	var out []cf.Breakpoint
+	at := map[cf.Position]int{} // position -> index in out
+	add := func(p cf.Position, ttl string) {
+		if i, ok := at[p]; ok {
+			if ttl == "1h" {
+				out[i].TTL = "1h"
+			}
+			return
+		}
+		at[p] = len(out)
+		out = append(out, cf.Breakpoint{Pos: p, TTL: ttl})
+	}
 	ttl := func(cc gjson.Result) string {
 		if cc.Get("ttl").String() == "1h" {
 			return "1h"
@@ -48,12 +62,12 @@ func cfBreakpoints(raw []byte) []cf.Breakpoint {
 		i := 0
 		arr.ForEach(func(_, el gjson.Result) bool {
 			if cc := el.Get("cache_control"); cc.Exists() {
-				out = append(out, cf.Breakpoint{Pos: cf.Position{Section: sec, Index: i}, TTL: ttl(cc)})
+				add(cf.Position{Section: sec, Index: i}, ttl(cc))
 			}
 			if content := el.Get("content"); content.IsArray() {
 				content.ForEach(func(_, blk gjson.Result) bool {
 					if cc := blk.Get("cache_control"); cc.Exists() {
-						out = append(out, cf.Breakpoint{Pos: cf.Position{Section: sec, Index: i}, TTL: ttl(cc)})
+						add(cf.Position{Section: sec, Index: i}, ttl(cc))
 					}
 					return true
 				})

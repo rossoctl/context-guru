@@ -11,8 +11,8 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 )
 
-// This file plays every opscases.Case through the path the proxy uses (Trackers, the shared replay
-// Request.Add (every op, replays included), Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
+// This file plays every opscases.Case through the path the proxy uses (Trackers, Request.Add of
+// every op with replays included, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, beside
 // Play, because the helpers it reuses (priceOf, micros, expected, abs) are in that package.
 

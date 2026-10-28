@@ -80,3 +80,18 @@ func TestCfBreakpoints_AllSectionsInBodyOrder(t *testing.T) {
 		}
 	}
 }
+
+// S3: an element mark and a block mark in one message are one breakpoint, with the longer TTL,
+// whichever order they come in.
+func TestCfBreakpointsOnePerPositionLongerTTL(t *testing.T) {
+	for _, raw := range []string{
+		`{"messages":[{"role":"user","cache_control":{"type":"ephemeral"},"content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`,
+		`{"messages":[{"role":"user","cache_control":{"type":"ephemeral","ttl":"1h"},"content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}},{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`,
+	} {
+		bps := cfBreakpoints([]byte(raw))
+		if len(bps) != 1 || bps[0].TTL != "1h" || bps[0].Pos != (cf.Position{Section: cf.SectionMessages, Index: 0}) {
+			t.Fatalf("%s: breakpoints = %+v, want one 1h at messages[0]", raw, bps)
+		}
+	}
+}

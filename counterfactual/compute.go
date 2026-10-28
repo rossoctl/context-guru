@@ -796,9 +796,10 @@ func (c *calcState) conservation(res *Result) {
 
 func tierSum(t TierTokens) int { return t.Input + t.CacheWrite5m + t.CacheWrite1h + t.CacheRead }
 
-// checks runs the sum, spans and unique-ChangeID checks (§6.5). The order, attribution and
-// conservation checks are not implemented: attribution holds by construction, because the library
-// only gives a break the ChangeID of one of the request's operations.
+// checks runs the sum, spans and unique-ChangeID checks (§6.5). The conservation check runs in
+// conservation(). The order check is not implemented, and the attribution check is not run because
+// it holds by construction: the library only gives a break the ChangeID of one of the request's
+// operations.
 func (c *calcState) checks(res *Result) {
 	var got [3]int
 	seen := map[string]bool{}

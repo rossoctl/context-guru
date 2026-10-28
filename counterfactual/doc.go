@@ -64,10 +64,13 @@
 //
 // These parts of the design are not implemented. Compute adds no figure for them:
 //
-//   - The split, ttlPremium and ttlRescue effects (cachesplit and headttl, §4.4, §6.2).
 //   - Result.Interaction on a rescued request (§6.2). It is always zero.
-//   - The order and conservation checks (§6.5 checks 2 and 6). The attribution check (5) holds by
-//     construction: a break only takes the ChangeID of an operation of the same request.
+//   - The order check (§6.5 check 2). The attribution check (5) holds by construction: a break only
+//     takes the ChangeID of an operation of the same request. The sum, unique-ChangeID and spans
+//     checks run in checks(), the conservation check (6) in conservation().
+//   - The split effect is found only inside the cache TTL with a hot phase (split()), and the
+//     ttlPremium and ttlRescue effects only for a ChangeID with the "headttl:" prefix (headTTL());
+//     both are emitted by Compute, but a host must report the matching operation for them to appear.
 //   - The minimum cacheable length and the 20-block lookback (§5.1), and the long-context tier.
 //   - MessageSplice moves message positions only. A rewrite that removes or adds whole tools or
 //     system blocks moves no later position in its section (§4.3 gives no splice for them).

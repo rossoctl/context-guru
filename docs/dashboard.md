@@ -98,24 +98,40 @@ need `--dashboard`.
 - `legacy` (the default): the dashboard's own pricing rules. Nothing else runs.
 - `shadow`: the legacy figures are stored unchanged. The proxy also runs `counterfactual.Compute`
   per request and logs one `cf_shadow` line beside the legacy figure, so the two can be compared.
+  The line also carries `recomputed`, the failed library `checks`, and `fallback`: the reason
+  `counterfactual` mode would keep the legacy figures for that event (empty when it would not).
 - `counterfactual`: each component's saved dollars and the baseline cost are stored from the
   library's result. The component figures are net of the cache break each component caused, and
   they sum to baseline minus cost.
 
 Limits of `counterfactual`:
 
+- The override is all-or-nothing per event. If the event does not qualify, it keeps its legacy
+  figures and the proxy logs one `cf_fallback` line with the reason. The reasons are `no_result`,
+  `ops_dropped`, `observe`, `unpriced`, `check_sum`, `check_unique_change`, `check_spans`,
+  `size_unknown`, `implausible_size`, `figure_without_row`, `duplicate_name` and
+  `acted_without_figure`.
+- So a dashboard total in this mode mixes the two methods: some events are priced by the library,
+  the rest by the legacy rules.
+- The first request of a thread falls back (`unpriced`): there is no previous request to classify a
+  cache break against. A request after a gap longer than the cache TTL falls back for the same
+  reason.
+- A request whose response called `context_guru_expand` (more than one upstream round) falls back
+  (`no_result`): the usage is billed on the expanded body, which the library did not see. Shadow
+  mode logs `cf_shadow_skipped` instead of a figure.
+- The thread state lives in memory. After a restart, and for a thread idle for more than 2 hours
+  (or evicted by the 10,000-thread cap), the next request of the thread falls back until the state
+  is rebuilt.
 - The keep-alive and cachesplit figures stay on the legacy rules. The library cannot yet price
   keep-alive, because the keeper report carries no read extent.
 - The cache-saved and cost figures are not changed.
-- The override is all-or-nothing per event. An event keeps its legacy figures if the library
-  result is missing, if the trace dropped any operation, if the tenancy runs in observe mode,
-  if any operation is unpriced, or if a component that acted has no library figure.
 - The counterfactual figures are estimates. The library converts the removed bytes to tokens with
   the request's own billed-token ratio. A figure that implies more removed tokens than the request
   had (a ratio that does not fit the usage) is rejected, and the event keeps its legacy figures.
 - They can differ from the legacy figures: the library prices removed tokens at the tier their
   position falls in, and legacy prices them at the rate the request paid.
 - Rows stored under the legacy rule are still repriced with the legacy rule at read time.
+- The proxy computes the operations on every request, also in `legacy` mode. That cost is accepted.
 
 ## Tool inventory panel
 
