@@ -19,3 +19,10 @@ func (e *Event) Counterfactual() (cf.Result, bool) {
 	}
 	return *e.cfRes, true
 }
+
+// SetCounterfactualContext records what qualifies the attached Result: how many of the request's
+// changes the trace could not place as operations, and whether the run was observe mode. Both
+// gate the counterfactual override in PriceMode.
+func (e *Event) SetCounterfactualContext(opsDropped int, observe bool) {
+	e.cfOpsDropped, e.cfObserve = opsDropped, observe
+}

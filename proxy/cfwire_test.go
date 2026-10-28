@@ -148,3 +148,61 @@ func TestNoUsageMeansNoCounterfactualResult(t *testing.T) {
 		}
 	}
 }
+
+// In counterfactual mode the stored component figures and the baseline come from the library's
+// Result when the event qualifies, and equal the legacy-priced copy of the same event when not.
+// shadow and legacy always keep the legacy figures. The harness's request may yield no rewrite
+// operation; the test then covers the fallback arm and the invariant, and the dash tests cover
+// the override arithmetic.
+func TestCounterfactualModeStoresLibraryFiguresOrFallsBack(t *testing.T) {
+	price := fixedPricer{}
+	p, _ := price.Price(nil, "aws/claude-sonnet-5")
+	overridden := 0
+	for _, mode := range []string{"legacy", "shadow", "counterfactual"} {
+		for i, ev := range cfTwoRequests(t, mode) {
+			e := ev
+			e.Components = append([]dash.CompRow(nil), ev.Components...)
+			want := ev
+			want.Components = append([]dash.CompRow(nil), ev.Components...)
+			// want: the same event priced by the legacy rule only.
+			want.Price(p, true)
+			fig := e.CounterfactualFigure(p)
+			qualifies := mode == "counterfactual" && e.HasCounterfactual() && len(fig.Unpriced) == 0
+			if qualifies {
+				for j, c := range e.Components {
+					if c.Acted {
+						if _, ok := fig.ByComponent[c.Component]; !ok {
+							qualifies = false
+						}
+					}
+					_ = j
+				}
+			}
+			if qualifies {
+				overridden++
+				var sum float64
+				for j, c := range e.Components {
+					if d := c.SavedUSD - fig.ByComponent[c.Component]; d > 1e-12 || d < -1e-12 {
+						t.Errorf("%s event %d component %d: SavedUSD %v, library %v", mode, i, j, c.SavedUSD, fig.ByComponent[c.Component])
+					}
+					sum += c.SavedUSD
+				}
+				if d := sum - (e.BaselineCostUSD - e.CostUSD); d > 1e-9 || d < -1e-9 {
+					t.Errorf("%s event %d: components %v != baseline delta %v", mode, i, sum, e.BaselineCostUSD-e.CostUSD)
+				}
+				continue
+			}
+			if e.BaselineCostUSD != want.BaselineCostUSD {
+				t.Errorf("%s event %d: baseline %v, legacy %v", mode, i, e.BaselineCostUSD, want.BaselineCostUSD)
+			}
+			for j := range e.Components {
+				if e.Components[j].SavedUSD != want.Components[j].SavedUSD {
+					t.Errorf("%s event %d component %d: SavedUSD %v, legacy %v", mode, i, j, e.Components[j].SavedUSD, want.Components[j].SavedUSD)
+				}
+			}
+		}
+	}
+	if overridden == 0 {
+		t.Error("no counterfactual event qualified for the override: the override arm is untested")
+	}
+}

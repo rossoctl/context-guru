@@ -124,6 +124,9 @@ type WaitCauseResult struct {
 type Event struct {
 	// cfRes is the counterfactual Result (see cfevent.go). Unexported: not serialized.
 	cfRes *cf.Result
+	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
+	cfOpsDropped int
+	cfObserve    bool
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
@@ -797,13 +800,17 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked
 // partial/missing: a cost we cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
+	e.PriceMode(p, accountingComplete, SavingsLegacy)
+}
+
+func (e *Event) priceLegacy(p modelinfo.Price, accountingComplete bool) bool {
 	if !accountingComplete || p.Zero() {
 		if e.TokensBefore > 0 {
 			e.TokenAccounting = AccountingPartial
 		} else {
 			e.TokenAccounting = AccountingMissing
 		}
-		return
+		return false
 	}
 	e.TokenAccounting = AccountingComplete
 	// Resolve the tokenizer correction ONCE per request, before anything prices a saving.
@@ -842,6 +849,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 		c := &e.Components[i]
 		c.SavedUSD = e.ComponentSavedUSD(p, c.Component, c.SavedGross, c.SavedUnique)
 	}
+	return true
 }
 
 // ComponentSavedUSD is ONE component's share of the baseline delta on this request: the

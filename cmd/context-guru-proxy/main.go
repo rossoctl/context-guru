@@ -88,7 +88,7 @@ func main() {
 				"non-streaming one, whose headers arrive only once it is generated")
 		bob         = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag   = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
-		savingsFlag = flag.String("savings", envOr("SAVINGS", "legacy"), "where the savings figure comes from: legacy (default) | shadow (also run counterfactual.Compute and attach its result to each dashboard event; the legacy figure is unchanged) | counterfactual. shadow and counterfactual need --dashboard: without a recorder there is no event to attach to")
+		savingsFlag = flag.String("savings", envOr("SAVINGS", "legacy"), "where the savings figure comes from: legacy (default) | shadow (also run counterfactual.Compute and attach its result to each dashboard event; the legacy figure is unchanged) | counterfactual (store the library's per-component savings and baseline for events that qualify; keep-alive and cachesplit figures stay on the legacy rules, and an event whose operation list is partial, observe-mode or unpriced keeps its legacy figures). shadow and counterfactual need --dashboard: without a recorder there is no event to attach to")
 		modeFlag    = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
 		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
 		// that self-terminates is a much worse failure than a laptop process left running.

@@ -90,6 +90,28 @@ SQLite (pure Go, no C toolchain), in WAL mode. Retention is bounded by both **ag
 blow past the limit and a quiet week can't erase itself. `--dashboard-db :memory:`
 runs with no persistence at all.
 
+## Savings source (`--savings`)
+
+`--savings` picks where the stored savings figures come from. `shadow` and `counterfactual`
+need `--dashboard`.
+
+- `legacy` (the default): the dashboard's own pricing rules. Nothing else runs.
+- `shadow`: the legacy figures are stored unchanged. The proxy also runs `counterfactual.Compute`
+  per request and logs one `cf_shadow` line beside the legacy figure, so the two can be compared.
+- `counterfactual`: each component's saved dollars and the baseline cost are stored from the
+  library's result. The component figures are net of the cache break each component caused, and
+  they sum to baseline minus cost.
+
+Limits of `counterfactual`:
+
+- The keep-alive and cachesplit figures stay on the legacy rules. The library cannot yet price
+  keep-alive, because the keeper report carries no read extent.
+- The cache-saved and cost figures are not changed.
+- The override is all-or-nothing per event. An event keeps its legacy figures if the library
+  result is missing, if the trace dropped any operation, if the tenancy runs in observe mode,
+  if any operation is unpriced, or if a component that acted has no library figure.
+- Rows stored under the legacy rule are still repriced with the legacy rule at read time.
+
 ## Tool inventory panel
 
 *How much of what your agent carries in every request does it actually use?*

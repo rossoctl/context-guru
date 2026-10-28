@@ -10,6 +10,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -108,6 +109,9 @@ type capture struct {
 	savings *savingsTracker
 	// mode is Options.Savings: only "shadow" logs the two figures at finish.
 	mode string
+	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
+	// and the counterfactual must not override the legacy figures.
+	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	cfReq  *cf.Request
@@ -135,6 +139,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		unique:  map[string]int{},
 		waits:   h.waits,
 		savings: h.savings, mode: h.opts.Savings, pings: h.opts.Pings,
+		observe: tn.Mode == components.ModeObserve,
 	}
 }
 
@@ -624,7 +629,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		c.cfDone = true
 		e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
 	}
-	e.Price(price, usageOK && priced)
+	e.SetCounterfactualContext(c.trace.OpsDropped, c.observe)
+	e.PriceMode(price, usageOK && priced, dashSavingsMode(c.mode))
 	if c.mode == SavingsShadow && e.HasCounterfactual() {
 		logShadow(e, price)
 	}
@@ -725,4 +731,16 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
 		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+}
+
+// dashSavingsMode maps a ParseSavings value to the dash pricing mode. Anything but shadow and
+// counterfactual is legacy.
+func dashSavingsMode(m string) dash.SavingsMode {
+	switch m {
+	case SavingsShadow:
+		return dash.SavingsShadow
+	case SavingsCounterfactual:
+		return dash.SavingsCounterfactual
+	}
+	return dash.SavingsLegacy
 }

@@ -103,3 +103,56 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 	}
 	return f
 }
+
+// SavingsMode picks where the stored per-component savings and the baseline come from.
+type SavingsMode int
+
+const (
+	SavingsLegacy         SavingsMode = iota // the rules in this package
+	SavingsShadow                            // legacy figures; the host logs the library's beside them
+	SavingsCounterfactual                    // the library's figures, when the event qualifies
+)
+
+// PriceMode is Price, then, in SavingsCounterfactual mode, an override of each component's
+// SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
+// CacheSavedUSD, CostUSD and CGLLMCostUSD always stay as Price set them.
+//
+// The override is all-or-nothing per event, because a partial list would show an unmeasured
+// component as a $0 saving. It applies only when: a Result is attached; no change was dropped
+// from the operation list; the run was not observe mode; no operation or effect is unpriced;
+// and every component that acted has a library figure. Otherwise the legacy figures stand.
+func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode SavingsMode) {
+	if !e.priceLegacy(p, accountingComplete) || mode != SavingsCounterfactual {
+		return
+	}
+	if e.cfRes == nil || e.cfOpsDropped != 0 || e.cfObserve {
+		return
+	}
+	fig := e.CounterfactualFigure(p)
+	if len(fig.Unpriced) > 0 {
+		return
+	}
+	// A library figure for a component the event has no row for would leave the rows short of
+	// the baseline: the sum invariant would break. Keep the legacy figures instead.
+	rows := map[string]bool{}
+	for _, c := range e.Components {
+		rows[c.Component] = true
+	}
+	for name := range fig.ByComponent {
+		if !rows[name] {
+			return
+		}
+	}
+	saved := make([]float64, len(e.Components))
+	for i, c := range e.Components {
+		v, ok := fig.ByComponent[c.Component]
+		if !ok && c.Acted {
+			return
+		}
+		saved[i] = v
+	}
+	for i := range e.Components {
+		e.Components[i].SavedUSD = saved[i]
+	}
+	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+}
