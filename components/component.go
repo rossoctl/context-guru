@@ -800,6 +800,15 @@ func (c *Ctx) Stats() FilterStatsSink {
 	return c.FilterStats
 }
 
+// Change is one message a component rewrote, in bytes. The pipeline fills it, so no component
+// has to. Hash is of the text BEFORE the run: the same content re-sent next turn gets the same
+// hash, which is what lets the savings code recognise a replay (counterfactual ChangeID).
+type Change struct {
+	Idx                     int // index in req.Input
+	BytesBefore, BytesAfter int
+	Hash                    string
+}
+
 // Report is the per-component result, modelled after lean-ctx's ToolOutput
 // token accounting and headroom's record_pipeline_run inputs. The pipeline
 // fills TokensBefore/After/DurationMs; the component fills CacheKey and may set
@@ -827,6 +836,11 @@ type Report struct {
 	// pipeline. The writeback layer uses them to attribute a discarded change back to
 	// the component that made it (see Pipeline.RecordDiscards).
 	ChangedIdx []int
+	// Changes is ChangedIdx with sizes and a content hash. Empty when CountChanged.
+	Changes []Change
+	// CountChanged says the run added or removed messages (a summary, a drop). ChangedIdx and
+	// Changes are empty then, because indices before and after do not line up.
+	CountChanged bool
 	// Discarded counts changes this component made that the WRITEBACK layer then threw
 	// away (bifrost could not round-trip the message, so splicing would have dropped
 	// provider fields). A report carrying Discarded > 0 is a follow-up attribution, not

@@ -213,6 +213,9 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		if restoreOwn(&rep, before, req.Input, own) {
 			after = tokensOf(req.Input)
 		}
+		// After restoreOwn: it can rewrite req.Input once changedIdx has run.
+		rep.CountChanged = len(before) != len(req.Input)
+		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx)
 		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
 		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
@@ -224,6 +227,24 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		resync(snap, req.Input, rep.ChangedIdx)
 	}
 	return rep
+}
+
+// changesOf sizes each changed message and hashes its pre-run text.
+func changesOf(before, after []schemas.ChatMessage, idx []int) []Change {
+	if len(idx) == 0 {
+		return nil
+	}
+	out := make([]Change, 0, len(idx))
+	for _, i := range idx {
+		if i < 0 || i >= len(before) || i >= len(after) {
+			continue
+		}
+		bt, at := schema.MessageText(before[i]), schema.MessageText(after[i])
+		sum := sha256.Sum256([]byte(bt))
+		out = append(out, Change{Idx: i, BytesBefore: len(bt), BytesAfter: len(at),
+			Hash: hex.EncodeToString(sum[:6])})
+	}
+	return out
 }
 
 // reformatKeys gives a Reformat the content-derived dedup keys an Offload gets for free
