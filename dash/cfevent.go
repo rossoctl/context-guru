@@ -10,3 +10,12 @@ func (e *Event) SetCounterfactual(r cf.Result) { e.cfRes = &r }
 
 // HasCounterfactual reports whether a Result is attached.
 func (e *Event) HasCounterfactual() bool { return e.cfRes != nil }
+
+// Counterfactual returns a copy of the attached Result and whether one is attached. It is how a
+// test or a host reads what the store does not keep.
+func (e *Event) Counterfactual() (cf.Result, bool) {
+	if e.cfRes == nil {
+		return cf.Result{}, false
+	}
+	return *e.cfRes, true
+}
