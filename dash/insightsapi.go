@@ -87,8 +87,13 @@ func (a *API) insights(w http.ResponseWriter, r *http.Request) {
 			coverage = cov
 		}
 		doc := ShapeInsights(rep, InsightsOptions{
-			Qualified:    qualified,
-			Descriptions: skillDescriptions(""),
+			Qualified: qualified,
+			// diskHome, not "": the test home must reach this walk too, or the insights
+			// tests pay for whatever plugin tree the RUNNER's machine happens to hold
+			// (#700). For a local proxy diskHome is "" and the walk is unchanged; for a
+			// hosted one it is the no-read sentinel, which is what this function's own
+			// "a hosted proxy sees nothing" doc already promised.
+			Descriptions: skillDescriptions(a.diskHome()),
 			// The scope, echoed into the document. These came from ?project= through filterFrom,
 			// so the ROWS are already narrowed by SQL; passing them here is what makes the
 			// document state which narrowing produced them.

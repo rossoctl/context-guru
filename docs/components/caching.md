@@ -54,7 +54,7 @@ measurement is n=1 and mildly negative, with no mechanism established. `cachespl
 them apart is what stops disabling placement from silently disabling the split too. Every preset
 that touches caching carries `cachesplit`, never `cacheinject`.
 
-**Explicit-breakpoint providers only** (Anthropic, Bedrock, Vertex). Under an implicit
+**Explicit-breakpoint providers only** (Anthropic, Bedrock, Vertex). The −34.1% figure was measured on Anthropic only. The split also handles the Bedrock Converse shape, where `cachePoint` is its own array entry, but that path has no cost measurement. Under an implicit
 longest-prefix cache (OpenAI, Gemini) the match already ends at the divergence, so neither
 component buys anything there.
 

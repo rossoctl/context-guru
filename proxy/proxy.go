@@ -298,6 +298,10 @@ type Handler struct {
 	// running — see metricsHandler.
 	metricsInflight singleflight.Group
 
+	// mailWG tracks the feedback-delivery goroutines a POST starts, so a test can wait
+	// for every send still in flight before its mail sink goes away (see waitMailForTest).
+	mailWG sync.WaitGroup
+
 	// lastSessionMu guards lastSession.
 	lastSessionMu sync.Mutex
 	// lastSession is the session id of the most recent REAL (non-ping) request this
@@ -1199,6 +1203,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
 		var added time.Duration // hoisted with tr: the lifecycle log line reads both
 		var threadID string     // hoisted with it: serve hands it to the keeper
+
+		// threadOf is hoisted too: serve resolves the observe-mode thread with it.
+		var threadOf func(session string) thread.Result
 		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
 		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
 		// read by h.serve below, and stashed alongside the body actually forwarded: see the
@@ -1226,7 +1233,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// when we are rewriting this request at all.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				var repaired int
-				body, repaired = h.repairExpandErrors(wire, body, tn, cp)
+				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
+					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
+					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"), api, provider, bypassed, b)
+				})
 				if repaired > 0 {
 					// A rewrite of the client's own transcript must never be silent: this is
 					// the only line that says the response side failed to withhold the call
@@ -1267,7 +1277,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// The thread is resolved INSIDE apply, once the session id is known and before the
 			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
 			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
-			threadOf := func(sess string) thread.Result {
+			threadOf = func(sess string) thread.Result {
 				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
 			}
 			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
@@ -1424,7 +1434,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, anchor, slg)
+		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg)
 	}
 }
 
@@ -1575,20 +1585,26 @@ func refuseTooLarge(w http.ResponseWriter, limit int64) {
 // because the client keeps its own copy of the error and the repair therefore runs again on
 // every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
 // CALLS, and ten repairs of one stale error are one call.
-func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture) ([]byte, int) {
+func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, sessionOf func(body []byte) string) ([]byte, int) {
 	out, restored := expand.RepairToolResults(wire, body, func(hashID string) (string, bool) {
 		return expand.Resolve(tn.Store, hashID)
 	})
+	if len(restored) == 0 {
+		return out, 0
+	}
+	// Lazy: the derivation re-parses the transcript, and a repair is rare. Derived from the repaired
+	// body, because that is what the pipeline will see.
+	session := sessionOf(out)
 	for _, orig := range restored {
 		// Charge the row only the FIRST time this original comes back. Repairing the same
 		// stale error on ten later turns is one recovery, not ten.
-		if !offload.KeptVerbatim(tn.Store, orig) {
+		if !offload.KeptVerbatim(tn.Store, session, orig) {
 			cp.noteExpand(schema.TextTokens(orig))
 			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
 			// first-time rule as the line above: the repair runs again on every later turn.
 			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
 		}
-		offload.MarkKeptVerbatim(tn.Store, orig)
+		offload.MarkKeptVerbatim(tn.Store, session, orig)
 	}
 	return out, len(restored)
 }
@@ -1616,7 +1632,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, anchor *expand.Anchor, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger) {
 	wire := string(provider)
 	if up.path == "/v1/responses" {
 		wire = "responses"
@@ -1673,8 +1689,36 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// EVERY way this request can end has to end it with a complete turn, and these are the
 	// bytes that do it. prevWithheld keeps the round before's, because a continuation round
 	// that carries no terminator of its own leaves the earlier round's message_stop as the
-	// only one the client will ever get.
+	// only one the client will ever get. called is hoisted with them for the same reason: a
+	// round that ends the request without running pass (an upstream failure, a JSON round
+	// after a stream) is still holding the previous round's tool_use, and that is the leak
+	// countLeak has to attribute.
 	var withheld, prevWithheld []byte
+	var called []string
+	// countLeak attributes a proxy tool_use this loop handed the client, BY TOOL (#174). pass
+	// reports the names it withheld, so every hand-back knows what it is handing back —
+	// including the two bail sites that never parse the turn (a failed SSE aggregation, a
+	// spent round cap), which is why the split was once deferred as impossible. A round can
+	// leak BOTH tools at once, so both are counted: the either/or a boolean `found` could not
+	// express was the original defect. Only the names pass was HANDED get a counter: a third
+	// proxy tool added to the pass call must not land silently in the expand bucket — that
+	// would rebuild the conflation this split exists to end — so it is logged and counted
+	// nowhere until it gets a counter of its own.
+	countLeak := func(called []string) {
+		if h.agg == nil {
+			return
+		}
+		for _, name := range called {
+			switch name {
+			case adjudicate.ToolName:
+				h.agg.RecordSSEAdjudicateAfterStream()
+			case expand.ToolName:
+				h.agg.RecordSSEExpandAfterStream()
+			default:
+				lg.Warn("cg.sse_splice: proxy tool leak with no counter of its own", "tool", name)
+			}
+		}
+	}
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1719,6 +1763,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if usageOK {
 			billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 			apply.RecordBilledInput(tn.Store, session, billed)
+			apply.RecordBilledInputThread(tn.Store, session, threadID, billed)
 			// OBSERVE MODE NEEDS ITS OWN RECORD, or the projection it exists to produce is a
 			// permanent zero.
 			//
@@ -1734,9 +1779,19 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// The session id is derived HERE rather than on the request path, so observe keeps
 			// paying only the enqueue for its measurement — the property modes.go documents.
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
-				if sid := apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"),
-					provider, body); sid != "" {
+				// The id the shadow pipeline derives (post-transform), not the raw body's: see
+				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
+					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
+					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
+					// real one from the same inputs the off-path run's ThreadOf uses (agent header,
+					// then prefix continuity), so the key written is the key that run reads.
+					obsThread := threadID
+					if threadOf != nil {
+						obsThread = threadOf(sid).ID
+					}
+					apply.RecordBilledInputThread(tn.Shadow, sid, obsThread, billed)
 				}
 			}
 		}
@@ -1790,8 +1845,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// model's turn — so end the turn with the events the splice withheld
 				// instead. The client sees the model's own call, which is the same fail-open
 				// as every other round the loop cannot finish.
-				if withheld != nil && h.agg != nil {
-					h.agg.RecordSSEExpandAfterStream()
+				if withheld != nil {
+					countLeak(called)
 				}
 				sp.handBack(withheld)
 				sp.terminate(withheld)
@@ -1845,7 +1900,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			return
 		}
 		var respBody []byte
-		found := false // this round called the expand tool
 		switch {
 		case isSSE && provider == bschemas.Anthropic:
 			// Forward the events as they arrive and stop at the expand call, rather than
@@ -1859,10 +1913,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
-			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
 			resp.Body.Close()
 			switch {
-			case found && sp.blocks == 0:
+			case len(called) > 0 && sp.blocks == 0:
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -1872,7 +1926,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			case !sseBuffered:
 				sseFirstByte = sp.first
 			}
-			lg.Debug("cg.sse_splice", "round", round, "expand_call", found,
+			lg.Debug("cg.sse_splice", "round", round, "proxy_calls", strings.Join(called, ","),
 				"blocks_sent", sp.blocks, "bytes", len(respBody))
 		case isSSE && wire == "responses" && expand.HasMarkersInMessages(body):
 			// Responses' terminal event includes the complete output array. Buffer
@@ -1908,20 +1962,18 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody); ok {
+		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if isSSE && sp != nil && withheld == nil {
-			// The whole round is already on the wire. Either it never called expand, or it
-			// ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
-			// that second case the client has our tool_use, which is the leak the counter
-			// exists for.
-			if found && h.agg != nil {
-				h.agg.RecordSSEExpandAfterStream()
-			}
+			// The whole round is already on the wire. Either it never called a proxy tool, or
+			// it ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
+			// that second case the client has our tool_use, which is the leak these counters
+			// exist for.
+			countLeak(called)
 			sp.terminate(prevWithheld)
 			return
 		}
@@ -1935,18 +1987,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				writeRaw(w, resp, respBody)
 				return
 			}
-			// KNOWN CONFLATION, recorded rather than fixed. This counts "the peek withheld a
-			// proxy tool_use and handed it back", but the metric is named for expand, so an
-			// adjudicate leak (the co-call deferral below) lands in the expand bucket. Not split
-			// here for three reasons: the field is /stats-only and reaches no dashboard or alert
-			// (notExportedWhy calls it "NOT EXPORTED YET"); two of the three bail sites — a round
-			// that failed SSE aggregation, and a spent maxExpandRounds — cannot attribute the leak
-			// at all, because nothing has parsed the turn yet; and a leak can be BOTH at once, so
-			// the honest split is two counters and a new exported family with its own render and
-			// vacuity guard, which is a metrics change rather than this PR's subject. Filed
-			// separately; until then, read this counter as "proxy tool_use reached the client".
-			if withheld != nil && h.agg != nil {
-				h.agg.RecordSSEExpandAfterStream()
+			// The leak is attributed BY TOOL (#174): pass reports which proxy tools the round
+			// named, so an adjudicate leak lands in sse_adjudicate_after_stream rather than
+			// the expand bucket it used to share — this used to be recorded as a known
+			// conflation because the two bail sites that never parse the turn were thought
+			// unattributable, but the peek knows the name before any parsing happens. Both
+			// counters stay /stats-only until the family is exported (notExportedWhy), and
+			// the pair is what an alert would read.
+			if withheld != nil {
+				countLeak(called)
 			}
 			sp.handBack(withheld)
 			// Idempotent via sp.ended: if those events closed the turn this is a no-op, and
@@ -2015,7 +2064,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				got++
 				// The agent needed this content back — don't re-compact it on later turns
 				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(tn.Store, orig)
+				offload.MarkKeptVerbatim(tn.Store, session, orig)
 				// And, under fixed restore, where to give it back from now on. The mark above stays:
 				// it is the fail-open behaviour for any turn on which the anchor cannot be honoured.
 				if anchor != nil {
@@ -2225,9 +2274,10 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte 
 		}
 	}
 	// The window, not the response: over sniffMax each way this is head+"\n"+tail, which is not a
-	// whole JSON document. responseUsageWhy reports that as `unreadable_body` rather than as an
-	// unrecognised dialect, because the remedy is here and not in any parser.
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes())
+	// whole JSON document. The sniffer says whether it spliced, so responseUsageWhy reports a
+	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
+	// block that was present but rejected stays a dialect finding, whatever the window did.
+	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes(), sn.spliced())
 	return firstByte, u, why, ok
 }
 
@@ -2353,6 +2403,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.PrefixStashOversized = PrefixStashOversized()
 	snap.CacheAnchorWritten, snap.CacheAnchorNoSlot, snap.CacheAnchorNotFound = apply.CacheAnchorStats()
 	snap.CacheAwareSummarizerStalePrefix = offload.CacheAwareSummarizerStalePrefix()
+	snap.CacheAwareSummarizerCoordsShifted = offload.CacheAwareSummarizerCoordsShifted()
 	snap.CacheAwareSummarizerPrefixAskUsed = offload.CacheAwareSummarizerPrefixAskUsed()
 	snap.CacheAwareSummarizerCacheReadTokens, snap.CacheAwareSummarizerCacheWriteTokens =
 		offload.CacheAwareSummarizerCacheTokens()

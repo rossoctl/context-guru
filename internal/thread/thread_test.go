@@ -794,6 +794,24 @@ func TestARequestSharingAllButThreeMessagesIsANewThread(t *testing.T) {
 	}
 }
 
+// The "more than half" half of the rewritten-tail rule at its exact boundary (#610): a
+// 4-message thread is the smallest where 2*lcp == n is reachable. A request sharing exactly 2
+// messages PASSES the all-but-two half (2 >= 4-2) and must still be declined, because sharing
+// half a conversation is not sharing a conversation. One message more — all but the last, a
+// rewritten final message — joins, as the rule exists to let it.
+func TestAShortThreadIsNotJoinedByARequestSharingExactlyHalf(t *testing.T) {
+	tr := testTracker()
+	main := texts(4)
+	tr.Resolve("t\x00s", "", withTools(conv(main...)), false)
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:2], "x2", "x3")...)), false).ID; id == Primary {
+		t.Fatal("a request sharing exactly half of a 4-message thread (2 >= n-2, but 2*lcp == n) " +
+			"joined the main thread")
+	}
+	if id := tr.Resolve("t\x00s", "", withTools(conv(with(main[:3], "m3 rewritten")...)), false).ID; id != Primary {
+		t.Fatalf("a request sharing all but the last message got %q, want the main thread's id", id)
+	}
+}
+
 // convTail builds a conversation whose last message is a volatile system reminder that the next
 // turn replaces, as Claude Code sends it: texts are the stable messages, reminder is the trailing
 // message. It declares tools, as every real Claude Code main-agent request does.
@@ -860,6 +878,21 @@ func TestUnrelatedConversationsWithTrailingRemindersStayTwoThreads(t *testing.T)
 	b := tr.Resolve("s", "", convTail("r2", "beta one", "beta two", "beta three"), false)
 	if a.ID == b.ID {
 		t.Fatalf("two conversations that share no messages must not share a thread (both %q)", a.ID)
+	}
+}
+
+// The "all but the last one or two" half at n-3 (#610), in the shape the rule exists for: a
+// trailing reminder the next turn replaces. This request shares 4 of a 7-message thread — more
+// than half (2*4 > 7), so the half-rule alone would join it — but one message MORE than the
+// n-2 bound allows, so it must get a new thread. Unlike the unrelated test above, this request
+// DOES reach rewrittenTailParent, so deleting the rule (or its n-2 half) fails here.
+func TestARequestSharingAllButThreeMessagesOfAReminderThreadIsANewThread(t *testing.T) {
+	tr := testTracker()
+	stable := texts(6) // 7 messages with the trailing reminder
+	tr.Resolve("s", "", convTail("reminder one", stable...), false)
+	next := tr.Resolve("s", "", convTail("reminder two", with(stable[:4], "x4", "x5")...), false)
+	if next.ID == Primary {
+		t.Fatal("a request sharing 4 of 7 messages (more than half, but n-3) joined the main thread")
 	}
 }
 

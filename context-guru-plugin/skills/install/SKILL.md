@@ -1,6 +1,6 @@
 ---
 name: install
-description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. Also installs the terminal status line, in the same scope routing uses, on by default. Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <none|auto|1-ping|2-ping|1-hour-head> to override the default cache strategy, --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one, and --no-statusline to skip the automatic status line install.
+description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. The Context Guru band above the prompt shows the savings, the cache clock and the context; the terminal status line is optional (--statusline). Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <none|auto|1-ping|2-ping|1-hour-head> to override the default cache strategy, --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one, and --statusline to also install the terminal status line.
 ---
 
 # Install context-guru for Claude Code
@@ -37,7 +37,7 @@ in `install.sh --route`, as line order rather than a paragraph somebody can read
 If `cache_strategy` is `auto`, `1-ping` or `2-ping` (the default is `auto`), one more clause: keep-alive is on, so it spends a little
 of their own quota on idle turns to hold the cache warm, and `/context-guru:cache-strategy-picker`
 names the alternatives and what each costs. Do not recommend one — they differ in what they spend, and
-that is the user's call. Always, one more: a read-only status line goes on too, in the same file routing itself just used (`--no-statusline` skips it, `/context-guru:statusline off` undoes it after).
+that is the user's call. No status line is written: the Context Guru band above the prompt shows the same figures. Pass `--statusline` only when the user asks for the terminal status line too (it goes in the same file routing just used; `/context-guru:statusline off` undoes it).
 
 Fuller detail is in `docs/how-to/install-plugin.md`. Point at it; do not recite it.
 
@@ -189,7 +189,7 @@ write routing while no proxy answers.
   meant — do not pick, because the names differ in whether they spend the user's quota.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
-- `statusline=on` — also installed; mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `skipped` is not an install failure.
+- `statusline=on` — also installed (only with `--statusline`); mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `off` is the default: say nothing. `skipped` is not an install failure.
 - `history_import=done` — Claude Code's history from before this install was imported once, so on day one
   Cleanup can tell imported projects from measured ones; quote `history_import_summary=`. It records what was
   used and when, not what unused tools cost (only the proxy sees that, from now on). `already_done`/`skipped`

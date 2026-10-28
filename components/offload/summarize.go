@@ -330,6 +330,10 @@ func (Summarize) Enabled(c *components.Ctx) bool {
 }
 func (*Summarize) NeedsModel() bool { return true }
 
+// CutFrac is the trigger fraction of the window at which this component cuts the conversation
+// (components.CutFracProvider).
+func (s *Summarize) CutFrac() float64 { return s.trigger.MinRequestFrac }
+
 func summaryStashJSON(c *components.Ctx, start, end int, span []bschemas.ChatMessage) ([]byte, error) {
 	if c.SummaryStashPayload != nil {
 		return c.SummaryStashPayload(start, end, span)

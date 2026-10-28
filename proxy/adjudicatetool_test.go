@@ -13,6 +13,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/metrics"
 )
 
 // sweepPipeline is a pipeline that CONTAINS extract_llm_sweep, i.e. one that can actually adjudicate.
@@ -423,5 +424,76 @@ func TestAdjudicateStrayCallDoesNotReachTheClientOnTheSSEPath(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "done") {
 		t.Errorf("the client did not receive the finished turn: %s", got)
+	}
+}
+
+// #174: the co-call deferral above leaks the adjudication tool_use on purpose, and that leak
+// used to be counted as an EXPAND leak — sse_expand_after_stream took every proxy tool_use the
+// peek handed back, because pass reported only a boolean `found`. pass reports the NAMES now,
+// so the leak lands in its own counter and the expand bucket stays at zero. The pair is what
+// the alert candidate notExportedWhy describes would read, and it cannot say which tool leaked
+// while the two share one bucket.
+func TestAnAdjudicateLeakOnTheSSEPathIsCountedAsItself(t *testing.T) {
+	var rounds atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		rounds.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// One assistant turn, co-called: the CLIENT's tool first, then ours.
+		for _, ev := range []string{
+			`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"cli1","name":"read_file","input":{"path":"a.go"}}}`,
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"stray1","name":"` + adjudicate.ToolName + `","input":{"verdicts":[]}}}`,
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}`,
+			`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+			`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+		} {
+			_, _ = w.Write([]byte(ev + "\n\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+	h, _ := buildHandler(t, sweepPipeline, upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		bytes.NewReader(streamingToolsRequest(t, map[string]any{"role": "user", "content": "go"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// PRECONDITION: exactly one upstream round and the leak happened — the deferral did not
+	// turn into an in-band answer, and the client holds the stray. Without these, the counter
+	// assertions below would pass on a turn that never leaked anything.
+	if rounds := rounds.Load(); rounds != 1 {
+		t.Fatalf("expected the loop to bail on otherTools after ONE round, got %d — the co-call "+
+			"path no longer defers, so this test's premise is gone: %s", rounds, out)
+	}
+	if !strings.Contains(string(out), adjudicate.ToolName) {
+		t.Fatalf("the stray did not reach the client, so there is no leak to count: %s", out)
+	}
+
+	var snap metrics.Snapshot
+	stx, err := http.Get(srv.URL + "/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(stx.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	stx.Body.Close()
+	if snap.SSEAdjudicateAfterStream != 1 {
+		t.Fatalf("the leaked adjudication tool_use was not counted as itself: "+
+			"sse_adjudicate_after_stream=%d, want 1 (%+v)", snap.SSEAdjudicateAfterStream, snap)
+	}
+	if snap.SSEExpandAfterStream != 0 {
+		t.Fatalf("the adjudicate leak was counted as an expand leak: sse_expand_after_stream=%d, "+
+			"want 0 — the split is the point of #174", snap.SSEExpandAfterStream)
 	}
 }

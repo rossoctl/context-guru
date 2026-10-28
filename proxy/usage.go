@@ -312,14 +312,10 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	// `worst` ranges over absent/all_zero/unparsed_dialect and nothing else. A `data:` line cut
 	// mid-JSON yields no present block, so the stream reads as "the provider streamed no usage".
 	//
-	// That leaves usage_unreadable reachable for a sniffed JSON response and structurally
-	// unreachable for a sniffed STREAM, which is where a head+tail window would hide a block —
-	// #200's own defect, in the corner this classification does not cover. Narrow in practice:
-	// Anthropic puts input_tokens in message_start at the front of the head window, so `found` is
-	// true and the answer is `parsed`. Closing it properly means passing the sniffer's own
-	// knowledge that it spliced (s.total > len(s.head)) into responseUsageWhy, which would also
-	// make the buffered case exact instead of inferred from ValidBytes. Filed rather than guessed
-	// at here.
+	// The corner that leaves open — a head+tail window hiding the block a whole response carried
+	// — is closed one frame up, in responseUsageWhy, from the sniffer's own knowledge that it
+	// spliced: an `absent` verdict over a spliced window is upgraded to unreadable there (#207),
+	// because "no block in what we kept" and "no block anywhere" are different facts.
 	worst := usageMissAbsent
 	worstPayload := "" // the event `worst` came from, so the record describes the right one
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -367,7 +363,7 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 // responseUsage picks the right parser for a response's content type. The returned
 // Usage carries the stop reason whatever `ok` says — see Usage.StopReason.
 func responseUsage(contentType string, body []byte) (Usage, bool) {
-	u, _, ok := responseUsageWhy(contentType, body)
+	u, _, ok := responseUsageWhy(contentType, body, false)
 	return u, ok
 }
 
@@ -375,10 +371,17 @@ func responseUsage(contentType string, body []byte) (Usage, bool) {
 // and recorded — the whole response is in scope here, which is what it takes to say anything
 // about it (parseUsage is also called per-event by the SSE path, where a skip means nothing).
 //
+// spliced says the bytes in body are a head+tail WINDOW rather than the whole response (the
+// sniffer's own knowledge, sn.spliced()). It upgrades an `absent` verdict to unreadable: over a
+// window, "no usage block in what we kept" is not "the provider sent none" — the middle of the
+// response was dropped on the floor, and the remedy is upstream of any parser. Only `absent` is
+// upgraded; a block that was present and rejected is a real dialect finding whatever the window
+// did, and `found` wins over everything (#207).
+//
 // The reason reaches the lifecycle log line beside `usage_reported`, so a deployment that has
 // quietly stopped accounting tokens says which of the five cases it is at the moment it happens,
 // instead of being reconstructed two iterations later from a cost figure.
-func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) {
+func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, usageMiss, bool) {
 	if len(body) == 0 {
 		return Usage{}, usageMissNoBody, false
 	}
@@ -395,6 +398,9 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 	} else {
 		u, why = parseUsageWhy(body)
 	}
+	if spliced && why == usageMissAbsent {
+		why = usageMissUnreadable
+	}
 	u.StopReason = responseStopReason(sse, body)
 	u.ToolUseNames = responseToolUseNames(sse, body)
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
@@ -403,7 +409,7 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 		counter.Add(1)
 		// len(body) so the record still reports the whole response's size — that is what says a
 		// window was spliced — while describing the document that actually failed to parse.
-		recordUsageShape(sse, len(body), doc)
+		recordUsageShape(sse, len(body), spliced, doc)
 	}
 	return u, why, why == usageMissNone
 }
@@ -496,8 +502,8 @@ func noteUsageShape(key string) bool {
 // is false" into "the provider is sending camelCase", which is the difference between an open
 // question and a one-line fix — without needing a captured body, an instrumented capture hop, or
 // any extra request.
-func recordUsageShape(sse bool, total int, doc []byte) {
-	attrs := usageShapeAttrs(sse, total, doc)
+func recordUsageShape(sse bool, total int, spliced bool, doc []byte) {
+	attrs := usageShapeAttrs(sse, total, spliced, doc)
 	if !noteUsageShape(usageShapeKey(attrs)) {
 		return
 	}
@@ -539,10 +545,10 @@ func ResetUsageShapeRecordForTest() {
 //
 // doc is the JSON document that failed to parse: the whole body for a buffered response, and for a
 // stream the ONE EVENT the classifier judged (see parseSSEUsageWhy) rather than the transport or its
-// last event. total is the whole response's size, which is the figure that says a window was
-// spliced.
-func usageShapeAttrs(sse bool, total int, doc []byte) []any {
-	attrs := []any{"sse", sse, "bytes", total,
+// last event. total is the whole response's size, and spliced says that size was seen through a
+// head+tail window — the two together are what say "the bytes were dropped, not the dialect".
+func usageShapeAttrs(sse bool, total int, spliced bool, doc []byte) []any {
+	attrs := []any{"sse", sse, "bytes", total, "spliced", spliced,
 		// Not parseable means the window was spliced rather than the dialect being strange —
 		// stated in the record so it cannot be misread as a field-name gap.
 		"valid_json", gjson.ValidBytes(doc),
@@ -721,6 +727,12 @@ type sniffer struct {
 }
 
 func newSniffer(on bool) *sniffer { return &sniffer{on: on} }
+
+// spliced reports whether the retained window DROPPED anything: more bytes were written than
+// the head alone holds, so bytes() is a splice of head and tail with a middle missing. The usage
+// classifier needs this because "no usage block in what we kept" then stops meaning "the
+// provider sent none" — see responseUsageWhy.
+func (s *sniffer) spliced() bool { return s.on && s.total > len(s.head) }
 
 func (s *sniffer) write(p []byte) {
 	if !s.on {

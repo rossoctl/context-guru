@@ -29,6 +29,66 @@ func pkExpand() string {
 		"\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"" + expand.ToolName + "\",\"input\":{}}}\n\n"
 }
 
+func pkAdjudicate() string {
+	return "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2," +
+		"\"content_block\":{\"type\":\"tool_use\",\"id\":\"a1\",\"name\":\"" + adjudicate.ToolName + "\",\"input\":{}}}\n\n"
+}
+
+// #174: pass reports WHICH proxy tool the round named, not only that it named one, so the
+// response loop can attribute a leaked tool_use by tool instead of parking every leak in the
+// expand bucket. Order is first appearance, repeats collapse, and a round carrying both tools
+// reports both — the either/or a boolean `found` could not express.
+func TestPassReportsWhichProxyToolItWithheld(t *testing.T) {
+	newSplicer := func() (*sseSplicer, *httptest.ResponseRecorder) {
+		rec := httptest.NewRecorder()
+		sp := newSSESplicer(rec)
+		sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+		return sp, rec
+	}
+
+	t.Run("an adjudicate-only round names only the adjudication tool", func(t *testing.T) {
+		sp, _ := newSplicer()
+		_, _, called := sp.pass(strings.NewReader(pkStart+pkText+pkBStop+pkAdjudicate()+pkStop),
+			expand.ToolName, adjudicate.ToolName)
+		if len(called) != 1 || called[0] != adjudicate.ToolName {
+			t.Fatalf("called=%v, want [%s] — an adjudicate leak cannot be told from an expand one",
+				called, adjudicate.ToolName)
+		}
+	})
+
+	t.Run("a round carrying both reports both, in order of appearance", func(t *testing.T) {
+		sp, _ := newSplicer()
+		stream := pkStart + pkText + pkBStop + pkExpand() + pkAdjudicate() + pkStop
+		_, _, called := sp.pass(strings.NewReader(stream), expand.ToolName, adjudicate.ToolName)
+		if len(called) != 2 || called[0] != expand.ToolName || called[1] != adjudicate.ToolName {
+			t.Fatalf("called=%v, want [%s %s] — a both-at-once leak needs both counters",
+				called, expand.ToolName, adjudicate.ToolName)
+		}
+	})
+
+	t.Run("a repeated call to the same tool is reported once", func(t *testing.T) {
+		sp, _ := newSplicer()
+		_, _, called := sp.pass(strings.NewReader(pkStart+pkExpand()+pkExpand()+pkStop),
+			expand.ToolName, adjudicate.ToolName)
+		if len(called) != 1 || called[0] != expand.ToolName {
+			t.Fatalf("called=%v, want [%s] — the caller counts leaks per tool, not per block",
+				called, expand.ToolName)
+		}
+	})
+
+	t.Run("a client tool among them names nothing", func(t *testing.T) {
+		sp, rec := newSplicer()
+		_, _, called := sp.pass(strings.NewReader(pkStart+pkOtherT+pkStop),
+			expand.ToolName, adjudicate.ToolName)
+		if len(called) != 0 {
+			t.Fatalf("called=%v, want none — a client tool is not ours to count", called)
+		}
+		if !strings.Contains(rec.Body.String(), "Bash") {
+			t.Fatalf("a client tool must still stream through: %q", rec.Body.String())
+		}
+	})
+}
+
 // The one event a client must never receive. Everything else — thinking, text, another
 // tool, a ping, an error — is the client's to have, and the block INDEX is irrelevant:
 // deciding by index is the bug this replaced.
@@ -107,7 +167,8 @@ func TestPassSplitsTheStreamWithoutLosingAByte(t *testing.T) {
 			rec := httptest.NewRecorder()
 			sp := newSSESplicer(rec)
 			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-			whole, withheld, found := sp.pass(strings.NewReader(tc.stream), expand.ToolName)
+			whole, withheld, called := sp.pass(strings.NewReader(tc.stream), expand.ToolName)
+			found := len(called) > 0
 			if found != tc.wantFound {
 				t.Fatalf("found=%v, want %v", found, tc.wantFound)
 			}
@@ -142,9 +203,9 @@ func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 
 	sp.round(resp)
 	round1 := pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkStop
-	_, withheld, found := sp.pass(strings.NewReader(round1), expand.ToolName)
-	if !found || sp.blocks != 1 {
-		t.Fatalf("round 1 should have forwarded exactly one block, found=%v blocks=%d", found, sp.blocks)
+	_, withheld, called := sp.pass(strings.NewReader(round1), expand.ToolName)
+	if len(called) == 0 || sp.blocks != 1 {
+		t.Fatalf("round 1 should have forwarded exactly one block, called=%v blocks=%d", called, sp.blocks)
 	}
 	prefix := rec.Body.String()
 	if prefix != pkStart+pkText+pkDelta+pkBStop {
@@ -153,7 +214,7 @@ func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 
 	sp.round(resp)
 	round2 := pkStart + pkText + pkDelta + pkBStop + pkStop
-	if _, _, found := sp.pass(strings.NewReader(round2), expand.ToolName); found {
+	if _, _, called := sp.pass(strings.NewReader(round2), expand.ToolName); len(called) > 0 {
 		t.Fatal("round 2 has no expand call")
 	}
 	out := rec.Body.String()
@@ -251,7 +312,7 @@ func bigStream(n int, expandFirst bool) string {
 
 // Past sseRetainBoundMaxBytes the turn cannot be rebuilt, so nothing is intercepted and
 // NOTHING IS DROPPED: the client gets the stream exactly as it arrived, expand call included,
-// and pass says so with whole=nil and found=true so the caller can count the leak.
+// and pass says so with whole=nil and the tool named in called so the caller can count the leak.
 //
 // The bound is a per-ROUND ceiling and AggregateSSE's 8 MB is a per-LINE one, so a round past
 // this bound is not necessarily a round the aggregator would have refused — a 20 MiB round of
@@ -273,14 +334,14 @@ func TestARoundPastTheRetainBoundIsForwardedWholeAndNothingIsWithheld(t *testing
 			rec := httptest.NewRecorder()
 			sp := newSSESplicer(rec)
 			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-			whole, withheld, found := sp.pass(strings.NewReader(stream), expand.ToolName)
+			whole, withheld, called := sp.pass(strings.NewReader(stream), expand.ToolName)
 			if whole != nil {
 				t.Fatalf("past the bound the round must not be retained, got %d B", len(whole))
 			}
 			if withheld != nil {
 				t.Fatalf("past the bound nothing can be withheld, got %d B", len(withheld))
 			}
-			if !found {
+			if len(called) == 0 {
 				t.Fatal("the response called expand and the caller has to know, to count the leak")
 			}
 			if got := rec.Body.String(); got != stream {
@@ -302,10 +363,10 @@ func TestARoundUnderTheRetainBoundIsStillIntercepted(t *testing.T) {
 	rec := httptest.NewRecorder()
 	sp := newSSESplicer(rec)
 	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-	whole, withheld, found := sp.pass(strings.NewReader(stream), expand.ToolName)
-	if !found || withheld == nil || string(whole) != stream {
-		t.Fatalf("a full-length 4.5 MB round must still be retained and withheld: found=%v withheld=%d whole=%d",
-			found, len(withheld), len(whole))
+	whole, withheld, called := sp.pass(strings.NewReader(stream), expand.ToolName)
+	if len(called) == 0 || withheld == nil || string(whole) != stream {
+		t.Fatalf("a full-length 4.5 MB round must still be retained and withheld: called=%v withheld=%d whole=%d",
+			called, len(withheld), len(whole))
 	}
 	if strings.Contains(rec.Body.String(), expand.ToolName) {
 		t.Fatal("the client received our own tool_use")

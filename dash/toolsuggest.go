@@ -78,6 +78,9 @@ type Suggestion struct {
 	// `skill__<name>`, because the two are removed by different mechanisms and a bare name
 	// cannot say which is meant. See internal/skills.RemovePrefix.
 	RemoveAs string `json:"remove_as"`
+	// ClientOnly: the proxy filter cannot remove it (a deferred MCP tool), so RemoveAs is empty
+	// and only the user's own change applies.
+	ClientOnly bool `json:"client_only,omitempty"`
 	// Tokens is what carrying this costs on ONE request.
 	Tokens int `json:"tokens"`
 	// Sessions is how many captured sessions declared it; Days is the span they cover.
@@ -439,7 +442,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 		}
 		if s, ok := suggest(st, win[statKey{st.Kind, st.Name}]); ok {
 			out.Suggestions = append(out.Suggestions, s)
-		} else if st.SessionsUsed == 0 && st.Tokens > 0 {
+		} else if st.SessionsUsed == 0 && st.Calls == 0 && st.Tokens > 0 { // never used, below the bar
 			out.Withheld++
 		}
 	}
@@ -522,7 +525,9 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	}
 	// Positive, sufficient observation, and every clause is required.
 	span := time.Duration(w.last-w.first) * time.Millisecond
-	if st.SessionsUsed > 0 || st.Tokens <= 0 ||
+	// Calls as well as SessionsUsed: a tool called in a session with no declaration row for it has
+	// SessionsUsed 0 and was still used, and suggesting its removal is the worst advice this gives.
+	if st.SessionsUsed > 0 || st.Calls > 0 || st.Tokens <= 0 ||
 		w.sessions < suggestMinSessions || span < suggestMinSpan {
 		return Suggestion{}, false
 	}
@@ -531,8 +536,13 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	if st.Kind == KindSkill {
 		removeAs = skills.RemovePrefix + st.Name
 	}
+	// A deferred tool stays a suggestion (it is the evidence behind the insights verdict), but the
+	// filter cannot remove it, so it names no filter entry.
+	if st.Deferred {
+		removeAs = ""
+	}
 	return Suggestion{
-		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: removeAs,
+		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: removeAs, ClientOnly: st.Deferred,
 		Tokens: st.Tokens, Sessions: w.sessions, Days: days, Since: w.first,
 		UnusedReads: st.UnusedReads, ProjectedUSD: st.UnusedUSD, Priced: st.Priced,
 		Basis: fmt.Sprintf("declared but never invoked across %d of your sessions since %s (%.0f days)",

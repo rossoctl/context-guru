@@ -280,6 +280,22 @@ type errStalePrefix struct{}
 
 func (errStalePrefix) Error() string { return "stashed prefix does not cover the span to summarize" }
 
+// ErrCoordsShifted is what a caller should treat an attempted PrefixAsk as having returned when
+// an earlier component in the pipeline changed the MESSAGE COUNT, so the span the caller wanted
+// to verify against the host's stash cannot be located at all: rawSpanForHash reports !ok and
+// there is no slice of either coordinate system safe to compare. Kept apart from
+// ErrStalePrefix for the same reason the two have different counters: the stash itself can be
+// perfectly current here — the pipeline geometry moved, not the data — and on a `high` or
+// `xhigh` pipeline, where `summarize` runs before the later guards and compacts, this is the
+// expected decline on every turn rather than a defect in the stash.
+var ErrCoordsShifted = errCoordsShifted{}
+
+type errCoordsShifted struct{}
+
+func (errCoordsShifted) Error() string {
+	return "an earlier component changed the message count, so the stashed span cannot be located"
+}
+
 // MessagesModel is an OPTIONAL capability on a Model: a client that can send a full
 // message ARRAY rather than one flattened prompt string. Components detect it by type
 // assertion and must degrade gracefully when a client does not implement it.
@@ -401,6 +417,15 @@ func ParseMode(s string) (Mode, error) {
 	return ModeSync, fmt.Errorf("mode must be sync|observe, got %q", s)
 }
 
+// CutFracProvider is implemented by a component that cuts the conversation when billed input reaches a
+// fraction of the window: cache_aware_summarizer and summarize (their trigger's min_request_frac). The
+// pipeline asks each once, before any component runs, and hands the SMALLEST positive value to every
+// component as Ctx.CutFrac, so the warm sweep can estimate how many turns are left before the conversation is cut
+// (#491) without reaching into a sibling component. 0 means "no fraction".
+type CutFracProvider interface {
+	CutFrac() float64
+}
+
 // Ctx is the per-request runtime handed to every component.
 type Ctx struct {
 	Ctx     context.Context
@@ -441,6 +466,11 @@ type Ctx struct {
 	// text turns only, and a provider entry that ends at a text turn is never read by the next
 	// request, so every turn after a splice re-writes the whole kept history. "" = no anchor.
 	CacheAnchorToolID string
+	// NoCacheBreakpoint is true when the backend takes no explicit cache breakpoint (OpenAI and
+	// Gemini shaped wires cache an implicit prefix). The host cannot write the CacheAnchorToolID
+	// mark there, so a summary span has no reason to stop before the last tool exchange (#730).
+	// False (the default) keeps the retreat.
+	NoCacheBreakpoint bool
 	// AllowSummarySpan is supplied by a wire adapter when only some normalized
 	// spans can be rebuilt without dropping opaque provider state. Nil means the
 	// ordinary Chat/Anthropic adapter has no extra restriction.
@@ -488,6 +518,12 @@ type Ctx struct {
 	// harmless direction. A component must treat 0 as UNKNOWN and decline a fill decision, the
 	// same rule CtxWindowExact carries, for the same reason.
 	PrevBilledInput int
+	// PrevBilledInputThread is PrevBilledInput for THIS request's thread only: the billed input of the
+	// previous turn of the same thread, or 0 when the thread has none (unknown). A session holds the main
+	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one to
+	// measure how a thread GROWS (the billed-growth horizon). Use PrevBilledInput to ask how full the
+	// session's context is.
+	PrevBilledInputThread int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their
@@ -599,6 +635,12 @@ type Ctx struct {
 	// own position differs from len(RawInput), rather than hash the wrong span under a matching
 	// nil-ness check alone.
 	RawInput []schemas.ChatMessage
+	// CutFrac is the smallest trigger fraction of the window at which a component of THIS pipeline cuts
+	// the conversation (CutFracProvider), or 0 when none does. Set by Pipeline.Run before any
+	// component runs. Coref's horizon (and later the warm sweep's) reads it to estimate the turns left
+	// before the cut. A summarizer's min/max_request_tokens gates can cut earlier than this fraction
+	// says, so the horizon can be an overestimate.
+	CutFrac float64
 	// WireGroup names, for each req.Input index, the ORIGINAL wire message it came from (#457).
 	// On Anthropic traffic several normalized messages can share one wire message — a
 	// tool_result's synthetic role=tool message and a sibling text block beside it (mid-turn

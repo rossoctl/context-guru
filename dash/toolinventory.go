@@ -25,11 +25,13 @@ package dash
 //     the redactor and size-capped, and without consent the column is NULL while every
 //     measurement above survives — see Decl.Text and declText.
 //   - NEVER a message of the conversation. The inventory reads the request's PREAMBLE (its
-//     tools array, its system prompt, the skills listing in a system-role reminder) and
-//     nothing a user or the model said in the transcript itself.
+//     tools array, its system prompt, the skills listing in a system-role reminder, the
+//     deferred-tools list Claude Code injects as text) and nothing a user or the model said
+//     in the transcript itself. The deferred list can sit in a user-role block, so it is read
+//     only in the exact shape Claude Code writes it: see deferredDecls.
 //
 // Cost discipline. This runs on every request, so the hot path is: one structural
-// gjson scan of `tools`, two byte searches for the skills listing, one structural lookup and
+// gjson scan of `tools`, byte searches for the skills and deferred-tools lists, one structural lookup and
 // one hash for the system prompt, and two map lookups — and on a hit (every request after a
 // session's first) nothing else. All tokenizing and all parsing happen once per distinct
 // declaration SET, memoized by its digest, and once per distinct system prompt, memoized by
@@ -41,6 +43,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"hash/maphash"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +121,10 @@ type Decl struct {
 	// while keeping its metrics. Applying it here instead would poison declCache, whose
 	// entries are shared by every tenant that declares the same set.
 	Text string `json:"text,omitempty"`
+	// Deferred marks an MCP tool read from the deferred-tools list, not from `tools`. The proxy
+	// filter removes only `tools` elements, so it cannot remove this one: only the user's own
+	// change (claude mcp remove, permissions.deny) can.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // Used is one invoked capability: a tool name, or the Skill tool plus the skill it
@@ -205,13 +212,14 @@ func ScanInventory(provider string, body []byte) *Inventory {
 		return nil // see maxDeclSet: not an inventory we will spend a request's CPU on
 	}
 	region := skillRegion(body)
-	// One digest over both halves of the declaration set: a tool added and a skill added
+	// One digest over every part of the declaration set: a tool added and a skill added
 	// are the same event as far as "is this the set we already measured" goes.
 	var h maphash.Hash
 	h.SetSeed(declSeed)
 	h.WriteString(tools.Raw)
 	h.WriteString("\x00")
 	h.WriteString(region)
+	deferred := hashDeferred(&h, body)
 	digest := h.Sum64()
 
 	declMu.Lock()
@@ -219,6 +227,9 @@ func ScanInventory(provider string, body []byte) *Inventory {
 	declMu.Unlock()
 	if !hit {
 		decls = declsFrom(provider, tools)
+		if deferred {
+			decls = mergeDeferred(decls, deferredDecls(body))
+		}
 		if region != "" {
 			decls = append(decls, skillDecls(skillsText(body))...)
 		}
@@ -272,6 +283,8 @@ func declsFrom(provider string, tools gjson.Result) []Decl {
 			}
 		case name == "":
 			continue // malformed element: no name to attribute anything to
+		case name == deferredPlaceholder && t.Get("defer_loading").Bool():
+			continue // a marker that keeps tool search on, not a tool anybody can remove
 		}
 		d := Decl{Kind: kind, Name: identName(name), Tokens: tokens.Count(t.Raw), Text: t.Raw}
 		if server, _, ok := SplitMCPName(name); ok {
@@ -423,6 +436,214 @@ func skillDecls(text string) []Decl {
 		out[0].Server = SkillsOK
 	}
 	return out
+}
+
+// deferredHeader starts the list of deferred tools. Claude Code defers MCP tools: the tools
+// array then carries only the built-ins and deferredPlaceholder, and the mcp__* names arrive
+// in a message as this header line, one name per line, and a blank line. Each such list is
+// a delta, so a request carries one per change and the declared set is all of them together.
+//
+// Claude Code also sends removals, in wording not yet captured, so a removed server stays in
+// the set until the session ends.
+const deferredHeader = "The following deferred tools are now available via ToolSearch."
+
+// deferredTagEnds are the escaped-body spellings of a newline then `</system-reminder>`.
+var deferredTagEnds = [][]byte{[]byte(`\n` + reminderEnd), []byte(`\n\u003c/system-reminder\u003e`)}
+
+// deferredPlaceholder is the stub tools element that keeps deferred loading on.
+const deferredPlaceholder = "DeferredToolPlaceholder"
+
+// hashDeferred writes every deferred list in the RAW body into h and reports whether there
+// was one. It runs on every request, so it is byte searches only and copies nothing. A
+// request without a list writes nothing, so it keeps the digest it had. A region runs to a
+// blank line (`\n\n` in the escaped body) or to the end of its JSON string, whichever is
+// first; maxListing bounds the bytes hashed in total.
+func hashDeferred(h *maphash.Hash, body []byte) bool {
+	found, budget := false, maxListing
+	for rest := body; budget > 0; {
+		i := bytes.Index(rest, []byte(deferredHeader))
+		if i < 0 {
+			break
+		}
+		rest = rest[i:]
+		end := len(rest)
+		for _, blank := range [][]byte{[]byte(`\n\n`), []byte(`\r\n\r\n`)} {
+			if j := bytes.Index(rest, blank); j >= 0 && j < end {
+				end = j
+			}
+		}
+		// appendDeferred also stops at a `</system-reminder>` line; end here too, or text after a
+		// closing tag that follows the last name (a date, another reminder) churns the digest. Both
+		// JSON spellings: Claude Code writes the tag literally, an encoder that escapes HTML (Go's
+		// does) writes `\u003c/system-reminder\u003e`.
+		for _, tag := range deferredTagEnds {
+			if j := bytes.Index(rest, tag); j >= 0 && j < end {
+				end = j
+			}
+		}
+		if j := stringEnd(rest); j < end {
+			end = j
+		}
+		end = min(end, budget)
+		h.WriteByte(0)
+		h.Write(rest[:end])
+		found, budget, rest = true, budget-end, rest[end:]
+	}
+	return found
+}
+
+// stringEnd returns the offset of the first unescaped `"` in b (the end of the JSON string
+// b starts inside), or len(b). The header line itself holds escaped quotes.
+func stringEnd(b []byte) int {
+	for off := 0; ; {
+		j := bytes.IndexByte(b[off:], '"')
+		if j < 0 {
+			return len(b)
+		}
+		i := off + j
+		// Escaped when an odd number of backslashes runs up to it.
+		k := i
+		for k > 0 && b[k-1] == '\\' {
+			k--
+		}
+		if (i-k)%2 == 0 {
+			return i
+		}
+		off = i + 1
+	}
+}
+
+// deferredDecls parses the deferred lists. Only called on a digest miss.
+//
+// Fail-safe, like skillDecls, because a user can quote the header:
+//
+//   - Only text that Claude Code sends: a user or system message's own text, never a tool
+//     result, which holds whatever a command printed.
+//   - The header must start a line, and every line up to the end of the list must be a bare
+//     tool name. One line that is not voids that whole list.
+//
+// Each list's measured tokens are split equally over every name in it, so an MCP tool is
+// charged its share and the built-in names keep theirs off the page, as before. The shares are
+// APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
+// name costs a little more than a short one. Removing a tool gives back its own line, not the
+// header, so an equal share of the whole is a fair bound, not an exact figure.
+func deferredDecls(body []byte) []Decl {
+	var out []Decl
+	seen := map[string]bool{}
+	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
+		if !strings.Contains(m.Raw, deferredHeader) {
+			return true
+		}
+		if r := m.Get("role").String(); r != "user" && r != "system" {
+			return true
+		}
+		c := m.Get("content")
+		if c.Type == gjson.String {
+			out = appendDeferred(out, seen, c.String())
+			return true
+		}
+		c.ForEach(func(_, blk gjson.Result) bool {
+			if blk.Get("type").String() == "text" {
+				out = appendDeferred(out, seen, blk.Get("text").String())
+			}
+			return true
+		})
+		return true
+	})
+	return out
+}
+
+// appendDeferred adds the MCP tools of every valid list in text, skipping names in seen.
+func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
+	for from := 0; ; {
+		i := strings.Index(text[from:], deferredHeader)
+		if i < 0 {
+			return out
+		}
+		start := from + i
+		from = start + len(deferredHeader)
+		if start > 0 && text[start-1] != '\n' {
+			continue // quoted mid-line: not a list
+		}
+		nl := strings.IndexByte(text[start:], '\n')
+		if nl < 0 {
+			continue
+		}
+		var names []string
+		end, pos, ok := start+nl, start+nl+1, true
+		for pos < len(text) {
+			line, next := text[pos:], len(text)
+			if k := strings.IndexByte(line, '\n'); k >= 0 {
+				line, next = line[:k], pos+k+1
+			}
+			line = strings.TrimSuffix(line, "\r") // a CRLF client: the name must not fail isToolName
+			if line == "" || line == reminderEnd {
+				break
+			}
+			if !isToolName(line) {
+				ok = false
+				break
+			}
+			names = append(names, line)
+			end, pos = pos+len(line), next
+		}
+		if !ok || len(names) == 0 {
+			// Counts only, never the text: a voided list can be a user quoting the header. Logged so
+			// a format change shows up here rather than as "0 MCP servers" on the page.
+			slog.Debug("dash: ignored a deferred-tools list that did not parse",
+				"names_before_bad_line", len(names), "bad_line", !ok)
+			continue
+		}
+		total := tokens.Count(text[start:end])
+		share, extra := total/len(names), total%len(names)
+		for k, name := range names {
+			n := share
+			if k < extra {
+				n++
+			}
+			server, _, isMCP := SplitMCPName(name)
+			if !isMCP || seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, Decl{Kind: KindMCPTool, Name: identName(name),
+				Server: identName(server), Tokens: n, Text: name, Deferred: true})
+		}
+	}
+}
+
+// isToolName reports whether s is a bare tool name: the API's own charset and length.
+func isToolName(s string) bool {
+	if s == "" || len(s) > maxDeclName {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeDeferred adds the deferred MCP tools to the tools-array declarations. A tool loaded
+// through ToolSearch is in both, with 0 tokens in `tools`; its listing row replaces that one,
+// so it is charged once.
+func mergeDeferred(decls, deferred []Decl) []Decl {
+	if len(deferred) == 0 {
+		return decls
+	}
+	listed := map[string]bool{}
+	for _, d := range deferred {
+		listed[d.Name] = true
+	}
+	out := decls[:0:0]
+	for _, d := range decls {
+		if d.Kind == KindMCPTool && d.Tokens == 0 && listed[d.Name] {
+			continue
+		}
+		out = append(out, d)
+	}
+	return append(out, deferred...)
 }
 
 // skillEntryName reads a listing line's name, or reports that the line is not an entry. Kept as
@@ -673,8 +894,8 @@ func (w *invWriter) write(batch []invMsg) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	declStmt, err := tx.Prepare(`INSERT INTO tool_declarations(
-		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_hash
-	) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
+		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_hash, deferred
+	) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
 	}
@@ -730,7 +951,7 @@ func (w *invWriter) write(batch []invMsg) error {
 					return err
 				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					d.Kind, d.Name, d.Server, d.Tokens, m.ts, h); err != nil {
+					d.Kind, d.Name, d.Server, d.Tokens, m.ts, h, d.Deferred); err != nil {
 					return err
 				}
 			}
@@ -753,7 +974,7 @@ func (w *invWriter) write(batch []invMsg) error {
 					return err
 				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts, h); err != nil {
+					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts, h, false); err != nil {
 					return err
 				}
 			}

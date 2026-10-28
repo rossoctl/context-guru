@@ -211,17 +211,26 @@ def cachestate_cached(base: str, session: str, fetch=None) -> dict:
     if cached is not None and age is not None and age < CACHESTATE_TTL_SECONDS:
         return {**cached, "age_s": round(age, 1), "stale": False}
     # Past the TTL: one caller per window refreshes; the rest, and anyone inside a back-off, serve the old copy.
-    may_fetch = not cgcache.backoff(path) and (cached is None or cgcache.take_slot(path, CACHESTATE_TTL_SECONDS))
+    wait = cgcache.backoff(path)
+    may_fetch = not wait and (cached is None or cgcache.take_slot(path, CACHESTATE_TTL_SECONDS))
+    kind = (wait or {}).get("kind") if isinstance(wait, dict) else None
     if may_fetch:
-        doc = (fetch or (lambda: Api(base).get("/api/cachestate", {"session": session}, timeout=5)))()
-        if isinstance(doc, dict):
+        if fetch:  # an injected fetcher answers a document or None (no answer)
+            doc = fetch()
+            status = 200 if isinstance(doc, dict) else 0
+        else:
+            status, doc = Api(base).send("GET", "/api/cachestate", {"session": session}, timeout=5)
+        if status == 200 and isinstance(doc, dict):
             cgcache.write_atomic(path, json.dumps(doc).encode())
             cgcache.clear_failure(path)
             return {**doc, "age_s": 0.0, "stale": False}
-        cgcache.record_failure(path, "error")
+        # The status line's three cases: nothing answered (`down`), too slow (`timeout`), an answer that is no
+        # document (`empty`). Only `down` is the `cg ✕ proxy offline` notice.
+        kind = "down" if status == 0 else "timeout" if status == -1 else "empty"
+        cgcache.record_failure(path, kind)
     if cached is not None:
         return {**cached, "age_s": round(age or 0.0, 1), "stale": True}
-    return {"error": "proxy not answering"}
+    return {"error": "proxy not answering", **({"failure": kind} if kind else {})}
 
 
 def name_agents(doc: dict, transcript: str) -> None:
@@ -240,6 +249,30 @@ def name_agents(doc: dict, transcript: str) -> None:
             t["name"] = rows[t["id"]]
 
 
+def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -> None:
+    """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
+    longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
+    from the status line's own cached /api/stats), and on a subscription the tokens compaction kept out of the current
+    5-hour window. Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
+    try:
+        import statusline as sl  # noqa: PLC0415
+        strip = lambda t: re.sub(r"\033\[[0-9;]*m", "", t or "")  # noqa: E731
+        up = strip(sl._update_available_segment())
+        if up:
+            doc["update"] = up
+        port = base.rsplit(":", 1)[-1].split("/")[0]
+        stats, _ = sl._fetch_stats(port, sid)
+        if isinstance(stats, dict) and isinstance(stats.get("manual_pings"), dict):
+            doc["manual_pings"] = stats["manual_pings"]
+        if window_start_ms:
+            win, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}", f"win-{window_start_ms // 1000}", sl.WINDOW_TTL_SECONDS)
+            saved = sl._saved_tokens_text(win)
+            if saved:
+                doc["window_saved"] = saved
+    except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
+        pass
+
+
 def cmd_cachestate(api: Api, o: dict) -> list[str]:
     sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
@@ -248,6 +281,14 @@ def cmd_cachestate(api: Api, o: dict) -> list[str]:
         doc = cachestate_cached(api.base, sid)
         if o.get("transcript") and "error" not in doc:
             name_agents(doc, o["transcript"])
+        if "error" not in doc:
+            status_extras(api.base, sid, doc, o.get("window_start_ms"))
+        elif doc.get("failure") == "down":
+            doc["notice"] = "cg ✕ proxy offline"  # the status line's own words, for a proxy that does not answer at all
+        elif doc.get("failure") == "timeout":
+            # Too slow, and nothing was ever read: the status line's `_timeout_result` with no cache says this. It
+            # redraws with real numbers on its own once an answer lands.
+            doc["notice"] = "cg: stats loading…"
         code = 1 if "error" in doc else 0
     o["exit"] = code
     return [json.dumps(doc, separators=(",", ":"))]
@@ -823,9 +864,12 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
             sl = json.load(f).get("statusLine") or {}
     except (OSError, ValueError):
         pass
-    add("ok" if "statusline" in str(sl.get("command", "")) else "warn", "Context Guru status line is installed", "Run /context-guru:statusline")
-    add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
-        'Add "refreshInterval": 5 to statusLine in settings.json')
+    # Since 0.6.1 the mod's band draws the status line's figures, and the install writes no statusLine. The line is
+    # an option: its two checks run only when it is there, so a default install is never told to add one.
+    if "statusline" in str(sl.get("command", "")):
+        add("ok", "Context Guru status line is installed", "Run /context-guru:statusline")
+        add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
+            'Add "refreshInterval": 5 to statusLine in settings.json')
     ping_state = _ping_header_state()
     if ping_state in ("present", "missing", "user-off", "removed"):
         add("ok" if ping_state == "present" else "warn", "Ping header is set (the Ping button needs it)",
@@ -1158,9 +1202,14 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
         shown = items if o["details"] else items[:8]
         top = max([i.get("usd") or 0 for i in shown] + [0.01])
         L += ["", f"Never used in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Never used in this window:"]
-        L += ["  " + r for r in T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
-                                         money(i.get("usd") if i.get("priced", True) else None),
-                                         bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")]
+        rows = T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
+                        money(i.get("usd") if i.get("priced", True) else None),
+                        bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")
+        for i, r in zip(shown, rows):
+            L.append("  " + r)
+            # The proxy cannot filter a deferred item, and the summary sends the reader to its command.
+            if i.get("client_only") and (i.get("remove") or i.get("suggest")):
+                L.append("      run: " + (i.get("remove") or i.get("suggest")))
     removed = rep.get("removed") or []
     if removed and o["details"]:
         # Measured (the proxy's filter) and estimated (removed in the client) stay apart and are never added
@@ -1483,6 +1532,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
     ap.add_argument("--transcript", help="cachestate: this session's transcript path, to name its sub-agents")
+    ap.add_argument("--window-start-ms", type=int, help="cachestate: when this subscription's 5-hour window began, for its saved tokens")
     ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
@@ -1543,7 +1593,7 @@ def main(argv: list[str] | None = None) -> int:
         print(cmd_panedata(api, {"session": a.session})[0])
         return 0
     if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
-        o = {"session": a.session, "transcript": a.transcript}
+        o = {"session": a.session, "transcript": a.transcript, "window_start_ms": a.window_start_ms}
         print(cmd_cachestate(api, o)[0])
         return o["exit"]
     print(run(a.cmd, api, opts))

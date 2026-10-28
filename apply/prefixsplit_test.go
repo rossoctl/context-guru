@@ -495,3 +495,30 @@ func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {
 		t.Errorf("no split, but reported %d stable tokens", n)
 	}
 }
+
+// Bedrock Converse spells the breakpoint as its own entry after the block. The split must
+// keep that entry right after the stable half, so the volatile half is outside the cache.
+func TestSplitOnBedrockConverseKeepsCachePointAfterStableHalf(t *testing.T) {
+	full, stable, volatile := blockWithGitTail(6000)
+	in := sysBody(
+		map[string]any{"text": full},
+		map[string]any{"cachePoint": map[string]any{"type": "default"}},
+	)
+	for _, p := range []bschemas.ModelProvider{bschemas.Bedrock, bschemas.BedrockMantle} {
+		got, split := splitTail(in, p)
+		if !split {
+			t.Fatalf("%s: did not split", p)
+		}
+		e := gjson.GetBytes(got, "system").Array()
+		if len(e) != 3 {
+			t.Fatalf("%s: want [stable, cachePoint, volatile], got %d entries", p, len(e))
+		}
+		if e[0].Get("text").String() != stable || !e[1].Get("cachePoint").Exists() ||
+			e[2].Get("text").String() != volatile {
+			t.Fatalf("%s: wrong order, the breakpoint still covers the volatile half: %s", p, got)
+		}
+		if after, before := wireBreakpoints(got), wireBreakpoints(in); after != before {
+			t.Fatalf("%s: breakpoint count %d -> %d", p, before, after)
+		}
+	}
+}

@@ -8,13 +8,17 @@ import (
 )
 
 // Usage tracks cumulative token usage of the cheap (config-source) model across
-// all NeedsModel component calls in this process. It is the basis for reporting
-// the CONTEXT-GURU components' OWN LLM cost (e.g. extract:code's Starlark-writer
-// calls) separately from the agent's cost — the proxy exposes it at /stats and the
-// benchmark prices it. Process-global (there is a single cheap model per proxy);
-// per-component attribution would need the Model interface to carry a label, a
-// deferred refinement — today the LLM component in a config is extract, so the
-// global total is that component's cost.
+// every component that calls a model in this process — extract_llm, extract_llm_sweep,
+// summarize, cache_aware_summarizer and agentdiet all land in these totals, so the
+// global figure is every cheap-model call in the process, not one component's cost.
+// (Components that call a model, not NeedsModel implementors: the extract pair goes
+// through components.Model without implementing NeedsModel.) Per-component
+// attribution exists since #178: each component prices its own calls from
+// ModelCall.CostUSD at the rates of the model it addressed (metrics.RecordExtractionSpend).
+// Usage() survives as /stats' labelled fallback for when no component priced anything
+// (cost_source: host_total, a SUPERSET that also carries the other components and prices
+// everything through one rate card — see metrics/extract.go), and the harnesses price
+// these totals. Process-global (there is a single cheap model per proxy).
 //
 // The cache tiers are tracked separately because they are the whole question behind
 // issue #28's part A: a preamble breakpoint below the model's minimum cacheable prefix

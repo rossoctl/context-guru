@@ -193,8 +193,9 @@ type slot struct {
 	preText string // anthropicToolText: original tool-output text (change detection)
 	// tail is the run of trailing <system-reminder> blocks split off an anthropicToolText
 	// output before the components saw it (#556). preText still holds the WHOLE original, and
-	// writeback appends tail to whatever the components left, so preText == text+tail means
-	// unchanged.
+	// writeTail rebuilds it, so preText == writeTail(text) means unchanged. The separator
+	// between the output and the run stays in the body (#752); writeTail puts it back before
+	// the tail when a component rewrote the body.
 	tail string
 	// raw is the BODY message's original bytes — for a tool-text slot, the whole user
 	// message the tool_result block lives in, so several slots can share one raw.
@@ -664,19 +665,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	rawInput := make([]bschemas.ChatMessage, len(norm))
 	copy(rawInput, norm)
 	c := &components.Ctx{
-		Ctx:            ctx,
-		Session:        sessionID,
-		Thread:         tr.Thread.ID,
-		ThreadParent:   threadParent,
-		ThreadInherits: threadInherits,
-		DeclaresTools:  gjson.GetBytes(body, "tools.#").Int() > 0,
-		Store:          st,
-		RawInput:       rawInput,
-		WireGroup:      wireGroups(slots),
-		Model:          models,
-		Bypass:         bypass,
-		CtxWindow:      o.Window,
-		CtxWindowExact: o.WindowExact,
+		Ctx:               ctx,
+		Session:           sessionID,
+		Thread:            tr.Thread.ID,
+		ThreadParent:      threadParent,
+		ThreadInherits:    threadInherits,
+		DeclaresTools:     gjson.GetBytes(body, "tools.#").Int() > 0,
+		Store:             st,
+		RawInput:          rawInput,
+		WireGroup:         wireGroups(slots),
+		NoCacheBreakpoint: !explicitBreakpointProvider(provider),
+		Model:             models,
+		Bypass:            bypass,
+		CtxWindow:         o.Window,
+		CtxWindowExact:    o.WindowExact,
 		// C, the denominator the fill fraction actually belongs over — see
 		// components.Ctx.CompactionPoint.
 		CompactionPoint:       o.CompactionPoint,
@@ -684,14 +686,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Read under the SAME sessionID the host will write back under (Trace.Session), which
 		// is what keeps the fraction gate from reading a permanent zero. See
 		// RecordBilledInput.
-		PrevBilledInput: prevBilledInput(st, sessionID),
-		ModelName:       gjson.GetBytes(body, "model").String(),
-		SelfRates:       o.SelfRates,
-		RatesFor:        o.RatesFor,
-		CacheAware:      cacheAware,
-		ColdCache:       coldCache,
-		IdleMs:          idleMs,
-		MaxCachedIdx:    maxCachedIdx,
+		PrevBilledInput:       prevBilledInput(st, sessionID),
+		PrevBilledInputThread: prevBilledInputThread(st, sessionID, tr.Thread.ID),
+		ModelName:             gjson.GetBytes(body, "model").String(),
+		SelfRates:             o.SelfRates,
+		RatesFor:              o.RatesFor,
+		CacheAware:            cacheAware,
+		ColdCache:             coldCache,
+		IdleMs:                idleMs,
+		MaxCachedIdx:          maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -854,7 +857,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// exactly as they arrived. Never written back, so never counted as a change.
 			continue
 		case anthropicToolText:
-			newText := schema.MessageText(chat.Input[i]) + s.tail
+			newText := s.writeTail(schema.MessageText(chat.Input[i]))
 			if newText == s.preText {
 				continue
 			}
@@ -1399,6 +1402,21 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 	return sessionIDFrom(tenant, explicitSess, body, norm)
 }
 
+// EnforcedSessionIDFor derives the session id BodyOpts will use for this request on an ENFORCED
+// path: it runs the same envelope transform first (toolfilter's skills half rewrites the head
+// message that the session hash reads), then derives the id exactly as BodyOpts does. A host that
+// must write state under the pipeline's session BEFORE the pipeline runs (the proxy's expand
+// repair, #175) calls this, so the two cannot disagree. It costs a transform and a re-parse, so
+// call it only when there is state to write.
+func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
+	if api == "responses" {
+		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
+		return SessionIDFor(tenant, explicitSess, provider, out)
+	}
+	out, _, _, _ := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
+	return SessionIDFor(tenant, explicitSess, provider, out)
+}
+
 // ProjectFor returns the directory the agent was started in, as stated in the request's own
 // prompt, or "" when the request does not state one.
 //
@@ -1437,6 +1455,31 @@ func RecordBilledInput(st store.Store, session string, tokens int64) {
 		return
 	}
 	st.Put(store.BilledPrefix+session, []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// RecordBilledInputThread stores the same figure per thread, for the billed-growth horizon. Call it next
+// to RecordBilledInput, with the thread id the request was served under.
+func RecordBilledInputThread(st store.Store, session, threadID string, tokens int64) {
+	if st == nil || session == "" || tokens <= 0 {
+		return
+	}
+	st.Put(store.BilledThreadPrefix+thread.Key(session, threadID), []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// prevBilledInputThread reads back what RecordBilledInputThread stored, or 0 (unknown).
+func prevBilledInputThread(st store.Store, session, threadID string) int {
+	if st == nil {
+		return 0
+	}
+	b, ok := st.Get(store.BilledThreadPrefix + thread.Key(session, threadID))
+	if !ok || len(b) == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // prevBilledInput reads back what RecordBilledInput stored, or 0 when this session has no earlier
@@ -1944,7 +1987,7 @@ func writeBackToolText(body []byte, orig []gjson.Result, slots []slot,
 		if !ok {
 			continue
 		}
-		txt := schema.MessageText(out[i]) + slots[k].tail
+		txt := slots[k].writeTail(schema.MessageText(out[i]))
 		if txt == slots[k].preText {
 			continue // unchanged; the original bytes already carry it
 		}

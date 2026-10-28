@@ -1,5 +1,7 @@
 # Status line
 
+**Since 0.6.1 the [Context Guru band](#the-mod) above the prompt shows everything below, the same way, and the install no longer writes a status line.** A status line an earlier install wrote by default is removed at the next session start, with one line saying so. The status line is still here for anyone who wants it as well: `/context-guru:statusline` (or `install.sh --statusline`) turns it on, and then it stays.
+
 The status line sits under the prompt and answers two questions all the time: **how much am I saving, and is my cache about to cost me?** It shows nothing in a project that is not routed through the proxy.
 
 The default layout has two lines:
@@ -9,7 +11,7 @@ saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents
 cache ● █████░ 4:00 ↻ │ ctx ███░░░░░ 41%
 ```
 
-Line 1 is money. Line 2 is the main agent's cache clock and the context bar. The status line owns the money, the clock and the context bar. The [Context Guru mod](#the-mod) owns the next-message price, the sub-agent caches, the weekly tip and the Ping button.
+Line 1 is money. Line 2 is the main agent's cache clock and the context bar. The [Context Guru band](#the-mod) draws the same figures on its second row.
 
 Only savings recorded with each request count: the compaction saving (against the same request uncompacted), the cache split, and the keep-alive credit, which a request gets only when a ping that read the cache kept it warm. Two credits that the dashboard prices when it is read are left out: the estimate for requests recorded before the cache split was measured, and the tool (declaration) filter's saving. So the line can read lower than the dashboard, which adds both. A figure the proxy did not report is left out, never shown as `$0.00`. The figures are not Claude Code's own `cost` (its estimate at list prices), which `detailed` shows as `spent`.
 
@@ -170,36 +172,35 @@ The weekly tip names each of `/context-guru:save-more` and `/context-guru:remove
 
 ## <span id="the-mod"></span>The mod: band and pane
 
-Claude Code can load the plugin as a mod. It draws a calm band above the prompt and a pane. The mod never reads the network itself. It runs `scripts/cg.py`, which uses the same on-disk cache as the status line. So the two never ask the proxy twice.
+Claude Code can load the plugin as a mod. It draws a calm band above the prompt and a pane. The mod never reads the network itself. It runs `scripts/cg.py`, which uses the same on-disk cache, TTLs and back-off as the status line, so the two never ask the proxy twice when both are on.
 
-One home per fact:
+Where each fact is:
 
 | Fact | Where |
 |---|---|
-| saved $x of $y (session, subagents) | status line, line 1 |
-| the main cache clock, `↻` | status line |
-| context fill | status line |
-| the price of the next message, warm and cold | band |
-| Ping | band, pane and `/ping` |
-| sub-agent caches | band (row 2) and pane |
-| the weekly tip | band (row 3, only when stale) |
+| the price of the next message, warm and cold; Ping; the dashboard link | band, row 1 |
+| `▲ update`, saved $x of $y (session, subagents), `↻ $x pings`, the main cache clock, context fill | band, row 2 (the status line's figures) |
+| sub-agent caches | band (row 3) and pane |
+| the weekly tip, or one command and what it does, rotating | band (row 4) |
 | spark, strip, heat, fill | pane |
 
 ### The band
 
-At most three rows. Usually one.
+At most four rows. Each row needs one spare row of room, so a short band keeps row 1 and drops the others from the bottom.
 
 ```text
-◆ next message $0.06 · $0.78 if cold [ Ping ]  hide
+◆ next message $0.06 · $0.78 if cold [ Ping ]  hide  dashboard ↗
+saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents │ cache ● █████░ 3:59 │ ctx █░░░░░░░ 9%
 └ agents  ● Explore 5m  ◐ code-reviewer <1m  ○ planner
-tip: /context-guru:save-more hasn't run in 7+ days — finds a cheaper config
+try /context-guru:insights — see where your money goes
 ```
 
-- **Row 1.** `◆`, then the price of the next message: warm in green, cold dim. Then **Ping** (key `p`) and a small `hide`. The dashboard link is in the pane header: the terminal draws a link's address next to its label, which would wrap the row.
+- **Row 1.** `◆`, then the price of the next message: warm in green, cold dim. Then **Ping** (key `p`), a small `hide`, and last the dashboard link (`dashboard ↗`, `dash ↗` below 80 columns). It is last because a terminal without hyperlink support prints the address after the label: then the link wraps to its own line and the rest of the row stays whole. The pane header has the link too.
 - **Cold cache.** The row changes to `◆ ○ cache cold · next message $0.78`. The price is amber. There is no Ping: a ping cannot help a cache that is gone.
 - **Ping off.** When the server says it cannot ping, the button is replaced by a dim reason, such as `ping off: on next session` or `ping off: not supported` (`ping off: not supported` means extended thinking, or a route Ping does not support). Below 80 columns it shows only `ping off`, so the row fits one line. A reason that is only a timing artefact (`no entry`, right after a reply) or unknown shows nothing in the band. If the server does not say (an older server), the button stays. The pane and the toast keep the full text.
-- **Row 2, sub-agents.** On by default. One chip per named agent that made a request in the last 30 minutes, most recent first, at most four, then `+N`. `●` green is warm, `◐` amber is the last minute, cyan with `↻` is kept warm by pings, dim `○` is cold. The `a` key, or the pane button, turns the row off and on.
-- **Row 3, the weekly tip.** Only when `/context-guru:save-more` or `/context-guru:remove-mcp-and-skills` has not run for 7 days. It uses the same rule as the status line tip (`last-run.json`, and a new install waits a week). It does not rotate.
+- **Row 2, the status line's figures.** The same elements, rules and colours as the status line's default layout: `saved $x of $y session`, `· saved $z of $q subagents` once another thread exists, `↻ $x pings` once a manual ping saved something, the cache clock (it counts every second, cyan with `↻` while pings hold it, dim `cache ○ cold 1:07:04` counting up once cold), and `ctx` (the engine's own context figures, the proxy's while its copy is fresh). `⏳` marks a copy over a minute old. On a Claude subscription the money gives way to `5h 34% · saved 1.2M rd / 85.0k wr`. `▲ update v0.6.1` leads the row when a release you have not declined exists. A saving never reads below `$0.00`: a session that has not yet earned back its first requests or a ping shows `saved $0.00`. When the row is too wide it drops, in this order, the subagents phrase, the `session` label (and `▲ update`), then the bars; the figures stay. With no data at all, the band says what the status line says: `cg ✕ proxy offline` when nothing answers, `cg: stats loading…` when the proxy is too slow. A proxy that answers with an error shows nothing.
+- **Row 3, sub-agents.** On by default. One chip per named agent that made a request in the last 30 minutes, most recent first, at most four, then `+N`. `●` green is warm, `◐` amber is the last minute, cyan with `↻` is kept warm by pings, dim `○` is cold. The `a` key, or the pane button, turns the row off and on.
+- **Row 4, a command to try.** The weekly tip when `/context-guru:save-more` or `/context-guru:remove-mcp-and-skills` has not run for 7 days (the status line's rule: `last-run.json`, and a new install waits a week). Otherwise one of `/context-guru:insights`, `/context-guru:save-more` and `/context-guru:remove-mcp-and-skills` with four or five words on what it does, the next one every 12 seconds.
 - **Hide.** `hide` removes the band for the session. `/context-guru`, or the pane's **Show the band again** button, brings it back.
 
 ### The pane
@@ -305,4 +306,4 @@ Colours are the basic ANSI set plus dim, so they follow your terminal theme on l
 
 ## Turn it on, off, or change it
 
-`/context-guru:statusline` installs it (the install also does this by default), changes the layout, or turns it off with `settings.py off`, which restores whatever status line you had before. It never sends a keep-alive ping; it only reads.
+`/context-guru:statusline` installs it (or `install.sh --statusline`), changes the layout, or turns it off with `settings.py off`, which restores whatever status line you had before. It never sends a keep-alive ping; it only reads.

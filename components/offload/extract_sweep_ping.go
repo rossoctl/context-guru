@@ -68,7 +68,9 @@ const (
 	// SweepReasonNoAsker: the route has no prefix asker.
 	SweepReasonNoAsker SweepPingReason = "no_asker"
 	// SweepReasonPanic: the question panicked and was recovered. The ping stays plain, and the
-	// conversation is marked asked so the next ping is plain too.
+	// conversation is marked asked so the next ping is plain too. A panic inside ONE batch is caught per
+	// batch (reason batch_panic): the other batches' answers are kept, and the conversation is still marked
+	// asked, because that batch's model call may already have been paid for.
 	SweepReasonPanic SweepPingReason = "panic"
 )
 
@@ -80,6 +82,10 @@ type SweepPingWait struct {
 	// LastTurnRead is the cache_read of the thread's last real turn, 0 when unknown. It is the one
 	// field here that decides something: the cache gate compares the question's read to it (#721).
 	LastTurnRead int
+	// MaxBatches, when > 0, is the most batches this sweep may ask: the keeper sets it to the number of
+	// answers its per-ping cost ceiling admits (#132). The sweep then asks that many and leaves the rest
+	// of the candidates unasked, counted as sweep_over_ask_cap. 0 = no limit beyond max_ask_batches.
+	MaxBatches int
 }
 
 // SweepPingInfo is what a registered candidate looks like before the question is sent, for the
@@ -87,6 +93,9 @@ type SweepPingWait struct {
 type SweepPingInfo struct {
 	Model   string
 	Offered int
+	// Batches is the number of questions this sweep PLANS to ask: ceil(Offered / 12). The keeper prices
+	// that many answers against its per-ping cost ceiling and may lower it (SweepPingWait.MaxBatches).
+	Batches int
 }
 
 // SweepPingResult is what one question cost and produced, shaped like KeepAliveSummaryResult so the
@@ -420,7 +429,7 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 		sweepPingNoInventory.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonBelowMin, false
 	}
-	info = SweepPingInfo{Model: c.ModelName, Offered: len(cands)}
+	info = SweepPingInfo{Model: c.ModelName, Offered: len(cands), Batches: plannedAskBatches(len(cands))}
 	return func(timeout time.Duration, wait SweepPingWait) (res SweepPingResult) {
 		// The same recover for the ask itself: the asker, the verdict checks, buildHeld and the Store
 		// all run here. cand.asked was set before the call and stays set.
@@ -458,7 +467,7 @@ func notePingPanic(where, threadKey string, r any) {
 }
 
 // collect finds the candidates for the question: the same rules as the in-request loop, on the
-// snapshot. The 12 largest, by the same cap.
+// snapshot. The largest 12 x max_ask_batches, by the same cap; askInBatches splits them into batches.
 func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	noteCollect()
 	defer collectDone()
@@ -496,12 +505,15 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 		}
 		cands = append(cands, cd)
 	}
-	if len(cands) > maxAskItems {
+	if max := e.askCandidateLimit(); len(cands) > max {
 		sort.SliceStable(cands, func(a, b int) bool {
 			return schema.TextTokens(cands[a].content) > schema.TextTokens(cands[b].content)
 		})
-		rep.GateN("sweep_over_ask_cap", len(cands)-maxAskItems)
-		cands = cands[:maxAskItems]
+		rep.GateN("sweep_over_ask_cap", len(cands)-max)
+		// The same candidates feed the batching ledger, so sweep_batch_over_cap counts EVERY candidate left
+		// unasked by any limit: max_ask_batches here, or the keeper's cost ceiling in askInBatches.
+		sweepOverAskCapBatch.Add(int64(len(cands) - max))
+		cands = cands[:max]
 	}
 	rep.EventN("sweep_offered", len(cands))
 	return cands
@@ -522,11 +534,13 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	e := cand.e
 	c := *cand.ctx
 	key := thread.Key(c.Session, c.Thread)
-	// TWO DEADLINES MEET HERE, and the shorter wins. The keeper passes CacheAwareSummarizerCallTimeout()
-	// (300 s by default) so a slow question is not cut short as a ping would be; adjudicateWith then
-	// bounds the model call by llmCallTimeout (the in-request extract bound). A question that outlives
-	// llmCallTimeout ends there and is reported as a failed ask, and the ordinary ping goes out. Fail
-	// open either way. If either constant moves, check the other.
+	// TWO DEADLINES MEET HERE. The keeper passes CacheAwareSummarizerCallTimeout() (300 s by default) as
+	// the OUTER bound for the whole sweep, which can be several questions (extract_sweep_batch.go);
+	// adjudicateWith bounds EACH model call by llmCallTimeout (the in-request extract bound, 90 s). So one
+	// slow question ends at llmCallTimeout and counts as a failed batch, but k slow ones could add up past
+	// the outer bound: askInBatches therefore stops before starting a batch once this context has ended,
+	// and a later batch never starts after the deadline. Fail open either way; the ordinary ping goes out.
+	// If either constant moves, check the other.
 	if timeout <= 0 {
 		timeout = llmCallTimeout
 	}
@@ -537,14 +551,14 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	ctx, sink := cheapmodel.WithDetachedSink(ctx)
 	c.Ctx = ctx
 	req := &bschemas.BifrostChatRequest{Input: cand.input}
-	rep := &components.Report{Component: "extract_llm_sweep", Kind: "offload"}
-	start := time.Now()
-	drop, r := e.adjudicateWith(req, &c, rep, cands, askOpts{
+	// THE QUESTIONS, in sequence, over the same cached prefix, under the one slot and claim this function and
+	// its caller already hold (extract_sweep_batch.go). A list of 12 or fewer is one question, as before.
+	br := e.askInBatches(req, &c, cands, askOpts{
 		trigger:      "ping",
 		gateReason:   "asked at the keep-alive ping, in place of the ping",
 		lastTurnRead: wait.LastTurnRead,
-	})
-	ms := float64(time.Since(start).Microseconds()) / 1000.0
+	}, wait.MaxBatches)
+	ms := br.ms
 	gates, events := map[string]int{}, map[string]int{}
 	for k, v := range collected.Gates {
 		gates[k] += v
@@ -552,14 +566,18 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	for k, v := range collected.Events {
 		events[k] += v
 	}
-	countNames(gates, r.gates)
-	countNames(events, r.events)
+	for k, v := range br.gates {
+		gates[k] += v
+	}
+	for k, v := range br.events {
+		events[k] += v
+	}
 	bumpSweepPingGates(gates)
 	bumpSweepPingGates(events)
 
-	in, out := r.rec.PromptTokens, r.rec.CompletionTokens
+	in, out := br.prompt, br.completion
 	res := SweepPingResult{Model: sink.Model(), FreshInput: int(in), Output: int(out),
-		CacheWrite: int(r.rec.CacheWrite), CacheRead: int(r.rec.CacheRead),
+		CacheWrite: int(br.cacheWrite), CacheRead: int(br.cacheRead),
 		CacheWrite1h: int(sink.CacheWrite1h()), Offered: len(cands), Gates: gates, Events: events}
 	if res.Model == "" {
 		res.Model = c.ModelName
@@ -567,21 +585,29 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	// The provider touched the prefix if it read or wrote any of it. That refreshed the TTL, which is
 	// all a ping is for, so the keeper counts this as the ping.
 	res.Substituted = res.CacheRead > 0 || res.CacheWrite > 0
-	if res.Substituted || in > 0 || out > 0 {
+	if res.Substituted || in > 0 || out > 0 || br.panicked > 0 {
 		sweepPingAsked.Add(1)
 	} else {
 		// Nothing left the process (no stashed prefix, a stale one): not an ask. Allow the next ping
 		// to try again.
+		//
+		// A PANIC IS NOT THIS CASE. A batch can panic after its model call returned and was paid for; the
+		// recover zeroes that batch's result, so the sums read zero. Releasing the latch then would pay for
+		// the same question on every ping while the panic repeats. A panicked batch keeps the thread marked
+		// asked, so the next ping is plain.
 		cand.asked.Store(false)
 	}
-	if !r.answered {
+	if br.answered == 0 {
 		sweepPingFailed.Add(1)
 		cand.deferBilling(sink, ms, res.Substituted)
 		logging.From(c.Ctx).Debug("cg.sweep.ping_no_answer", "session", c.Session, "thread", c.Thread,
-			"gates", r.gates)
+			"gates", br.gateList)
 		return res
 	}
-	h, unholdable := buildHeld(key, c.ModelName, cand.raw, cands, drop, time.Now().UnixMilli(), wait, r.rec.CostUSD)
+	// Only the batches that ANSWERED are held. The outputs of a failed batch were never judged, so they are
+	// left out of the held answer (unasked, not "kept") and the next question may offer them again.
+	cands, drop := br.judged, br.drop
+	h, unholdable := buildHeld(key, c.ModelName, cand.raw, cands, drop, time.Now().UnixMilli(), wait, br.costUSD)
 	if unholdable > 0 {
 		sweepPingHoldNoToolID.Add(int64(unholdable))
 	}
@@ -593,7 +619,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	res.Proposed, res.ProposedTokens = h.proposed()
 	cand.deferBilling(sink, ms, res.Substituted)
 	logging.From(c.Ctx).Info("cg.sweep.held", "session", c.Session, "thread", c.Thread,
-		"offered", len(cands), "proposed", res.Proposed, "proposed_tokens", res.ProposedTokens,
+		"offered", res.Offered, "judged", len(cands), "proposed", res.Proposed, "proposed_tokens", res.ProposedTokens,
 		"cache_read", res.CacheRead, "cache_write", res.CacheWrite, "output", res.Output,
 		"waiting_for", wait.WaitingFor, "wait_tool", wait.WaitTool, "held", res.Held)
 	return res

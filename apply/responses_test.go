@@ -565,3 +565,35 @@ func TestResponsesCacheAwareOneMessageSpliceIsWritten(t *testing.T) {
 		t.Fatalf("the one-message cache-aware splice was not written to the Responses input:\n%.500s", res.Body)
 	}
 }
+
+// #730 review. The Responses route is always OpenAI, so no breakpoint can be written: the summary
+// covers the last function_call_output instead of stopping before it.
+func TestResponsesSummaryCoversTheLastToolExchange(t *testing.T) {
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	long := strings.Repeat("verbose tool output ", 60)
+	body := []byte(`{"model":"gpt-5.6","input":[` +
+		`{"role":"user","content":"task ` + long + `"},` +
+		`{"role":"assistant","content":"thinking ` + long + `"},` +
+		`{"role":"user","content":"go on ` + long + `"},` +
+		`{"type":"function_call","call_id":"c1","name":"shell","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"LASTEXCHANGE ` + long + `"},` +
+		`{"role":"assistant","content":"done"},` +
+		`{"role":"user","content":"final question"}]}`)
+	o := apply.Opts{Provider: bschemas.OpenAI, API: "responses", Body: body,
+		Models: components.ModelSpec{Incoming: &recordingModel{reply: "<summary>CA-SUMMARY-730</summary>"}}}
+	apply.BodyOpts(context.Background(), p, st, o)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("background summary did not finish")
+	}
+	res := apply.BodyOpts(context.Background(), p, st, o)
+	if !strings.Contains(string(res.Body), "CA-SUMMARY-730") {
+		t.Fatalf("the summarizer never spliced:\n%.500s", res.Body)
+	}
+	if strings.Contains(string(res.Body), "LASTEXCHANGE") {
+		t.Fatalf("the Responses summary kept the last tool exchange, which no breakpoint can mark")
+	}
+}

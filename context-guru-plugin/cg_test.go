@@ -811,3 +811,31 @@ func TestCGTipHonoursSetTipsOff(t *testing.T) {
 		t.Errorf("tips are off: want no stale commands, got %v", got)
 	}
 }
+
+// A deferred MCP server (client_only) cannot be filtered by the proxy, so the report's summary
+// sends the reader to "the command on each item". That command must then be on screen: the skill
+// may not add advice the output does not contain. A filterable item keeps its plain row.
+func TestCGRemoveShowsTheClientCommandForAClientOnlyItem(t *testing.T) {
+	adapt := `{"kind":"tools","version":1,"current":"keep","default":"keep","best":"keep",
+	 "summary":"1 declared items were unused from 2026-10-01 to 2026-10-26 ($4.00). Claude Code sends them as deferred tools, which the proxy cannot filter: remove them in the client with the command on each item.",
+	 "options":[{"id":"keep","label":"Keep everything","remove":[]}],
+	 "items":[
+	  {"kind":"mcp_server","name":"playwright","usd":4,"priced":true,"client_only":true,
+	   "remove_as":"","suggest":"claude mcp remove playwright","remove":"claude mcp remove playwright"},
+	  {"kind":"skill","name":"dataviz","usd":1,"priced":true,"remove_as":"skill__dataviz",
+	   "suggest":"set skillOverrides","remove":"set skillOverrides"}]}`
+	b, _ := json.Marshal(map[string]any{"/api/adapt/tools": json.RawMessage(adapt)})
+	f := filepath.Join(t.TempDir(), "fx.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runCG(t, "http://127.0.0.1:1", nil, "remove-mcp-and-skills", "--fixture", f)
+
+	if !strings.Contains(out, "claude mcp remove playwright") {
+		t.Errorf("the client-only item's command is missing from\n%s", out)
+	}
+	if strings.Contains(out, "set skillOverrides") {
+		t.Errorf("a filterable item got the client-only command line too:\n%s", out)
+	}
+}

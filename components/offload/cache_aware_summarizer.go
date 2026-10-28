@@ -326,6 +326,13 @@ var (
 	// dropped for being oversized, or a race against this session's own concurrent turn) —
 	// caught before paying for the call rather than after.
 	cacheAwareStalePrefix int64
+	// cacheAwareCoordsShifted counts a decline because an EARLIER COMPONENT changed the message
+	// count, so the span to verify against the host's stash could not be located (rawSpanForHash
+	// !ok — see components.ErrCoordsShifted). Not a stash defect at all: the stash can be
+	// perfectly current, and on a `high`/`xhigh` pipeline, where `summarize` compacts before this
+	// guard runs, it is the expected decline of every compacted turn (#452). Counted apart from
+	// cacheAwareStalePrefix so that counter keeps meaning "the stashed body was the wrong one".
+	cacheAwareCoordsShifted int64
 	// cacheAwarePrefixAskUsed counts turns that reached the model step via components.PrefixAsker
 	// rather than a components.MessagesModel — i.e. every turn that activated on a route whose
 	// client has no MessagesModel at all, which on this deployment IS the Anthropic
@@ -363,6 +370,9 @@ func CacheAwareSummarizerErrors() int64   { return atomic.LoadInt64(&cacheAwareE
 func CacheAwareSummarizerNoPrefix() int64 { return atomic.LoadInt64(&cacheAwareNoPrefix) }
 func CacheAwareSummarizerStalePrefix() int64 {
 	return atomic.LoadInt64(&cacheAwareStalePrefix)
+}
+func CacheAwareSummarizerCoordsShifted() int64 {
+	return atomic.LoadInt64(&cacheAwareCoordsShifted)
 }
 func CacheAwareSummarizerPrefixAskUsed() int64 {
 	return atomic.LoadInt64(&cacheAwarePrefixAskUsed)
@@ -599,6 +609,10 @@ func (CacheAwareSummarizer) Name() string                 { return "cache_aware_
 func (CacheAwareSummarizer) Enabled(*components.Ctx) bool { return true }
 func (*CacheAwareSummarizer) NeedsModel() bool            { return true }
 
+// CutFrac is the trigger fraction of the window at which this component cuts the conversation
+// (components.CutFracProvider).
+func (s *CacheAwareSummarizer) CutFrac() float64 { return s.trigger.MinRequestFrac }
+
 // InstructionRole exposes the resolved role so /stats and a probe can report which channel this
 // arm actually used; with `auto` it cannot be read off the config alone.
 func (s *CacheAwareSummarizer) InstructionRole() string { return string(s.instructionRole) }
@@ -740,7 +754,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// verbatim, and marked by the host (CacheAnchorToolID), that exchange gives the next turn an
 	// entry to read (measured: read 21,563, write 98). The cut is frozen in the checkpoint's
 	// CoveredCount, so later turns keep the same exchange without recomputing it.
-	end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
+	// Only where the host can write the mark (#730): on OpenAI the exchange would stay unsummarized
+	// for nothing.
+	if !c.NoCacheBreakpoint {
+		end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
+	}
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
 		rep.Gate("summary_span_below_min_tokens")
@@ -879,15 +897,21 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// Check and ask on ONE read of the stash when the asker can: this call runs detached,
 			// and the thread's next request can replace the stashed body between a separate
 			// CoversSpan and Ask.
+			//
+			// !rawOK is reported as ErrCoordsShifted, NOT ErrStalePrefix: the count change is in
+			// the pipeline geometry, not the stash, and the stash can be perfectly current. On a
+			// `high`/`xhigh` pipeline this is the expected decline of every compacted turn, so
+			// folding it into the stale-prefix counter reported stash defects that did not
+			// happen (#452).
+			if !rawOK {
+				return "", components.ErrCoordsShifted
+			}
 			if ca, ok := asker.(components.PrefixCoveredAsker); ok {
-				if !rawOK {
-					return "", components.ErrStalePrefix
-				}
 				reply, _, err := ca.AskCovered(ctx, session, requiredCount, requiredHash, instructionText)
 				return reply, err
 			}
 			if pc, ok := asker.(components.PrefixCoverage); ok &&
-				(!rawOK || !pc.CoversSpan(session, requiredCount, requiredHash)) {
+				!pc.CoversSpan(session, requiredCount, requiredHash) {
 				return "", components.ErrStalePrefix
 			}
 			reply, _, err := asker.Ask(ctx, session, instructionText)

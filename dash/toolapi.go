@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -35,6 +36,9 @@ type ToolStat struct {
 	Kind   string `json:"kind"`
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
+	// Deferred: some session carried it as a deferred MCP tool, which the proxy filter cannot
+	// remove (see Decl.Deferred).
+	Deferred bool `json:"deferred,omitempty"`
 	// Tokens is what carrying this declaration costs on ONE request.
 	Tokens int `json:"tokens"`
 	// SessionsDeclared / SessionsUsed / Calls: how often it was carried, how often it was
@@ -558,6 +562,12 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 		}, carriedOpts{})
 		return err
 	})
+	var deferred map[string]bool
+	g.Go(func() error {
+		var err error
+		deferred, err = d.deferredNames(f, where, args)
+		return err
+	})
 	var decls []declRow
 	if len(sessions) >= declScanMinSessions {
 		// Broad scope: one concurrent pass over the table instead of a probe per session (declfacts.go).
@@ -573,7 +583,45 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	}
 	rep = buildToolReport(sessions, decls, uses, f.PerSession)
 	repriceCarried(rep, carriedRes, carryRes)
+	for i := range rep.Tools {
+		rep.Tools[i].Deferred = deferred[rep.Tools[i].Name]
+	}
 	return rep, nil
+}
+
+// newerPlainRow is a correlated subquery over `d`: a `tools` row for the same tenant and name that is
+// newer than this deferred one. The flag follows the client the tenant uses NOW: a tool deferred
+// earlier and since sent as a real `tools` element is filterable again. A loaded deferred tool writes
+// no plain row (mergeDeferred keeps its list row), so it stays deferred.
+const newerPlainRow = `SELECT 1 FROM tool_declarations p WHERE p.tenant_id = d.tenant_id
+		  AND p.name = d.name AND p.deferred = 0 AND p.ts > d.ts`
+
+// deferredNames is the set of MCP tool names any session in scope carried as deferred
+// (Decl.Deferred). Its own query, so the report's inventory read keeps its covering index
+// (idx_tooldecl_inventory); only deferred rows match, so it is empty on older data.
+func (d *DB) deferredNames(f Filter, where string, args []any) (map[string]bool, error) {
+	q := `SELECT DISTINCT d.name FROM tool_declarations d WHERE d.deferred = 1 AND d.session_id IN
+		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)
+		  AND NOT EXISTS (` + newerPlainRow + `)`
+	a := append([]any{}, args...)
+	if !f.TenantAll {
+		q += ` AND d.tenant_id = ?`
+		a = append(a, f.Tenant)
+	}
+	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
 }
 
 // repriceCarried replaces the report's unused-carry figures with the per-request pricing
@@ -875,10 +923,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
-		calls := usedIn[dr.session][k]
-		if calls > 0 {
+		// Calls is set after this loop, over every session in scope; here only the per-session facts.
+		if usedIn[dr.session][k] > 0 {
 			st.SessionsUsed++
-			st.Calls += calls
 			continue
 		}
 		// UnusedReads and UnusedUSD are computed for every row, aside included: the row-level
@@ -911,6 +958,20 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if !aside && !skillEntry { // same reason as declTok above
 			unusedTok[dr.session] += dr.tokens
 		}
+	}
+	// Calls count every call in scope, the same set lastUsedOf reads. The loop above saw a call only
+	// in a session that also declared the tool, so a call made where the tool had no declaration row
+	// (deferred, or a session that began before the proxy) set last_used and left calls at 0, and
+	// calls 0 files a tool as never used. SessionsUsed and the unused figures stay per session: a
+	// session that carried the tool without calling it still paid for it.
+	allCalls := map[statKey]int{}
+	for _, m := range usedIn {
+		for k, n := range m {
+			allCalls[k] += n
+		}
+	}
+	for k, st := range stats {
+		st.Calls = allCalls[k]
 	}
 
 	// Coverage, and the honest denominator: only captured sessions can say anything about
@@ -995,7 +1056,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if st.Kind == KindSkill {
 			rep.Skills.Skills = append(rep.Skills.Skills, *st)
 			rep.Skills.Declared++
-			if st.SessionsUsed > 0 {
+			if st.SessionsUsed > 0 || st.Calls > 0 { // the verdict's own test of "invoked"
 				rep.Skills.Invoked++
 				rep.Skills.Calls += st.Calls
 			}
@@ -1126,7 +1187,7 @@ func serverRollup(tools []ToolStat) []ServerStat {
 		if !t.CarryPriced {
 			s.CarryPriced = false
 		}
-		if t.SessionsUsed > 0 {
+		if t.SessionsUsed > 0 || t.Calls > 0 { // the verdict's own test of "invoked"
 			s.ToolsUsed++
 		}
 		if t.SessionsDeclared > s.SessionsDeclared {
@@ -1534,4 +1595,22 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		out = out[:25]
 	}
 	return out, nil
+}
+
+// IsDeferredDecl reports whether tenant has carried name as a deferred MCP tool: the exact tool,
+// or, for the whole-server form `mcp__<server>`, any tool of that server.
+func (d *DB) IsDeferredDecl(tenant, name string) (bool, error) {
+	q, arg := `d.name = ?`, name
+	if _, _, ok := SplitMCPName(name); !ok {
+		server := strings.TrimPrefix(name, "mcp__")
+		if server == name || server == "" {
+			return false, nil // not an MCP name: nothing deferred to find
+		}
+		q, arg = `d.server = ?`, server
+	}
+	var n int
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT 1 FROM tool_declarations d
+		WHERE d.tenant_id = ? AND d.deferred = 1 AND `+q+` AND NOT EXISTS (`+newerPlainRow+`) LIMIT 1)`,
+		tenant, arg).Scan(&n)
+	return n > 0, err
 }

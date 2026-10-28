@@ -1521,6 +1521,9 @@ class P:  # stands in for the detached refresher
     def __init__(self, *a, **k): spawned.append(1)
 m.subprocess.Popen = P
 m._http_get = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow"))  # every inline read misses the budget
+m.cgcache.backoff = lambda path: None  # the back-off is a different mechanism; left real, the burst's
+# concurrent record_failure calls escalate it past the next window on a loaded runner, and the
+# next-window burst then serves the back-off instead of spawning - the CI flake this test had (#726)
 w = m.CACHESTATE_REFRESH_WINDOW_SECONDS
 base = 30 * 1000000 + 1.0  # 1 s into a window of both lengths
 clock = [base]; m.time.time = lambda: clock[0]

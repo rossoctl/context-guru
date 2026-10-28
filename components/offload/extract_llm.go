@@ -670,6 +670,16 @@ var extractInflight singleflight.Group
 // inflightDeduped counts calls avoided because an identical extraction was already running.
 var inflightDeduped atomic.Int64
 
+// beforeInflightJoinForTest, set only by tests, runs immediately before a candidate joins
+// extractInflight — past the concurrency semaphore, one statement before the Do call.
+// Which candidates become followers is otherwise a scheduling race the test can only hope
+// to win: the model replies in microseconds, so the leader can drop the key before the
+// other goroutines reach Do, and under load (or -cpu 1) they often do. Parking the model
+// keeps the key held, and this line is the last point a test can observe before
+// singleflight parks a waiter — a test that waits for every candidate here, then releases
+// the leader, arranges the followers rather than hoping for them.
+var beforeInflightJoinForTest func()
+
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
@@ -848,6 +858,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			commitRefresh(c, rep, eff, key, content)
 			recordOwner(c, key)
 		} else if !commitMark(c, rep, eff, key, content) {
+			if eff == markerFull {
+				e.ratios.noteRefused() // the reserve is full: see ratioTracker.exploring (#214)
+			}
 			return false // the store cannot back the marker; leave this output verbatim
 		}
 		schema.SetMessageText(&req.Input[i], newText)
@@ -1022,6 +1035,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				if !apply(i, content, cached.Projected, cached.Summary, false) {
 					continue
 				}
+				// commitMark took the payload, so the reserve is not full (#214). The same-session
+				// replay above is left out on purpose: commitRefresh never refuses, so a replay
+				// says nothing about whether the reserve has room.
+				e.ratios.noteSpliced()
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
@@ -1096,8 +1113,14 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
 			// clock as well as money, and an agent on a task deadline feels the former more.
-			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs(rep.Component)) &&
-				e.ratios.exploring(c.Session)
+			explore := false
+			if !tooSlowToExplore(metrics.ExtractionP50LatencyMs(rep.Component)) {
+				var skippedFull bool
+				explore, skippedFull = e.ratios.exploringWhy(c.Session)
+				if skippedFull {
+					rep.Gate("explore_skipped_reserve_full")
+				}
+			}
 			// goalOverhead, not promptOverhead: the gate needs the VARIABLE part of the
 			// prompt, because callCost adds the static preamble itself. promptOverhead is
 			// the window-fitting figure and bundles extractPromptOverheadTokens = 2000,
@@ -1306,6 +1329,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				res, sum, strategy, why string
 				executed                bool
 			)
+			if beforeInflightJoinForTest != nil {
+				beforeInflightJoinForTest()
+			}
 			sfv, _, _ := extractInflight.Do(extract.ResultKey(cands[k].id, e.modelName, extCfg),
 				func() (any, error) {
 					executed = true
@@ -1520,6 +1546,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
+			e.ratios.noteSpliced() // in full mode a payload fit, so the reserve is not full (#214)
 			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what this request's message actually
 			// shrank by, and the basis extract_llm_sweep already books on. Carrying
 			// `before - TextTokens(projection)` out of runCall instead omitted the summary, the
@@ -1569,12 +1596,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// exploration, and a reader reasoning from a "bounded per session" claim would
 			// under-count this by the number of concurrent sessions.
 			//
-			// The option that gets both properties is to gate exploring() on RESERVE HEALTH rather
-			// than on r.total — stash_refused already distinguishes "cannot learn because we are
-			// refusing" from "no evidence yet", which is the distinction r.total cannot express.
-			// Deliberately not done here: it is the same question as #190 (what a component should
-			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
-			// issue's candidate list rather than guessed at in this diff.
+			// That is now closed (#214): ratioTracker.exploring grants no slot while the reserve is
+			// refusing (a refusal inside reserveRefuseWindow with no splice since), and the skip is
+			// counted as the explore_skipped_reserve_full gate. So the spend above falls to about
+			// one trial call per window while saturation lasts, not maxExploreCalls per session.
+			// The "observe nothing while refusing" rule stays: it is correct.
 			//
 			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
 			// an explicit flag rather than a proxy.

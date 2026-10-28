@@ -71,6 +71,8 @@ type ExtractSweep struct {
 	// keepRecheckTurns is how many model turns must pass before re-offering a candidate the adjudicator
 	// already judged still needed. 0 = off. See extractSweepConfig.KeepRecheckTurns.
 	keepRecheckTurns int
+	// maxAskBatches is how many batches one sweep asks (max_ask_batches).
+	maxAskBatches int
 
 	mode markerMode
 }
@@ -81,9 +83,8 @@ type ExtractSweep struct {
 // construction, because only that model's cache holds the transcript — naming another would read a
 // different namespace and pay fresh for everything. There is no `context` / `context_messages`: the
 // conversation IS the prefix, so there is nothing to choose how much of to re-send. There is no
-// `max_calls`: there is exactly one ask per turn, bounded by maxAskItems rather than by a call count
-// — and that bound is not configurable, because it follows from the reply budget rather than from a
-// deployment's preference (see the cap in Offload, and #132 for the coverage question it leaves open).
+// `max_calls`: a long list of outputs is asked in balanced batches of maxAskItems, up to max_ask_batches
+// of them, rather than bounded by a call count (extract_sweep_batch.go, #132).
 // And there is no `economic_gate`: the gate prices a
 // per-output cheap-model call against an expected saving, and this is one cached read for the whole
 // transcript, so its arithmetic does not describe this component at all — the brakes here are the
@@ -135,6 +136,8 @@ type extractSweepConfig struct {
 	// Counted in TURNS rather than seconds deliberately: what changes whether an output is spent is the
 	// agent doing more work, and wall-clock says nothing about that.
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
+	// MaxAskBatches is how many batches of 12 one sweep asks (0 = 4, at most 8). See extract_sweep_batch.go.
+	MaxAskBatches int `yaml:"max_ask_batches"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -157,9 +160,14 @@ const defaultSweepFloor = 1000
 // the old floor back.
 const defaultMinInventory = 1
 
-// maxAskItems bounds how many candidates one ask may carry. Not configurable: it is a property of the
-// reply budget and the model's transport limit, not of a deployment's taste, and an operator raising
-// it would be trading a partial sweep for no sweep at all. See the cap in Offload for the arithmetic.
+// maxAskItems is the BATCH SIZE: how many candidates one question carries. Not configurable: it is a
+// property of the reply budget and the model's transport limit, not of a deployment's taste. One reply
+// carries a verdict for every candidate, so it grows with the count, and a reply cut off mid-array parses
+// as nothing; 12 sits well inside the flat reply budget.
+//
+// IT WAS A HARD CAP on the whole sweep (#132): the 12 largest were asked and the rest dropped. It is now
+// only the size of one batch. More candidates are split into balanced batches and asked in sequence, up
+// to max_ask_batches of them (extract_sweep_batch.go).
 const maxAskItems = 12
 
 // sweepBannedKeys are the compaction knobs that have no meaning for an adjudicator, and the reason
@@ -197,7 +205,7 @@ var sweepBannedKeys = []struct {
 		"prompt carries the output itself"},
 	{"context", "the conversation IS the cached prefix, so there is no amount of it to choose to re-send"},
 	{"context_messages", "the conversation IS the cached prefix; see `context`"},
-	{"max_calls", "one call adjudicates every candidate, because nothing is copied per candidate"},
+	{"max_calls", "a list is asked in batches of 12 (max_ask_batches bounds them), not by a call count"},
 	{"economic_gate", "the gate prices a per-output cheap-model call; this is one cached read for the whole " +
 		"transcript, so its arithmetic does not describe this component"},
 }
@@ -288,6 +296,12 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	if cfg.MinInventory <= 0 {
 		cfg.MinInventory = defaultMinInventory
 	}
+	if cfg.MaxAskBatches < 1 {
+		cfg.MaxAskBatches = defaultMaxAskBatches
+	}
+	if cfg.MaxAskBatches > maxAskBatchesCap {
+		cfg.MaxAskBatches = maxAskBatchesCap
+	}
 	// Evidence is ON unless the operator wrote `evidence: false`.
 	evidence := cfg.Evidence == nil || *cfg.Evidence
 	return &ExtractSweep{
@@ -295,6 +309,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
 		minLaterTurns: cfg.MinLaterTurns, keepRecheckTurns: cfg.KeepRecheckTurns,
+		maxAskBatches: cfg.MaxAskBatches,
 	}, nil
 }
 
@@ -722,6 +737,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// verify either way is the pre-existing, separately tracked gap (#122), not this guard's job.
 	usePrefixAsk := c.PrefixAsk != nil
 	stalePrefix := false
+	coordsShifted := false
 	// The span the guard verified, kept so the ask below can check it again on the SAME read of the
 	// stash it asks over (PrefixCoveredAsker) instead of trusting that the stash did not change
 	// between the check above and the ask.
@@ -741,32 +757,46 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 				// component in the configured pipeline (textclean, format, dedup, … in housellm/
 				// xhigh) — see rawSpanForHash's own comment and PR #431 round 1.
 				//
+				// !rawOK and !CoversSpan are counted as DIFFERENT gates, because only the second
+				// means the stash is stale. !rawOK says an earlier component changed the message
+				// count, so no span of either coordinate system is safe to compare — the stash can
+				// be perfectly current, and on a `high`/`xhigh` pipeline (summarize first, then
+				// this) it is the expected decline of every compacted turn, not a stash defect.
+				//
 				// thread.Key(c.Session, c.Thread), not bare c.Session: the host's stash (proxy's
 				// sentStash) is keyed per thread (#423), and the Ask call just below already reads
 				// it that way. Checking coverage under the plain session would almost always MISS
 				// for a non-primary thread — CoversSpan's own missing-key convention then reports
 				// "covered" and this guard would never fire for any thread but the first.
-				if span, ok := rawSpanForHash(c, req, requiredCount); !ok ||
-					!pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)) {
+				span, rawOK := rawSpanForHash(c, req, requiredCount)
+				switch {
+				case !rawOK:
+					coordsShifted = true
+				case !pc.CoversSpan(thread.Key(c.Session, c.Thread), requiredCount, components.SpanHash(span)):
 					stalePrefix = true
-				} else {
+				default:
 					haveCover, coverCount, coverHash = true, requiredCount, components.SpanHash(span)
 				}
 			}
 		}
 	}
-	if !usePrefixAsk || stalePrefix {
-		// No asker at all (a non-Anthropic route, or no incoming client) and a stale stash take the
-		// same fork, because both mean there is nothing SAFE to ask through: one has nothing stashed,
-		// the other has the wrong thing. Gated separately so a run showing sweep_stale_prefix, rather
-		// than sweep_no_asker, says which one happened.
+	if !usePrefixAsk || stalePrefix || coordsShifted {
+		// No asker at all (a non-Anthropic route, or no incoming client), a stale stash and a
+		// shifted coordinate system take the same fork, because all three mean there is nothing
+		// SAFE to ask through: one has nothing stashed, one has the wrong thing, and one cannot
+		// even say which span to check. Gated separately so a run showing
+		// sweep_stale_prefix, sweep_coords_shifted or sweep_no_asker says which one happened.
 		//
 		// THERE IS NO FALLBACK (#404). The ask is made at the keep-alive ping, which has no request to
 		// pay a full-price content-carrying completion for. The ping is sent instead.
-		if stalePrefix {
+		switch {
+		case coordsShifted:
+			r.gate("sweep_coords_shifted")
+			r.rec.Rejection = "an earlier component changed the message count, so the stashed span cannot be located"
+		case stalePrefix:
 			r.gate("sweep_stale_prefix")
 			r.rec.Rejection = "stashed prefix does not cover the candidates offered"
-		} else {
+		default:
 			r.gate("sweep_no_asker")
 			r.rec.Rejection = "no prefix asker on this route"
 		}
@@ -892,6 +922,9 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	}
 
 	verdicts, parsed := extract.ParseVerdicts(reply)
+	if sweepPanicAfterCallHook != nil {
+		sweepPanicAfterCallHook() // a test panics here, AFTER the model call was paid for
+	}
 	r.answered = parsed
 	if dump != nil {
 		dump.Reply, dump.ViaTool, dump.Parsed = reply, usage.ViaTool, parsed
@@ -1135,6 +1168,8 @@ func init() {
 		{Key: "keep_recheck_turns", Type: components.FieldInt, Min: 0,
 			Hint: "How many model turns must pass before re-offering a candidate the adjudicator already judged STILL NEEDED. Unset = 0 = off, which re-offers and re-pays for every candidate every turn. Measured on one probe pass: SEVEN of ten adjudications were the same five candidates at the same 41,453 tokens, kept every time — 70% of that pass's adjudication spend buying a verdict already given, because drops are frozen and replayed through cg:res: while keeps were forgotten. DO NOT SET IT LARGE, and do not reach for \"cache the keep forever\": \"still needed\" is a judgement about the conversation's current obligations, not a property of the bytes, so suppressing the question for too long makes a candidate judged needed once unreachable for the rest of the session — which disables the component for precisely the outputs it most wants and reads in the counters as an inventory that quietly shrank rather than as a component that stopped asking. Counted in TURNS, not seconds, because what changes whether an output is spent is the agent doing more work. A transcript that got SHORTER behind an output (agent-side compaction, a rewind) invalidates the record rather than extending it. Read sweep_keep_still_held against sweep_offered.",
 		},
+		{Key: "max_ask_batches", Type: components.FieldInt, Default: defaultMaxAskBatches, Min: 1,
+			Hint: "How many batches of 12 outputs one sweep asks. Default 4, at most 8 (a larger value reads as 8, below 1 as 4). A list longer than 12 is split into balanced batches (16 gives 8+8, 23 gives 12+11) and asked one after the other over the same cached prefix, each judged on its own; a batch that fails (error, refused cache read, truncated or unparseable reply) keeps its outputs and the other batches still count. All answers are merged into one held answer, so the next cold request does one recheck and one cut. Each batch is one more question, so it costs one more answer. Candidates beyond 12 x max_ask_batches (the smallest) are not asked and are counted as sweep_over_ask_cap. A list of 12 or fewer is one question, as before."},
 		markerModeField(),
 	})
 }

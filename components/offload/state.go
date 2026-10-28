@@ -37,7 +37,7 @@ import (
 //     compaction moves both, so the checkpoint self-invalidates and the next turn
 //     summarizes fresh. An explicit reset would be a second mechanism for an outcome the
 //     hash already produces.
-//   - seenKey / keptKey / ownerKey are session-independent or observational by design.
+//   - seenKey / ownerKey are session-independent or observational by design. keptKey is per session.
 //
 // Keeping them is also what keeps PRE-compaction content readable: the expand markers that
 // survive into the agent's summary resolve through the same content-hash keys.
@@ -356,22 +356,41 @@ func contentKey(s string) string { return extract.ContentKey(s) }
 // churn). The expand handler marks the restored content's key kept-verbatim so the
 // offloaders leave it alone thereafter.
 
-func keptKey(ck string) string { return "cg:keep:" + ck }
+// keptKey is the session-scoped mark: cg:keep:<session>:<contentkey> (#175). The mark stops ONE
+// session's expand loop, so it must not exempt the same bytes in another session. Nothing parses
+// the key: the session part may hold ":" (a scoped id is tenant:base, and an explicit id may hold
+// one too), so the key is only ever built and looked up whole.
+//
+// There is no read of the pre-#175 shape (cg:keep:<contentkey>). The Store is in memory and never
+// written to disk, so a mark cannot outlive the process that wrote it, and the process that
+// writes the new shape is a new process. Reading the old shape would only keep the cross-session
+// exemption alive for no gain.
+func keptKey(session, ck string) string { return "cg:keep:" + session + ":" + ck }
 
-// MarkKeptVerbatim records that this original content was expanded and must not be
-// re-compacted (keyed by content hash, session-independent). Exported for the proxy's
+// MarkKeptVerbatim records that this session expanded this original content, so it must not be
+// re-compacted in this session (keyed by session and content hash). Exported for the proxy's
 // expand loop, which has the restored original but not the offload Ctx.
-func MarkKeptVerbatim(st store.Store, original string) {
-	st.Put(keptKey(contentKey(original)), []byte{1})
+//
+// An empty session writes NOTHING. A fallback to a global key would bring the cross-session leak
+// back through the default path.
+func MarkKeptVerbatim(st store.Store, session, original string) {
+	if session == "" {
+		return
+	}
+	st.Put(keptKey(session, contentKey(original)), []byte{1})
 }
 
-// KeptVerbatim reports whether this content has already been marked. The expand repair reads
-// it to charge a restored original to the dashboard ONCE: the client keeps its own copy of the
-// error, so the same repair runs on every later turn, and counting each one drives the
+// KeptVerbatim reports whether this content has already been marked in THIS session. The expand
+// repair reads it to charge a restored original to the dashboard ONCE: the client keeps its own
+// copy of the error, so the same repair runs on every later turn, and counting each one drives the
 // headline savings arbitrarily negative (ExpandTokens is subtracted from a unique-counted
 // total, so the units do not even match).
-func KeptVerbatim(st store.Store, original string) bool {
-	_, ok := st.Get(keptKey(contentKey(original)))
+//
+// It is session-scoped like the mark, and that is a choice (#175): the dashboard row is per
+// session, so a second session that gets the same bytes back is a second recovery and is charged.
+// A global "counted" flag would charge it to the first session only.
+func KeptVerbatim(st store.Store, session, original string) bool {
+	_, ok := st.Get(keptKey(session, contentKey(original)))
 	return ok
 }
 
@@ -387,7 +406,7 @@ func isKeptVerbatim(c *components.Ctx, ck string) bool {
 	if _, ok := c.Restored[ck]; ok {
 		return false
 	}
-	_, ok := c.Store.Get(keptKey(ck))
+	_, ok := c.Store.Get(keptKey(c.Session, ck))
 	return ok
 }
 

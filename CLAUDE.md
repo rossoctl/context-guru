@@ -46,7 +46,8 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Commits: DCO sign-off is mandatory** — `git commit -s`. Author as the repo owner.
   AI attribution uses `Assisted-By:` — never `Co-Authored-By`, never a "Generated with"
   line. Conventional-commit titles.
-- Observability follows OpenTelemetry **GenAI semantic conventions** (`gen_ai.*`).
+- Observability: every exported metric is `cg_*` / `cg_tenant_*`. OpenTelemetry **GenAI
+  semantic conventions** (`gen_ai.*`) are the intended direction and are not yet emitted.
 
 ## How to write for me: ASD-STE100 style
 

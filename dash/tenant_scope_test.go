@@ -37,21 +37,31 @@ func newScopeFixture(t *testing.T, principal func(*http.Request) (Principal, boo
 			Content:         []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
 		})
 	}
-	// Drain the writer so the rows exist before any query.
+	// Drain the writer so the rows exist before any query. The database alone is not
+	// enough: the writer publishes to the SSE hub only AFTER the insert commits, so a row
+	// /api/requests can see is not yet a row /api/events can replay — waiting on the
+	// database alone left a window where the live feed read empty (#91). Same package, so
+	// the hub's ring is reachable directly.
+	hubEvents := func() int {
+		rec.hub.mu.Lock()
+		defer rec.hub.mu.Unlock()
+		return len(rec.hub.ring)
+	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(p.Requests) == 3 {
+		if len(p.Requests) == 3 && hubEvents() == 3 {
 			for _, e := range p.Requests {
 				f.ids[e.TenantID] = e.ID
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 3 rows (got %d)", len(p.Requests))
+			t.Fatalf("writer did not persist 3 rows and publish them (got %d rows, %d hub events)",
+				len(p.Requests), hubEvents())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

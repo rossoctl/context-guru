@@ -363,53 +363,46 @@ func TestCorefTriggerGatesNewCutsButNotReplay(t *testing.T) {
 // This is the negative half of TestCorefLeavesExpandedContentAlone, and it is the half that
 // fails on the old key layout: the guard is real within its session and absent outside it.
 func TestKeptVerbatimDoesNotLeakAcrossSessions(t *testing.T) {
-	// SKIPPED, NOT DELETED, and the distinction matters: this test fails on `main` because the leak is
-	// real there, not because the test is wrong. `main`'s keptKey(ck) carries no session, so a mark
-	// written by one session exempts the same bytes in every other session sharing the store —
-	// preferentially on content that recurs across sessions, which is exactly the content most worth
-	// cutting. The fix is a store key-format change in state.go affecting every offloader, plus a
-	// read-both-shapes migration for marks already on disk, so it does not belong to coref. Filed as
-	// issue #175; un-skip with the three-argument MarkKeptVerbatim when that lands.
-	t.Skip("cross-session kept-verbatim scoping is a main-wide state.go fix, issue #175")
-	// The body is preserved COMMENTED rather than adapted to the two-argument signature, because an
-	// adapted body would compile, read as a real test, and assert nothing — both sessions would share
-	// one global mark. Restore it verbatim when the scoped key lands.
+	cf := corefFor(t, "")
+	st := store.NewMemory(store.Options{})
+	req := corefReq()
+	MarkKeptVerbatim(st, "session-a", schema.MessageText(req.Input[corefCutIdx]))
 
-	// cf := corefFor(t, "")
-	// st := store.NewMemory(store.Options{})
-	// req := corefReq()
-	// MarkKeptVerbatim(st, "session-a", schema.MessageText(req.Input[corefCutIdx]))
+	// A DIFFERENT session sends the same bytes. It has never expanded anything, so it cannot
+	// be in an expand loop and must not inherit session-a's exemption.
+	var rep components.Report
+	if _, err := cf.Offload(req, &rep, &components.Ctx{Session: "session-b", Store: st}); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema.MessageText(req.Input[corefCutIdx]); strings.Contains(got, corefNovelUnused) {
+		t.Fatal("session-b inherited session-a's kept-verbatim exemption; the guard is leaking")
+	}
 
-	// // A DIFFERENT session sends the same bytes. It has never expanded anything, so it cannot
-	// // be in an expand loop and must not inherit session-a's exemption.
-	// var rep components.Report
-	// if _, err := cf.Offload(req, &rep, &components.Ctx{Session: "session-b", Store: st}); err != nil {
-	// t.Fatal(err)
-	// }
-	// if got := schema.MessageText(req.Input[corefCutIdx]); strings.Contains(got, corefNovelUnused) {
-	// t.Fatal("session-b inherited session-a's kept-verbatim exemption; the guard is leaking")
-	// }
-
-	// // And the guard still holds for the session that earned it.
-	// req2 := corefReq()
-	// var rep2 components.Report
-	// if _, err := cf.Offload(req2, &rep2, &components.Ctx{Session: "session-a", Store: st}); err != nil {
-	// t.Fatal(err)
-	// }
-	// if got := schema.MessageText(req2.Input[corefCutIdx]); !strings.Contains(got, corefNovelUnused) {
-	// t.Fatal("session-a lost its own exemption; scoping broke the guard it was meant to keep")
-	// }
+	// And the guard still holds for the session that earned it.
+	req2 := corefReq()
+	var rep2 components.Report
+	if _, err := cf.Offload(req2, &rep2, &components.Ctx{Session: "session-a", Store: st}); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema.MessageText(req2.Input[corefCutIdx]); !strings.Contains(got, corefNovelUnused) {
+		t.Fatal("session-a lost its own exemption; scoping broke the guard it was meant to keep")
+	}
 }
 
 // An empty session must not fall back to a global mark — that is the leak, reinstated.
 func TestMarkKeptVerbatimIgnoresAnEmptySession(t *testing.T) {
-	t.Skip("same main-wide state.go fix as TestKeptVerbatimDoesNotLeakAcrossSessions, issue #175")
-
-	// st := store.NewMemory(store.Options{})
-	// MarkKeptVerbatim(st, "", "content expanded by nobody in particular")
-	// if _, ok := st.Get(keptKey("", contentKey("content expanded by nobody in particular"))); ok {
-	// t.Fatal("an empty session wrote a mark; it must be a no-op")
-	// }
+	st := store.NewMemory(store.Options{})
+	const content = "content expanded by nobody in particular"
+	MarkKeptVerbatim(st, "", content)
+	if _, ok := st.Get(keptKey("", contentKey(content))); ok {
+		t.Fatal("an empty session wrote a mark; it must be a no-op")
+	}
+	if _, ok := st.Get("cg:keep:" + contentKey(content)); ok {
+		t.Fatal("an empty session fell back to the global key; that is the leak")
+	}
+	if KeptVerbatim(st, "", content) || KeptVerbatim(st, "s", content) {
+		t.Fatal("a no-op write left a readable mark")
+	}
 }
 
 // An output the agent expanded must never be re-cut: doing so just makes it expand again,
@@ -418,7 +411,7 @@ func TestCorefLeavesExpandedContentAlone(t *testing.T) {
 	cf := corefFor(t, "")
 	st := store.NewMemory(store.Options{})
 	req := corefReq()
-	MarkKeptVerbatim(st, schema.MessageText(req.Input[corefCutIdx]))
+	MarkKeptVerbatim(st, "s", schema.MessageText(req.Input[corefCutIdx]))
 
 	var rep components.Report
 	if _, err := cf.Offload(req, &rep, corefCtx(st)); err != nil {

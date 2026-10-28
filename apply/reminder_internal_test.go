@@ -17,15 +17,18 @@ func TestSplitTrailingReminders(t *testing.T) {
 		name, in, body, tail string
 	}{
 		{"no reminder", "line 1\nline 2\n", "line 1\nline 2\n", ""},
-		{"one trailing", "[1,2]\n\n" + r1, "[1,2]", "\n\n" + r1},
-		{"two trailing", "out\n" + r2 + "\n" + r1, "out", "\n" + r2 + "\n" + r1},
-		{"whitespace after", "out\n\n" + r1 + "\n", "out", "\n\n" + r1 + "\n"},
+		// The whitespace before the run is output and stays in the body (#752): the body is what
+		// an offloader stashes and expand gives back, so an output that ends in a newline must
+		// keep it there.
+		{"one trailing", "[1,2]\n\n" + r1, "[1,2]\n\n", r1},
+		{"two trailing", "out\n" + r2 + "\n" + r1, "out\n", r2 + "\n" + r1},
+		{"whitespace after", "out\n\n" + r1 + "\n", "out\n\n", r1 + "\n"},
 		{"in the middle is content", "a\n" + r1 + "\nb", "a\n" + r1 + "\nb", ""},
 		{"reminder only is left alone", r1, r1, ""},
 		{"reminder and whitespace only", "\n\n" + r1, "\n\n" + r1, ""},
 		{"unclosed tag", "out\n<system-reminder>\nno end", "out\n<system-reminder>\nno end", ""},
 		{"stray end tag", "out\n</system-reminder>", "out\n</system-reminder>", ""},
-		{"nested open in body", "a <system-reminder> b\n\n" + r1, "a <system-reminder> b", "\n\n" + r1},
+		{"nested open in body", "a <system-reminder> b\n\n" + r1, "a <system-reminder> b\n\n", r1},
 		// A stray close tag at the end, after output that quotes an open tag: the "block" holds the
 		// output, so nothing is split.
 		{"stray end tag after a quoted block", hdr + "\n" + r2 + big + "\n</system-reminder>",
@@ -34,7 +37,7 @@ func TestSplitTrailingReminders(t *testing.T) {
 			"out\n" + r2 + "\nmore output\n</system-reminder>", ""},
 		{"block over the cap", "out\n\n<system-reminder>" + big + "</system-reminder>",
 			"out\n\n<system-reminder>" + big + "</system-reminder>", ""},
-		{"block at the cap", "out\n\n" + atCap, "out", "\n\n" + atCap},
+		{"block at the cap", "out\n\n" + atCap, "out\n\n", atCap},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

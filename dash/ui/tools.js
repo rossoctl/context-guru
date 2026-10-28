@@ -572,7 +572,7 @@ function shortSessionsDominate(rep) {
  */
 function renderUnused(host, rep) {
   const rows = rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0
       && !t.builtin && t.kind !== 'server_tool');
   const groups = groupRemovable(rows);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
@@ -929,8 +929,10 @@ function removalGroup(g, rep) {
   // TOOL only: a reader who had decided to drop a nineteen-tool server had to tick nineteen
   // boxes, each one a separate write, each one its own prefix rebuild — which is the one thing
   // the reversibility note tells them not to do.
+  // deferred: one deferred tool makes the server unfilterable, as on the server side.
   const srv = many && g.sub === 'MCP server'
-    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens } : null;
+    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens,
+      deferred: g.items.some((t) => t.deferred) } : null;
   const head = el('div', { class: 'inv-group-head' },
     el('div', { class: 'inv-group-id' },
       srv ? excludeToggle(srv) : null,
@@ -1251,13 +1253,13 @@ function toolTable(host, rep) {
     return;
   }
   for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used)
-        : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never')
+        : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       // Every row, used or not. The actionable list above covers the never-invoked ones; a reader
@@ -1373,15 +1375,15 @@ function skillsPanel(host, rep) {
   const body = el('tbody');
   table.appendChild(body);
   for (const t of s.skills) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       // The switch, on EVERY skill and not only the never-invoked ones. A skill the reader used
       // once and does not want to keep paying for is exactly the case the actionable list above
       // cannot reach, and editing a config file by hand was the only route to it.
       el('td', {}, excludeToggle(t)),
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       el('td', {}, removalDetails(t, 'Command'))));
@@ -1423,6 +1425,10 @@ const SKILL_SWITCH_REASON = 'This switch is inert on a skill row for now. The se
   + 'than the one skill it names. The listing\'s totals are unaffected. Use the settings snippet '
   + 'at the top of the page, or the command on this row — both edit your own configuration and '
   + 'neither goes through that parser.';
+// A deferred MCP tool is a name in a message, not a `tools` element, and the proxy filter removes
+// only elements: switching it off would save nothing.
+const DEFERRED_SWITCH_REASON = 'Claude Code sends this tool as a deferred name, which the proxy '
+  + 'filter cannot remove. Use the command on this row instead.';
 
 /**
  * excludeToggle is the one-click opt-out, extracted so a table row and a card row share it.
@@ -1438,10 +1444,11 @@ function excludeToggle(t) {
   // and a built-in cannot be dropped from here at all, and a skill cannot be dropped SAFELY until
   // the parser can name one (SKILL_SWITCH_SAFE).
   const gated = t.kind === 'skill' && !SKILL_SWITCH_SAFE;
-  const fixed = t.kind === 'server_tool' || t.builtin || gated;
+  const fixed = t.kind === 'server_tool' || t.builtin || gated || t.deferred;
   const cb = el('input', {
     type: 'checkbox', 'data-testid': 'inv-toggle-' + key, id: 'inv-cb-' + key,
     title: gated ? SKILL_SWITCH_REASON
+      : t.deferred ? DEFERRED_SWITCH_REASON
       : fixed ? 'This one is not yours to drop from here.'
         : (tools.control ? 'Stop sending this declaration' : 'One-click opt-out is not enabled on '
           + 'this proxy — use the command beside this row'),
@@ -1633,8 +1640,8 @@ function renderBuiltins(host, rep) {
       el('td', {}, kindPill(t)),
       numTd(t.tokens),
       el('td', { class: 'num', text: pct(t.share_pct, 1) }),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       // FOLDED, unlike every other command on this page, and that asymmetry is the point. The
       // requirement for this section is that it be visible and deliberately not easy to act on;
       // twenty-two open copy-boxes reading `claude --disallowedTools "Bash"` is the opposite of
@@ -2311,7 +2318,7 @@ function renderTools() {
 /** removableRows are the never-called, removable MCP tools and skills: the one ranking this tab and the Overview share. */
 function removableRows(rep) {
   return rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
 }
 
 /** invSection is a collapsed `Details` block: one sentence of what it is, then the content. */

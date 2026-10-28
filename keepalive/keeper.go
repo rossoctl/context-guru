@@ -456,6 +456,9 @@ type Keeper struct {
 	// sweepOverBudget counts a question refused BEFORE sending because its projected cost exceeded
 	// the per-ping ceiling.
 	sweepOverBudget atomic.Int64
+	// sweepBatchesLowered counts sweeps where the per-ping cost ceiling admitted fewer questions than the
+	// sweep planned, so fewer were asked (#132).
+	sweepBatchesLowered atomic.Int64
 }
 
 // New builds a Keeper. o.Dispatcher is required. o.Now defaults to time.Now; o.Go defaults to
@@ -1698,6 +1701,19 @@ type Stats struct {
 	SweepPanics           int64 `json:"sweep_ping_panics"`
 	SweepConcurrency      int64 `json:"sweep_concurrency_full"`
 	SweepNotRegistered    int64 `json:"sweep_not_registered"`
+	// SweepAskBatches counts the batches asked in all (#132): a sweep of 20 candidates is 2 batches.
+	// SweepBatchFailed counts batches that failed open, SweepBatchFailedBy giving the reason. The answer
+	// cost sums every batch.
+	SweepAskBatches    int64            `json:"sweep_ask_batches"`
+	SweepBatchFailed   int64            `json:"sweep_batch_failed"`
+	SweepBatchFailedBy map[string]int64 `json:"sweep_batch_failed_by,omitempty"`
+	// SweepBatchSkipped counts batches never started because the sweep's deadline passed (the per-request
+	// event is sweep_batch_skipped_deadline). SweepBatchOverCap counts EVERY candidate left unasked by a
+	// limit: max_ask_batches, or the cost ceiling lowering the count. SweepBatchesLowered counts sweeps
+	// where the per-ping cost ceiling admitted fewer questions than planned.
+	SweepBatchSkipped   int64 `json:"sweep_batch_skipped"`
+	SweepBatchOverCap   int64 `json:"sweep_batch_over_cap"`
+	SweepBatchesLowered int64 `json:"sweep_batches_lowered"`
 	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
 	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
 	// xhigh on. Metadata only: counts, never content, never a session id.
@@ -1781,6 +1797,7 @@ func (k *Keeper) Stats() Stats {
 	live := len(k.live)
 	k.mu.Unlock()
 	sw := offload.SweepPingCounters()
+	bc := offload.SweepBatchCounters() // ONE snapshot, so the three batch fields agree
 	return Stats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
 		Failed: k.failed.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
 		RouteTrips:                         k.routeTrips.Load(),
@@ -1811,6 +1828,12 @@ func (k *Keeper) Stats() Stats {
 		SweepPanics:                        sw.Panics,
 		SweepConcurrency:                   sw.ConcurrencyFull,
 		SweepNotRegistered:                 sw.NotRegistered,
+		SweepAskBatches:                    bc.Batches,
+		SweepBatchFailed:                   bc.Failed,
+		SweepBatchFailedBy:                 bc.FailedBy,
+		SweepBatchSkipped:                  bc.Skipped,
+		SweepBatchOverCap:                  bc.OverCap,
+		SweepBatchesLowered:                k.sweepBatchesLowered.Load(),
 		SweepDrops:                         sweepDropStats(),
 		SweepGates:                         sw.Gates,
 	}

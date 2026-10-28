@@ -408,7 +408,9 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	k, fd, clock := testKeeper(t)
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
+	// Wait on what Arrive actually reports, not on the ping counter: refreshed is written
+	// after the counter, and this test asserts on it below.
+	waitRefreshed(t, k, sess1, 48576)
 
 	pings, refreshed, tag := k.Arrive(sess1)
 	if pings != 1 {
@@ -704,8 +706,9 @@ func TestKillSwitch(t *testing.T) {
 
 // waitPings waits for the sweep's fire goroutines to finish n pings. The sweep dispatches
 // asynchronously in production (a ping is a round trip and must not be made under the map
-// lock); these tests run it inline, so this returns at once — it stays so a test still reads
-// correctly against the default runner.
+// lock); these tests run it inline, so this returns at once. It counts the round trip's
+// END only — a test that asserts on what Arrive reports must use waitRefreshed instead,
+// because the entry's own fields are written after the counter.
 func waitPings(t *testing.T, k *Keeper, n int64) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -728,6 +731,29 @@ func waitSkipped(t *testing.T, k *Keeper, n int64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("skipped = %d after 2s, want %d", k.skipped.Load(), n)
+}
+
+// waitRefreshed waits until one session's entry carries the cache-read its ping saw.
+// The pings counter above is bumped when the round trip is OVER; e.refreshed is written a
+// moment later under k.mu, and Arrive reports that field — so a test that asserts on what
+// Arrive says must wait for the write itself, not for the counter that precedes it
+// (issue #206). Correct under the inline runner and the default goroutine runner both.
+func waitRefreshed(t *testing.T, k *Keeper, key Key, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		k.mu.Lock()
+		var got int64
+		if e := k.live[key.id()]; e != nil {
+			got = e.refreshed
+		}
+		k.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("refreshed for session %s never reached %d", key.Session, want)
 }
 
 // Deletion, token revocation and disablement each end an account's authority, and the keeper is

@@ -568,6 +568,8 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, ThreadParent: threadParent, ThreadInherits: threadInherits,
 		DeclaresTools: gjson.GetBytes(o.Body, "tools.#").Int() > 0, Store: st, Model: o.Models,
 		RawInput: rawInput,
+		// No explicit breakpoint on this route, and no anchor write (#730).
+		NoCacheBreakpoint: !explicitBreakpointProvider(bschemas.OpenAI),
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
 		// A previous_response_id points to upstream-held history that this
@@ -587,7 +589,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		PrefixAsk:    o.PrefixAsk,
 		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
 		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
-		PrevBilledInput: prevBilledInput(st, res.Session), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
+		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)
 	start := 0

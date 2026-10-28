@@ -82,7 +82,7 @@ func TestCacheAwareEveryDeclineRecordsAGateOrEvent(t *testing.T) {
 			msgs: caFixture,
 			ctx: func(c *components.Ctx) {
 				for _, m := range caFixture()[1:] {
-					c.Store.Put(keptKey(contentKey(schema.MessageText(m))), []byte{1})
+					c.Store.Put(keptKey(c.Session, contentKey(schema.MessageText(m))), []byte{1})
 				}
 			},
 			want: "summary_span_empty_after_expand_trim"},

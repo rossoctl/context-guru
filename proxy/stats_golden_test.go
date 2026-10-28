@@ -58,6 +58,11 @@ var statsGoldenTopLevel = []string{
 	"cache_anchor_no_slot",
 	"cache_anchor_not_found",
 	"cache_aware_summarizer_stale_prefix",
+	// The count-changing sibling of stale_prefix (#452): an earlier component changed the
+	// message count, so the stashed span could not be located at all. Split from
+	// stale_prefix because the remedies differ — a stale prefix is re-asked, a shifted one
+	// cannot be. Added to the reviewed contract rather than loosening the assertion.
+	"cache_aware_summarizer_coords_shifted",
 	"cache_aware_summarizer_prefix_ask_used",
 	"cache_aware_summarizer_cache_read_tokens",
 	"cache_aware_summarizer_cache_write_tokens",
@@ -124,6 +129,11 @@ var statsGoldenTopLevel = []string{
 	"sse_buffered",
 	"sse_buffered_pct",
 	"sse_expand_after_stream",
+	// The adjudication half of that leak, split out so the pair can name its tool (#174).
+	// Added to the reviewed contract rather than loosening the assertion: while the two
+	// share one key, an operator reading "the peek leaked" cannot tell a splice that gave
+	// up on an answerable turn from the deliberate co-call deferral.
+	"sse_adjudicate_after_stream",
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",

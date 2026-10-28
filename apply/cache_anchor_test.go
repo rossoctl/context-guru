@@ -226,3 +226,37 @@ func TestAnOpenAISpliceDoesNotCountAMissingAnchor(t *testing.T) {
 		t.Fatalf("an OpenAI-shaped splice counted %d missing anchor(s)", nf-notFound)
 	}
 }
+
+// #730. On OpenAI no breakpoint can be written, so the summary covers the last tool exchange too.
+// The Anthropic half (the exchange stays and carries the anchor) is the tests above.
+func TestTheOpenAISummaryCoversTheLastToolExchange(t *testing.T) {
+	long := strings.Repeat("verbose tool output\n", 60)
+	body, _ := json.Marshal(map[string]any{
+		"model": "gpt-x",
+		"messages": []map[string]any{
+			{"role": "system", "content": "you are helpful"},
+			{"role": "user", "content": "do the task " + long},
+			{"role": "assistant", "content": "thinking " + long},
+			{"role": "user", "content": "go on " + long},
+			{"role": "assistant", "content": "", "tool_calls": []map[string]any{{"id": "c1", "type": "function", "function": map[string]any{"name": "read", "arguments": "{}"}}}},
+			{"role": "tool", "tool_call_id": "c1", "content": "LASTEXCHANGE " + long},
+			{"role": "assistant", "content": "done"},
+			{"role": "user", "content": "the final question"},
+		},
+	})
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	model := &recordingModel{reply: "<summary>SUMMARY-MARKER</summary>"}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, components.ModelSpec{Incoming: model})
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, _ := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, components.ModelSpec{Incoming: model})
+	if !strings.Contains(string(out), "SUMMARY-MARKER") {
+		t.Fatalf("the summarizer never spliced:\n%.400s", out)
+	}
+	if strings.Contains(string(out), "LASTEXCHANGE") {
+		t.Fatalf("the OpenAI summary kept the last tool exchange, which no breakpoint can mark")
+	}
+}

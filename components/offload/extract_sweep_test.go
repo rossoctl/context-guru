@@ -124,7 +124,7 @@ func askOffload(e *ExtractSweep, req *bschemas.BifrostChatRequest, rep *componen
 		rep.Gate("ping_not_offered_" + string(reason))
 		return keys, err
 	}
-	res := dispatch(time.Second, SweepPingWait{})
+	res := dispatch(batchTestBudget, SweepPingWait{})
 	for g, n := range res.Gates {
 		rep.GateN(g, n)
 	}
@@ -244,9 +244,10 @@ func (m *recordingModel) Complete(_ context.Context, prompt string) (string, err
 
 func (m *recordingModel) lastPrompt() string { s, _ := m.prompt.Load().(string); return s }
 
-// ONE CALL FOR EVERY CANDIDATE. There is no batching any more: nothing is copied per candidate, so
-// there is nothing to divide. Twenty candidates must be one ask naming twenty labels.
-func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
+// BATCHED, NOT CAPPED (#132). Twenty candidates are two balanced questions of 10 (the batch size is 12, so
+// k = ceil(20/12) = 2), asked in sequence over the same cached transcript, and every candidate is judged
+// exactly once. They used to be one ask of the 12 largest with the other 8 left out.
+func TestSweepAsksTwentyCandidatesAsTwoBalancedBatches(t *testing.T) {
 	const n = 20
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
@@ -256,42 +257,23 @@ func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if got := atomic.LoadInt64(&asker.calls); got != 1 {
-		t.Fatalf("%d candidates took %d asks; the shape is ONE ask over the cached transcript", n, got)
+	if got := atomic.LoadInt64(&asker.calls); got != 2 {
+		t.Fatalf("%d candidates took %d asks, want 2 balanced batches", n, got)
 	}
-	// UP TO THE CAP, and the remainder counted rather than dropped silently. The cap exists because
-	// the reply carries a verbatim quote per verdict against a fixed budget, and truncation discards
-	// the WHOLE array — so an uncapped ask on a large transcript sweeps nothing at all. See
-	// maxAskItems. What this test still pins is the shape: ONE ask, not one call per output.
-	if got := rep.Events["sweep_adjudicated"]; got != maxAskItems {
-		t.Fatalf("sweep_adjudicated = %d, want %d (the ask cap) — the inventory was starved before "+
-			"assembly (gates: %v)", got, maxAskItems, rep.Gates)
+	// Every candidate was judged, and none twice.
+	if got := rep.Events["sweep_adjudicated"]; got != n {
+		t.Fatalf("sweep_adjudicated = %d, want %d: every candidate is asked about once (gates: %v)", got, n, rep.Gates)
 	}
-	if got := rep.Gates["sweep_over_ask_cap"]; got != n-maxAskItems {
-		t.Errorf("sweep_over_ask_cap = %d, want %d: what the cap left unasked must be counted, or a "+
-			"component that swept %d of %d would report plain success", got, n-maxAskItems,
-			maxAskItems, n)
+	if got := rep.Gates["sweep_over_ask_cap"]; got != 0 {
+		t.Errorf("sweep_over_ask_cap = %d, want 0: 20 is under 12 x 4", got)
 	}
 	if rep.Events["sweep_inventory_of_one"] != 0 {
 		t.Errorf("an inventory of %d was recorded as one (gates: %v)", n, rep.Gates)
 	}
-	// The cap must NOT trip the starvation tripwire: that alarm is for a pre-filter quietly thinning
-	// the comparison, and a deliberate ceiling firing it would make it noise on exactly the
-	// transcripts where it should be loudest.
+	// Batching must NOT trip the starvation tripwire: that alarm is for a pre-filter quietly thinning the
+	// comparison.
 	if got := rep.Events["sweep_inventory_thinned"]; got != 0 {
-		t.Errorf("the ask cap tripped sweep_inventory_thinned (%d); that counter is for an upstream "+
-			"filter, not for this ceiling", got)
-	}
-	// Every candidate the ask CARRIES must be named in it, and the cap keeps the largest.
-	ask := asker.ask()
-	named := 0
-	for i := 0; i < n; i++ {
-		if strings.Contains(ask, "["+strconv.Itoa(i)+"] ") {
-			named++
-		}
-	}
-	if named != maxAskItems {
-		t.Errorf("the one ask named %d candidates, want %d", named, maxAskItems)
+		t.Errorf("batching tripped sweep_inventory_thinned (%d); that counter is for an upstream filter", got)
 	}
 }
 
@@ -371,6 +353,43 @@ func TestSweepDeclinesOnAStalePrefix(t *testing.T) {
 	if got := asker.gotCount.Load(); got != int64(len(req.Input)) {
 		t.Errorf("the guard asked coverage for %d messages, want %d (the deepest candidate is the last "+
 			"message)", got, len(req.Input))
+	}
+}
+
+// A count-changing component BEFORE the sweep is a third decline, distinct from a stale stash
+// (#452): the raw and pipeline coordinates name different messages, so rawSpanForHash cannot
+// locate a span at all and the guard declines WITHOUT judging the stash — which can be perfectly
+// current. Counted as sweep_coords_shifted, never as sweep_stale_prefix, so a `high`/`xhigh`
+// pipeline (summarize first, then this) does not report a stash defect on every compacted turn.
+func TestSweepCountsShiftedCoordinatesApartFromAStalePrefix(t *testing.T) {
+	// covers: true, so only the coordinate shift can decline — if the stash were judged, it
+	// would pass.
+	asker := &fakeCoverageAsker{covers: true}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-shifted", asker, store.NewMemory(store.Options{}))
+	// What apply.BodyOpts would have set had a component ahead of the sweep changed the message
+	// count: the pre-pipeline body holds one message more than req.Input does at this position.
+	raw := make([]bschemas.ChatMessage, len(req.Input), len(req.Input)+1)
+	copy(raw, req.Input)
+	ctx.RawInput = append(raw, req.Input[0])
+	rep := &components.Report{}
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_coords_shifted"] != 1 {
+		t.Fatalf("a shifted coordinate system was not counted as sweep_coords_shifted (gates: %v)", rep.Gates)
+	}
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("a shifted coordinate system was counted as a stale stash (gates: %v)", rep.Gates)
+	}
+	if got := asker.gotCount.Load(); got != 0 {
+		t.Errorf("CoversSpan was consulted for %d messages; with the coordinates shifted there is "+
+			"no span safe to compare, so the stash must not be judged at all", got)
+	}
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a guard that cannot locate the span must decline before "+
+			"paying for the call", asker.calls)
 	}
 }
 

@@ -49,9 +49,11 @@ class CodexPluginTest(unittest.TestCase):
             self.assertEqual(PLUGIN.signal_hook(None), 0)
 
     def test_skills_cover_sandbox_boundaries(self):
+        # insights-capabilities/-components/-idle folded into `insights` (README: "still work for
+        # one release"); their folders are gone, so naming them here made this test error before it
+        # reached the assertions below — which hid a wrong assertion for two releases.
         skills = MODULE_PATH.parent.parent / "skills"
-        for name in ("status", "insights", "insights-capabilities",
-                     "insights-components", "insights-idle"):
+        for name in ("status", "insights"):
             text = (skills / name / "SKILL.md").read_text()
             self.assertIn('sandbox_permissions="require_escalated"', text, name)
             self.assertIn("unverified", text, name)
@@ -68,7 +70,8 @@ class CodexPluginTest(unittest.TestCase):
         self.assertIn("context-guru-reset --yes", uninstall)
         status = (skills / "status" / "SKILL.md").read_text()
         self.assertIn("status --stats", status)
-        self.assertIn("stdout verbatim", status)
+        self.assertIn("file path", status)  # the #411 contract: the path, not the JSON
+        self.assertIn("do not print the JSON", status)
         self.assertIn("no narration", status)
 
     def setUp(self):
@@ -246,7 +249,7 @@ screen_reader_detection_done = true
             self.assertEqual(PLUGIN.uninstall(args), 0)
         self.assertTrue(binary.exists())
 
-    def test_status_stats_prints_exact_response_body(self):
+    def test_status_stats_writes_exact_response_body_and_prints_the_path(self):
         PLUGIN.state_dir().mkdir(parents=True)
         PLUGIN.state_dir().joinpath("install.json").write_text('{"port": 8791}')
         body = b'{"requests":3,"tokens_saved":17}\n'
@@ -258,7 +261,15 @@ screen_reader_detection_done = true
              mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
             self.assertEqual(PLUGIN.status(args), 0)
         fetch.assert_called_once_with("http://127.0.0.1:8791/stats", timeout=2)
-        self.assertEqual(stdout.getvalue(), body.decode())
+        # The #411 contract: stdout holds only the snapshot's path, and the file holds the exact
+        # bytes the proxy sent, unreadable by anyone else (mkstemp's 0600).
+        path = stdout.getvalue().strip()
+        self.assertNotIn("tokens_saved", stdout.getvalue())
+        self.assertTrue(path.endswith(".json"), path)
+        self.addCleanup(os.unlink, path)
+        with open(path, "rb") as file:
+            self.assertEqual(file.read(), body)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         self.assertEqual(stderr.getvalue(), "")
 
     def test_status_stats_without_install_keeps_stdout_empty(self):

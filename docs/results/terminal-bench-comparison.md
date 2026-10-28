@@ -152,7 +152,7 @@ the predicted mechanism operated. Each claim below names the counter that proves
 |---|---|---|
 | #33 SSE fast path | **verified** | 44.2% of streams buffered, down from an unconditional **100%**; a marker-free probe streamed through, which was impossible before |
 | #42 cmdfilter | **verified, large** | `acted` **950/3,311 (28.7%)** vs the old arm's **34/3,827 (0.9%)** — a 32× firing rate, 35.7× unique tokens |
-| #36 cacheinject wire | code verified, **value inert here** | `cachesplit acted=0` for a *structural* reason: TB runs the Claude Agent **SDK**, which never appends the git/env snapshot the CLI does, so all 73 captured requests carry 3 system blocks and **zero** volatile-tail markers. The −34.1% split figure came from SWE-bench CLI traffic and does not transfer |
+| #36 cacheinject wire | code verified, **value inert here** | `cachesplit acted=0` for a *structural* reason: TB runs the Claude Agent **SDK**, which never appends the git/env snapshot the CLI does, so all 73 captured requests carry 3 system blocks and **zero** volatile-tail markers. The −34.1% split figure came from a Terminal-Bench task run with the Claude Code **CLI** (`fix-code-vulnerability`, see [caching](../components/caching.md#what-the-split-is-worth)), not the SDK, and does not transfer to this study's runs |
 | #40 freeze TTL | **NOT EXERCISED — unverified** | all five `frozen_*` counters are 0, because its only callers are `mask`, `failed_run` and `extract_llm` — all three excluded by this config. **This arm is not evidence for or against #40 in either direction**, and none of the cost improvement above may be credited to it |
 | #43 observe | off by design | `mode: sync` |
 
