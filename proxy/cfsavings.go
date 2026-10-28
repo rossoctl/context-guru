@@ -4,7 +4,11 @@ import cf "github.com/rossoctl/context-guru/counterfactual"
 
 // savingsTracker runs the counterfactual calls around one request. It holds the one Trackers
 // of the proxy: a thread's state lives there between requests.
-type savingsTracker struct{ trackers *cf.Trackers }
+type savingsTracker struct {
+	trackers *cf.Trackers
+	// onEnd, when set, is called with each record after EndRequest. Tests only.
+	onEnd func(*cf.Request)
+}
 
 func newSavingsTracker() *savingsTracker { return &savingsTracker{trackers: cf.NewTrackers()} }
 
@@ -22,6 +26,9 @@ func (s *savingsTracker) end(req *cf.Request, th cf.Thread, forwarded []byte, op
 		req.Add(op)
 	}
 	req.EndRequest(th, cfBodies(forwarded), cfBreakpoints(forwarded), facts)
+	if s.onEnd != nil {
+		s.onEnd(req)
+	}
 }
 
 // compute prices the request. It stores the new ThreadState (so a shadow run still advances it).

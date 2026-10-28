@@ -1250,6 +1250,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if rec := recover(); rec != nil {
 					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
 					body = orig
+					// The original goes upstream, so no operation of the savings record is on the
+					// wire: drop the record, and the event keeps its legacy figures.
+					cp.cfDrop()
 				}
 			}()
 			// A client that received our own expand tool_use answered it itself, with an
@@ -1371,7 +1374,6 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
-			cp.cfEnd(th, body, tr.Ops)
 			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
 			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
 			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
@@ -1468,6 +1470,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					body, _ = adjudicate.Inject(wire, body)
 				}
 			}
+			// The savings record ends HERE, after both injections, with the body that goes
+			// upstream: the provider bills the injected tool declarations, so the library's
+			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
+			// message moves and the operations' positions stay valid.
+			cp.cfEnd(th, body, tr.Ops)
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
@@ -1838,6 +1845,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 			}
 		}
+		cp.noteRounds(rounds)
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure

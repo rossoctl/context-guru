@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -116,6 +117,11 @@ type capture struct {
 	pings  *PingStore
 	cfReq  *cf.Request
 	cfDone bool
+	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
+	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
+	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so
+	// the record is not computed.
+	rounds int
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -624,10 +630,20 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		price, priced = c.pricer.Price(context.Background(), c.model)
 	}
 	// Run the counterfactual BEFORE the event is priced. Only with usage: without it the thread
-	// state stays untouched and the event carries no result.
+	// state stays untouched and the event carries no result. Not after several upstream rounds
+	// either (see rounds): no Result is attached, so PriceMode keeps the legacy figures
+	// (cf_fallback reason no_result) and shadow logs no figure. The thread state is left as the
+	// previous request left it; the next request then sees a longer gap, which the library
+	// handles (a phase it cannot prove is unknown and falls back too).
 	if c.cfReq != nil && usageOK && !c.cfDone {
 		c.cfDone = true
-		e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
+		if c.rounds > 1 {
+			if c.mode == SavingsShadow {
+				slog.Info("cf_shadow_skipped", "session", c.cfReq.Meta.Session, "reason", "expand_rounds", "rounds", c.rounds)
+			}
+		} else {
+			e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
+		}
 	}
 	e.SetCounterfactualContext(c.trace.OpsDropped, c.observe)
 	e.PriceMode(price, usageOK && priced, dashSavingsMode(c.mode))
@@ -746,4 +762,18 @@ func dashSavingsMode(m string) dash.SavingsMode {
 		return dash.SavingsCounterfactual
 	}
 	return dash.SavingsLegacy
+}
+
+// noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
+func (c *capture) noteRounds(n int) {
+	if c != nil {
+		c.rounds = n
+	}
+}
+
+// cfDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
+func (c *capture) cfDrop() {
+	if c != nil {
+		c.cfReq = nil
+	}
 }
