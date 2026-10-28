@@ -663,7 +663,7 @@ A cut is one big removal, made late, when the conversation is near the point whe
      which that client never reaches. State it and the sweet spot is 0.85 x 167k = 142k:
      `- {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}`.
      `compaction_point` is in billed tokens. It does not change `window`.
-   - The summarizer and the dashboard span read the same figure, so an operator value applies to them too. Nothing changes
+   - The summarizer and the dashboard (the compact-episode span, the summarize ledger and the replay cap) read the same figure, so an operator value applies to them too. Nothing changes
      unless the field is set.
    - `fill(C)` is `fill_small` (0.85) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
 2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
@@ -698,7 +698,7 @@ expanded in this session.
 `not_in_sweet_spot` and `cut_point_unknown` are counted once per `warm_every_n` warm requests.
 
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
-`c_source` (how often C came from `cutfrac`, `compaction` or `window`), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
+`c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
 `no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
 P as a share of C).
 

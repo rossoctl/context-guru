@@ -109,6 +109,9 @@ func ParseTable(b []byte) (*Table, error) {
 		}
 		prefix := strings.HasSuffix(match, "*")
 		match = strings.TrimSuffix(match, "*")
+		if m.Window > 0 && m.CompactionPoint > m.Window {
+			return nil, fmt.Errorf("model price list: %q states compaction_point %d above its window %d", m.Match, m.CompactionPoint, m.Window)
+		}
 		if m.Window < 0 || m.CompactionPoint < 0 {
 			return nil, fmt.Errorf("model price list: %q has a negative window or compaction_point", m.Match)
 		}

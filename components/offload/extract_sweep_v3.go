@@ -609,7 +609,9 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 		}
 		return nil, 0
 	}
-	noteV3CSource(cSource)
+	if paced {
+		noteV3CSource(cSource)
+	}
 	if float64(P) < v3Fill(C, e.fillSmall, e.fillLarge)*float64(C) {
 		if paced {
 			noteV3Refuse("not_in_sweet_spot")
@@ -848,7 +850,7 @@ func noteV3HybridRulesOnly() {
 	v3Mu.Unlock()
 }
 
-// noteV3CSource counts where C came from, once per sweet-spot check.
+// noteV3CSource counts where C came from, once per warm_every_n warm requests, like the refusal counters.
 func noteV3CSource(source string) {
 	v3Mu.Lock()
 	if v3Ledger.CSource == nil {

@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -442,6 +443,22 @@ func spanFor(fillFrac, ceilingFrac float64) (float64, bool) {
 // is a pure function under test — no resolver, no network, no clock.
 type windowFn func(model string) (tokens int, exact bool)
 
+// pointFn resolves a model's compaction point (internal/compactionpoint) for a window. The dashboard builds
+// one that puts the operator's compaction_point from the MODEL_PRICES table in front of the bootstrap table,
+// the way it already reads the operator's window. With no field set it is compactionpoint.For.
+type pointFn func(model string, window int) compactionpoint.Point
+
+// bootstrapPoint is the point with no operator in front of it: the built-in table.
+func bootstrapPoint(model string, _ int) compactionpoint.Point { return compactionpoint.For(model) }
+
+// operatorPoint is pointFn over a resolver that may state a compaction point.
+func operatorPoint(ctx context.Context, windows modelinfo.Resolver) pointFn {
+	return func(model string, window int) compactionpoint.Point {
+		stated, _ := modelinfo.OperatorCompactionPoint(windows, ctx, model)
+		return compactionpoint.Resolve(model, stated, window)
+	}
+}
+
 // priceFn resolves a model's cache-write rates. Injected for the same reason.
 type priceFn func(model string) kvcache.Pricing
 
@@ -453,6 +470,12 @@ type priceFn func(model string) kvcache.Pricing
 // window is a guess — is a sequence of rows, and a test that has to build a database to express
 // one is a test nobody writes the fifth variant of.
 func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
+	spanFrac, fillFrac, ceilingFrac float64) *CompactionEpisodes {
+	return walkCompactEpisodesWith(rows, window, bootstrapPoint, price, spanFrac, fillFrac, ceilingFrac)
+}
+
+// walkCompactEpisodesWith is walkCompactEpisodes with the compaction point resolver stated.
+func walkCompactEpisodesWith(rows []compactRow, window windowFn, point pointFn, price priceFn,
 	spanFrac, fillFrac, ceilingFrac float64) *CompactionEpisodes {
 	// fillFrac FIRST: the span derives from it. Reversing these two silently derived the span from a
 	// zero fill, i.e. the whole ceiling — a span ten times too wide.
@@ -499,7 +522,7 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 		p := price(conv[0].Model)
 
 		// This conversation's own span, from this MODEL's compaction point.
-		ceil := compactionpoint.For(conv[0].Model)
+		ceil := point(conv[0].Model, w)
 		if explicitCeiling {
 			ceil = compactionpoint.Point{Frac: ceilingFrac, Source: compactionpoint.Assumed,
 				Note: "supplied explicitly on the request"}
@@ -1278,11 +1301,12 @@ func (d *DB) CompactionEpisodesFor(f Filter, windows modelinfo.Resolver, p model
 		names = append(names, m)
 	}
 	list := kvcache.NewPriceList(ctx, names, p, cfg.Multipliers, cfg.Overrides)
-	out := walkCompactEpisodes(rows,
+	out := walkCompactEpisodesWith(rows,
 		func(model string) (int, bool) {
 			w, exact, ok := modelinfo.Exact(windows, ctx, model)
 			return w, exact && ok
 		},
+		operatorPoint(ctx, windows),
 		list.For, spanFrac, fillFrac, ceilingFrac)
 	out.Pricing = list
 	if rl, err := d.ReplayLedgerFor(f, windows, p); err == nil {

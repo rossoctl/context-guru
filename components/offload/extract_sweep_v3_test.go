@@ -200,12 +200,12 @@ func TestV3CSourceIsReportedForEachCase(t *testing.T) {
 			r := newV3Rig(t, "v3-src-"+tc.name, v3Rule)
 			r.window, r.c, r.cSource, r.cutFrac = 200_000, tc.point, tc.src, tc.cutFrac
 			r.request(0)
-			r.request(10_000)
-			r.request(10_000)
-			r.request(10_000)
+			for i := 0; i < 6; i++ {
+				r.request(10_000)
+			}
 			v := v3Counters()
-			if v.CSource[tc.want] == 0 || len(v.CSource) != 1 {
-				t.Fatalf("c_source = %v, want only %q", v.CSource, tc.want)
+			if v.CSource[tc.want] != 2 || len(v.CSource) != 1 {
+				t.Fatalf("c_source = %v, want %q counted twice over 6 requests with warm_every_n 3 (paced)", v.CSource, tc.want)
 			}
 			d, ok := lastWarmDecision()
 			if !ok || d.CSource != tc.want || d.CutPoint == 0 {

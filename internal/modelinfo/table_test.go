@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -250,5 +251,21 @@ func TestTableParsesCompactionPoint(t *testing.T) {
 	}
 	if _, err := ParseTable([]byte("models:\n  - {match: x, in: 1, out: 1, compaction_point: -1}\n")); err == nil {
 		t.Fatal("a negative compaction_point was accepted")
+	}
+}
+
+func TestTableRejectsACompactionPointAboveItsWindow(t *testing.T) {
+	_, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1, out: 1, window: 200000, compaction_point: 250000}\n"))
+	if err == nil || !strings.Contains(err.Error(), "rits/zai-org/glm-5-3") {
+		t.Fatalf("err = %v, want a refusal that names the model", err)
+	}
+	// Not stated together: no check. A point alone is fine, and equal to the window is fine.
+	for _, y := range []string{
+		"models:\n  - {match: x, in: 1, out: 1, compaction_point: 250000}\n",
+		"models:\n  - {match: x, in: 1, out: 1, window: 200000, compaction_point: 200000}\n",
+	} {
+		if _, err := ParseTable([]byte(y)); err != nil {
+			t.Errorf("%q refused: %v", y, err)
+		}
 	}
 }

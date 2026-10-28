@@ -2140,18 +2140,6 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	}
 }
 
-// resolveWindow resolves this request's model context window and whether that figure is
-// published for the model rather than guessed at from its family.
-//
-// ONE reader for both facts, and both paths (`/v1/messages` and `/compact`) go through it —
-// because they diverged once already: /compact hard-coded the window as 0, which silently
-// disabled every fraction-based trigger on the endpoint the offline eval runs against, so eval
-// measured a different component than the one that ships. A second fact resolved beside it is a
-// second chance to make that mistake.
-//
-// exact=false covers BOTH "unknown" and "a guess", because a caller that must not act on a guess
-// must not act on an unknown either, and no caller needs to tell those apart. See
-// modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
 // resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
 // table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
 // and /compact) go through it, as they do for the window.
@@ -2168,6 +2156,18 @@ func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, windo
 	return compactionpoint.Resolve(model, stated, window)
 }
 
+// resolveWindow resolves this request's model context window and whether that figure is
+// published for the model rather than guessed at from its family.
+//
+// ONE reader for both facts, and both paths (`/v1/messages` and `/compact`) go through it —
+// because they diverged once already: /compact hard-coded the window as 0, which silently
+// disabled every fraction-based trigger on the endpoint the offline eval runs against, so eval
+// measured a different component than the one that ships. A second fact resolved beside it is a
+// second chance to make that mistake.
+//
+// exact=false covers BOTH "unknown" and "a guess", because a caller that must not act on a guess
+// must not act on an unknown either, and no caller needs to tell those apart. See
+// modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
 func (h *Handler) resolveWindow(ctx context.Context, body []byte) (window int, exact bool) {
 	if h.opts.Windows == nil {
 		return 0, false
