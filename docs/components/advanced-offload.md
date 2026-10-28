@@ -645,6 +645,44 @@ Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_ac
 `false_drop_rate_warm`, `false_drop_rate_cold`) and `keepalive.sweep_warm` (trigger, question and gate
 counts with refusal reasons).
 
+### Sweep v3: rules and one big cut (`selector`, off by default)
+
+Sweep v3 is a **setting** of the warm path. It is not a new component. It needs `warm: true`. It is off unless you write one
+of its settings. With none written, the warm path runs exactly as described above.
+
+A cut is one big removal, made late, when the conversation is near the point where it would be compacted anyway.
+
+1. **Sweet spot.** The sweep tries a cut when `P >= fill(C) x C`.
+   - `P` is the billed prompt of this thread. `C` is the cut point: the summarizer's fraction of the window when one is in the
+     pipeline, else the client's compaction point if known, else the window. `C` needs an exact window.
+   - `fill(C)` is `fill_small` (0.85) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
+2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
+   A refused cut does not start this wait. The sweep asks the judge no question during the wait.
+3. **Meaningful drop.** `D >= min_drop_frac x P` (default 0.15). `D` is the rule drops and the judge drops that survive the recheck.
+4. **Payback.** The warm gate above, unchanged.
+
+`selector` picks who chooses the drops:
+
+- `judge` (default): the model, as before. Protected outputs are not offered.
+- `rule`: rules only. **No model call.**
+- `hybrid`: the rules, then the judge on what the rules did not decide. It is **one** cut: nothing is applied while the
+  question is out. If the judge gives no answer, the rules go alone, through the same gates (`hybrid_rules_only`).
+
+The rules read tool names, input paths and commands from the request in flight. They store nothing.
+
+- `file_reread`: a file read whose same path was read again later, or edited or written later.
+- `build_rerun`: a build, test or lint run in a shell tool whose same command (white space collapsed) ran again later.
+- An output that already has a `<<cg:...>>` marker, or that the agent expanded, is never chosen.
+
+Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), outputs whose call path matches `protect_paths`
+(globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
+expanded in this session.
+
+Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
+`refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
+`no_rule_drops`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (D as a share of P,
+P as a share of C).
+
 ### How many warm turns are left (`warm_expected_turns`)
 
 The warm gate collects its saving over N more warm turns. N comes from one of three models, and the decision log says which

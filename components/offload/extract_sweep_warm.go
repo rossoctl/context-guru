@@ -112,6 +112,10 @@ type warmThread struct {
 	// set is not retried on every warm request (it would be refused again on nearly the same numbers); the
 	// trigger runs instead, asks a new question, and the new answer is merged in (warmHold clears this).
 	heldTried bool
+	// Sweep v3 (extract_sweep_v3.go): numbers only. v3Await: a cut was accepted and the next request sets the
+	// base. v3Baseline: the billed prompt after the last accepted cut. v3Asked: a hybrid question is out.
+	v3Await, v3Asked bool
+	v3Baseline       int
 }
 
 var (
@@ -199,6 +203,8 @@ type SweepWarmStats struct {
 	// numbers they were made on.
 	RecentDecisions []WarmDecision
 	Panics          int64
+	// V3 is the sweep v3 ledger (extract_sweep_v3.go).
+	V3 V3Stats
 	// Gates counts the question's own gate and event names (sweep_kept, sweep_unparseable, ...) for warm
 	// questions, apart from the ping's.
 	Gates map[string]int64
@@ -206,7 +212,7 @@ type SweepWarmStats struct {
 
 // Any reports whether the warm path did or counted anything, so /stats shows nothing when it never ran.
 func (w SweepWarmStats) Any() bool {
-	if len(w.TriggerReasons) > 0 || len(w.Recent) > 0 || len(w.RecentDecisions) > 0 || w.GatePriceModel != "" || w.PriceModelUnknown > 0 {
+	if w.V3.Any() || len(w.TriggerReasons) > 0 || len(w.Recent) > 0 || len(w.RecentDecisions) > 0 || w.GatePriceModel != "" || w.PriceModelUnknown > 0 {
 		return true
 	}
 	return w.Fired+w.Asked+w.Held+w.Failed+w.NotWorth+w.NoBilled+w.ThreadBusy+w.ModelDeclined+
@@ -261,7 +267,7 @@ func SweepWarmCounters() SweepWarmStats {
 		AlreadyAsked: sweepWarmAlreadyAsked.Load(), NoInventory: sweepWarmNoInventory.Load(), Gates: copyWarmGates(),
 		PriceModelUnknown: sweepWarmPriceModelUnknown.Load(), GatePriceModel: gatePriceModel(),
 		GateAccept: sweepWarmGateAccept.Load(), GateRefuse: sweepWarmGateRefuse.Load(), Reasons: rs,
-		Panics: sweepWarmPanics.Load()}
+		Panics: sweepWarmPanics.Load(), V3: v3Counters()}
 }
 
 func noteWarmGate(accept bool, reason string) {
@@ -418,6 +424,7 @@ func (m memHeld) put(h heldAnswer) {
 
 // resetWarmForTest clears every thread's warm state, as a new process would have it.
 func resetWarmForTest() {
+	resetV3ForTest()
 	resetSweepBatchForTest() // the batching ledger the warm ask feeds (#747)
 	warmMu.Lock()
 	warmThreads = map[string]*warmThread{}
@@ -688,6 +695,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		// EVERY exit records its decision, accepted or refused, with the numbers it had by then.
 		defer func() {
 			d.Accept, d.Reason = ok, reason
+			d.DShareP, d.PShareC = wa.dShareP, wa.pShareC
 			noteWarmDecision(tkey, d)
 		}()
 		// The recheck's own account, recorded whatever the gate decides below.
@@ -838,6 +846,11 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			}
 			hasHeld = false
 		}
+	}
+	// SWEEP V3 (extract_sweep_v3.go) replaces everything below when it is on.
+	if e.v3 {
+		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, run: run, count: count, growthFrom: growthFrom,
+			growthTurns: growthTurns, prevLocal: prevLocal, busy: busy, hasHeld: hasHeld, heldTried: heldTried})
 	}
 	// A CARRIED set the gate already refused is not retried on every warm request: the trigger runs instead and
 	// asks a new question, whose drops are merged in, and THEN the gate decides on the merged set. A FRESH
@@ -1353,6 +1366,9 @@ type WarmDecision struct {
 	// Saving and Rewrite are the gate's two sides in USD, so the refusal reads as numbers.
 	Saving  float64 `json:"saving_usd"`
 	Rewrite float64 `json:"rewrite_usd"`
+	// Sweep v3 only: D as a share of P (the billed prompt), and P as a share of C (the cut point).
+	DShareP float64 `json:"d_share_of_p,omitempty"`
+	PShareC float64 `json:"p_share_of_c,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1371,7 +1387,8 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"removed_local", d.RemovedLocal, "removed_billed", d.RemovedBilled,
 		"rewritten_local", d.RewrittenLocal, "rewritten_billed", d.RewrittenBilled,
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
-		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite)
+		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
+		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC)
 }
 
 func warmDecisionsCopy() []WarmDecision {
@@ -1423,6 +1440,20 @@ func lastWarmDecision() (WarmDecision, bool) {
 // thread cannot keep a verdict alive for ever by being refused (warmHeldMaxAge counts from the oldest
 // question that still contributes). Returns how many drops were carried.
 func carryRefused(src heldSource, tkey string, claimed heldAnswer, res recheckResult) int {
+	// Sweep v3: only the judge's verdicts are carried. A rule is decided again on every request.
+	if vh, isV3 := src.(*v3Held); isV3 {
+		if !vh.useMem {
+			return 0
+		}
+		src = vh.mem
+		var judged []heldOutput
+		for _, o := range res.Valid {
+			if _, isRule := vh.ruleOf[o.ToolUseID]; !isRule {
+				judged = append(judged, o)
+			}
+		}
+		res.Valid = judged
+	}
 	m, ok := src.(memHeld)
 	if !ok || len(res.Valid) == 0 {
 		return 0

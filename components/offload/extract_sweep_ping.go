@@ -492,6 +492,11 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	if cand.warm {
 		fe = newFileEvidence(req)
 	}
+	// Sweep v3: the judge is not asked about a protected output, nor (hybrid) about one a rule decided.
+	var v3p v3Plan
+	if cand.warm && e.v3 {
+		v3p = e.v3Plan(c, req)
+	}
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
@@ -501,6 +506,14 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 		content := schema.MessageText(*msg)
 		if content == "" || carriesRealMarker(c, content) {
 			rep.Gate("empty_or_marker_present")
+			continue
+		}
+		if v3p.protected[i] {
+			rep.Gate("sweep_v3_protected")
+			continue
+		}
+		if e.selector == selectorHybrid && v3p.ruleIdx[i] {
+			rep.Gate("sweep_v3_rule_decided")
 			continue
 		}
 		id := extract.ContentKey(content)

@@ -774,7 +774,9 @@ type warmApply struct {
 	removedBilled int
 	turns, netUSD float64
 	deep          bool
-	gate          func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
+	// Sweep v3: D as a share of P, and P as a share of C, set by the v3 gate.
+	dShareP, pShareC float64
+	gate             func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
 }
 
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
