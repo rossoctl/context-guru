@@ -88,14 +88,14 @@ func spliceReport(at, removed, inserted int) components.RunReport {
 }
 
 func TestOpsFromRun_SpliceMapsToWire(t *testing.T) {
-	// slots 1 and 2 are one wire message (3); slot 0 is wire 0, slot 3 is wire 4.
-	wire := []int{0, 3, 3, 4}
+	// slots 1 and 2 are one wire message (1); slot 0 is wire 0, slot 3 is wire 2. Dense.
+	wire := []int{0, 1, 1, 2}
 	ops, dropped := OpsFromRun(spliceReport(1, 2, 1), wire, true)
 	if dropped != 0 || len(ops) != 1 {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	o := ops[0]
-	if *o.MessageSplice != (cf.MessageSplice{At: 3, Removed: 1, Inserted: 1}) || o.At.Index != 3 ||
+	if *o.MessageSplice != (cf.MessageSplice{At: 1, Removed: 1, Inserted: 1}) || o.At.Index != 1 ||
 		o.SizeBefore.Bytes != 8 || o.SizeAfter.Bytes != 2 || o.ChangeID != "cg:sum:ss" {
 		t.Fatalf("op = %+v splice %+v", o, o.MessageSplice)
 	}
@@ -145,5 +145,30 @@ func TestOpsFromRun_SecondSpliceIsDropped(t *testing.T) {
 	ops, dropped := OpsFromRun(rr, []int{0, 1, 2}, true)
 	if len(ops) != 1 || dropped != 1 {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
+	}
+}
+
+// wire {0,3,3,4} means wire messages 1 and 2 were unparseable and have no slot.
+func TestOpsFromRun_SpliceAcrossAWireHoleIsDropped(t *testing.T) {
+	wire := []int{0, 3, 3, 4}
+	for _, c := range []struct{ at, rm, in int }{{1, 2, 1}, {0, 1, 1}, {0, 1, 0}, {1, 0, 1}} {
+		ops, dropped := OpsFromRun(spliceReport(c.at, c.rm, c.in), wire, true)
+		if len(ops) != 0 || dropped != 1 {
+			t.Fatalf("splice %+v: ops = %+v dropped = %d, want dropped", c, ops, dropped)
+		}
+	}
+}
+
+func TestOpsFromRun_SpliceBeforeAWireHoleIsKept(t *testing.T) {
+	wire := []int{0, 1, 2, 5, 6}
+	ops, dropped := OpsFromRun(spliceReport(0, 2, 1), wire, true)
+	// end=2: pair (wire[1], wire[2]) = (1,2) is dense, so it is kept.
+	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (cf.MessageSplice{At: 0, Removed: 2, Inserted: 1}) {
+		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
+	}
+	// ending at slot 3 touches the pair (2,5): dropped.
+	ops, dropped = OpsFromRun(spliceReport(1, 2, 1), wire, true)
+	if len(ops) != 0 || dropped != 1 {
+		t.Fatalf("ops = %+v dropped = %d, want dropped", ops, dropped)
 	}
 }

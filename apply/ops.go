@@ -80,6 +80,9 @@ func spliceOp(r components.Report, c components.Change, wire []int, applied bool
 	if sp.Removed > 0 && end < n && wire[end-1] == wire[end] {
 		return cf.Operation{}, false
 	}
+	if !denseAcross(wire, sp.At, end) {
+		return cf.Operation{}, false
+	}
 	var at, removed int
 	switch {
 	case sp.Removed > 0:
@@ -104,9 +107,29 @@ func spliceOp(r components.Report, c components.Change, wire []int, applied bool
 		ChangeID:      "cg:" + r.Component + ":" + c.Hash,
 		MessageSplice: &cf.MessageSplice{At: at, Removed: removed, Inserted: sp.Inserted},
 	}
-	if sp.Inserted > 1 {
-		op.Spans = []cf.Span{{Section: cf.SectionMessages, From: at, To: at + sp.Inserted - 1,
-			SizeBefore: op.SizeBefore, SizeAfter: op.SizeAfter}}
-	}
 	return op, true
+}
+
+// denseAcross reports whether wire has no hole over the slots [at, end) and the pairs bordering
+// that range. normalize skips a message it cannot parse and gives it no slot, so wire can read
+// {0, 3, 3, 4}: wire messages 1 and 2 are in the body but not in req.Input. A splice that crosses
+// or touches such a hole would count wire messages the component never held, and the position of
+// what it inserted would be ambiguous, so the caller drops it. Every consecutive pair wire[k-1],
+// wire[k] for k in [max(at,1), min(end,len-1)] must differ by 0 or 1. An append at the end has no
+// pair to check, so a trailing unparseable message cannot be detected here (known limit).
+func denseAcross(wire []int, at, end int) bool {
+	lo := at
+	if lo < 1 {
+		lo = 1
+	}
+	hi := end
+	if hi > len(wire)-1 {
+		hi = len(wire) - 1
+	}
+	for k := lo; k <= hi; k++ {
+		if d := wire[k] - wire[k-1]; d < 0 || d > 1 {
+			return false
+		}
+	}
+	return true
 }
