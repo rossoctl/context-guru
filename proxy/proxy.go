@@ -30,6 +30,7 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
+	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
@@ -122,6 +123,14 @@ type Options struct {
 	// request is captured off the hot path into a durable store and the dashboard UI
 	// + API are mounted. nil = the proxy behaves exactly as before.
 	Dashboard *dash.Recorder
+
+	// Savings selects where the savings figure comes from: "legacy" (the default, also ""),
+	// "shadow" (the legacy figure stays; counterfactual.Compute also runs on every request
+	// that completes with usage and its Result is attached to the dashboard event) or
+	// "counterfactual". It has an effect only with a Dashboard, because the Result is
+	// attached to the recorded event; without one the tracker is not built. Any other value
+	// is refused by ParseSavings (main) and makes New panic.
+	Savings string
 
 	// PipelineFor builds a pipeline for a per-request override on /compact
 	// (?preset=… or x-context-guru-pipeline: a,b,c). nil = overrides ignored, the
@@ -233,6 +242,10 @@ type Handler struct {
 	pool *modes.Pool
 	// observeSeq numbers observations so each request enqueues one.
 	observeSeq atomic.Uint64
+	// savings is nil in legacy mode and without a dashboard recorder (see Options.Savings).
+	savings *savingsTracker
+	// cfSeq numbers requests for the counterfactual RequestMeta.RequestID.
+	cfSeq atomic.Uint64
 	// shadow is observe mode's own state store, separate from the live one. Observe must
 	// not write into the live store — a real request would then replay a decision that was
 	// never enforced — but it also cannot simply discard its writes: offloaders FREEZE a
@@ -362,9 +375,18 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if c == nil {
 		c = &http.Client{Transport: upstreamTransport(opts.UpstreamHeaderTimeout)}
 	}
+	sv, err := ParseSavings(opts.Savings)
+	if err != nil {
+		// New has no error return; main validates the flag with ParseSavings first.
+		panic("proxy.New: " + err.Error())
+	}
+	opts.Savings = sv
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: modes.NewTracker(0), rec: opts.Dashboard,
 		sent: newSentStash()}
+	if sv != SavingsLegacy && opts.Dashboard != nil {
+		h.savings = newSavingsTracker()
+	}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
 		h.shadow = store.NewMemory(store.Options{})
@@ -1310,6 +1332,21 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
+			// The savings tracker begins HERE, after applyMode, and not before it: the session
+			// (tr.Session) is known only once the pipeline has run, and BeginRequest only records
+			// the client body, so opening the record late loses nothing. `orig` is what the agent
+			// sent. An empty session means the pipeline did not run (bypassed, observe, no
+			// messages): there are no operations to price, so the request is skipped.
+			if cp != nil && cp.savings != nil && tr.Session != "" {
+				cp.cfBegin(cf.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.cfSeq.Add(1), 10),
+					Session:   tr.Session,
+					Model:     gjson.GetBytes(orig, "model").String(),
+					At:        cp.start,
+					// The proxy has no subscription detection, so every request is billed as api.
+					Billing: cf.BillingFrom(cf.BillingAPI),
+				}, orig)
+			}
 			// A real request has arrived on this session: cancel any pending keep-alive
 			// (this request refreshes the entry itself, and a ping concurrent with it would
 			// be a second request against the tenant's budget for nothing), and pick up what
@@ -1329,6 +1366,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
+			cp.cfEnd(th, body, tr.Ops)
 			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
 			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
 			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,

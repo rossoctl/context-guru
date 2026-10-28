@@ -6,6 +6,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
@@ -121,6 +122,9 @@ type WaitCauseResult struct {
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
+	// cfRes is the counterfactual Result (see cfevent.go). Unexported: not serialized.
+	cfRes *cf.Result
+
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
 	// TenantID owns this row; "" in single-tenant deployments.

@@ -61,3 +61,24 @@ func (ts *Trackers) IsActive(session string, t Thread, changeID string) bool {
 	}
 	return false
 }
+
+// Fork installs a copy of the parent thread's state as the child's initial state, when the child
+// has none and the parent has some. A child with state, or a parent without, is left alone.
+func (ts *Trackers) Fork(session string, parent, child Thread) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	p, ok := ts.m[ThreadKey(session, parent)]
+	if !ok {
+		return
+	}
+	if _, has := ts.m[ThreadKey(session, child)]; has {
+		return
+	}
+	s := p.snapshot()
+	if s.PrevPrint != nil {
+		fp := *s.PrevPrint
+		s.PrevPrint = &fp
+	}
+	s.Version = 0
+	ts.m[ThreadKey(session, child)] = &Tracker{state: s}
+}

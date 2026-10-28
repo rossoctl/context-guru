@@ -86,9 +86,10 @@ func main() {
 			"how long an upstream may take to send its FIRST byte before we treat it as gone. "+
 				"Not a cap on a streaming response's duration; it is the whole budget for a "+
 				"non-streaming one, whose headers arrive only once it is generated")
-		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
-		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
-		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		bob         = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
+		storeFlag   = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
+		savingsFlag = flag.String("savings", envOr("SAVINGS", "legacy"), "where the savings figure comes from: legacy (default) | shadow (also run counterfactual.Compute and attach its result to each dashboard event; the legacy figure is unchanged) | counterfactual. shadow and counterfactual need --dashboard: without a recorder there is no event to attach to")
+		modeFlag    = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
 		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
 		// that self-terminates is a much worse failure than a laptop process left running.
 		//
@@ -250,6 +251,9 @@ func main() {
 	mode, err := cfg.OperatingMode()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if _, err := proxy.ParseSavings(*savingsFlag); err != nil {
+		log.Fatalf("%v", err)
 	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
@@ -575,7 +579,8 @@ func main() {
 		Windows:   windows,                // dynamic context-window resolver (fraction triggers)
 		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:    cfg.Preset,
-		Dashboard: rec,  // nil unless --dashboard
+		Dashboard: rec, // nil unless --dashboard
+		Savings:   *savingsFlag,
 		Mode:      mode, // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,

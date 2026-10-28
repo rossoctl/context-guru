@@ -35,3 +35,42 @@ func TestIsActive_FalseForUnknownThread(t *testing.T) {
 		t.Fatal("an unseen thread has no active change")
 	}
 }
+
+func seedThread(ts *Trackers, session string, th Thread, st ThreadState) {
+	ts.tracker(ThreadKey(session, th)).state = st
+}
+
+func TestFork_CopiesParentStateIndependently(t *testing.T) {
+	ts := NewTrackers()
+	parent, child := Thread{ID: "main"}, Thread{ID: "side", Parent: "main"}
+	fp := &Fingerprint{Thread: "main"}
+	seedThread(ts, "s", parent, ThreadState{Active: []Operation{{ChangeID: "c1"}}, PrevPrint: fp, Version: 7})
+	ts.Fork("s", parent, child)
+	if !ts.IsActive("s", child, "c1") {
+		t.Fatal("child did not inherit the active change")
+	}
+	ct := ts.tracker(ThreadKey("s", child))
+	if ct.state.Version != 0 {
+		t.Errorf("child version = %d, want 0", ct.state.Version)
+	}
+	ct.state.Active[0].ChangeID = "changed"
+	ct.state.PrevPrint.Thread = "changed"
+	if !ts.IsActive("s", parent, "c1") || fp.Thread != "main" {
+		t.Fatal("mutating the child changed the parent")
+	}
+}
+
+func TestFork_NoOpCases(t *testing.T) {
+	ts := NewTrackers()
+	parent, child := Thread{ID: "main"}, Thread{ID: "side"}
+	ts.Fork("s", parent, child) // parent has no state
+	if _, ok := ts.m[ThreadKey("s", child)]; ok {
+		t.Fatal("forked from a parent with no state")
+	}
+	seedThread(ts, "s", parent, ThreadState{Active: []Operation{{ChangeID: "c1"}}})
+	seedThread(ts, "s", child, ThreadState{Active: []Operation{{ChangeID: "own"}}})
+	ts.Fork("s", parent, child) // child already has state
+	if ts.IsActive("s", child, "c1") || !ts.IsActive("s", child, "own") {
+		t.Fatal("Fork overwrote a child that had state")
+	}
+}

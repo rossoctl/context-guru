@@ -14,6 +14,11 @@ import (
 // database, content capture on, 7-day / 512 MiB retention, loopback-only access
 // to per-request content and effective config.
 type Options struct {
+	// Tap, when non-nil, is called on the writer goroutine with each event once it is stored,
+	// before the live feed gets its summary copy. It must not block or keep the event after
+	// it returns. It is how a host reads fields the store does not keep (the counterfactual
+	// Result), and how tests see them.
+	Tap func(*Event)
 	// DBPath is the SQLite file. "" or ":memory:" keeps everything in RAM (the
 	// no-persistence mode), which is also the automatic fallback when the path
 	// cannot be opened — the proxy must never fail to start over a dashboard.
@@ -487,6 +492,9 @@ func (r *Recorder) run() {
 			slog.Debug("dash: wrote a batch of captured requests", "n", len(batch),
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
+				if r.opts.Tap != nil {
+					r.opts.Tap(e)
+				}
 				r.hub.Publish(e)
 				r.enqueueCount(e)
 			}

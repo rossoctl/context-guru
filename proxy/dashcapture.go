@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	cf "github.com/rossoctl/context-guru/counterfactual"
 	"net/http"
 	"strings"
 	"time"
@@ -102,6 +103,11 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
+	// savings is the handler's counterfactual tracker (nil in legacy mode); cfReq is this
+	// request's record (nil when it was skipped); cfDone guards a double finish.
+	savings *savingsTracker
+	cfReq   *cf.Request
+	cfDone  bool
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -121,9 +127,10 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
-		llm:    &cheapmodel.Sink{},
-		unique: map[string]int{},
-		waits:  h.waits,
+		llm:     &cheapmodel.Sink{},
+		unique:  map[string]int{},
+		waits:   h.waits,
+		savings: h.savings,
 	}
 }
 
@@ -606,6 +613,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	priced := false
 	if c.pricer != nil && c.model != "" {
 		price, priced = c.pricer.Price(context.Background(), c.model)
+	}
+	// Run the counterfactual BEFORE the event is priced. Only with usage: without it the thread
+	// state stays untouched and the event carries no result.
+	if c.cfReq != nil && usageOK && !c.cfDone {
+		c.cfDone = true
+		e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
 	}
 	e.Price(price, usageOK && priced)
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
