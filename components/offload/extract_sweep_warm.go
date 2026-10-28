@@ -115,6 +115,7 @@ type warmThread struct {
 	// Sweep v3 (extract_sweep_v3.go): numbers only. v3Await: a cut was accepted and the next request sets the
 	// base. v3Baseline: the billed prompt after the last accepted cut. v3Asked: a hybrid question is out.
 	v3Await, v3Asked bool
+	v3Reqs           int
 	v3Baseline       int
 }
 

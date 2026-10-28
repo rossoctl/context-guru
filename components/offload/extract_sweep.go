@@ -184,7 +184,7 @@ type extractSweepConfig struct {
 	// then expects max(this - turns so far, 0) more. 0 (the default) = unset: the turns left are estimated
 	// from the billed growth per turn up to the cut.
 	WarmExpectedTurns int `yaml:"warm_expected_turns"`
-	// Sweep v3 on the warm path (extract_sweep_v3.go). All off by default. They need warm: true.
+	// Sweep v3 on the warm path (extract_sweep_v3.go). All off by default. They do nothing without warm: true.
 	//
 	// Selector: judge (the default, as before), rule (rules only, no model call) or hybrid (rules, then the judge).
 	Selector string `yaml:"selector"`
@@ -1310,7 +1310,7 @@ func init() {
 		{Key: "selector", Type: components.FieldEnum, Default: selectorJudge, Options: []string{selectorJudge, selectorRule, selectorHybrid},
 			Hint: "Sweep v3, on the warm path (needs warm: true). Who picks the outputs to drop. judge (default): the model, as before. rule: rules only, no model call: a file read whose path was read or written again later, and a build, test or lint run that a later run of the same command repeats. hybrid: the rules first, then the model on the outputs the rules did not decide. rule and hybrid switch the v3 gates on."},
 		{Key: "fill_small", Type: components.FieldFloat, Default: 0,
-			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of fill_small, fill_large or min_drop_frac switches the v3 gates on. When on, an unset or out-of-range value reads as 0.85. fill is linear in C between 200k and 1M."},
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths or protect_last_n switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.85. fill is linear in C between 200k and 1M."},
 		{Key: "fill_large", Type: components.FieldFloat, Default: 0,
 			Hint: "Sweep v3: the sweet spot as a share of C when C is 1M or more. 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.6."},
 		{Key: "min_drop_frac", Type: components.FieldFloat, Default: 0,
