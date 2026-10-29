@@ -26,7 +26,7 @@ import (
 //
 // f is the measured tokenizer factor (tokens.BilledDeltaFactor, issue #240): the removed count is
 // ours, the ceiling is in provider-billed tokens. When cf reaches the client's compaction ceiling
-// (compactionpoint.For, the same ceiling the summarize span uses) the client of that world
+// (the operator's compaction_point when the MODEL_PRICES table states one, else compactionpoint.For; the same ceiling the summarize span uses) the client of that world
 // compacts, and from there both worlds carry a summarized transcript: nothing later is ours.
 // A real client compaction (a drop in tokens_before, the same detector the episode walk uses)
 // ends it too, for the same reason.

@@ -542,9 +542,9 @@ const (
 // turnsEstimate is the expected number of warm turns N and how it was produced.
 type turnsEstimate struct {
 	N, Raw float64
-	// NNoCut and RawNoCut are N and Raw if nothing were removed. They equal N and Raw unless the estimate is
-	// taken AFTER a removal (sweep v3), so a log can show both.
-	NNoCut, RawNoCut float64
+	// NAfter and RawAfter are the turns left counted from the prompt AFTER a removal (sweep v3 passes D), so a log
+	// can show both. They are 0 when no removal was passed. The gate prices the saving on N, not on NAfter.
+	NAfter, RawAfter float64
 	Model, Why       string
 	Cut              int
 	GrowthPerTurn    float64
@@ -577,9 +577,13 @@ func (t *warmThread) noteBilledGrowth(billed int) {
 //
 // warm_max_turns caps N in every case. The wait-cause weight is applied by the caller, at the apply.
 //
-// warmTurnsLeftAfter takes removedBilled, the billed tokens a cut would remove. It is 0 on the plain warm path, which
-// counts the turns to the cut from the prompt as it is. Sweep v3 passes D: the cut POSTPONES the compaction, so the turns left
-// are counted from the prompt after it, N' = (cut - (P - D)) / growth (turnsUntilCut, the one definition).
+// N is always the turns to the cut from the prompt as it is, (cut - P) / growth: the compaction comes then without
+// the cut, and it removes the dropped outputs anyway. The gate prices the saving on N and on nothing longer. A cut
+// only DELAYS the compaction, so a saving counted past N would be paid for by a compaction that happens anyway.
+//
+// warmTurnsLeftAfter also takes removedBilled, the billed tokens a cut would remove. With it, NAfter is the turns
+// from the prompt after the cut, N' = (cut - (P - D)) / growth (turnsUntilCut, the one definition). It is for the
+// log. Nothing prices on it.
 func (e *ExtractSweep) warmTurnsLeft(c *components.Ctx, run, growthFrom, growthTurns int) turnsEstimate {
 	return e.warmTurnsLeftAfter(c, run, growthFrom, growthTurns, 0)
 }
@@ -597,10 +601,10 @@ func (e *ExtractSweep) warmTurnsLeftAfter(c *components.Ctx, run, growthFrom, gr
 	}
 	if e.warmExpectedTurns > 0 {
 		raw := float64(e.warmExpectedTurns - run)
-		return turnsEstimate{N: capN(raw), Raw: raw, NNoCut: capN(raw), RawNoCut: raw, Model: turnsModelExpected}
+		return turnsEstimate{N: capN(raw), Raw: raw, Model: turnsModelExpected}
 	}
 	soFar := func(why string) turnsEstimate {
-		return turnsEstimate{N: capN(float64(run)), Raw: float64(run), NNoCut: capN(float64(run)), RawNoCut: float64(run), Model: turnsModelSoFar, Why: why}
+		return turnsEstimate{N: capN(float64(run)), Raw: float64(run), Model: turnsModelSoFar, Why: why}
 	}
 	if c == nil || c.PrevBilledInput <= 0 {
 		return soFar(turnsWhyNoBilled)
@@ -626,11 +630,12 @@ func (e *ExtractSweep) warmTurnsLeftAfter(c *components.Ctx, run, growthFrom, gr
 		return est
 	}
 	raw := float64(cut-c.PrevBilledInput) / growth
-	if removedBilled <= 0 {
-		return turnsEstimate{N: capN(raw), Raw: raw, NNoCut: capN(raw), RawNoCut: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
+	est := turnsEstimate{N: capN(raw), Raw: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
+	if removedBilled > 0 {
+		est.RawAfter = turnsUntilCut(float64(cut), float64(c.PrevBilledInput-removedBilled), growth)
+		est.NAfter = capN(est.RawAfter)
 	}
-	after := turnsUntilCut(float64(cut), float64(c.PrevBilledInput-removedBilled), growth)
-	return turnsEstimate{N: capN(after), Raw: after, NNoCut: capN(raw), RawNoCut: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
+	return est
 }
 
 func localTokens(msgs []bschemas.ChatMessage) int {
@@ -761,8 +766,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		}
 		read, write := e.warmGateRates(c)
 		rewritten, deep := warmRewrite(req, first, cachedEnd(c, req), rm)
-		// Sweep v3 counts the turns from the prompt AFTER the cut: the cut postpones the compaction. The plain
-		// warm path counts them from the prompt as it is.
+		// Sweep v3 also reports the turns from the prompt AFTER the cut, for the log. The price uses N.
 		removedBilled := 0
 		if e.v3 {
 			removedBilled = int(float64(removed) * content)
@@ -777,12 +781,9 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		d.RewrittenLocal, d.RewrittenBilled = rewritten, int(float64(rewritten)*full)
 		d.Turns, d.Deep, d.Saving, d.Rewrite = in.Turns, deep, saving, rewrite
 		if e.v3 {
-			d.TurnsNoCut, d.TurnsAfterCut = te.NNoCut, te.N
+			d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
 		}
-		// The avoided compaction (sweep v3, credit_avoided_compaction): see avoidedCompactionUSD.
-		credit, avoided := e.avoidedCompactionUSD(te, read, write)
-		d.SavingCompaction, d.CompactionAvoided = credit, avoided
-		if !(saving+credit > rewrite) {
+		if !(saving > rewrite) {
 			if deep {
 				return false, "does_not_pay_deep"
 			}
@@ -790,8 +791,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		}
 		wa.rewriteBilled = int(float64(in.Rewritten) * in.RatioFull)
 		wa.removedBilled = int(float64(removed) * in.RatioContent)
-		wa.turns, wa.netUSD, wa.deep = in.Turns, saving+credit-rewrite, deep
-		wa.savingCompaction, wa.compactionAvoided = credit, avoided
+		wa.turns, wa.netUSD, wa.deep = in.Turns, saving-rewrite, deep
 		return true, ""
 	}
 }
@@ -1011,11 +1011,9 @@ func (e *ExtractSweep) warmWorthAsking(c *components.Ctx, req *bschemas.BifrostC
 	saving, rewrite := warmEcon(in)
 	d.Saving, d.Rewrite = saving, rewrite
 	if e.v3 {
-		d.TurnsNoCut, d.TurnsAfterCut = te.NNoCut, te.N
+		d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
 	}
-	credit, avoided := e.avoidedCompactionUSD(te, read, write)
-	d.SavingCompaction, d.CompactionAvoided = credit, avoided
-	if !(saving+credit > rewrite) {
+	if !(saving > rewrite) {
 		sweepWarmNotWorth.Add(1)
 		noteWarmTrigger("does_not_pay")
 		d.Reason = "does_not_pay"
@@ -1417,13 +1415,10 @@ type WarmDecision struct {
 	CSource  string `json:"c_source,omitempty"`
 	// RuleD is D by what chose it: a rule name, or judge (v3 only), in billed tokens.
 	RuleD map[string]int `json:"rule_d,omitempty"`
-	// Sweep v3: the turns left if nothing were cut (N) and after the cut (N'), both capped by warm_max_turns and
-	// before the wait-cause weight. SavingCompaction is the credit for an avoided compaction in USD, and
-	// CompactionAvoided says the cut avoids one within the horizon.
-	TurnsNoCut        float64 `json:"turns_no_cut,omitempty"`
-	TurnsAfterCut     float64 `json:"turns_after_cut,omitempty"`
-	SavingCompaction  float64 `json:"saving_compaction_usd,omitempty"`
-	CompactionAvoided bool    `json:"compaction_avoided,omitempty"`
+	// Sweep v3: the turns left if nothing were cut (N, the one the saving is priced on) and counted from the prompt
+	// after the cut (N', for reading only), both capped by warm_max_turns and before the wait-cause weight.
+	TurnsNoCut    float64 `json:"turns_no_cut,omitempty"`
+	TurnsAfterCut float64 `json:"turns_after_cut,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1444,7 +1439,7 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
 		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
 		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource, "rule_d", ruleDString(d.RuleD),
-		"turns_no_cut", d.TurnsNoCut, "turns_after_cut", d.TurnsAfterCut, "saving_compaction_usd", d.SavingCompaction)
+		"turns_no_cut", d.TurnsNoCut, "turns_after_cut", d.TurnsAfterCut)
 }
 
 func warmDecisionsCopy() []WarmDecision {
@@ -1555,38 +1550,4 @@ func SeedCarriedCountersForTest() (reset func()) {
 	sweepWarmCarriedExpired.Store(4)
 	sweepWarmCarriedCapped.Store(5)
 	return resetWarmForTest
-}
-
-// THE AVOIDED COMPACTION (sweep v3, credit_avoided_compaction).
-//
-// A cut postpones the client's compaction: with the prompt smaller, it takes longer to reach the cut point C.
-// When the compaction would have come inside the horizon (warm_max_turns) and the cut pushes it past the
-// horizon, the cut AVOIDS a compaction we can count. If compaction still comes inside the horizon, the cut only
-// DELAYS it and nothing is credited.
-//
-// The credit prices what that compaction would have cost, from metadata only (C and the rates):
-//
-//	saving_compaction = C x read                          the client's summary call reads the whole prompt
-//	                  + compactionSummaryFrac x C x write the cache rewrite after it writes the summary-sized prompt
-//
-// The cache is warm on this path, so the summary call is priced at the read rate, not the fresh rate. The
-// summary is taken to be compactionSummaryFrac of C. The summary call's own output is not counted. All three are
-// choices that make the credit smaller, not larger.
-const (
-	// compactionSummaryFrac is the size of the prompt after a compaction, as a share of C.
-	compactionSummaryFrac = 0.10
-)
-
-// avoidedCompactionUSD is the credit and whether a compaction is avoided within the horizon. It is 0, false
-// off v3, with the setting off, or when the turns were not counted to the cut (a model other than "cut").
-func (e *ExtractSweep) avoidedCompactionUSD(te turnsEstimate, read, write float64) (usd float64, avoided bool) {
-	if !e.v3 || !e.creditAvoided || te.Model != turnsModelCut || te.Cut <= 0 {
-		return 0, false
-	}
-	horizon := float64(e.warmMaxTurns)
-	if !(te.RawNoCut <= horizon && te.Raw > horizon) {
-		return 0, false
-	}
-	c := float64(te.Cut)
-	return c*read + compactionSummaryFrac*c*write, true
 }

@@ -482,7 +482,7 @@ func walkCompactEpisodesWith(rows []compactRow, window windowFn, point pointFn, 
 	if fillFrac <= 0 {
 		fillFrac = defaultFillFrac
 	}
-	// THE CEILING IS PER MODEL, so it is resolved per conversation below rather than once here — it
+	// THE CEILING IS PER MODEL (the operator's compaction_point first, then the built-in table), so it is resolved per conversation below rather than once here — it
 	// is a fact about the CLIENT's behaviour on a given model, and a query spanning haiku and opus
 	// must not average the two. `ceilingFrac > 0` is the explicit `?ceiling=` override, which applies
 	// to every conversation because an operator using it is investigating one deployment.

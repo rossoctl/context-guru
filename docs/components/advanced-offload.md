@@ -669,28 +669,14 @@ A cut is one big removal, made late, when the conversation is near the point whe
 2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
    A refused cut does not start this wait. The sweep asks the judge no question during the wait.
 3. **Meaningful drop.** `D >= min_drop_frac x P` (default 0.15). `D` is the rule drops and the judge drops that survive the recheck.
-4. **Payback.** The warm gate above, with two changes in v3:
-   - **Turns left count the postponement.** A cut makes the prompt smaller, so the compaction comes later. The gate counts the
-     turns from the prompt after the cut: `N' = (C - (P - D)) / g`, where `g` is the billed growth per turn and `D` the billed
-     tokens the cut removes. Without a cut it is `N = (C - P) / g`. `N'` is larger than `N` by `D / g`. Both are capped by
-     `warm_max_turns`, and both are in the decision log (`turns_no_cut`, `turns_after_cut`). The trigger does the same with its
-     own D. It is one function (`turnsUntilCut`), shared with the co-reference horizon.
-   - **The avoided compaction is credited** (`credit_avoided_compaction`, on in v3, off without it; write `false` to turn it
-     off). If the compaction would have come inside the horizon without the cut (`N <= warm_max_turns`) and the cut pushes it
-     past the horizon (`N' > warm_max_turns`), the cut avoids a compaction we can count. The gate then adds
-     `saving_compaction_usd` to the saving and accepts when `saving + saving_compaction >= rewrite`. If compaction still comes
-     inside the horizon the cut only delays it, and nothing is credited.
-
-     ```
-     saving_compaction = C x read_rate + compactionSummaryFrac x C x write_rate
-     ```
-
-     The first term is the client's summary call reading the whole prompt at `C` (the cache is warm on this path, so the read
-     rate, not the fresh rate). The second is the cache write of the summary-sized prompt after the compaction.
-     `compactionSummaryFrac` is 0.10 (a named constant in `extract_sweep_warm.go`). The summary call's own output is not
-     counted. Every choice makes the credit smaller. The inputs are `C` and the two rates: metadata only. The credit is a
-     number the gate used, not a measurement: `v3.compactions_avoided` and `v3.saving_compaction_usd` in `/stats` count what it
-     credited.
+4. **Payback.** The warm gate above. The saving is priced on **N only**: the turns until the compaction would have come
+   without the cut, `N = (C - P) / g`, where `g` is the billed growth per turn. It is capped by `warm_max_turns` and
+   weighted as before. The rule is: count until the compaction would have occurred, given the context growth. If the session
+   ends before N, the saving is not collected. The reason is that a cut only **delays** the compaction. Compaction at N
+   removes the dropped outputs anyway, so a saving counted past N would be paid for by a compaction that happens regardless.
+   The gate accepts when `saving > rewrite` (strictly), as #720's does. The decision log also shows `N'`
+   (`turns_after_cut`), the turns counted from the prompt after the cut, `(C - (P - D)) / g`, for reading only: nothing prices
+   on it. N and N' come from one function (`turnsUntilCut`), shared with the co-reference horizon.
 
 `selector` picks who chooses the drops:
 
@@ -721,13 +707,13 @@ Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), out
 (globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
 expanded in this session.
 
-`not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every v3 decision line, accepted or refused, `does_not_pay` included.
+`not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
 
 The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.
 
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
-`compactions_avoided` and `saving_compaction_usd` (cuts that carried the avoided-compaction credit, and its total), `expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
-expand rate per rule), `recent_refusals` (the last size-gate refusals with D, D/P, P/C, C, `c_source` and D by rule),
+`expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
+expand rate per rule), `recent_refusals` (the last refusals made before the gate, with D, D/P, P/C, C, `c_source` and D by rule; the gate's own refusals are in the decision log),
 `c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
 `no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
 P as a share of C).

@@ -86,7 +86,6 @@ type v3Config struct {
 	protectLastN         int
 	ruleUnref            bool
 	ruleUnrefMinAge      int
-	creditAvoided        bool
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
@@ -129,8 +128,6 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 			out.protectLastN = 0
 		}
 	}
-	// On by default in v3 only: the plain warm path never reaches this line.
-	out.creditAvoided = cfg.CreditAvoidedCompaction == nil || *cfg.CreditAvoidedCompaction
 	out.ruleUnref, out.ruleUnrefMinAge = cfg.RuleUnreferenced, cfg.RuleUnreferencedMinAge
 	if out.ruleUnrefMinAge <= 0 {
 		out.ruleUnrefMinAge = defaultRuleUnrefMinAge
@@ -772,7 +769,6 @@ type v3CutRec struct {
 	p, c, d          int
 	cSource          string
 	dShareP, pShareC float64
-	savingCompaction float64
 	rules            map[string]int
 	judge            int
 	set              bool
@@ -850,7 +846,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 			}
 			return false, reason
 		}
-		*cut = v3CutRec{p: P, c: C, cSource: cSource, savingCompaction: wa.savingCompaction, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
+		*cut = v3CutRec{p: P, c: C, cSource: cSource, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
 		for _, o := range res.Valid {
 			if r, isRule := src.ruleOf[o.ToolUseID]; isRule {
 				cut.rules[r]++
@@ -867,19 +863,17 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 
 // V3Cut is one accepted v3 cut, in numbers. The thread is a hash label.
 type V3Cut struct {
-	Thread   string `json:"thread"`
-	AtMs     int64  `json:"at_ms"`
-	Selector string `json:"selector"`
-	P        int    `json:"billed_prompt"`
-	C        int    `json:"cut_point"`
-	CSource  string `json:"c_source"`
-	// SavingCompactionUSD is the credit for the compaction this cut avoids (0 when it avoids none).
-	SavingCompactionUSD float64 `json:"saving_compaction_usd,omitempty"`
-	D                   int     `json:"dropped_billed"`
-	DShareP             float64 `json:"d_share_of_p"`
-	PShareC             float64 `json:"p_share_of_c"`
-	RuleDrops           int     `json:"rule_drops"`
-	JudgeDrops          int     `json:"judge_drops"`
+	Thread     string  `json:"thread"`
+	AtMs       int64   `json:"at_ms"`
+	Selector   string  `json:"selector"`
+	P          int     `json:"billed_prompt"`
+	C          int     `json:"cut_point"`
+	CSource    string  `json:"c_source"`
+	D          int     `json:"dropped_billed"`
+	DShareP    float64 `json:"d_share_of_p"`
+	PShareC    float64 `json:"p_share_of_c"`
+	RuleDrops  int     `json:"rule_drops"`
+	JudgeDrops int     `json:"judge_drops"`
 }
 
 // V3Stats is the sweep v3 ledger for /stats.
@@ -893,10 +887,6 @@ type V3Stats struct {
 	// HybridRulesOnly counts hybrid attempts that went ahead on the rules alone: the judge gave no answer.
 	HybridRulesOnly int64 `json:"hybrid_rules_only,omitempty"`
 	Cuts            int64 `json:"cuts"`
-	// CompactionsAvoided counts accepted cuts that avoid a compaction within the horizon, and SavingCompactionUSD
-	// is the credit they carried. They are what the gate counted, not a measurement.
-	CompactionsAvoided  int64   `json:"compactions_avoided,omitempty"`
-	SavingCompactionUSD float64 `json:"saving_compaction_usd,omitempty"`
 	// CSource counts the sweet-spot checks by where C came from: cutfrac (a summarizer's fraction of the effective
 	// context), compaction (the compaction point: operator, measured or assumed) or window (the model's window).
 	CSource map[string]int64 `json:"c_source,omitempty"`
@@ -904,12 +894,13 @@ type V3Stats struct {
 	// Expands counts the first expands of v3 drops by what chose them: a rule name, or judge. With rule_drops and
 	// judge_drops it gives the expand rate per rule and for the judge.
 	Expands map[string]int64 `json:"expands,omitempty"`
-	// RecentRefusals lists the last cut attempts a size gate refused (drop_too_small, no_rule_drops), with D, D/P,
-	// C, where C came from, and D by rule.
+	// RecentRefusals lists the last cut attempts refused before the gate (not_in_sweet_spot, and in rule mode
+	// drop_too_small and no_rule_drops), with D, D/P, C, where C came from, and D by rule. The gate's own refusals
+	// (drop_too_small, does_not_pay) are in the decision log, not here.
 	RecentRefusals []V3Refusal `json:"recent_refusals,omitempty"`
 }
 
-// V3Refusal is one refused cut attempt, in numbers. The thread is a hash label.
+// V3Refusal is one cut attempt refused before the gate, in numbers. The thread is a hash label.
 type V3Refusal struct {
 	Thread  string         `json:"thread"`
 	AtMs    int64          `json:"at_ms"`
@@ -948,7 +939,7 @@ func noteV3Expand(rule string) {
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.CompactionsAvoided > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -987,8 +978,8 @@ func noteV3Refusal(tkey, reason string, p, c int, cSource string) {
 	noteV3SizeRefusal(tkey, "sweet_spot", reason, p, c, cSource, 0, nil)
 }
 
-// noteV3SizeRefusal logs one refused cut attempt as a decision line, and keeps it in recent_refusals: D, D/P,
-// P/C, C and where it came from, and D by rule.
+// noteV3SizeRefusal logs one refused cut attempt (before the gate) as a decision line, and keeps it in
+// recent_refusals: D, D/P, P/C, C and where it came from, and D by rule.
 func noteV3SizeRefusal(tkey, stage, reason string, p, c int, cSource string, d int, ruleD map[string]int) {
 	dShare, pShare := 0.0, 0.0
 	if p > 0 {
@@ -1021,12 +1012,8 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 	}
 	v3Ledger.JudgeDrops += int64(r.judge)
 	v3Ledger.Cuts++
-	if r.savingCompaction > 0 {
-		v3Ledger.CompactionsAvoided++
-		v3Ledger.SavingCompactionUSD += r.savingCompaction
-	}
 	v3Ledger.Recent = append(v3Ledger.Recent, V3Cut{Thread: threadLabel(tkey), AtMs: time.Now().UnixMilli(), Selector: selector,
-		P: r.p, C: r.c, CSource: r.cSource, SavingCompactionUSD: r.savingCompaction, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: rd, JudgeDrops: r.judge})
+		P: r.p, C: r.c, CSource: r.cSource, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: rd, JudgeDrops: r.judge})
 	if len(v3Ledger.Recent) > maxV3Recent {
 		v3Ledger.Recent = v3Ledger.Recent[len(v3Ledger.Recent)-maxV3Recent:]
 	}
@@ -1035,7 +1022,7 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 func v3Counters() V3Stats {
 	v3Mu.Lock()
 	defer v3Mu.Unlock()
-	out := V3Stats{CompactionsAvoided: v3Ledger.CompactionsAvoided, SavingCompactionUSD: v3Ledger.SavingCompactionUSD, JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
+	out := V3Stats{JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
 	if len(v3Ledger.Refused) > 0 {
 		out.Refused = map[string]int64{}
 		for k, v := range v3Ledger.Refused {
