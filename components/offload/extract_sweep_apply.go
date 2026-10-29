@@ -795,7 +795,12 @@ type warmApply struct {
 	dShareP, pShareC float64
 	cutPoint         int
 	cSource          string
-	gate             func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
+	// Sweep v3: D by what chose it (set before the gate runs, so every decision line carries it), and the credit
+	// for an avoided compaction.
+	ruleD             map[string]int
+	savingCompaction  float64
+	compactionAvoided bool
+	gate              func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
 }
 
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
