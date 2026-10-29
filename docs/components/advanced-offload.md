@@ -474,6 +474,12 @@ not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `swe
 exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
 question writes some tail; the read, not the write alone, shows the prefix held (#721).
 
+The question leaves every byte of the turn it reads as sent, the last message's breakpoint included,
+and copies that breakpoint onto its short "Understood." bridge only while the request stays at or under
+the provider's 4 breakpoints (#776). The breakpoint names the turn's cache entry. A question that moved it
+away refreshed only its own new entry, so the plain ping after it found the turn's entry expired and wrote
+the whole conversation again.
+
 It then **declines**: there is no fallback (#404). A question that reads nothing, or that writes the
 agent's prefix again, is not acted on and the ordinary ping goes out. A failed prefix ask is logged at
 WARN with the session and the gate it raised, so the reason is never visible only inside a rejection
