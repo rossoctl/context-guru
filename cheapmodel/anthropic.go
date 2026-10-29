@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -378,11 +377,10 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 // insertAskMessage appends `ask` as a new user message to prefixBody's `messages` array. When the
 // array's own last message is a `role: system` mid-conversation reminder, it first appends ONE
 // short synthetic assistant turn ("Understood.") so the result stays a VALID Anthropic request.
-// Nothing already in the array is reordered or removed. The ONE edit is the last message's
-// breakpoint, which moves (see the next paragraph); every other byte before the appended messages
-// is untouched.
+// Nothing already in the array is reordered, removed or changed: every byte before the appended
+// messages is untouched, the last message's breakpoint included (#776).
 //
-// THE LAST MESSAGE'S BREAKPOINT MOVES ONTO WHAT IS APPENDED (#721). Claude Code 2.1.310 puts its
+// THE LAST MESSAGE'S BREAKPOINT IS COPIED ONTO WHAT IS APPENDED (#721). Claude Code 2.1.310 puts its
 // last cache_control on the trailing system reminder, and in -p/--resume mode that is the only
 // breakpoint in `messages`. Left there, it stops the provider matching the turn's cache entry
 // once the system message is no longer last: the question rewrote the whole conversation.
@@ -392,9 +390,24 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 //	breakpoint moved onto "Understood.":         read 25,588 (the whole turn entry), wrote 6
 //	breakpoint on the ask:                       read 25,588, wrote 20
 //
-// So the breakpoint is removed from the last message and the SAME cache_control object (ttl
-// included) is put on the bridge. It sits on a text block, the form the API documents. A last
-// message with no breakpoint gets none added, so the count never goes up.
+// So the SAME cache_control object (ttl included) is put on the bridge. It sits on a text block, the
+// form the API documents. A last message with no breakpoint gives the bridge none.
+//
+// THE LAST MESSAGE KEEPS ITS OWN BREAKPOINT TOO (#776). The question reads the turn's entry, but only
+// the entry its own breakpoint names gets a new lifetime. The turn's entry ends at the last message,
+// so with the breakpoint moved away it expired 5 minutes after the turn, and the plain keep-alive
+// ping after the question (the turn's own body again) wrote the whole conversation again. Live, on
+// one session that ends at a tool_result and a system reminder, the ping after the question:
+//
+//	breakpoint moved (as #721 built it):          Sonnet 5.5 read 13,487 write 18,053; Opus 5.5 read 13,371 write 18,214
+//	kept on the last message and on the bridge:   Sonnet 5.5 read 31,550 write 0
+//	kept on the last message only:                Sonnet 5.5 read 31,542 write 0; Opus 5.5 read 31,592 write 0
+//
+// The copy on the bridge ADDS a breakpoint, and the provider refuses more than maxBreakpoints. Claude
+// Code already sends 4 on most turns, so the bridge gets its copy only when the request stays at or
+// under the cap. Without it the question still reads the turn's entry and keeps it alive (the last
+// row above). A ping after a turn that ends at a TEXT turn is not fixed by this: no later request
+// reads an entry that ends there.
 //
 // THE BREAKPOINT NEVER GOES ON THE ASK (#725 review). The cache write covers everything up to the
 // breakpoint, so a breakpoint on the ask writes the whole ask: about 1,000 to 1,400 tokens of
@@ -461,18 +474,19 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	if n := len(msgs); n > 0 {
 		lastRole = msgs[n-1].Get("role").String()
 	}
-	// Move the last message's breakpoint (if it has one) onto the bridge. Only a system or user
-	// last message is touched: after an assistant message the ask follows directly and the
-	// breakpoint stays where it is.
-	var moved gjson.Result
+	// Copy the last message's breakpoint (if it has one) onto the bridge, and leave it on the last
+	// message as well (#776). Only a system or user last message gets a bridge: after an assistant
+	// message the ask follows directly.
+	var cc gjson.Result
 	if lastRole == "system" || lastRole == "user" {
-		var stripped string
-		if stripped, moved = takeLastBreakpoint(parts[len(parts)-1]); moved.Exists() {
-			parts[len(parts)-1] = stripped
-		}
+		cc = lastBreakpoint(parts[len(parts)-1])
 	}
-	if bridge := askBridgeFor(lastRole, moved.Exists()); bridge != "" {
-		understoodJSON, err := marshalAppended("assistant", bridge, moved)
+	bridgeCC := cc
+	if cc.Exists() && countBreakpoints(prefixBody) >= maxBreakpoints {
+		bridgeCC = gjson.Result{}
+	}
+	if bridge := askBridgeFor(lastRole, cc.Exists()); bridge != "" {
+		understoodJSON, err := marshalAppended("assistant", bridge, bridgeCC)
 		if err != nil {
 			return nil, err
 		}
@@ -500,32 +514,55 @@ func askBridgeFor(lastRole string, hasBreakpoint bool) string {
 	return ""
 }
 
-// takeLastBreakpoint removes the breakpoint a message carries and returns the message without it,
-// plus the cache_control object it held (verbatim, so a ttl survives). The breakpoint sits on the
-// message itself (string content) or on the last content block that has one (array content). A
-// message with none is returned untouched and the result does not Exist. Any failure to edit
-// leaves the message untouched: the question is then asked unmoved, as before #721.
-func takeLastBreakpoint(msg string) (string, gjson.Result) {
+// lastBreakpoint returns the cache_control object a message carries (verbatim, so a ttl survives):
+// on the message itself (string content) or on the last content block that has one (array content).
+// A message with none gives a result that does not Exist.
+func lastBreakpoint(msg string) gjson.Result {
 	if cc := gjson.Get(msg, "cache_control"); cc.Exists() {
-		if out, err := sjson.Delete(msg, "cache_control"); err == nil {
-			return out, cc
-		}
-		return msg, gjson.Result{}
+		return cc
 	}
 	blocks := gjson.Get(msg, "content")
 	if !blocks.IsArray() {
-		return msg, gjson.Result{}
+		return gjson.Result{}
 	}
 	arr := blocks.Array()
 	for i := len(arr) - 1; i >= 0; i-- {
 		if cc := arr[i].Get("cache_control"); cc.Exists() {
-			if out, err := sjson.Delete(msg, "content."+strconv.Itoa(i)+".cache_control"); err == nil {
-				return out, cc
-			}
-			return msg, gjson.Result{}
+			return cc
 		}
 	}
-	return msg, gjson.Result{}
+	return gjson.Result{}
+}
+
+// maxBreakpoints is the provider's cap on cache_control marks in one request.
+const maxBreakpoints = 4
+
+// countBreakpoints counts the breakpoint marks in body's tools, system and messages (on a message or
+// on its content blocks), the places the provider's cap counts. Same rule as apply.CountBreakpoints,
+// which this package cannot import.
+func countBreakpoints(body []byte) int {
+	n := 0
+	marks := func(arr gjson.Result) {
+		arr.ForEach(func(_, v gjson.Result) bool {
+			for _, k := range [...]string{"cache_control", "cachePoint"} {
+				if v.Get(k).IsObject() {
+					n++
+				}
+			}
+			return true
+		})
+	}
+	root := gjson.ParseBytes(body)
+	marks(root.Get("tools"))
+	marks(root.Get("system"))
+	root.Get("messages").ForEach(func(_, m gjson.Result) bool {
+		if m.Get("cache_control").IsObject() {
+			n++
+		}
+		marks(m.Get("content"))
+		return true
+	})
+	return n
 }
 
 // marshalAppended renders one appended message. With a breakpoint to carry, the content becomes a
