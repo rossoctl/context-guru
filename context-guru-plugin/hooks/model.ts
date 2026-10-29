@@ -134,7 +134,7 @@ function nextPingIn(e: Entry, now: number): number | undefined {
 }
 
 /** The one rule for the band's Ping button and the pane's "Ping now": show it when the cache is warm, the proxy can
- * ping, and no automatic ping fires before the cache expires. `/context-guru:ping` works in every case. */
+ * ping, and no automatic ping fires before the cache expires. */
 export const showPing = (v: View): boolean => v.main.isWarm && v.pingable !== false && v.main.nextPingS === undefined
 
 /** While the button is hidden for a planned ping: `↻ next ping 4:12` (`↻ ping 4:12` on a narrow band). */

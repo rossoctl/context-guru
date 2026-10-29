@@ -145,8 +145,8 @@ func (k *Keeper) PingStates(tenant string, all bool, session string) PingStateMa
 			continue
 		}
 		switch {
-		case e.stopped:
-			out[e.thread] = PingState{Reason: ReasonStopped}
+		// A stopped entry still holds the body and key until its hold ends, and it plans no ping, so a
+		// press can work and is the only thing left to keep the cache warm (#771).
 		case e.manualExpired(now):
 			out[e.thread] = PingState{Reason: ReasonExpired}
 		default:

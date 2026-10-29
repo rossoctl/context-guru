@@ -241,9 +241,6 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // /ping is answered by the hook below with `{ text }` alone: the engine prints it as the command's output
-    // and sends nothing to the model (no `context`, so no hidden user message either), so no turn starts.
-    await $.command.register({ name: 'ping', description: 'Keep this session\'s prompt cache warm with one ping now' })
     await $.command.register({ name: 'context-guru', description: 'Open the Context Guru pane: next message, agents, savings, cache hits, context. Shows the band again if it was hidden' })
     try {
       await update($, isHidden, () => false)
@@ -282,8 +279,6 @@ export const register: Register = on => {
     void refreshSoon($) // a turn touched the cache: the countdown restarted; the first document may not exist yet
     return next(e)
   })
-
-  on('command.run', { command: 'ping' }, async $ => ({ text: await pingNow($) }))
 
   on('command.run', { command: 'context-guru' }, async $ => {
     await setHidden($, false) // the pane command also brings a hidden band back

@@ -246,17 +246,17 @@ func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
 		t.Errorf("PingNow = %v, want ErrNotHeld", err)
 	}
-	// And one the scheduled path stopped agrees too.
+	// A thread the scheduled path stopped still holds its copy, so a press can work (#771).
 	k2, _, _ := manualKeeper(t)
 	k2.mu.Lock()
 	for _, e := range k2.live {
 		e.stopped = true
 	}
 	k2.mu.Unlock()
-	if k2.PingStates("t1", false, sess1.Session).For("").Pingable {
-		t.Error("a stopped thread is reported pingable")
+	if !k2.PingStates("t1", false, sess1.Session).For("").Pingable {
+		t.Error("a stopped thread that still holds its copy is not reported pingable")
 	}
-	if _, err := k2.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
-		t.Errorf("PingNow on a stopped thread = %v, want ErrNotHeld", err)
+	if _, err := k2.PingNow(ManualRequest{Key: sess1}); errors.Is(err, ErrNotHeld) {
+		t.Errorf("PingNow on a stopped thread = %v, want a ping to be sent", err)
 	}
 }

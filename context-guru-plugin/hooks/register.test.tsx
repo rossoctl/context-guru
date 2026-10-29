@@ -70,7 +70,11 @@ function lines(n: any): string[] {
 const dump = async (ui: any): Promise<string> => lines(await ui.drawn()).join('\n')
 
 async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }, mainExtra: object = {}) {
-  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  registered = []
+  on('command.register', (_: any, e: any) => {
+    registered.push(e.name)
+    return { value: { command: 'context-guru' } }
+  })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sess-1' }))
   if (usage) on('session.usage', () => ({ value: usage }))
@@ -109,6 +113,16 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
   await clock.advance(1000) // the first poll lands
 }
 let statusCalls = 0
+let registered: string[] = []
+
+/** Presses the band's Ping button and returns the toast it raised. */
+async function pressPing($: any): Promise<{ text: string }> {
+  toasts = []
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  await ui.unmount()
+  return { text: toasts.join('\n') }
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: warm band shows the next-message price warm and cold, Ping and the agent chips`, async ($, on) => {
@@ -371,30 +385,15 @@ test('pressing Ping runs the helper with the session id and toasts the saving', 
   await ui.unmount()
 })
 
-test('/ping answers with text alone and starts no turn', async ($, on) => {
-  const calls: string[][] = []
-  const started: string[] = []
-  on('turn.start', (_: any, e: any) => {
-    started.push('turn')
-    return e
-  })
-  on('prompt.submit', (_: any, e: any) => {
-    started.push('prompt')
-    return e
-  })
-  await boot($, on, true, calls)
-  const r = await $.command.run({ command: 'ping', args: '' })
-  expect(r.text).toMatch(/kept warm .* saved \$0\.46 net \(ping cost \$0\.04\)/)
-  expect(r.context).toBeUndefined() // nothing is recorded for the model
-  expect(calls.some(c => c.includes('ping'))).toBe(true)
-  expect(started).toEqual([])
-  expect(calls.filter(c => c.includes('ping')).length).toBe(1) // the helper ran once
+test('the /ping slash command is gone: only /context-guru is registered', async ($, on) => {
+  await boot($, on, true)
+  expect(registered).toEqual(['context-guru'])
 })
 
 test('a server without the ping route is not blamed on the session', async ($, on) => {
   // The helper reports Go's plain-text 404 as a status with no error field.
   await boot($, on, true, [], { status: 404 })
-  const r = await $.command.run({ command: 'ping', args: '' })
+  const r = await pressPing($)
   expect(r.text).toMatch(/does not support manual pings yet/)
   expect(r.text).not.toMatch(/not known/)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -453,16 +452,16 @@ for (const [status, error, want] of [
   [429, 'no spare capacity', /no spare capacity/],
   [502, 'upstream', /upstream model refused/],
 ] as const) {
-  test(`/ping says the right thing for ${status} ${error}`, async ($, on) => {
+  test(`a press says the right thing for ${status} ${error}`, async ($, on) => {
     await boot($, on, true, [], { status, error })
-    const r = await $.command.run({ command: 'ping', args: '' })
+    const r = await pressPing($)
     expect(r.text).toMatch(want)
   })
 }
 
 test('a refused press explains itself with the server\'s ping_reason', async ($, on) => {
-  await boot($, on, true, [], { status: 409, error: 'not held' }, { pingable: false, ping_reason: 'too large' })
-  const r = await $.command.run({ command: 'ping', args: '' })
+  await boot($, on, true, [], { status: 409, error: 'not held', ping_reason: 'too large' })
+  const r = await pressPing($)
   expect(r.text).toMatch(/can't ping: context too large to hold for Ping/)
 })
 
@@ -479,9 +478,9 @@ for (const [reason, want] of [
   ['expired', /already cold/],
   ['some-future-code', /cannot ping this session right now/],
 ] as const) {
-  test(`/ping words ping_reason ${reason}`, async ($, on) => {
-    await boot($, on, true, [], { status: 409, error: 'not held' }, { pingable: false, ping_reason: reason })
-    const r = await $.command.run({ command: 'ping', args: '' })
+  test(`a refused press words ping_reason ${reason}`, async ($, on) => {
+    await boot($, on, true, [], { status: 409, error: 'not held', ping_reason: reason })
+    const r = await pressPing($)
     expect(r.text).toMatch(want)
     expect(r.text).not.toMatch(/some-future-code/)
     expect(r.text).not.toMatch(/restart Claude Code/)
@@ -859,5 +858,21 @@ test('band row 1 fits 60 columns with the next-ping hint, warm', async ($, on) =
   expect(row).toMatch(/↻ ping \d+:\d\d/)
   expect(row.length, row).toBeLessThanOrEqual(60 - 4)
   expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
+
+// #771: a thread the keeper stopped (a miss, a refused ping, a route failure) plans no ping. While the proxy still
+// holds its copy the server says pingable, and the button shows; once the copy is released it says `stopped`.
+test('a stopped thread with a warm cache and a held copy shows the Ping button', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a stopped thread whose copy is released shows no Ping button', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'stopped' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
   await ui.unmount()
 })

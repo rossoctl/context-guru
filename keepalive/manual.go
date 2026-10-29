@@ -24,7 +24,7 @@ import (
 
 var (
 	// ErrNotHeld means the keeper holds nothing to ping this thread with: an unknown thread,
-	// another tenant's, one the keeper has stopped, or a thread of an account whose keep-alive is
+	// another tenant's, or a thread of an account whose keep-alive is
 	// off (no body and no credential are kept then, and pinging needs both).
 	ErrNotHeld = errors.New("keepalive: nothing held for this thread")
 	// ErrBusy means a real request is open on the thread. It refreshes the entry itself, and a
@@ -85,7 +85,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	now := k.now()
 	k.mu.Lock()
 	e, ok := k.live[id]
-	if !ok || e.stopped || e.manualExpired(now) {
+	if !ok || e.manualExpired(now) {
 		k.mu.Unlock()
 		return ManualResult{}, ErrNotHeld
 	}
