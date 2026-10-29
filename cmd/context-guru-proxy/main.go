@@ -113,6 +113,17 @@ func main() {
 			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
 				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
 
+		// Session state on disk (#769). OFF by default: empty path = the memory-only store, exactly
+		// as before. On, the summary checkpoint and the other session state survive a restart and a
+		// long pause. The file is separate from the dashboard database, so a proxy without a
+		// dashboard can use it. Created with mode 0600, not encrypted.
+		sessionStateDB = flag.String("session-state-db", envOr("SESSION_STATE_DB", ""),
+			"path of the session state file (SQLite). Empty = off: state lives in memory only and is lost on a restart or after store.ttl_seconds idle. On: state is also written here, kept 24h in memory unless store.state_ttl_seconds says otherwise, and loaded back when its session returns. Not encrypted (mode 0600)")
+		sessionStateMetaOnly = flag.Bool("session-state-metadata-only", envBool("SESSION_STATE_METADATA_ONLY", false),
+			"with --session-state-db: write only metadata keys (counts, hashes, ids) to the file, never the summary text or other content keys")
+		sessionStateRetention = flag.Duration("session-state-retention", envDuration("SESSION_STATE_RETENTION", store.DefaultDiskRetention),
+			"with --session-state-db: delete a session's rows this long after its last write")
+
 		// Dashboard. Off by default so an existing deployment's behavior and route
 		// table are unchanged until asked for; on, it adds /dashboard/ + /api/*.
 		// NOTE: deliberately NO "disable observability in production" gate — for a
@@ -263,6 +274,11 @@ func main() {
 	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
+	}
+	// With the disk copy on, the state keys stay 24h in memory (a session that comes back later is
+	// loaded from disk). An explicit store.state_ttl_seconds wins. With it off nothing changes.
+	if *sessionStateDB != "" && cfg.Store.StateTTLSeconds == 0 {
+		cfg.Store.StateTTLSeconds = int(store.DefaultStateTTL / time.Second)
 	}
 
 	// Refuse a bad --idle-exit HERE, immediately after the config is resolved and before
@@ -547,7 +563,27 @@ func main() {
 	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
 		adaptOverride = *dashDB + ".adapt.json"
 	}
-	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
+	pstore := cfg.NewStore()
+	if *sessionStateDB != "" && tenants == nil {
+		// Hosted multi-tenant mode builds a store per tenant; the disk copy is single-tenant only.
+		if mem, ok := pstore.(*store.Memory); ok {
+			d, err := store.OpenDisk(*sessionStateDB, store.DiskOptions{
+				MetadataOnly: *sessionStateMetaOnly, Retention: *sessionStateRetention})
+			if err != nil {
+				// Fail open: run memory only.
+				slog.Warn("context-guru: session state file unusable; state stays in memory only",
+					"path", *sessionStateDB, "err", err)
+			} else {
+				mem.AttachDisk(d)
+				defer d.Close()
+				slog.Info("context-guru: session state on disk", "path", *sessionStateDB,
+					"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
+			}
+		}
+	} else if *sessionStateDB != "" {
+		slog.Warn("context-guru: --session-state-db is ignored in hosted multi-tenant mode")
+	}
+	h := proxy.New(pipe, pstore, agg, proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
 		AdaptOverride: adaptOverride,

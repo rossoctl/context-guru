@@ -517,6 +517,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)

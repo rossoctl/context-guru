@@ -279,6 +279,10 @@ type entry struct {
 	payload []byte
 	expires time.Time
 	pinned  bool // exempt from LRU eviction (frozen decision); TTL still applies
+	// state marks a key in a pin namespace (session state). It takes the state lifetime, which
+	// can be longer than ttl (Options.StateTTLSeconds). It is a property of the KEY, not of the pin
+	// slot: a pin that lost its slot to the cap is still session state.
+	state bool
 	// stash marks a REWIND PAYLOAD written through PutStash. Also exempt from LRU
 	// eviction, and — unlike a pin, which silently degrades to an evictable entry once
 	// over its cap — a stash that cannot be admitted is REFUSED, so the caller declines
@@ -298,6 +302,7 @@ type Memory struct {
 	// not. See DefaultStashTTL.
 	ttl         time.Duration
 	stashTTL    time.Duration
+	stateTTL    time.Duration // lifetime of pin-namespace keys; 0 = ttl (the default)
 	max         int
 	ll          *list.List               // LRU, front = most recent
 	items       map[string]*list.Element // key -> element(*entry)
@@ -349,6 +354,12 @@ type Memory struct {
 	lostN      int64
 	repairedN  int64
 	noSlide    bool // tests only: restore the old write-only expiry (see DisableSlidingTTLForTest)
+	// disk is the optional write-through copy of the session state (see Disk). nil = memory only,
+	// which is the default and the behavior before the disk store existed.
+	disk *Disk
+	// loadedAt is when each session was last seen by LoadSession. A session seen within the state
+	// lifetime still has its state in memory, so it is not read from disk again.
+	loadedAt map[string]time.Time
 }
 
 // Options configures a Memory store; the zero value yields sane defaults.
@@ -376,6 +387,12 @@ type Options struct {
 	// See DefaultStashTTL for why the two namespaces do not want the same horizon.
 	StashTTLSeconds int `yaml:"stash_ttl_seconds"`
 	MaxSessions     int `yaml:"max_sessions"`
+	// StateTTLSeconds is the lifetime of the SESSION STATE keys (the pin namespaces: summary
+	// checkpoint, billed input, freeze decisions...). Zero => TTLSeconds, which is the behavior
+	// before this setting existed. It does not touch the rewind payloads (StashTTLSeconds) or the
+	// other entries. Set it with the disk store (see Disk): a session that comes back after the
+	// memory lifetime is then loaded from disk, so a longer memory lifetime only saves that read.
+	StateTTLSeconds int `yaml:"state_ttl_seconds"`
 }
 
 // Nop is a Store that persists nothing: Put discards, Get/Sticky always miss.
@@ -624,7 +641,12 @@ func NewMemory(o Options) *Memory {
 	if pins == nil {
 		pins = DefaultPinPrefixes
 	}
+	var stateTTL time.Duration
+	if o.StateTTLSeconds > 0 {
+		stateTTL = time.Duration(o.StateTTLSeconds) * time.Second
+	}
 	return &Memory{
+		stateTTL: stateTTL, loadedAt: map[string]time.Time{},
 		ttl: ttl, stashTTL: stashTTL, max: max, maxStick: stick, pinPrefixes: pins,
 		stashMaxBytes: stashMax,
 		ll:            list.New(), items: map[string]*list.Element{},
@@ -717,6 +739,9 @@ func (m *Memory) DisableSlidingTTLForTest() {
 func (m *Memory) ttlFor(e *entry) time.Duration {
 	if e.stash {
 		return m.stashTTL
+	}
+	if e.state && m.stateTTL > 0 {
+		return m.stateTTL
 	}
 	return m.ttl
 }
@@ -913,6 +938,18 @@ func (m *Memory) StashStats() StashStat {
 func (m *Memory) Put(key string, payload []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.putLocked(key, payload)
+	// Write-through to disk, after the memory write and without waiting for it: enqueue only
+	// records the value in a map. A rewind payload never gets here (PutStash), and enqueue refuses
+	// any key outside the persisted namespaces.
+	if m.disk != nil {
+		m.disk.enqueue(key, payload, m.now())
+	}
+}
+
+// putLocked is Put's memory write. The caller holds m.mu. LoadSession uses it too, so a value read
+// back from disk is not written to disk again.
+func (m *Memory) putLocked(key string, payload []byte) {
 	// Writing a key previously recorded as lost IS the repair — the decision is present
 	// again. Counted here, before either branch, so it is not missed when the entry still
 	// exists (over the pin cap it stays in the map, unpinned) and so a decision that is
@@ -945,7 +982,7 @@ func (m *Memory) Put(key string, payload []byte) {
 		m.ll.MoveToFront(el)
 		return
 	}
-	e := &entry{key: key, payload: payload}
+	e := &entry{key: key, payload: payload, state: isStateKey(key)}
 	// Pin frozen decisions, but never more than half the cache: past that the marginal
 	// pin protects one message while starving the rewind stashes the expand loop needs.
 	// Over the cap the entry is simply evictable — NOT recorded as lost: it is present and
@@ -1042,6 +1079,13 @@ func (m *Memory) Peek(key string) bool {
 }
 
 func (m *Memory) Get(key string) ([]byte, bool) {
+	if v, ok := m.getMem(key); ok {
+		return v, true
+	}
+	return m.getGlobal(key) // a miss: the disk copy may hold a session-less key (nil disk: false)
+}
+
+func (m *Memory) getMem(key string) ([]byte, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	el, ok := m.items[key]
