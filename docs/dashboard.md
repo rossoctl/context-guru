@@ -30,17 +30,19 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 ## What you'll see
 
-- **Overview** — "What context-guru saved": three rows (Cache strategy, Your preset, Tools and
-  skills filter), each in dollars and tokens against what you spent, with an *Estimated* or
-  *Upper bound* badge. The cache strategy row notes that whether to keep it on is a forecast (see
-  the Cache strategy tab), and a note says the provider's own cache discount is not counted. Below: "Tools and
+- **Overview** — "What context-guru saved": one **total** in dollars, out of what the traffic would
+  have cost without context-guru, with the percent saved and the input tokens removed. Below it, one
+  card each for the **Cache** (with automatic vs manual pings, tokens read instead of rewritten,
+  waiting time saved and cache writes prevented), the **Preset** and the **Tools and skills filter**.
+  Each card shows its money and tokens out of the same whole, with a percent. An "i" explains the
+  total and the waiting-time estimate. Below: "Tools and
   skills to remove" (a ranked list, with `/context-guru:remove-mcp-and-skills` and
   `/context-guru:insights tools`), "About the other tabs", and one closed "Detailed diagnostics"
   section with five plots (net saving over time; money saved and added, where an outlined bar is an
   upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
   and fresh; time added per request and requests with cache misses) and a live requests table.
   Every plot shows exact figures on hover.
-- **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)) and Usage over time.
+- **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)), Cleanup (what to remove, with one command) and Usage over time.
 - **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
   Requests, including a git-style diff of exactly what was rewritten on the wire.
 - **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
@@ -162,7 +164,7 @@ header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context
 per line when there are several headers). The proxy never forwards it upstream.
 
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
-`manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
+`manual_pings` (`count`, `ping_usd`, `saved_usd` net of the pings' cost, and `writes_avoided`: the pings that found the cache warm). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
 The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive, so with
 automatic pings on it can overlap the keep-alive credit for the same avoided write. `saved_usd` is

@@ -8,23 +8,28 @@ package dash
 // then-current context, minus what the ping cost (negative if a ping missed and paid for a write
 // instead). So it is the figure that joins total_saved_usd, and PingUSD is shown beside it for the
 // reader, not to be subtracted again.
+//
+// WritesAvoided is how many of the pings found the cache still warm (read it). It counts pings, not
+// later requests: two presses in one cache lifetime both count, so the Overview shows it as an
+// upper bound, apart from the measured count of requests.
 type ManualPings struct {
-	Count    int64   `json:"count"`
-	PingUSD  float64 `json:"ping_usd"`
-	SavedUSD float64 `json:"saved_usd"`
+	Count         int64   `json:"count"`
+	PingUSD       float64 `json:"ping_usd"`
+	SavedUSD      float64 `json:"saved_usd"`
+	WritesAvoided int64   `json:"writes_avoided"`
 }
 
 // manualAgg is what the SQL sums: the stored, GROSS avoided write beside the cost.
 type manualAgg struct {
-	count            int64
+	count, writes    int64
 	pingUSD, avoided float64
 }
 
 func (a manualAgg) pings() ManualPings {
-	return ManualPings{Count: a.count, PingUSD: a.pingUSD, SavedUSD: a.avoided - a.pingUSD}
+	return ManualPings{Count: a.count, PingUSD: a.pingUSD, SavedUSD: a.avoided - a.pingUSD, WritesAvoided: a.writes}
 }
 
-func (a *manualAgg) dest() []any { return []any{&a.count, &a.pingUSD, &a.avoided} }
+func (a *manualAgg) dest() []any { return []any{&a.count, &a.pingUSD, &a.avoided, &a.writes} }
 
 // autoPing selects the pings the keeper scheduled: the rows every strategy ledger is built from.
 // A manual ping is also keepalive = 1 (it is real spend and it refreshes the provider's entry),
@@ -35,8 +40,9 @@ const autoPing = `r.keepalive = 1 AND r.manual_ping = 0`
 // manualPing selects the user's own pings.
 const manualPing = `r.keepalive = 1 AND r.manual_ping = 1`
 
-// manualSelect is the three SELECT terms behind manualAgg, in field order. The caller's WHERE
+// manualSelect is the four SELECT terms behind manualAgg, in field order. The caller's WHERE
 // must include ping rows (withKeepAlive).
 const manualSelect = `COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.cost_usd ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.manual_saved_usd ELSE 0 END),0)`
+			COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.manual_saved_usd ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN ` + manualPing + ` AND r.cache_read > 0 THEN 1 ELSE 0 END),0)`

@@ -102,7 +102,8 @@
  "manual_pings": {
   "count": 0,
   "ping_usd": 0,
-  "saved_usd": 0
+  "saved_usd": 0,
+  "writes_avoided": 0
  },
  "net_saved_usd": 0.24918150000000017,
  "output_tokens": 29550,

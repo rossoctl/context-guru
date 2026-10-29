@@ -43,7 +43,7 @@ async function visit(view) {
       intro: head && !head.hidden ? (head.querySelector('.tab-intro') || {}).textContent : '',
       errors: panel ? [...panel.querySelectorAll('.empty.error, [role=alert]')].map((e) => e.textContent.trim().slice(0, 120)) : [],
       text: panel ? panel.innerText : '',
-      headings: panel ? [...panel.querySelectorAll('h1,h2,h3,summary,.lv-name h3,dt')].map((e) => e.textContent) : [],
+      headings: panel ? [...panel.querySelectorAll('h1,h2,h3,summary,dt')].map((e) => e.textContent) : [],
     };
   }, view);
   if (!info.visible) failures.push(`${view}: its panel did not open`);
@@ -61,13 +61,16 @@ for (const v of [...DATA_VIEWS, ...SHELL_VIEWS]) {
       if (!(await page.$(`[data-testid="${id}"]`))) failures.push(`overview: missing the ${id} row`);
     }
     const total = await page.$('[data-testid="saved-total"]');
-    if (!total) failures.push('overview: the "Together" line under the three savings is missing');
+    if (!total) failures.push('overview: the total saved card is missing');
     else {
       const t = await total.innerText();
-      if (!/estimated saved/.test(t) || !/(up to \$|cost more than it saved)/.test(t)) failures.push('overview: the Together line must show the estimate and the cache-strategy upper bound apart: ' + t);
+      if (!/\$[\d,.]+/.test(t) || !/without context-guru/i.test(t) || !/% saved/i.test(t)) failures.push('overview: the total must show dollars, out of what, and a percent: ' + t);
     }
     const cacheRow = await (await page.$('[data-testid="saved-cache"]')).innerText();
-    if (!/Cache strategy/.test(cacheRow)) failures.push('overview: the cache row does not use the user term "Cache strategy": ' + cacheRow.slice(0, 80));
+    for (const want of [/Automatic pings/i, /Manual pings/i, /Waiting time saved/i, /Cache writes prevented/i]) {
+      if (!want.test(cacheRow)) failures.push('overview: the cache card does not show ' + want + ': ' + cacheRow.slice(0, 200));
+    }
+    if (!(await page.$('[data-testid="info-latency"]'))) failures.push('overview: the waiting time has no info button');
     if (!(await page.$('#overview-diagnostics:not([open])'))) failures.push('overview: Detailed diagnostics must exist and start closed');
     const rows = await page.$$('#tab-map dd');
     if (rows.length < 5) failures.push(`overview: About the other tabs lists ${rows.length} tabs`);
