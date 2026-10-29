@@ -1,4 +1,4 @@
-// The install opts a session in to MANUAL pings (the Ping button, /context-guru:ping) by adding
+// The install opts a session in to MANUAL pings (the Ping button) by adding
 // `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS. Claude Code reads that variable as `Name: Value`
 // lines separated by NEWLINES (a comma-joined value arrives as one corrupted header), and the variable may
 // already hold the user's headers or a hosted install's x-context-guru-token, so the line is merged in and

@@ -54,6 +54,9 @@ type CacheState struct {
 	// PingsLeft and HeldUntilMS are the main thread's keep-alive plan (see ThreadCache).
 	PingsLeft   int   `json:"pings_left,omitempty"`
 	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
+	// NextPingMS is when the next planned ping fires (epoch ms). Omitted when no ping is planned.
+	// The mod hides its Ping button while this is before the cache expires.
+	NextPingMS int64 `json:"next_ping_ms,omitempty"`
 	// Money is the session's `saved $x of $y`, main thread and the rest, over the whole session.
 	Money *SessionMoney `json:"money,omitempty"`
 	// Threads is the session's cache entries, one per thread (the main agent and each subagent
@@ -84,6 +87,8 @@ type ThreadCache struct {
 	// ping's start plus the TTL. Both omitted when no ping is planned.
 	PingsLeft   int   `json:"pings_left,omitempty"`
 	HeldUntilMS int64 `json:"held_until_ms,omitempty"`
+	// NextPingMS is when the next planned ping fires (epoch ms), omitted when none is planned.
+	NextPingMS int64 `json:"next_ping_ms,omitempty"`
 	// SavedUSD and BaselineUSD are this thread's `saved $x of $y` (see threadMoney).
 	SavedUSD    float64 `json:"saved_usd"`
 	BaselineUSD float64 `json:"baseline_usd"`
@@ -420,6 +425,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		for i := range s.Threads {
 			if p, ok := plans[s.Threads[i].ID]; ok && p.PingsLeft > 0 {
 				s.Threads[i].PingsLeft, s.Threads[i].HeldUntilMS = p.PingsLeft, p.heldUntil(s.Threads[i].TTLSeconds)
+				s.Threads[i].NextPingMS = p.NextPingMS
 			}
 		}
 		if p, ok := plans[""]; ok && p.PingsLeft > 0 {
@@ -430,6 +436,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
+			s.NextPingMS = p.NextPingMS
 		}
 	}
 	if held := a.pingableFor(f); held != nil {

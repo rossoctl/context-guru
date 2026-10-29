@@ -1504,8 +1504,12 @@ def ping_main(api: Api, sid: str | None, thread: str | None, as_json: bool) -> i
         body["thread"] = thread
     code, doc = api.send("POST", "/api/me/cache/ping", body=body, timeout=20)
     reason = ""
-    if code == 409 and (doc or {}).get("error") == "not held" and api.fixture is None:
-        reason = ping_reason(cachestate_cached(api.base, sid))  # the shared cache first: at most one fetch, only on this refusal
+    if code == 409 and (doc or {}).get("error") == "not held":
+        own = (doc or {}).get("ping_reason")  # the server's own answer at the moment of the press: newer than any cached copy
+        if isinstance(own, str) and own:
+            reason = own
+        elif api.fixture is None:
+            reason = ping_reason(cachestate_cached(api.base, sid))  # the shared cache first: at most one fetch, only on this refusal
     if as_json:  # the mod reads this: the HTTP status beside the server's own document
         print(json.dumps({"status": code, **(doc or {}), **({"ping_reason": reason} if reason else {})}))
     else:

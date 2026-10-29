@@ -22,6 +22,8 @@ export type ThreadView = {
   /** Seconds until the cache goes cold: the keep-alive plan's horizon while the entry is warm, else remS. */
   untilColdS?: number
   ttlS: number
+  /** Seconds until the next automatic ping, only while it fires before the entry expires. */
+  nextPingS?: number
   /** The last touch was a keep-alive ping; a keep-alive plan exists. Together they are the clock's `↻`. */
   isKeepalive: boolean
   isHeld: boolean

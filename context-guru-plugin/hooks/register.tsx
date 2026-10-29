@@ -20,7 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { PaneData, Snapshot, ThreadView, View } from '../types'
-import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, pingReason, pingToast, reasonWords, rotatingTip, shortReason, signature, spark, stack, usd, view, weeklyTip, words } from './model'
+import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, nextPingWords, pingReason, pingToast, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -241,9 +241,6 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // /ping is answered by the hook below with `{ text }` alone: the engine prints it as the command's output
-    // and sends nothing to the model (no `context`, so no hidden user message either), so no turn starts.
-    await $.command.register({ name: 'ping', description: 'Keep this session\'s prompt cache warm with one ping now' })
     await $.command.register({ name: 'context-guru', description: 'Open the Context Guru pane: next message, agents, savings, cache hits, context. Shows the band again if it was hidden' })
     try {
       await update($, isHidden, () => false)
@@ -282,8 +279,6 @@ export const register: Register = on => {
     void refreshSoon($) // a turn touched the cache: the countdown restarted; the first document may not exist yet
     return next(e)
   })
-
-  on('command.run', { command: 'ping' }, async $ => ({ text: await pingNow($) }))
 
   on('command.run', { command: 'context-guru' }, async $ => {
     await setHidden($, false) // the pane command also brings a hidden band back
@@ -351,7 +346,8 @@ export const register: Register = on => {
               {m.coldUsd !== undefined && <Text color="warning">{usd(m.coldUsd)}</Text>}
             </Text>
           )}
-          {m.isWarm && v.pingable !== false && (
+          {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
+          {showPing(v) && (
             <Box>
               <Text> </Text>
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
@@ -473,6 +469,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const snap = await read($, snapshot)
+    await read($, tick) // the `↻ next ping` countdown counts once a second, as in the band
     const v = view(snap, await $.clock.now())
     if (!v || !snap) {
       return <Text dimColor>No Context Guru data for this session yet. Send a prompt, or check /context-guru:doctor.</Text>
@@ -520,7 +517,8 @@ export const register: Register = on => {
           ) : (
             <Text dimColor>○ cache cold: the next message writes it again</Text>
           )}
-          {m.isWarm && v.pingable !== false && (
+          {nextPingWords(v, false) !== undefined && <Text dimColor>{nextPingWords(v, false)}</Text>}
+          {showPing(v) && (
             <Box columnGap={2}>
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping now'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>
