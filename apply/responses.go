@@ -537,12 +537,25 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
-			maxCachedIdx--
+			// The alias session id (the headerless twin of res.Session, see apply.go's clock
+			// note): the restart grace asks the lookup for the thread's keys under BOTH ids,
+			// because a refresh under either one kept the provider's single entry warm (#766).
+			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
+			// metadata id when the body carries one, else the content hash. alias below stays
+			// the bare content hash for the cold decision's own clock (aliasSeen).
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// wrote it — the store's alias keys use that id.
 			if alias != res.Session {
-				loadSessionState(st, alias) // its clocks (cg:seen:, cg:ttl:) may be on disk only
+				loadSessionState(st, alias)
 			}
+			graceAlias := graceAliasID(o.Tenant, o.Body, norm)
+			graceAliasKey := thread.Key(graceAlias, res.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
+			maxCachedIdx--
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}

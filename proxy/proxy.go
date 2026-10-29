@@ -377,6 +377,31 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard,
 		sent: newSentStash()}
+	// The restart grace decides by the thread's own last cache refresh — its last request or
+	// a keep-alive ping that read the cache — and not by this process's start (#766). The
+	// recorder holds that time per thread — seeded from the database at startup
+	// (Recorder.SeedGraceSessions, which main.go runs before it builds the handler) and kept
+	// current by requests and pings — and its keys are the tracker's keys, under either
+	// session id the conversation uses.
+	//
+	// OBSERVE mode cannot be answered by that lookup and must not ask it: an observe-mode row
+	// carries no session id (the enforced trace is zeroed), so the recorder knows none of that
+	// deployment's threads and a miss would read every warm thread as new — the one answer
+	// worse than not asking. Mode is PER TENANT in hosted mode, so the wired lookup declines
+	// the key (have=false) for a tenant whose pipeline runs observe (tenantObserves) and for a
+	// whole single-tenant observe proxy, and #759's start-time fallback answers for exactly
+	// those. Without a dashboard there is no record in any mode, and the tracker keeps #759's
+	// rule on its own.
+	if opts.Dashboard != nil {
+		lookup := opts.Dashboard.ThreadRefreshedAt
+		h.tracker.SetLastSeen(func(key string) (int64, bool, bool) {
+			if h.tenantObserves(key) {
+				return 0, false, false
+			}
+			at, known := lookup(key)
+			return at, known, true
+		})
+	}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
 		h.shadow = store.NewMemory(store.Options{})
@@ -1347,6 +1372,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
 			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
 			cp.noteWaitBody(orig)
+			// The alias derivation needs the pipeline that transforms THIS body, and the
+			// wire dialect and bypass flag it transforms under — see noteAliasSource.
+			cp.noteAliasSource(tn.Pipe, api, bypassed)
 			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())

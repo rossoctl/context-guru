@@ -191,6 +191,13 @@ type Recorder struct {
 	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
 	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	seenModel map[string]bool
+	// graceSeen holds, per thread.Key(session, thread), when that thread's cached prefix was
+	// last REFRESHED: by its own last request or by a keep-alive ping that read the cache. It
+	// is the restart grace's clock (#766), and it is SEPARATE from lastSeen on purpose:
+	// lastSeen answers cache ATTRIBUTION, where a ping must never re-date a thread (see
+	// SeedSessions), while the grace must count a ping that kept the entry warm. Seeded from
+	// the requests table at startup (SeedGraceSessions) and kept current at runtime.
+	graceSeen map[string]int64
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
 	seenKeys map[string]struct{}
@@ -239,6 +246,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		lastTail:  map[string]uint64{},
 		lastFacts: map[string]PrefixFacts{},
 		seenModel: map[string]bool{},
+		graceSeen: map[string]int64{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
 		counts:    make(chan countJob, countQueue),
@@ -331,6 +339,19 @@ func (r *Recorder) Record(e *Event) {
 	}
 	if e.TS == 0 {
 		e.TS = time.Now().UnixMilli()
+	}
+	// A keep-alive ping that READ the cache refreshed the provider's entry, so it counts on
+	// the restart grace's clock (#766) — this is the one dash write a ping produces, since
+	// pings never run ObserveThread. A ping that did not read the cache is not counted, the
+	// same rule the keeper's own refresh bookkeeping uses: such a ping re-created the entry
+	// rather than refreshing it, and the keeper counts those writes as a bug to fix, not as
+	// warmth. Recorded here, before the queue, so ThreadRefreshedAt answers at once even if
+	// the row is still in flight (the row is the restart's recovery path).
+	if e.KeepAlive && e.CacheRead > 0 && e.SessionID != "" {
+		key := thread.Key(e.SessionID, e.ThreadID)
+		r.mu.Lock()
+		r.touchGraceLocked(key, e.TS)
+		r.mu.Unlock()
 	}
 	r.captured.Add(1)
 	select {
@@ -474,6 +495,21 @@ func (r *Recorder) run() {
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
 			}
+			// The session's ALIAS id, for the restart grace (#766): a request under an
+			// explicit header id also refreshes the one provider entry its conversation's
+			// headerless turns read, so the grace clock must learn the alias key too —
+			// and the row must carry the alias, or the seed after a restart could reload
+			// only the header id's warmth. Runs here for the same reason WaitCause does:
+			// the derivation normalizes the whole body, and finish() is the handler's own
+			// defer. Observe()'s own-key touch already ran inline; this is the second key.
+			if e.AliasFn != nil {
+				if alias := e.AliasFn(); alias != "" {
+					e.SessionAlias = alias
+					r.mu.Lock()
+					r.touchGraceLocked(thread.Key(alias, e.ThreadID), e.TS)
+					r.mu.Unlock()
+				}
+			}
 			e.Redact()
 		}
 		if err := r.db.insertBatch(batch); err != nil {
@@ -596,7 +632,7 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	// wholesale over-claim. Dropping entries by age cannot do that: a session with no
 	// request for staleSession really has lost its provider cache, so treating its next
 	// turn as a cold start is not a guess, it is correct.
-	if len(r.lastSeen) > 20000 {
+	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.pruneSessionsLocked(now)
 	}
 	if len(r.seenModel) > 1000 {
@@ -625,7 +661,29 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	}
 	r.lastSeen[key] = now
 	r.seenModel[mk] = true
+	// A real request refreshes the provider's cache entry, so it counts on the grace clock
+	// too (#766). Guarded on the session id: an observe-mode row carries none (its trace is
+	// zeroed), and the empty key would say every sessionless row warmed one shared entry.
+	if session != "" {
+		r.touchGraceLocked(key, now)
+	}
 	return seenSession, seenModel, sinceLastMs, tailChanged
+}
+
+// touchGraceLocked records a cache refresh on the restart grace's clock: ts only ever moves a
+// key FORWARD (a later refresh is the only new fact), and the map is created lazily so a
+// Recorder built as a bare struct literal — a test fixture, or observe() reached before any
+// seed — does not panic on a nil map. Caller holds r.mu.
+func (r *Recorder) touchGraceLocked(key string, ts int64) {
+	if key == "" || ts <= 0 {
+		return
+	}
+	if r.graceSeen == nil {
+		r.graceSeen = map[string]int64{}
+	}
+	if ts > r.graceSeen[key] {
+		r.graceSeen[key] = ts
+	}
 }
 
 // staleSession is how long a session must be silent before its state is forgettable. Well
@@ -645,15 +703,24 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 			delete(r.lastTail, k)
 		}
 	}
+	// The grace clock ages by the same rule: a thread silent for two hours has lost its
+	// provider cache whatever refreshed it last, so forgetting it only makes the grace stop
+	// protecting something that is already cold.
+	for k, ts := range r.graceSeen {
+		if now-ts > staleSession {
+			delete(r.graceSeen, k)
+		}
+	}
 	// lastFacts holds two entries per thread and model; they age out by their own request time.
 	for k, f := range r.lastFacts {
 		if now-f.TS > staleSession {
 			delete(r.lastFacts, k)
 		}
 	}
-	if len(r.lastSeen) > 20000 {
+	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
 		r.lastFacts = map[string]PrefixFacts{}
+		r.graceSeen = map[string]int64{}
 	}
 }
 
@@ -727,6 +794,105 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 		}
 	}
 	return len(seeded), nil
+}
+
+// SeedGraceSessions primes the restart grace's clock (graceSeen) from the database, the same
+// startup recovery SeedSessions gives cache attribution (#766). One grouped query: per thread,
+// the newest row that refreshed the provider's cache entry — a real request (keepalive = 0,
+// whatever it read, because it wrote the entry) or a keep-alive ping that READ the cache
+// (keepalive = 1 AND cache_read > 0, the only ping that keeps the entry warm). Only rows the
+// upstream accepted (2xx): a failed request wrote no cache entry, and counting it would
+// protect a prefix nothing kept warm.
+//
+// Each row seeds BOTH its own key and, when it stored one, its session's ALIAS key: a request
+// under an explicit header id refreshed the one provider entry its conversation's headerless
+// turns read, and after a restart those turns ask for the alias key alone (their own id IS
+// the alias), so the header id's warmth alone cannot reach them. The alias is a column
+// because the body it was derived from is not stored — metadata only, the same kind of id
+// session_id is. Two limits, both documented in docs/design.md: a row written before the
+// column existed has no alias to seed, and a keep-alive ping carries no body to derive one
+// from, so a ping refreshes only the id it ran under.
+//
+// A SEPARATE map from SeedSessions' recency, and a SEPARATE query, because the two clocks
+// answer different questions and must not re-date each other: attribution asks "when was this
+// thread's last real request?", where a ping must never win (see SeedSessions), while the
+// grace asks "when was its cached prefix last refreshed?", where a cache-reading ping is
+// exactly the fact.
+//
+// Rows without a session id are skipped: an observe-mode row carries none, and the empty key
+// would say one shared entry warmed every sessionless thread.
+func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.session_alias, MAX(r.ts) FROM requests r
+		WHERE r.ts >= ? AND r.session_id != ''
+			AND r.status >= 200 AND r.status < 300
+			AND (r.keepalive = 0 OR (r.keepalive = 1 AND r.cache_read > 0))
+		GROUP BY r.session_id, r.thread_id, r.session_alias`,
+		now-staleSession)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	seeded := map[string]int64{}
+	for rows.Next() {
+		var sid, tid, alias string
+		var ts int64
+		if err := rows.Scan(&sid, &tid, &alias, &ts); err != nil {
+			return 0, err
+		}
+		seeded[thread.Key(sid, tid)] = ts
+		if alias != "" && alias != sid {
+			seeded[thread.Key(alias, tid)] = ts
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ts := range seeded {
+		r.touchGraceLocked(id, ts)
+	}
+	return len(seeded), nil
+}
+
+// SeedGrace merges per-thread refresh timestamps into the grace clock by hand. For hosts and
+// tests that know the clock exactly and want the grace seeded without the database round
+// trip. Like the runtime paths, a timestamp only ever moves a key forward.
+func (r *Recorder) SeedGrace(refresh map[string]int64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ts := range refresh {
+		r.touchGraceLocked(id, ts)
+	}
+}
+
+// ThreadRefreshedAt answers the restart grace's question (modes.Tracker.SetLastSeen): when was
+// this thread's cached prefix last refreshed, as far as this recorder knows? key is the shape
+// SeedGraceSessions and ObserveThread use — thread.Key(session, thread) — which is also the key
+// the tracker records its turns under, so the proxy can hand this method to the tracker
+// verbatim.
+//
+// Metadata only: a timestamp per thread, no content. After a restart it comes from
+// SeedGraceSessions' reload of the requests table; in a live process ObserveThread (real
+// requests) and Record (cache-reading pings) keep it current. A thread this recorder has never
+// seen reads as unknown, which the grace treats as a new thread. Pruning runs only once the
+// map passes 20,000 entries, and only by age (two silent hours — a thread that quiet has lost
+// its provider cache anyway); if even that frees nothing, the last resort empties the map
+// wholesale, and every thread then reads as new until its next request refreshes it again.
+func (r *Recorder) ThreadRefreshedAt(key string) (atMs int64, ok bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ts, ok := r.graceSeen[key]
+	return ts, ok
 }
 
 // MarkUnique attributes a component's savings to NEW content only, deduping by

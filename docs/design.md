@@ -315,9 +315,40 @@ the boundary describing neither. A boundary that's too high lets an offloader mu
 provider already cached, forcing a cache-write of the suffix; a shorter transcript under the same
 key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
 there. After a proxy restart the tracker's records are gone but the provider's cache entries are
-not, so an unknown key reads as all-cached until its first request after the restart, for that
-request's own cache lifetime (5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended
-tier); the host can switch the rule off (`--restart-grace=false`).
+not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
+only while that thread's cached prefix was last refreshed inside the request's cache lifetime
+(5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended tier). A refresh is the
+thread's own last request or a keep-alive ping that read the cache, under either session id the
+conversation uses (an explicit header on some turns, a content-derived id on others). The
+refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
+the dashboard off the fallback is the proxy's start time, and `--restart-grace=false` switches
+the rule off in every case.
+
+The recorder learns a refresh under BOTH session ids a conversation uses: the request's own
+id, and the alias id — the id a HEADERLESS turn of the same body runs under: the metadata
+session id when the body carries one (`metadata.user_id`, `metadata.taskId`), else the
+content hash of the transformed head. One rule resolves it on both sides (`apply.graceAliasID`
+on the ask side, `apply.EnforcedSessionIDFor`'s empty-explicit-id path on the record side,
+over the pipeline's own envelope transform — because toolfilter's skills half rewrites the
+head message the session hash reads, and a hash of the pristine body is a key no request
+ever derives; the record side stores the alias on the row). That is what makes the alias
+widening hold in both directions — a headerless turn asks for the alias id alone, because
+its own derived id IS the alias, so the header turns' warmth must already sit under that
+key. The cold decision's own alias clocks (idle, TTL) still key on the bare content hash
+and do not bridge to a metadata id — old behavior, unchanged by #766. The startup seed
+recovers both keys from the requests table, with two limits: a row written before the alias
+column existed has no alias to recover, so a seesaw-id tenant's first headerless request
+after an UPGRADE can read as expired (one turn, once), and a keep-alive ping carries no body
+to derive an alias from, so a ping refreshes only the id it ran under. In hosted mode a
+tenant running observe mode gets the start-time fallback instead of the lookup: its rows
+carry no session id, so the lookup declines that tenant's keys rather than answering every
+one with a miss.
+
+The recorder holds that refresh time in a bounded map. Pruning runs only once it passes 20,000
+entries, by age (two silent hours); if even that frees nothing, the last resort empties the map
+wholesale. Every thread then reads as new until its next request refreshes it again, so the
+first request of a warm thread is editable — a lost saving for one turn, never a wrong rewrite
+in the other direction.
 
 ### Fail-open per mode
 
