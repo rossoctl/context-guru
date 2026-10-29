@@ -6,6 +6,7 @@ import "time"
 // Compute, because Cached comes from the usage, which arrives after the response.
 type Fingerprint struct {
 	Thread                                  string
+	Model                                   string    // the model the request was sent for; "" when the host did not say
 	At                                      time.Time // the start of the request; the request gap is measured from it (§5.2)
 	Client                                  Body      // client body, before any plugin
 	Forwarded                               Body      // body as sent upstream

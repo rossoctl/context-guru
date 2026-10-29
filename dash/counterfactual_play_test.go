@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/counterfactual/opscases"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // This file plays an opscases.Case through the current saving logic (dash.Event.Price) and
@@ -79,10 +80,8 @@ func Play(t testing.TB, c opscases.Case) []Played {
 	seen := map[string][]change{} // per thread (see threadKey)
 	var out []Played
 
-	lastTail := map[string]uint64{} // per session: the hash of the volatile half cachesplit last moved the breakpoint past
-	var prevAt time.Time
-	requests := 0
 	pings, pingRead := 0, int64(0)
+	threads := map[string]bool{} // the threads this case has already sent a request on
 
 	for _, s := range c.Steps {
 		if s.IsStandalone() {
@@ -150,6 +149,7 @@ func Play(t testing.TB, c opscases.Case) []Played {
 		}
 		// cachesplit: the forwarded system block it split is the stable half, and the block after
 		// it is the volatile tail. A session's first request counts as a changed tail.
+		var tailHash uint64
 		for _, op := range s.Add {
 			if op.Kind != cf.KindRewrite || op.Operator != "context-guru.cachesplit" {
 				continue
@@ -158,10 +158,8 @@ func Play(t testing.TB, c opscases.Case) []Played {
 			if i+1 >= len(s.End.Forwarded.Pos) {
 				continue
 			}
-			sess, tail := s.Begin.Meta.Session, s.End.Forwarded.Pos[i+1].Hash
+			tailHash = s.End.Forwarded.Pos[i+1].Hash
 			e.SplitStableTokens = opscases.Tokens(cf.Body{Pos: s.End.Forwarded.Pos[i : i+1]})
-			e.TailChanged = lastTail[sess] != tail
-			lastTail[sess] = tail
 		}
 		var ids []string
 		for _, ch := range seen[threadKey(s)] {
@@ -178,14 +176,32 @@ func Play(t testing.TB, c opscases.Case) []Played {
 			ids = append(ids, ch.id)
 		}
 		ttl, _ := time.ParseDuration(s.End.Facts.TTL)
-		since := int64(0)
-		if requests > 0 {
-			since = at.Sub(prevAt).Milliseconds()
+		// Recency, "seen this thread", "seen this model" and the tail comparison are the live
+		// recorder's, per thread: the library's "main" is the live primary thread, the empty id.
+		tid := s.End.Thread.ID
+		if tid == "main" {
+			tid = thread.Primary
 		}
+		// The first request of a thread forked from another is that conversation's next turn with a
+		// changed prefix, not a cold start (thread.Result.Inherits): the recorder measures its gap
+		// from the parent. The live code finds the parent by content; a case names it.
+		var seenThread, seenModel, tailChanged bool
+		var since int64
+		key := threadKey(s)
+		if parent := s.End.Thread.Parent; parent != "" && !threads[key] {
+			if parent == "main" {
+				parent = thread.Primary
+			}
+			seenThread, seenModel, since, tailChanged = rec.ObserveThreadFrom("t1", s.Begin.Meta.Session, tid, parent, s.Begin.Meta.Model, at.UnixMilli(), tailHash)
+		} else {
+			seenThread, seenModel, since, tailChanged = rec.ObserveThread("t1", s.Begin.Meta.Session, tid, s.Begin.Meta.Model, at.UnixMilli(), tailHash)
+		}
+		threads[key] = true
+		e.TailChanged = tailChanged
 		e.SinceLastMs = since
 		e.KeepAlivePings = pings
 		e.KeepAliveRefreshed = pingRead
-		e.AttributeCache(requests > 0, requests > 0, since, ttl.Milliseconds(), "")
+		e.AttributeCache(seenThread, seenModel, since, ttl.Milliseconds(), "")
 		e.Price(price, true)
 
 		// cg books the keep-alive and cachesplit credits in their own columns, outside
@@ -212,7 +228,7 @@ func Play(t testing.TB, c opscases.Case) []Played {
 		p.NetMicro = p.BaseMicro - p.BilledMicro - micros(cgLLM)
 		out = append(out, p)
 
-		prevAt, requests, pings, pingRead = at, requests+1, 0, 0
+		pings, pingRead = 0, 0
 	}
 	return out
 }

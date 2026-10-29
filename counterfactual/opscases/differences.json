@@ -451,5 +451,49 @@
    }
   ],
   "total": true
+ },
+ {
+  "case": "threads/fork-first-request/summary",
+  "kind": "differs",
+  "reason": "design \u00a75.2 and Thread.Parent: the library keeps no history for a forked thread and does not read Parent, so its first request is unknown, hot only up to the read in the usage (the end of system). The summary's 9,500 removed tokens fall after B* and are priced as a write (+35,625 \u00b5$). cg prices a summarizer's first removal as a read when the request hit the cache (uniqueRate), +2,850 \u00b5$. The fork inherits main's entry by content, so the read is the truer tier and the library is the one that is off. Open: whether the library should read the parent's state for a fork.",
+  "allow": [
+   {
+    "step": 1
+   },
+   {
+    "step": 1,
+    "change": "cg:summarize:f0a1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "threads/two-sessions-same-change/main-and-subagent",
+  "kind": "differs",
+  "reason": "Recorder.MarkUnique has no session or thread in its key (tenant, component and content key), so of four requests that report the same ChangeID, in two sessions and on a main and a subagent each, only the first is unique to cg. The other three are replays (a read, 2,100 \u00b5$) where the library prices each as new on its own thread (26,250 \u00b5$). The same finding as threads/change-stays-on-its-thread, across sessions.",
+  "allow": [
+   {
+    "step": 3
+   },
+   {
+    "step": 5
+   },
+   {
+    "step": 7
+   },
+   {
+    "step": 3,
+    "change": "cg:cmdfilter:c40e"
+   },
+   {
+    "step": 5,
+    "change": "cg:cmdfilter:c40e"
+   },
+   {
+    "step": 7,
+    "change": "cg:cmdfilter:c40e"
+   }
+  ],
+  "total": true
  }
 ]

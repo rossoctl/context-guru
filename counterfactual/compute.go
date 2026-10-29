@@ -544,6 +544,10 @@ func (c *calcState) cacheEffects(res *Result) {
 		return
 	}
 	c.addBreak(res, c.readEnd, "") // row 4: the entry was lost early
+	if prev := c.s.PrevPrint; prev.Model != "" && c.r.Meta.Model != "" && prev.Model != c.r.Meta.Model {
+		// the provider keeps a cache for each model, so this is not a loss nobody can explain
+		res.CacheEffects[len(res.CacheEffects)-1].Cause = CauseModelChanged
+	}
 }
 
 func (c *calcState) reportedSetting() *Operation {
@@ -878,7 +882,7 @@ func (c *calcState) nextState() ThreadState {
 		}
 		next.Active = append(next.Active, op)
 	}
-	fp := &Fingerprint{Thread: c.r.Thread.ID, At: c.r.Meta.At, Client: c.client, Forwarded: c.fwd,
+	fp := &Fingerprint{Thread: c.r.Thread.ID, Model: c.r.Meta.Model, At: c.r.Meta.At, Client: c.client, Forwarded: c.fwd,
 		ClientBreakpoints: c.r.ClientBreakpoints, ForwardedBreakpoints: c.r.Breakpoints}
 	for _, it := range c.items {
 		if !it.ended && it.bad == "" && !it.op.DryRun && it.op.MessageSplice != nil {

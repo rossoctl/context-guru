@@ -76,8 +76,19 @@ type CacheEffect struct {
 	From *Position `json:"from,omitempty"`
 	To   *Position `json:"to,omitempty"`
 	// TTL is the lifetime of the entry the effect is about, "5m" or "1h". Set on the TTL kinds.
-	TTL       string     `json:"ttl,omitempty"`
-	Saved     TierTokens `json:"saved"`
-	Caused    TierTokens `json:"caused"`
-	Estimated bool       `json:"estimated,omitempty"`
+	TTL string `json:"ttl,omitempty"`
+	// Cause says why a break nobody reported happened, when the library can tell. Empty when it
+	// cannot: an entry lost early has no visible reason. It changes no figure.
+	Cause     CacheEffectCause `json:"cause,omitempty"`
+	Saved     TierTokens       `json:"saved"`
+	Caused    TierTokens       `json:"caused"`
+	Estimated bool             `json:"estimated,omitempty"`
 }
+
+// CacheEffectCause is the reason the library can give for a break that no operation reported.
+type CacheEffectCause string
+
+// CauseModelChanged: this request names a different model from the thread's previous one, and
+// the provider keeps a separate cache for each model, so nothing was read. Nobody reported the
+// change, so the break has no ChangeID (R50 says the library does not price the change itself).
+const CauseModelChanged CacheEffectCause = "model_changed"

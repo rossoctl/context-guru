@@ -200,7 +200,7 @@ func compare(t *testing.T, i int, want Expected, got cf.Result) {
 	for j, w := range want.Effects {
 		g := got.CacheEffects[j]
 		if g.Kind != w.Kind || g.ChangeID != w.ChangeID || g.Saved != w.Saved || g.Caused != w.Caused ||
-			(w.TTL != "" && g.TTL != w.TTL) {
+			(w.TTL != "" && g.TTL != w.TTL) || g.Cause != w.Cause {
 			t.Errorf("step %d effect %d: got %s %s saved=%+v caused=%+v, want %s %s saved=%+v caused=%+v",
 				i, j, g.Kind, g.ChangeID, g.Saved, g.Caused, w.Kind, w.ChangeID, w.Saved, w.Caused)
 		}

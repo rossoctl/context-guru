@@ -418,3 +418,34 @@ func TestNoRescueWhenTheRequestWroteMoreThanItRead(t *testing.T) {
 		}
 	}
 }
+
+// A request that names a different model from the thread's previous one, with nothing reported:
+// the usage shows the cache loss, and the break says why. The figure is the same as for an entry
+// lost early.
+func TestAnUnreportedModelChangeLabelsTheBreak(t *testing.T) {
+	rs := ex2Requests()
+	run := func(ts *Trackers, q req, model string) Result {
+		r := ts.BeginRequest(RequestMeta{RequestID: "r", Session: "s1", Model: model, At: q.at}, q.client, q.clientBPs)
+		fwd := q.fwd
+		if fwd.Pos == nil {
+			fwd = q.client
+		}
+		r.EndRequest(Thread{ID: "main"}, fwd, q.clientBPs, q.facts)
+		return r.Compute(q.usage)
+	}
+	for _, c := range []struct {
+		model string
+		want  CacheEffectCause
+	}{{"small-model", CauseModelChanged}, {"large-model", ""}, {"", ""}} {
+		ts := NewTrackers()
+		run(ts, rs[0], "large-model")
+		q := rs[2]
+		q.at = t0.Add(10 * time.Second)
+		q.usage = Usage{CacheWrite: 31500} // nothing read
+		res := run(ts, q, c.model)
+		br := effect(t, res, EffectBreak)
+		if br.Cause != c.want || br.ChangeID != "" || br.Saved.CacheRead == 0 {
+			t.Fatalf("model %q: break %+v, want cause %q, no ChangeID and moved tokens", c.model, br, c.want)
+		}
+	}
+}

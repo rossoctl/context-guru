@@ -98,7 +98,7 @@ def step(sec, rid, client, fwd, cbp, fbp, add, usage, exp, session="s1", model="
     }
 
 
-def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, note=None, baseline=None):
+def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, note=None, baseline=None, cause=None):
     """A cache effect the library finds (design 4.4). It has no input form: only Compute writes one."""
     e = {"kind": kind, "changeId": change, "saved": saved or {}, "caused": caused or {}}
     if baseline is None:  # a break nobody caused is in the client body's bill too, so it cancels out (§6.3)
@@ -111,6 +111,8 @@ def effect(kind, change, saved=None, caused=None, frm=None, to=None, ttl=None, n
         e["to"] = to
     if ttl:
         e["ttl"] = ttl
+    if cause:
+        e["cause"] = cause
     if note:
         e["note"] = note
     return e
@@ -986,6 +988,82 @@ def c_threads():
           "threads-change-stays-on-its-thread")
 
 
+# Three cases that mix sessions, threads and models.
+def c_mix():
+    # 1. A fork: the first request of a thread forked from main sends main's conversation with a summary.
+    tools, sysb, old = summary_bodies()
+    FK = "cg:summarize:f0a1"
+    fork = {"id": "p:fork", "parent": "main"}
+    summary, tail = [("summary", 500)], old[3:]
+    call = {"model": "summarizer-model", "params": {"effort": "low"},
+            "usage": {"input": 10000, "cacheRead": 0, "cacheWrite": 0, "cacheWrite1h": 0, "output": 500, "costUSD": 0.0125}}
+    spend = {"id": "op1", "kind": "spend", "operator": "context-guru.summarize", "changeId": FK, "call": call}
+    rw = rewrite("op2", "context-guru.summarize", "messages", 0, 10000, 500, FK, splice={"at": 0, "removed": 3, "inserted": 1})
+    s0 = sim(0, "main-0", (tools, sysb, old), (tools, sysb, old), [], "unknown")
+    # The provider caches by content, so the fork reads main's tools and system (8,000) and writes the rest.
+    s1 = sim(60, "fork-0", (tools, sysb, old + [("n0", 500)]), (tools, sysb, summary + tail + [("n0", 500)]),
+             [eop(FK, call=call), eop(FK, saved=TT(cacheWrite5m=9500))], "hot", add=[spend, rw],
+             usage=U(read=8000, write=4000), base=U(read=8000, write=13500),
+             unpriced=[{"reason": "penalty_unknown"}], boundary=P("system", 0), thread=fork)
+    write_issue("threads/fork-first-request/summary", 423,
+                "A thread forked from main sends main's conversation with a summary on its first request. Main cached "
+                "21,000 tokens; the provider caches by content, so the fork reads main's tools and system (8,000) and writes "
+                "the rest. The library keeps no history for the fork (Thread.Parent is carried and not read), so the phase "
+                "is unknown and the read in the usage makes it hot up to the end of system: the 9,500 removed tokens come "
+                "after B* and are a write, +$0.03563, less the summarizer call $0.0125. cg prices a summarizer's first "
+                "removal as a read whenever the request hit the cache (uniqueRate), +$0.00285. Main's entry held the whole "
+                "conversation and the provider caches by content, so without the summary the fork would have read those "
+                "tokens: cg's tier is nearer the truth here, and the library cannot see it because it keeps no history "
+                "for the fork.",
+                DIMS("rewrite+spend", "afterBStar", "fork", threads="2"), [s0, s1],
+                open_=["whether the library should read the parent's state for a forked thread (Thread.Parent). Today it "
+                       "does not, and prices the fork as a thread with no history"])
+
+    # 2. A subagent already runs on the small model. Main moves to it with nothing reported: the small
+    # model has no entry for main's prefix, so nothing is read. The break says why.
+    sub = {"id": "a:sub", "parent": "main"}
+    C1, F1 = M_BASE + [("m9", 8000)], M_BASE + [("m9f", 1000)]
+    m0 = sim(0, "main-0", ([], SYS1, M_BASE), ([], SYS1, M_BASE), [], "unknown", model="agent-model")
+    s0 = sim(5, "sub-0", ([], SYS1, M_BASE), ([], SYS1, M_BASE), [], "unknown", thread=sub, model="small-model")
+    m1 = sim(10, "main-1", ([], SYS1, C1), ([], SYS1, F1), [eop(CF, saved=TT(cacheWrite5m=7000))], "hot",
+             add=[cmdfilter_op()], prev=(30000, 30000), boundary=P("messages", 8), model="small-model",
+             usage=U(write=31000), base=U(write=38000),
+             effects=[effect("break", "", saved=TT(cacheRead=30000), caused=TT(cacheWrite5m=30000), to=P("messages", 8),
+                             cause="model_changed", note="the small model holds no entry for main's prefix")])
+    s1 = sim(15, "sub-1", ([], SYS1, M_BASE + [("x0", 500)]), ([], SYS1, M_BASE + [("x0", 500)]), [], "hot",
+             prev=(30000, 30000), thread=sub, model="small-model")
+    write_issue("threads/model-switch-unreported/main-joins-subagent-model", 423,
+                "Main runs on the large model and a subagent on the small one, each with its own cache entry. Main "
+                "moves to the small model and nothing reports it: the request names a different model from main's "
+                "previous one, and the provider keeps a cache for each model, so main reads nothing and writes all "
+                "31,000 tokens. The library sees the loss from the usage and records a break nobody caused, 30,000 "
+                "tokens from read to write, labelled model_changed. It is in the client body's bill too, so the baseline "
+                "equals the bill and the break nets out. The cmdfilter saving after B* is a write, 7,000 x $1.00. The "
+                "subagent's own thread is untouched. cg's seenModel is keyed by model alone, so main's first request "
+                "on the small model is not a cold start: the subagent used it first.",
+                DIMS("none", "beforeBStar", "break", threads="2", models="2", **{"break": "model"}), [m0, s0, m1, s1])
+
+    # 3. Two sessions, each with a main and a subagent, all reporting the same ChangeID.
+    C1, F1 = M_BASE + [("m9", 8000)], M_BASE + [("m9f", 1000)]
+    first = lambda sec, rid, ses, th: sim(sec, rid, ([], SYS1, M_BASE), ([], SYS1, M_BASE), [], "unknown", session=ses, thread=th)
+    newc = lambda sec, rid, ses, th: sim(sec, rid, ([], SYS1, C1), ([], SYS1, F1),
+                                         [eop(CF, saved=TT(cacheWrite5m=7000))], "hot", add=[cmdfilter_op()],
+                                         prev=(30000, 30000), boundary=P("messages", 8), session=ses, thread=th)
+    sa, sb = "s-a", "s-b"
+    sub_a, sub_b = {"id": "a:sub", "parent": "main"}, {"id": "a:sub", "parent": "main"}
+    steps = [first(0, "a-main-0", sa, None), newc(10, "a-main-1", sa, None),
+             first(20, "a-sub-0", sa, sub_a), newc(30, "a-sub-1", sa, sub_a),
+             first(40, "b-main-0", sb, None), newc(50, "b-main-1", sb, None),
+             first(60, "b-sub-0", sb, sub_b), newc(70, "b-sub-1", sb, sub_b)]
+    write_issue("threads/two-sessions-same-change/main-and-subagent", 175,
+                "Two sessions each have a main thread and a subagent called a:sub. All four report the same cmdfilter "
+                "ChangeID on their own request, as the operator derives the same one for the same output. Each prices it "
+                "once, as new on its own thread, +$0.02625, with no unique_change failure. ThreadKey is session plus "
+                "thread, so neither the other session's main nor its a:sub reaches it. cg's MarkUnique keys by tenant, "
+                "component and content, so only the first of the four is unique to it.",
+                DIMS("rewrite", "afterBStarToL", "hit", sessions="2", threads="4"), steps)
+
+
 # Cases 14 (#45) and 15 (#567): breakpoint operators that report success.
 SPL = "cg:cachesplit:e4d1"
 
@@ -1755,7 +1833,7 @@ if __name__ == "__main__":
     for old in os.listdir(OUT):  # the generator owns this directory: drop cases that no longer exist
         if old.endswith(".json"):
             os.remove(os.path.join(OUT, old))
-    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12, c_threads,
+    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12, c_threads, c_mix,
               c14, c15, c16, c17, c18, a1, a2, a3, a4_b3, b1_b2, b4, b5, c1_, c2_, c3_, c5, d2, d3, d4,
               d5, d6, e2, e345, f245, h2, h5):
         f()

@@ -119,14 +119,15 @@ type ExpectedOp struct {
 
 // ExpectedEffect is one cache effect. Its range is asserted only when present.
 type ExpectedEffect struct {
-	Note     string             `json:"note,omitempty"` // for the reader; never asserted
-	Kind     cf.CacheEffectKind `json:"kind"`
-	ChangeID string             `json:"changeId"`
-	From     *cf.Position       `json:"from,omitempty"`
-	To       *cf.Position       `json:"to,omitempty"`
-	TTL      string             `json:"ttl,omitempty"`
-	Saved    cf.TierTokens      `json:"saved"`
-	Caused   cf.TierTokens      `json:"caused"`
+	Note     string              `json:"note,omitempty"` // for the reader; never asserted
+	Kind     cf.CacheEffectKind  `json:"kind"`
+	ChangeID string              `json:"changeId"`
+	From     *cf.Position        `json:"from,omitempty"`
+	To       *cf.Position        `json:"to,omitempty"`
+	TTL      string              `json:"ttl,omitempty"`
+	Saved    cf.TierTokens       `json:"saved"`
+	Caused   cf.TierTokens       `json:"caused"`
+	Cause    cf.CacheEffectCause `json:"cause,omitempty"`
 	// InBaseline marks a break that the client body would have had too (an entry lost early, a client
 	// edit): it is on the record but cancels out of conservation. A break that an operator left behind
 	// (its change ended) is not in the baseline, so it counts.
