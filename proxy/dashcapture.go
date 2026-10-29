@@ -9,14 +9,13 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/predictive"
-	"github.com/rossoctl/context-guru/schema"
-	"github.com/rossoctl/context-guru/session"
 	"github.com/tidwall/gjson"
 )
 
@@ -88,6 +87,15 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
+	// The alias derivation's other inputs (#766): the pipeline that will transform this
+	// body, the wire dialect, and the bypass flag — everything apply.EnforcedSessionIDFor
+	// needs to derive the id the pipeline's own turn will ask under. Stashed here because
+	// the derivation runs on the WRITER goroutine, in finish()'s AliasFn closure. Set by
+	// noteAliasSource; a capture it was never called on derives off the raw body (nil pipe
+	// transforms nothing), the pre-round-4 behavior.
+	aliasPipe   *components.Pipeline
+	aliasAPI    string
+	aliasBypass bool
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -202,6 +210,20 @@ func (c *capture) noteWaitBody(body []byte) {
 	if c != nil {
 		c.waitBody = body
 	}
+}
+
+// noteAliasSource stashes the inputs of this request's alias derivation: the pipeline that
+// transforms the body, the wire dialect, and the bypass flag. The restart grace's record
+// side (#766) must touch the grace clock under the id the pipeline's own turn will ASK
+// for, and apply derives that id from the body AFTER transformEnvelope — toolfilter's
+// skills half rewrites the head message the session hash reads — so hashing the pristine
+// body the capture already holds would produce a key no request ever derives. See
+// apply.EnforcedSessionIDFor, the same door the expand repair and the observe job use.
+func (c *capture) noteAliasSource(pipe *components.Pipeline, api string, bypass bool) {
+	if c == nil {
+		return
+	}
+	c.aliasPipe, c.aliasAPI, c.aliasBypass = pipe, api, bypass
 }
 
 // noteMeta records the request's own metadata. Called once, from the chat handler, with
@@ -565,18 +587,21 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The restart grace's clock must also learn this session's ALIAS id (#766): a seesaw-id
 	// tenant (the session header on some turns, not others) refreshes the ONE provider entry
 	// under either id, so a later headerless turn — whose own derived id IS the alias — must
-	// find this turn's warmth under the key it will ask for. The derivation is the same one
-	// apply uses (session.Scoped over the normalized head), off the same lazy norm() WaitCause
-	// shares, so the two never disagree about which id a body derives. A closure for the same
-	// reason WaitCause is one: the body scan runs on the writer goroutine, not the handler's
-	// defer. Only set when this row ran under a session id at all — observe-mode rows carry
-	// none — and the closure answers '' when the alias is the request's own id (a headerless
-	// turn), which observe() above already touched.
+	// find this turn's warmth under the key it will ask for. The id is derived through the
+	// pipeline's own transform (apply.EnforcedSessionIDFor, empty explicit id: this asks for
+	// the content-derived alias alone), because apply derives the id it asks for from the
+	// body AFTER transformEnvelope — toolfilter's skills half rewrites the head message the
+	// session hash reads — and a hash of the pristine body is a key no request ever derives.
+	// A closure for the same reason WaitCause is one: the transform and re-parse run on the
+	// writer goroutine, not the handler's defer. Only set when this row ran under a session
+	// id at all — observe-mode rows carry none — and the closure answers '' when the alias
+	// is the request's own id (a headerless turn, or no body to derive from: /compact never
+	// stashes one), which observe() above already touched or nothing can.
 	if e.SessionID != "" {
+		pipe, api, bypass := c.aliasPipe, c.aliasAPI, c.aliasBypass
 		e.AliasFn = func() string {
-			sys, firstUser := schema.SessionHead(norm())
-			alias := session.Scoped(tenantID, "", sys, firstUser)
-			if alias == sessionID {
+			alias := apply.EnforcedSessionIDFor(pipe, tenantID, "", api, provider, bypass, waitBody)
+			if alias == "" || alias == sessionID {
 				return ""
 			}
 			return alias

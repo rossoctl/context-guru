@@ -147,8 +147,10 @@ type Event struct {
 	SessionAlias string `json:"session_alias,omitempty"`
 	// AliasFn fills SessionAlias and touches the grace clock under the alias key, on the
 	// WRITER goroutine (Recorder.run's write(), beside WaitCause) — never on the request
-	// path: the derivation normalizes the whole body, the same scan WaitCause pays, and
-	// finish() runs on the handler's own defer. nil on a row with no session id.
+	// path: the derivation transforms and normalizes the whole body, the same scans the
+	// enforced path pays, and finish() runs on the handler's own defer. It derives the id
+	// the pipeline's own turn will ask under, through the envelope transform — see
+	// apply.EnforcedSessionIDFor. nil on a row with no session id.
 	AliasFn func() string `json:"-"`
 	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
 	// from the request body and the response's own tool calls/stop reason, by string match

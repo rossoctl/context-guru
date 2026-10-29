@@ -14,6 +14,7 @@ import (
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -70,6 +71,15 @@ func sendBody(t *testing.T, server *httptest.Server, session string, body []byte
 func restartedHandler(t *testing.T, up, dbPath string, seededAt, startedAt int64) (*Handler, *dash.Recorder) {
 	t.Helper()
 	cfg, agg, pipe := codesafePipeline(t)
+	return restartedHandlerPipe(t, up, dbPath, seededAt, startedAt, cfg, agg, pipe)
+}
+
+// restartedHandlerPipe is restartedHandler for a caller that must restart onto a pipeline of
+// its own: the alias derivation reads the pipeline's transform, so a restart onto codesafe
+// would derive a different id than a toolfilter-active one the recorded warmth sits under.
+func restartedHandlerPipe(t *testing.T, up, dbPath string, seededAt, startedAt int64,
+	cfg *config.Config, agg *metrics.Aggregator, pipe *components.Pipeline) (*Handler, *dash.Recorder) {
+	t.Helper()
 	rec, err := dash.NewRecorder(dash.Options{DBPath: dbPath, BatchSize: 1,
 		FlushInterval: time.Millisecond})
 	if err != nil {
@@ -348,6 +358,118 @@ func TestTheRestartGraceProtectsAHeaderlessTurnAfterHeaderedOnes(t *testing.T) {
 		t.Fatalf("headerless turn after headered ones: %d of %d tokens attempted; want the whole request frozen (the alias id's clock protects it)",
 			seesaw.AttemptedTokens, seesaw.TokensBefore)
 	}
+	fresh := row(t, rec2, otherDerived)
+	if fresh.AttemptedTokens == 0 {
+		t.Fatalf("unknown headerless conversation: 0 of %d tokens attempted; want the request editable (no history, no grace)",
+			fresh.TokensBefore)
+	}
+}
+
+// skillFilterPipeline builds a pipeline whose toolfilter removes one skill, so its skills
+// half rewrites the head system message the session hash reads — the shape the alias
+// derivation must go through the transform for (issue #766, round 4).
+func skillFilterPipeline(t *testing.T) (*config.Config, *metrics.Aggregator, *components.Pipeline) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte("pipeline: [format, toolfilter]\ncomponents:\n  toolfilter:\n    remove: [" +
+		skills.RemovePrefix + "deep-research]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg, agg, pipe
+}
+
+// skillfulRequest is an Anthropic body whose head system message carries a skills listing:
+// removing one of the listed skills rewrites that message, which changes the session hash.
+func skillfulRequest() []byte {
+	return []byte(`{"model":"aws/claude-sonnet-5","max_tokens":64,` +
+		`"tools":[{"name":"Skill","description":"Invoke a skill.","input_schema":{"type":"object"}}],` +
+		`"messages":[` +
+		`{"role":"system","content":"<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n` +
+		`- dataviz: Use for charts and plots.\n- deep-research: A research harness.\n</system-reminder>"},` +
+		`{"role":"user","content":"please fix the failing test"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"ok"}]},` +
+		`{"role":"user","content":"please fix the failing test again"}]}`)
+}
+
+// Issue #766, round 4: the alias the record side touches must be the id the pipeline's own
+// turn will ask under, not a hash of the pristine body. toolfilter's skills half rewrites
+// the head message the session hash reads, so for a tenant with a skill removal the two
+// hashes differ — and a headerless turn after a restart asks under the transformed one. The
+// pre-restart request carries the session header; the first request after the restart is
+// headerless, within the lifetime: protected.
+func TestTheRestartGraceProtectsAHeaderlessTurnWhenToolfilterRewritesTheHead(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "d.db")
+	rec, err := dash.NewRecorder(dash.Options{DBPath: dbPath, BatchSize: 1,
+		FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	cfg, agg, pipe := skillFilterPipeline(t)
+	body := skillfulRequest()
+	// The two derivations the round-4 finding is about: the id the pipeline's own turn
+	// asks under (the transformed head) and the id the pristine body hashes to. The
+	// fixture must make them differ, or it tests nothing.
+	enforced := apply.EnforcedSessionIDFor(pipe, "", "", "", bschemas.Anthropic, false, body)
+	pristine := derivedSession(t, body)
+	if enforced == "" {
+		t.Fatal("the pipeline derived no alias")
+	}
+	if enforced == pristine {
+		t.Fatal("fixture does not exercise the bug: the transformed id equals the pristine one")
+	}
+
+	h1 := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		OpenAIUpstream:    up.URL,
+		Preset:            cfg.Preset,
+		Dashboard:         rec,
+		Prices:            fixedPricer{},
+	})
+	srv1 := httptest.NewServer(h1.Mux())
+	defer srv1.Close()
+	// The conversation's last pre-restart request: header present, one minute before the
+	// restart, well inside the 5-minute lifetime.
+	sendBody(t, srv1, "sess-header", body)
+	waitForRows(t, rec, 1)
+
+	t0 := time.Now().UnixMilli()
+	cfg2, agg2, pipe2 := skillFilterPipeline(t)
+	h2, rec2 := restartedHandlerPipe(t, up.URL, dbPath, t0, t0-2*60*60*1000, cfg2, agg2, pipe2)
+	srv2 := httptest.NewServer(h2.Mux())
+	defer srv2.Close()
+	// The alias key the header request's row must have seeded: the TRANSFORMED id, this
+	// thread. A pristine-body derivation stores an id no request ever asks for.
+	if at, ok := rec2.ThreadRefreshedAt(enforced); !ok || at < t0-60_000 {
+		t.Fatalf("the transformed alias id's grace clock = (%d, %v), want the header request's time", at, ok)
+	}
+	// The first request after the restart: headerless, so its own id IS the alias id the
+	// pipeline derives from the transformed head.
+	sendBody(t, srv2, "", body)
+	waitForRows(t, rec2, 1)
+
+	seesaw := row(t, rec2, enforced)
+	if seesaw.AttemptedTokens != 0 || seesaw.FrozenTokens == 0 {
+		t.Fatalf("headerless turn after headered ones, toolfilter-active: %d of %d tokens attempted; want the whole request frozen (the transformed alias id's clock protects it)",
+			seesaw.AttemptedTokens, seesaw.TokensBefore)
+	}
+	// A different conversation, also headerless: unknown under either derivation, so
+	// editable — the grace protects warmth, not everything.
+	other := []byte(strings.Replace(string(body), "please fix the failing test", "please fix the other failing test", 1))
+	otherDerived := apply.EnforcedSessionIDFor(pipe2, "", "", "", bschemas.Anthropic, false, other)
+	if otherDerived == enforced {
+		t.Fatal("the control body derived the same session id as the seesaw conversation")
+	}
+	sendBody(t, srv2, "", other)
+	waitForRows(t, rec2, 2)
 	fresh := row(t, rec2, otherDerived)
 	if fresh.AttemptedTokens == 0 {
 		t.Fatalf("unknown headerless conversation: 0 of %d tokens attempted; want the request editable (no history, no grace)",

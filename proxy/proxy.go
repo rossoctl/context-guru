@@ -1372,6 +1372,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
 			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
 			cp.noteWaitBody(orig)
+			// The alias derivation needs the pipeline that transforms THIS body, and the
+			// wire dialect and bypass flag it transforms under — see noteAliasSource.
+			cp.noteAliasSource(tn.Pipe, api, bypassed)
 			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())

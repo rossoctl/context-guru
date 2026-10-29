@@ -326,7 +326,10 @@ the rule off in every case.
 
 The recorder learns a refresh under BOTH session ids a conversation uses: the request's own
 id, and the content-derived alias id (the capture path derives it off the body, on the
-writer goroutine, and stores it on the row). That is what makes the alias widening hold in
+writer goroutine, through the pipeline's own envelope transform — the same door
+`apply.EnforcedSessionIDFor` is — because toolfilter's skills half rewrites the head message
+the session hash reads, and a hash of the pristine body is a key no request ever derives;
+it stores the alias on the row). That is what makes the alias widening hold in
 both directions — a headerless turn asks for the alias id alone, because its own derived id
 IS the alias, so the header turns' warmth must already sit under that key. The startup seed
 recovers both keys from the requests table, with two limits: a row written before the alias
