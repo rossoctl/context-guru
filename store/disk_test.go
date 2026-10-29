@@ -420,10 +420,13 @@ func TestFailedLoadAllowsRetry(t *testing.T) {
 	if _, err := d2.db.Exec(`ALTER TABLE session_state RENAME TO session_state_x`); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now()
+	m2.SetClock(func() time.Time { return now })
 	m2.LoadSession("s")
 	if _, err := d2.db.Exec(`ALTER TABLE session_state_x RENAME TO session_state`); err != nil {
 		t.Fatal(err)
 	}
+	now = now.Add(2 * loadRetryAfter)
 	m2.LoadSession("s")
 	defer d2.Close()
 	if got, ok := m2.Get(SumPrefix + "s"); !ok || string(got) != "CP" {
@@ -462,5 +465,62 @@ func TestEachOpLoggedOnce(t *testing.T) {
 	d.logged.Range(func(_, _ any) bool { n++; return true })
 	if n != 2 || d.Errors() != 3 {
 		t.Fatalf("ops logged %d, errors %d", n, d.Errors())
+	}
+}
+
+func breakTable(t *testing.T, d *Disk) {
+	t.Helper()
+	if _, err := d.db.Exec(`ALTER TABLE session_state RENAME TO session_state_x`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A disk that keeps failing must not grow the order list: N failed loads of one session leave at
+// most one entry, and many failing sessions leave none.
+func TestFailedLoadsDoNotGrowTheOrderList(t *testing.T) {
+	m, d := newDiskStore(t, filepath.Join(t.TempDir(), "state.db"), DiskOptions{}, stateOpts())
+	defer d.Close()
+	breakTable(t, d)
+	now := time.Now()
+	m.SetClock(func() time.Time { return now })
+	for i := 0; i < 50; i++ {
+		now = now.Add(2 * loadRetryAfter) // past the backoff, so every call really reads
+		m.LoadSession("same")
+	}
+	for i := 0; i < 200; i++ {
+		m.LoadSession(fmt.Sprintf("s%d", i))
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.loadedOrder) != 0 || len(m.loadedAt) != 0 {
+		t.Fatalf("after failures: order %d, marks %d, want 0", len(m.loadedOrder), len(m.loadedAt))
+	}
+}
+
+// After a failed read, the next requests inside the backoff do not read again; after it, they do.
+func TestFailedLoadBacksOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	m1, d1 := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	m1.Put(SumPrefix+"s", []byte("CP"))
+	d1.Close()
+	m, d := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	defer d.Close()
+	now := time.Now()
+	m.SetClock(func() time.Time { return now })
+	breakTable(t, d)
+	m.LoadSession("s")
+	e1 := d.Errors()
+	if _, err := d.db.Exec(`ALTER TABLE session_state_x RENAME TO session_state`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Second)
+	m.LoadSession("s")
+	if _, ok := m.Get(SumPrefix + "s"); ok || d.Errors() != e1 {
+		t.Fatal("a retry inside the backoff must not read the disk")
+	}
+	now = now.Add(2 * loadRetryAfter)
+	m.LoadSession("s")
+	if got, ok := m.Get(SumPrefix + "s"); !ok || string(got) != "CP" {
+		t.Fatalf("retry after the backoff: %q %v", got, ok)
 	}
 }

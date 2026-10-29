@@ -405,14 +405,25 @@ func (m *Memory) LoadSession(session string) {
 		m.mu.Unlock()
 		return
 	}
+	// A read failed lately: do not pay the read timeout again on every request.
+	if at, ok := m.loadFailedAt[session]; ok && now.Sub(at) < loadRetryAfter {
+		m.mu.Unlock()
+		return
+	}
 	m.markLoaded(session, now)
 	m.mu.Unlock()
 
 	rows, ok := d.loadSession(session) // outside the lock: this is a disk read
 	if !ok {
-		// A failed read must not block a retry for a whole lifetime.
+		// A failed read must not block a retry for a whole lifetime, so the mark goes (from the
+		// order list too, or a failing disk would grow it by one per request). It does block a
+		// retry for loadRetryAfter, so a hanging disk costs one timeout per session per minute.
 		m.mu.Lock()
-		delete(m.loadedAt, session)
+		m.unmarkLoaded(session)
+		if len(m.loadFailedAt) >= maxLoaded {
+			clear(m.loadFailedAt) // bounded; a cleared mark costs one early retry
+		}
+		m.loadFailedAt[session] = m.now()
 		m.mu.Unlock()
 	}
 
@@ -442,6 +453,21 @@ func (m *Memory) markLoaded(session string, now time.Time) {
 	}
 	m.loadedAt[session] = now
 }
+
+// unmarkLoaded forgets a session's load mark. The caller holds m.mu. It scans the order list, on
+// the failure path only.
+func (m *Memory) unmarkLoaded(session string) {
+	delete(m.loadedAt, session)
+	for i, k := range m.loadedOrder {
+		if k == session {
+			m.loadedOrder = append(m.loadedOrder[:i], m.loadedOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+// loadRetryAfter is the pause before a session whose disk read failed is read again.
+const loadRetryAfter = time.Minute
 
 // AttachDisk makes d the write-through copy of this store's state. Call it once, before serving.
 func (m *Memory) AttachDisk(d *Disk) {

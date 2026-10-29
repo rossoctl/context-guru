@@ -361,6 +361,8 @@ type Memory struct {
 	// lifetime still has its state in memory, so it is not read from disk again.
 	loadedAt    map[string]time.Time
 	loadedOrder []string // insertion order of loadedAt, oldest first
+	// loadFailedAt is when a session's disk read last failed; it backs off the retry.
+	loadFailedAt map[string]time.Time
 }
 
 // Options configures a Memory store; the zero value yields sane defaults.
@@ -647,7 +649,7 @@ func NewMemory(o Options) *Memory {
 		stateTTL = time.Duration(o.StateTTLSeconds) * time.Second
 	}
 	return &Memory{
-		stateTTL: stateTTL, loadedAt: map[string]time.Time{},
+		stateTTL: stateTTL, loadedAt: map[string]time.Time{}, loadFailedAt: map[string]time.Time{},
 		ttl: ttl, stashTTL: stashTTL, max: max, maxStick: stick, pinPrefixes: pins,
 		stashMaxBytes: stashMax,
 		ll:            list.New(), items: map[string]*list.Element{},
