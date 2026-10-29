@@ -1160,3 +1160,208 @@ func TestV3UnreferencedReadsTheAgentsOwnConversation(t *testing.T) {
 		t.Fatalf("rules = %v: toolu_wire_1 is referenced in the agent's conversation", got)
 	}
 }
+
+// ---- the gate counts the postponement and the avoided compaction ----
+
+const v3Turns = "warm: true\nselector: rule\nprotect_last_n: 0\nwarm_max_turns: 1000\n"
+
+func gCtx(window, billed, point int) *components.Ctx {
+	return &components.Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed, PrevBilledInputThread: billed,
+		CompactionPoint: point, CompactionPointSource: string(compactionpoint.Operator)}
+}
+
+// N' > N by D / g: the cut postpones the compaction.
+func TestV3TurnsLeftCountFromThePromptAfterTheCut(t *testing.T) {
+	e := shippedSweep(t, v3Turns)
+	// the t99 numbers: P 142k, D 24.8k, g 1.1k per turn (100 turns, from 32k), C 167k.
+	c := gCtx(200_000, 142_000, 167_000)
+	before := e.warmTurnsLeftAfter(c, 20, 32_000, 100, 0)
+	after := e.warmTurnsLeftAfter(c, 20, 32_000, 100, 24_800)
+	g := before.GrowthPerTurn
+	if g < 1_099 || g > 1_101 {
+		t.Fatalf("growth = %v, want 1100", g)
+	}
+	if before.N < 22 || before.N > 23 {
+		t.Fatalf("N = %v, want (167000-142000)/1100 = 22.7", before.N)
+	}
+	if after.N < 45 || after.N > 46 {
+		t.Fatalf("N' = %v, want (167000-(142000-24800))/1100 = 45.2", after.N)
+	}
+	if d := after.N - before.N; d < 22.5 || d > 22.6 {
+		t.Fatalf("N' - N = %v, want D/g = 22.5", d)
+	}
+	if after.NNoCut != before.N {
+		t.Fatalf("NNoCut = %v, want the no-cut N %v logged beside N'", after.NNoCut, before.N)
+	}
+	// warm_max_turns still caps N'.
+	capped := shippedSweep(t, strings.Replace(v3Turns, "warm_max_turns: 1000", "warm_max_turns: 30", 1))
+	if te := capped.warmTurnsLeftAfter(c, 20, 32_000, 100, 24_800); te.N != 30 || te.NNoCut < 22 || te.NNoCut > 23 {
+		t.Fatalf("capped estimate = %+v, want N' capped at 30 and N 22.7", te)
+	}
+	// The plain warm path is unchanged: removedBilled 0 is warmTurnsLeft.
+	if a, b := e.warmTurnsLeft(c, 20, 32_000, 100), before; a != b {
+		t.Fatalf("warmTurnsLeft = %+v, want it equal to the 0-removal form %+v", a, b)
+	}
+}
+
+// One definition: the horizon coref uses and the gate's turns are the same function.
+func TestV3TurnsAndTheCorefHorizonShareOneDefinition(t *testing.T) {
+	if got := turnsUntilCut(167_000, 117_200, 1_100); got < 45.2 || got > 45.3 {
+		t.Fatalf("turnsUntilCut = %v", got)
+	}
+	if turnsUntilCut(100, 200, 10) != 0 {
+		t.Fatal("a prompt past the cut must give 0 turns")
+	}
+}
+
+func TestV3AvoidedCompactionIsCreditedOnlyWhenAvoided(t *testing.T) {
+	e := shippedSweep(t, strings.Replace(v3Turns, "warm_max_turns: 1000", "warm_max_turns: 30", 1))
+	c := gCtx(200_000, 142_000, 167_000)
+	const read, write = 3e-7, 3.75e-6
+	cases := []struct {
+		name         string
+		removed      int
+		wantAvoided  bool
+		wantPositive bool
+	}{
+		// N = 22.7 is inside the horizon of 30; N' = 45.2 is past it: the compaction is avoided.
+		{"avoided", 24_800, true, true},
+		// N' = 29.5 is still inside the horizon: the cut only delays the compaction.
+		{"only delayed", 7_000, false, false},
+	}
+	for _, tc := range cases {
+		te := e.warmTurnsLeftAfter(c, 20, 32_000, 100, tc.removed)
+		usd, avoided := e.avoidedCompactionUSD(te, read, write)
+		if avoided != tc.wantAvoided || (usd > 0) != tc.wantPositive {
+			t.Errorf("%s: credit %v avoided %v (raw %v, no-cut %v), want avoided %v", tc.name, usd, avoided, te.Raw, te.RawNoCut, tc.wantAvoided)
+		}
+	}
+	// The formula: C x read + compactionSummaryFrac x C x write.
+	te := e.warmTurnsLeftAfter(c, 20, 32_000, 100, 24_800)
+	usd, _ := e.avoidedCompactionUSD(te, read, write)
+	if want := 167_000*read + compactionSummaryFrac*167_000*write; usd < want-1e-9 || usd > want+1e-9 {
+		t.Errorf("credit = %v, want %v", usd, want)
+	}
+	// No compaction inside the horizon even without the cut: nothing is avoided.
+	far := gCtx(1_000_000, 100_000, 900_000)
+	te = e.warmTurnsLeftAfter(far, 20, 32_000, 100, 24_800)
+	if _, avoided := e.avoidedCompactionUSD(te, read, write); avoided {
+		t.Errorf("a cut point far past the horizon avoided a compaction: %+v", te)
+	}
+}
+
+func TestV3CreditAvoidedCompactionHasAnOffSwitchAndIsOffWithoutV3(t *testing.T) {
+	te := turnsEstimate{Model: turnsModelCut, Cut: 167_000, Raw: 45, RawNoCut: 22}
+	on := shippedSweep(t, strings.Replace(v3Turns, "warm_max_turns: 1000", "warm_max_turns: 30", 1))
+	if _, ok := on.avoidedCompactionUSD(te, 3e-7, 3e-6); !ok {
+		t.Fatal("the credit must be on by default in v3")
+	}
+	off := shippedSweep(t, strings.Replace(v3Turns, "warm_max_turns: 1000", "warm_max_turns: 30", 1)+"credit_avoided_compaction: false\n")
+	if _, ok := off.avoidedCompactionUSD(te, 3e-7, 3e-6); ok {
+		t.Fatal("credit_avoided_compaction: false must turn the credit off")
+	}
+	plain := shippedSweep(t, "warm: true\nwarm_max_turns: 30\n")
+	if _, ok := plain.avoidedCompactionUSD(te, 3e-7, 3e-6); ok {
+		t.Fatal("the plain warm path must never credit")
+	}
+}
+
+// The gate accepts when saving + saving_compaction >= rewrite, and the decision shows both.
+func TestV3TheGateAcceptsOnTheCompactionCreditAndLogsIt(t *testing.T) {
+	run := func(cfg string) (bool, WarmDecision) {
+		r := newV3Rig(t, "v3-credit", cfg)
+		// growth: P rises 1,000 per request from 130k; the compaction point is 167k.
+		r.c, r.window = 167_000, 200_000
+		r.request(0)
+		var d WarmDecision
+		for i := 0; i < 3; i++ {
+			r.request(145_000 + i*1_000)
+			if cur, ok := lastWarmDecision(); ok && cur.Stage == "apply" && cur.TurnsModel == turnsModelCut {
+				d = cur // the last decision of the gate that had a growth to count turns from
+			}
+		}
+		return v3Counters().Cuts > 0, d
+	}
+	// Horizon 30: without the cut the compaction comes in about 20 turns (inside), with it in about 70 (past). The plain
+	// saving does not cover the rewrite, the avoided compaction does.
+	base := strings.Replace(v3Rule, "warm_expected_turns: 200\n", "", 1)
+	base = strings.Replace(base, "warm_max_turns: 200", "warm_max_turns: 30", 1)
+	okOff, dOff := run(base + "credit_avoided_compaction: false\n")
+	resetWarmForTest()
+	okOn, dOn := run(base)
+	if !okOn || okOff {
+		t.Fatalf("on: accepted %v (%+v); off: accepted %v (%+v). The credit must decide this case", okOn, dOn, okOff, dOff)
+	}
+	if dOn.SavingCompaction <= 0 || !dOn.CompactionAvoided || dOn.TurnsAfterCut <= dOn.TurnsNoCut {
+		t.Fatalf("decision = %+v, want saving_compaction_usd, compaction_avoided and N' > N", dOn)
+	}
+	if dOff.SavingCompaction != 0 {
+		t.Fatalf("decision with the credit off = %+v", dOff)
+	}
+	if v := v3Counters(); v.CompactionsAvoided != 1 || v.SavingCompactionUSD <= 0 || v.Recent[0].SavingCompactionUSD <= 0 {
+		t.Fatalf("stats = %+v, want the avoided compaction counted", v)
+	}
+}
+
+// With v3 off the warm path is #720's: no post-cut turns, no credit, the same gate arithmetic.
+func TestV3OffTheWarmGateIsUnchanged(t *testing.T) {
+	r := newWarmRig(t, "v3-off-gate", warmCfg, payingTail(), 1.0)
+	r.toHeld()
+	_, rep := r.request(nil)
+	d, ok := lastWarmDecision()
+	if !ok || rep.Events[eventAppliedWarm] != 3 {
+		t.Fatalf("fixture: %v %+v", rep.Events, d)
+	}
+	if d.SavingCompaction != 0 || d.CompactionAvoided || d.TurnsNoCut != 0 || d.TurnsAfterCut != 0 {
+		t.Fatalf("the plain warm path carried v3 numbers: %+v", d)
+	}
+}
+
+// ---- rule_d on every refusal and decision line ----
+
+func TestV3DoesNotPayRefusalCarriesRuleD(t *testing.T) {
+	r := newV3Rig(t, "v3-dnp-rd", strings.Replace(v3Rule, "warm_expected_turns: 200", "warm_expected_turns: 5", 1))
+	r.request(0)
+	r.request(175_000)
+	r.request(175_000)
+	d, ok := lastWarmDecision()
+	if !ok || !strings.HasPrefix(d.Reason, "does_not_pay") {
+		t.Fatalf("decision = %+v, want a does_not_pay refusal", d)
+	}
+	if d.RuleD[ruleFileReread] <= 0 || d.RuleD[ruleBuildRerun] <= 0 {
+		t.Fatalf("decision = %+v, want D by rule on a does_not_pay refusal", d)
+	}
+}
+
+func TestV3AcceptedDecisionCarriesRuleD(t *testing.T) {
+	r := newV3Rig(t, "v3-acc-rd", v3Rule)
+	r.request(0)
+	r.request(175_000)
+	d, ok := lastWarmDecision()
+	if !ok || !d.Accept || d.RuleD[ruleFileReread] <= 0 {
+		t.Fatalf("decision = %+v, want rule_d on an accepted decision", d)
+	}
+}
+
+// With v3 off, the plain warm gate counts the turns from the prompt as it is, even when the "cut" model runs:
+// (cut - P) / growth, with no D taken off P.
+func TestV3OffTheWarmGateCountsTurnsFromThePromptAsItIs(t *testing.T) {
+	r := newWarmRig(t, "v3-off-turns", strings.Replace(warmCfg, "warm_max_turns: 60", "warm_max_turns: 100000", 1), payingTail(), 1.0)
+	for i := 0; i < 3; i++ {
+		c := warmCtx(r.session, r.st)
+		c.CtxWindowExact, c.CtxWindow, c.CompactionPoint = true, 2_000_000, 1_900_000
+		r.request(c)
+	}
+	r.forward()
+	c := warmCtx(r.session, r.st)
+	c.CtxWindowExact, c.CtxWindow, c.CompactionPoint = true, 2_000_000, 1_900_000
+	r.request(c)
+	d, ok := lastWarmDecision()
+	if !ok || d.Stage != "apply" || d.TurnsModel != turnsModelCut || d.GrowthPerTurn <= 0 {
+		t.Fatalf("fixture: want an apply decision on the cut model, got %+v", d)
+	}
+	want := (float64(d.Cut) - float64(c.PrevBilledInput)) / d.GrowthPerTurn
+	if d.TurnsRaw < want-0.01 || d.TurnsRaw > want+0.01 {
+		t.Fatalf("turns = %v, want (cut - P) / growth = %v: the plain warm path must not count the postponement", d.TurnsRaw, want)
+	}
+}
