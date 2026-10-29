@@ -495,6 +495,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	loadSessionState(st, sessionID)
 	o.resolveThread(tr, sessionID)
 	var restore restorePlan
 	if !bypass {
@@ -593,6 +594,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. alias and sessionID are declared above,
+			// beside the grace keys — the merge keeps #770's call on the bare-hash alias.
+			if alias != sessionID {
+				loadSessionState(st, alias)
+			}
 			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
 			}
@@ -1311,6 +1318,19 @@ func prevLen(st store.Store, session string) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
+}
+
+// loadSessionState restores a session's state from the store's disk copy when memory has none
+// (after a restart, or a pause longer than the state lifetime). It runs before the pipeline reads
+// the store. A store without a disk copy does nothing. It reads one session, once per lifetime
+// (store.SessionLoader), and a disk error is absorbed there: the request goes on with memory only.
+//
+// The tenant-less alias id (the content hash that cg:seen: and cg:ttl: are also keyed by) is
+// loaded too, so a session that comes back under its other id finds its clocks.
+func loadSessionState(st store.Store, session string) {
+	if l, ok := st.(store.SessionLoader); ok {
+		l.LoadSession(session)
+	}
 }
 
 func putLen(st store.Store, session string, n int) {

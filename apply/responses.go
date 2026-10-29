@@ -517,6 +517,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
@@ -543,6 +544,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			// metadata id when the body carries one, else the content hash. alias below stays
 			// the bare content hash for the cold decision's own clock (aliasSeen).
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// wrote it — the store's alias keys use that id.
+			if alias != res.Session {
+				loadSessionState(st, alias)
+			}
 			graceAlias := graceAliasID(o.Tenant, o.Body, norm)
 			graceAliasKey := thread.Key(graceAlias, res.Thread.ID)
 			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)

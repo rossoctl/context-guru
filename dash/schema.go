@@ -397,6 +397,19 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Session state (#769): the proxy's summary checkpoint, billed input and the other keys a session
+-- needs between turns, written by package store through this database's own handle. One row per
+-- store key. It is NOT derived from the request rows and NOT pruned with them: its own retention
+-- (--session-state-retention) deletes it, and a session's rows go when the session is archived or
+-- evicted. It holds summary text at the "everything" storage level (docs/data-dependence.md).
+-- Created here so an older database gets it on open; package store creates it too (IF NOT EXISTS).
+CREATE TABLE IF NOT EXISTS session_state (
+  key     BLOB PRIMARY KEY,
+  val     BLOB NOT NULL,
+  updated INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_state_updated ON session_state(updated);
+
 -- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on: the facts no
 -- requests column holds. One row per request, and one per keep-alive ping (ping_n > 0; its
 -- thread is the ping's own requests.thread_id, its outcome and cost the same row's cache and

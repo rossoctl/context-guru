@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/store"
 	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
@@ -174,6 +175,9 @@ var nonDerivedTables = map[string]string{
 	"archived_sessions": `session_id,tenant_id,first_ts,last_ts,requests,content_path,
 	                      content_bytes,full_path,full_bytes,archived_at,remote`,
 	"tenant_spend": `tenant_id,month,usd`,
+	// The session state (#769) is rebuilt from traffic, but only by paying for it again (a summary
+	// is a model call), so a schema bump carries it.
+	"session_state": `key,val,updated`,
 }
 
 // carryNonDerived copies the non-derived tables out of the database renamed aside by
@@ -401,6 +405,20 @@ func (d *DB) Close() error {
 		return nil
 	}
 	return d.sql.Close()
+}
+
+// SQL returns the underlying handle, for a host that keeps a table of its own in this database.
+// The session state store (package store) does: it shares this pool, so one pool serializes every
+// writer in the process. The caller must not close it.
+func (d *DB) SQL() *sql.DB { return d.sql }
+
+// deleteSessionState removes the session's rows from the session_state table, when a session
+// is archived or deleted here. Best effort: the state is rebuilt from traffic, so a failure only
+// logs. The retention prune does NOT call it: state follows its own retention.
+func (d *DB) deleteSessionState(session string) {
+	if _, err := store.DeleteSessionState(d.sql, session); err != nil {
+		slog.Warn("dash: could not delete the session state of a removed session", "session", session, "err", err)
+	}
 }
 
 // Path returns the on-disk path ("" when in-memory).
@@ -851,14 +869,34 @@ func (d *DB) optimize() {
 //
 // "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
 // that is still in use must not be evicted because it started a week ago.
+func (d *DB) oldestSessionIDs(n int) []string {
+	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (d *DB) DropOldestSessions(n int) (int64, error) {
 	if n <= 0 {
 		return 0, nil
 	}
+	victims := d.oldestSessionIDs(n) // before the delete: afterwards they cannot be found
 	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
 		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
 	if err != nil {
 		return 0, err
+	}
+	for _, id := range victims {
+		d.deleteSessionState(id)
 	}
 	return res.RowsAffected()
 }
