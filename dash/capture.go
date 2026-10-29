@@ -342,9 +342,11 @@ func (r *Recorder) Record(e *Event) {
 	}
 	// A keep-alive ping that READ the cache refreshed the provider's entry, so it counts on
 	// the restart grace's clock (#766) — this is the one dash write a ping produces, since
-	// pings never run ObserveThread. A ping that did not read the cache kept nothing warm and
-	// must not count. Recorded here, before the queue, so ThreadRefreshedAt answers at once
-	// even if the row is still in flight (the row is the restart's recovery path).
+	// pings never run ObserveThread. A ping that did not read the cache is not counted, the
+	// same rule the keeper's own refresh bookkeeping uses: such a ping re-created the entry
+	// rather than refreshing it, and the keeper counts those writes as a bug to fix, not as
+	// warmth. Recorded here, before the queue, so ThreadRefreshedAt answers at once even if
+	// the row is still in flight (the row is the restart's recovery path).
 	if e.KeepAlive && e.CacheRead > 0 && e.SessionID != "" {
 		key := thread.Key(e.SessionID, e.ThreadID)
 		r.mu.Lock()
@@ -492,6 +494,21 @@ func (r *Recorder) run() {
 			}
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
+			}
+			// The session's ALIAS id, for the restart grace (#766): a request under an
+			// explicit header id also refreshes the one provider entry its conversation's
+			// headerless turns read, so the grace clock must learn the alias key too —
+			// and the row must carry the alias, or the seed after a restart could reload
+			// only the header id's warmth. Runs here for the same reason WaitCause does:
+			// the derivation normalizes the whole body, and finish() is the handler's own
+			// defer. Observe()'s own-key touch already ran inline; this is the second key.
+			if e.AliasFn != nil {
+				if alias := e.AliasFn(); alias != "" {
+					e.SessionAlias = alias
+					r.mu.Lock()
+					r.touchGraceLocked(thread.Key(alias, e.ThreadID), e.TS)
+					r.mu.Unlock()
+				}
 			}
 			e.Redact()
 		}
@@ -783,7 +800,18 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 // startup recovery SeedSessions gives cache attribution (#766). One grouped query: per thread,
 // the newest row that refreshed the provider's cache entry — a real request (keepalive = 0,
 // whatever it read, because it wrote the entry) or a keep-alive ping that READ the cache
-// (keepalive = 1 AND cache_read > 0, the only ping that keeps the entry warm).
+// (keepalive = 1 AND cache_read > 0, the only ping that keeps the entry warm). Only rows the
+// upstream accepted (2xx): a failed request wrote no cache entry, and counting it would
+// protect a prefix nothing kept warm.
+//
+// Each row seeds BOTH its own key and, when it stored one, its session's ALIAS key: a request
+// under an explicit header id refreshed the one provider entry its conversation's headerless
+// turns read, and after a restart those turns ask for the alias key alone (their own id IS
+// the alias), so the header id's warmth alone cannot reach them. The alias is a column
+// because the body it was derived from is not stored — metadata only, the same kind of id
+// session_id is. Two limits, both documented in docs/design.md: a row written before the
+// column existed has no alias to seed, and a keep-alive ping carries no body to derive one
+// from, so a ping refreshes only the id it ran under.
 //
 // A SEPARATE map from SeedSessions' recency, and a SEPARATE query, because the two clocks
 // answer different questions and must not re-date each other: attribution asks "when was this
@@ -797,10 +825,11 @@ func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
 	}
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, MAX(r.ts) FROM requests r
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.session_alias, MAX(r.ts) FROM requests r
 		WHERE r.ts >= ? AND r.session_id != ''
+			AND r.status >= 200 AND r.status < 300
 			AND (r.keepalive = 0 OR (r.keepalive = 1 AND r.cache_read > 0))
-		GROUP BY r.session_id, r.thread_id`,
+		GROUP BY r.session_id, r.thread_id, r.session_alias`,
 		now-staleSession)
 	if err != nil {
 		return 0, err
@@ -808,12 +837,15 @@ func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
 	defer rows.Close()
 	seeded := map[string]int64{}
 	for rows.Next() {
-		var sid, tid string
+		var sid, tid, alias string
 		var ts int64
-		if err := rows.Scan(&sid, &tid, &ts); err != nil {
+		if err := rows.Scan(&sid, &tid, &alias, &ts); err != nil {
 			return 0, err
 		}
 		seeded[thread.Key(sid, tid)] = ts
+		if alias != "" && alias != sid {
+			seeded[thread.Key(alias, tid)] = ts
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err

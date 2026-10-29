@@ -101,9 +101,13 @@ type Tracker struct {
 	// that read the cache. It is the PRIMARY clock of the restart grace (#766): the thread's
 	// own idle gap decides whether its prefix can still be cached, where the proxy's start
 	// time cannot tell a new thread from a long-idle one. Nil (no database, dashboard off)
-	// means the fallback above. Called under t.mu, so it must not call back into this
+	// means the fallback above, and so does the third return value: have=false says "cannot
+	// answer for this key" — the host wires the lookup process-wide but a tenant running
+	// observe mode records no session ids, so for that tenant's keys there is nothing to look
+	// up and the start-time fallback must answer, where a miss (have=true, known=false) would
+	// read every warm thread as new. Called under t.mu, so it must not call back into this
 	// tracker.
-	lastSeen func(key string) (atMs int64, ok bool)
+	lastSeen func(key string) (atMs int64, known, have bool)
 	// graceOn is the host's on/off switch for that rule. The length is not ours to choose: each
 	// request carries its own cache lifetime, and the caller passes it to TurnFrom. A benchmark
 	// that sends whole transcripts to a fresh proxy switches the rule off (false) so it measures
@@ -163,11 +167,13 @@ func (t *Tracker) SetRestartGrace(on bool) {
 // by the thread's own last request or by a keep-alive ping that read the cache; the host
 // decides what counts. The proxy sets it from the dashboard recorder, which reloads that time
 // per thread at startup; the library itself must not import dash, so the host hands the
-// function in. With no lookup set (no database, dashboard off), the grace keeps #759's
-// start-time rule. Startup setting, like SetRestartGrace. The lookup runs under the
+// function in. Three answers: known=true carries the timestamp; known=false with have=true
+// says "looked, never seen" (a new thread); have=false says "cannot answer for this key"
+// (no database, or a deployment whose rows carry no session id), and #759's start-time rule
+// answers instead. Startup setting, like SetRestartGrace. The lookup runs under the
 // tracker's lock, so it must not call back into the tracker; a panic inside it reads as
 // "no lookup", so a broken lookup cannot fail a request.
-func (t *Tracker) SetLastSeen(f func(key string) (atMs int64, ok bool)) {
+func (t *Tracker) SetLastSeen(f func(key string) (atMs int64, known, have bool)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.lastSeen = f
@@ -228,8 +234,9 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64, grace time.Duration
 // passes it as grace) the key reads as all-cached, because the process forgot the record, not
 // the provider the prefix; past it the thread is expired — cold, not new. A key the lookup does
 // not know under either id is a really new thread: nothing is cached, so its first request is
-// editable as usual. Without a lookup (no database, dashboard off), #759's start-time rule
-// answers instead, and the host can switch the grace off entirely (SetRestartGrace).
+// editable as usual. Without a lookup (no database, dashboard off, or one that declines the
+// key — an observe-mode deployment records no session ids), #759's start-time rule answers
+// instead, and the host can switch the grace off entirely (SetRestartGrace).
 func (t *Tracker) TurnFrom(key, parent, aliasKey, aliasParent string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -330,8 +337,8 @@ func (t *Tracker) lastSeenLocked(key string) (atMs int64, known, have bool) {
 			atMs, known, have = 0, false, false
 		}
 	}()
-	at, ok := t.lastSeen(key)
-	return at, ok, true
+	at, known, have := t.lastSeen(key)
+	return at, known, have
 }
 
 // pruneLocked makes room for one new key. It first expires every key idle past StaleAfter

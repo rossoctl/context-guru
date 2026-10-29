@@ -38,11 +38,11 @@ func TestTheRestartGraceAsksForTheAliasSessionIdToo(t *testing.T) {
 	// restart recorded the thread under the alias alone.
 	tr := modes.NewTracker(0)
 	now := base.Add(10 * time.Minute)
-	tr.SetLastSeen(func(key string) (int64, bool) {
+	tr.SetLastSeen(func(key string) (int64, bool, bool) {
 		if key == explicitKey {
-			return 0, false
+			return 0, false, true
 		}
-		return now.Add(-2 * time.Minute).UnixMilli(), true
+		return now.Add(-2 * time.Minute).UnixMilli(), true, true
 	})
 
 	res := BodyOpts(context.Background(), pipe, st, Opts{

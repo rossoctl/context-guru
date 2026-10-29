@@ -15,6 +15,8 @@ import (
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/session"
 	"github.com/tidwall/gjson"
 )
 
@@ -560,6 +562,26 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	seenSession, seenModel, sinceMs, tailChanged := observe(
 		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
+	// The restart grace's clock must also learn this session's ALIAS id (#766): a seesaw-id
+	// tenant (the session header on some turns, not others) refreshes the ONE provider entry
+	// under either id, so a later headerless turn — whose own derived id IS the alias — must
+	// find this turn's warmth under the key it will ask for. The derivation is the same one
+	// apply uses (session.Scoped over the normalized head), off the same lazy norm() WaitCause
+	// shares, so the two never disagree about which id a body derives. A closure for the same
+	// reason WaitCause is one: the body scan runs on the writer goroutine, not the handler's
+	// defer. Only set when this row ran under a session id at all — observe-mode rows carry
+	// none — and the closure answers '' when the alias is the request's own id (a headerless
+	// turn), which observe() above already touched.
+	if e.SessionID != "" {
+		e.AliasFn = func() string {
+			sys, firstUser := schema.SessionHead(norm())
+			alias := session.Scoped(tenantID, "", sys, firstUser)
+			if alias == sessionID {
+				return ""
+			}
+			return alias
+		}
+	}
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
 	//

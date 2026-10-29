@@ -326,11 +326,11 @@ func TestTheGraceUsesTheThreadsLastRequestNotTheProxyStart(t *testing.T) {
 		newTr := func() *Tracker {
 			tr := NewTracker(0)
 			tr.startedAtMs = t0 - time.Minute.Milliseconds()
-			tr.SetLastSeen(func(key string) (int64, bool) {
+			tr.SetLastSeen(func(key string) (int64, bool, bool) {
 				if key != "known" {
-					return 0, false
+					return 0, false, true
 				}
-				return t0 - c.lastSeen.Milliseconds(), true
+				return t0 - c.lastSeen.Milliseconds(), true, true
 			})
 			return tr
 		}
@@ -352,7 +352,7 @@ func TestAnUnknownThreadToTheLookupIsReallyNew(t *testing.T) {
 	t0 := int64(1_700_000_000_000)
 	tr := NewTracker(0)
 	tr.startedAtMs = t0 - time.Minute.Milliseconds()
-	tr.SetLastSeen(func(key string) (int64, bool) { return 0, false })
+	tr.SetLastSeen(func(key string) (int64, bool, bool) { return 0, false, true })
 	if n, at := tr.TurnAt("brand-new", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("unknown thread to the lookup = (%d, %d), want (0, 0): really new, no grace", n, at)
 	}
@@ -385,22 +385,22 @@ func TestTheGraceAsksTheAliasKeyToo(t *testing.T) {
 		newTr := func() *Tracker {
 			tr := NewTracker(0)
 			tr.startedAtMs = t0 - time.Minute.Milliseconds()
-			tr.SetLastSeen(func(key string) (int64, bool) {
+			tr.SetLastSeen(func(key string) (int64, bool, bool) {
 				switch key {
 				case "primary":
 					if c.primaryAt != 0 {
-						return c.primaryAt, true
+						return c.primaryAt, true, true
 					}
 				case "alias":
 					if c.aliasAt != 0 {
-						return c.aliasAt, true
+						return c.aliasAt, true, true
 					}
 				case "parent-alias":
 					if c.aliasParent != 0 {
-						return c.aliasParent, true
+						return c.aliasParent, true, true
 					}
 				}
-				return 0, false
+				return 0, false, true
 			})
 			return tr
 		}
@@ -412,11 +412,11 @@ func TestTheGraceAsksTheAliasKeyToo(t *testing.T) {
 	// the parent's prefix, so the parent's alias key is the clock that protects it.
 	tr := NewTracker(0)
 	tr.startedAtMs = t0 - time.Minute.Milliseconds()
-	tr.SetLastSeen(func(key string) (int64, bool) {
+	tr.SetLastSeen(func(key string) (int64, bool, bool) {
 		if key == "parent-alias" {
-			return t0 - 2*time.Minute.Milliseconds(), true
+			return t0 - 2*time.Minute.Milliseconds(), true, true
 		}
-		return 0, false
+		return 0, false, true
 	})
 	if n, at := tr.TurnFrom("fork", "parent", "fork-alias", "parent-alias", 925, t0, 5*time.Minute); n != 925 || at != 0 {
 		t.Fatalf("fork of an alias-refreshed parent = (%d, %d), want (925, 0)", n, at)
@@ -430,9 +430,26 @@ func TestAPanickingLookupFallsBackToTheStartTimeRule(t *testing.T) {
 	t0 := int64(1_700_000_000_000)
 	tr := NewTracker(0)
 	tr.startedAtMs = t0 - time.Minute.Milliseconds()
-	tr.SetLastSeen(func(key string) (int64, bool) { panic("broken lookup") })
+	tr.SetLastSeen(func(key string) (int64, bool, bool) { panic("broken lookup") })
 	if n, at := tr.TurnAt("known", 925, t0, 5*time.Minute); n != 925 || at != 0 {
 		t.Fatalf("panicking lookup = (%d, %d), want (925, 0): the start-time rule answers", n, at)
+	}
+}
+
+// A lookup that DECLINES the key (have=false) is not a miss (#766, round 3): a hosted tenant
+// running observe mode records no session ids, so its keys have nothing to look up, and the
+// start-time fallback must answer — where a miss would read every warm thread as new. This is
+// the answer a panic already gets, stated as a first-class case: the host decides per key.
+func TestADecliningLookupFallsBackToTheStartTimeRule(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	tr := NewTracker(0)
+	tr.startedAtMs = t0 - time.Minute.Milliseconds()
+	tr.SetLastSeen(func(key string) (int64, bool, bool) { return 0, false, false })
+	if n, at := tr.TurnAt("warm-but-unrecorded", 925, t0, 5*time.Minute); n != 925 || at != 0 {
+		t.Fatalf("declined key = (%d, %d), want (925, 0): the start-time rule answers", n, at)
+	}
+	if n, at := tr.TurnFrom("side", "nobody", "", "", 925, t0, 5*time.Minute); n != 925 || at != 0 {
+		t.Fatalf("fork of a declined parent = (%d, %d), want (925, 0): the start-time rule answers", n, at)
 	}
 }
 
@@ -442,7 +459,7 @@ func TestASwitchedOffGraceBeatsTheLastSeenLookupToo(t *testing.T) {
 	t0 := int64(1_700_000_000_000)
 	tr := NewTracker(0)
 	tr.startedAtMs = t0 - time.Minute.Milliseconds()
-	tr.SetLastSeen(func(key string) (int64, bool) { return t0 - time.Minute.Milliseconds(), true })
+	tr.SetLastSeen(func(key string) (int64, bool, bool) { return t0 - time.Minute.Milliseconds(), true, true })
 	tr.SetRestartGrace(false)
 	if n, at := tr.TurnAt("known", 925, t0, 5*time.Minute); n != 0 || at != 0 {
 		t.Fatalf("grace off, recent last-seen = (%d, %d), want (0, 0): never protected", n, at)

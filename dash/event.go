@@ -137,6 +137,19 @@ type Event struct {
 	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
 	// "p:" id.
 	ThreadID string `json:"thread_id"`
+	// SessionAlias is the session's content-derived alias id (session.Scoped over the
+	// normalized head), stored so the restart grace's seed can reload the warmth a request
+	// under an EXPLICIT header id also left under the alias id: a later headerless turn
+	// derives exactly that alias and asks for it alone (#766). '' on a row with no separate
+	// alias — a headerless request's own id IS the alias, and a keep-alive ping carries no
+	// body to derive one from — and on every row written before the column existed, which is
+	// the documented limit of the seed: the alias warmth of history is gone.
+	SessionAlias string `json:"session_alias,omitempty"`
+	// AliasFn fills SessionAlias and touches the grace clock under the alias key, on the
+	// WRITER goroutine (Recorder.run's write(), beside WaitCause) — never on the request
+	// path: the derivation normalizes the whole body, the same scan WaitCause pays, and
+	// finish() runs on the handler's own defer. nil on a row with no session id.
+	AliasFn func() string `json:"-"`
 	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
 	// from the request body and the response's own tool calls/stop reason, by string match
 	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every

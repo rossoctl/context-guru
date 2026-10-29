@@ -321,8 +321,21 @@ only while that thread's cached prefix was last refreshed inside the request's c
 thread's own last request or a keep-alive ping that read the cache, under either session id the
 conversation uses (an explicit header on some turns, a content-derived id on others). The
 refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
-the dashboard off — and always in observe mode, whose rows carry no session id — the fallback
-is the proxy's start time, and `--restart-grace=false` switches the rule off in every case.
+the dashboard off the fallback is the proxy's start time, and `--restart-grace=false` switches
+the rule off in every case.
+
+The recorder learns a refresh under BOTH session ids a conversation uses: the request's own
+id, and the content-derived alias id (the capture path derives it off the body, on the
+writer goroutine, and stores it on the row). That is what makes the alias widening hold in
+both directions — a headerless turn asks for the alias id alone, because its own derived id
+IS the alias, so the header turns' warmth must already sit under that key. The startup seed
+recovers both keys from the requests table, with two limits: a row written before the alias
+column existed has no alias to recover, so a seesaw-id tenant's first headerless request
+after an UPGRADE can read as expired (one turn, once), and a keep-alive ping carries no body
+to derive an alias from, so a ping refreshes only the id it ran under. In hosted mode a
+tenant running observe mode gets the start-time fallback instead of the lookup: its rows
+carry no session id, so the lookup declines that tenant's keys rather than answering every
+one with a miss.
 
 The recorder holds that refresh time in a bounded map. Pruning runs only once it passes 20,000
 entries, by age (two silent hours); if even that frees nothing, the last resort empties the map

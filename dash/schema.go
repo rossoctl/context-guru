@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS requests (
   -- record them -- so it can report spend and can never support a waste verdict. '' rather than
   -- a word for measured, since every row written before this column existed is measured.
   source             TEXT    NOT NULL DEFAULT '',
+  -- The session's content-derived ALIAS id (session.Scoped over the normalized head), stored
+  -- so the restart grace's seed can reload the warmth a request under an EXPLICIT header id
+  -- also left under the alias id (#766): the conversation's later headerless turns derive
+  -- exactly this id. '' when there is no separate alias, and on every row written before this
+  -- column existed. A hash, not content: the same kind of id session_id itself is.
+  session_alias      TEXT    NOT NULL DEFAULT '',
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -716,6 +722,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
