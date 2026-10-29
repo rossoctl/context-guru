@@ -371,11 +371,19 @@ func (r *Recorder) evictSessions(cands []coldCandidate) (int64, error) {
 			// full, which is what this option asks for.
 			continue
 		}
+		// The alias ids are read before the rows go: the state under them must leave with
+		// the session's own (#772). Best effort, like the cleanup itself: a failed read
+		// only means the alias rows wait for retention.
+		aliases, aerr := r.db.sessionAliases(c.SessionID)
+		if aerr != nil {
+			slog.Warn("dash: could not read the aliases of a session being evicted",
+				"session", c.SessionID, "err", aerr)
+		}
 		res, derr := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
 		if derr != nil {
 			return freed, derr
 		}
-		r.db.deleteSessionState(c.SessionID)
+		r.db.deleteSessionState([]string{c.SessionID}, aliases)
 		d, _ := res.RowsAffected()
 		freed += d
 		// Not a warning about a retry — a statement that data is gone. Anyone reading

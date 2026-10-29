@@ -334,11 +334,19 @@ func (r *Recorder) ArchiveSessionFull(ctx context.Context, c coldCandidate) (int
 	if err := r.putVerified(ctx, path, blob); err != nil {
 		return 0, err
 	}
+	// The alias ids are read before the rows go: the state under them must leave with the
+	// session's own (#772). Best effort, like the cleanup itself: a failed read only means
+	// the alias rows wait for retention.
+	aliases, aerr := r.db.sessionAliases(c.SessionID)
+	if aerr != nil {
+		slog.Warn("dash: could not read the aliases of a session being archived",
+			"session", c.SessionID, "err", aerr)
+	}
 	res, err := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
 	if err != nil {
 		return 0, err
 	}
-	r.db.deleteSessionState(c.SessionID) // archived: its summary checkpoint goes with its rows
+	r.db.deleteSessionState([]string{c.SessionID}, aliases) // archived: its state goes with its rows
 	n, _ := res.RowsAffected()
 	if err := r.db.markArchived(c, ArchiveFull, path, int64(len(blob)), r.remote.Describe()); err != nil {
 		return n, err

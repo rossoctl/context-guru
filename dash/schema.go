@@ -662,6 +662,13 @@ const additiveDDL2 = `
 -- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
 -- so on an existing database the column the index names does not exist yet.
 CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
+-- The session_alias arm of the state cleanup's in-use check (#772): which keys a deleted
+-- session's own id and aliases still have users for. idx_requests_session covers the
+-- session_id arm; without this index the alias arm is a full scan of requests per eviction
+-- pass, on the writer goroutine — the repo's own measurement puts one full scan of this
+-- table at 2.0 s over 1.58 M rows. Here and not in additiveDDL for the same reason as
+-- idx_requests_project above: that phase runs before the column exists.
+CREATE INDEX IF NOT EXISTS idx_requests_session_alias ON requests(session_alias);
 -- Deferred MCP rows (tool_declarations.deferred), for deferredNames on every inventory read and
 -- IsDeferredDecl on a filter write. Partial, so it holds only those rows and costs nothing on a
 -- database without them. Here for the same reason as idx_requests_project: it names a column
