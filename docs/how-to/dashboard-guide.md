@@ -36,7 +36,7 @@ The "i" next to the title says how the total is added up. Every part is already 
 
 **One card for each part.** Each card shows the **money saved**, out of the same "without context-guru" figure, with its percent. The percents of the three cards add up to the total's percent. Each card also shows the **tokens** it saved, out of all input tokens, with a percent. Click a card's title to open its tab.
 
-- **Cache.** Keeps your prompt cache warm while you think, so the next turn reads the cache instead of writing it again.
+- **Cache.** Keeps your prompt cache warm while you think, so the next turn reads the cache instead of writing it again. On a hosted account the title carries your cache strategy, such as `(auto)`, the default. It shows no name when your settings match no named strategy.
     - **Automatic vs manual pings.** A small breakdown: what the automatic pings (your cache strategy) saved, and what your own presses of the Ping button saved. A *cache reorder* line shows when that step also earned money.
     - **Tokens read instead of rewritten.** About how many tokens were read from the cache at the cheap rate instead of being written again. Shown with "≈" because it is worked out from the dollars.
     - **Waiting time saved.** How much time you did not wait because the cache was still warm. The "i" next to it explains the calculation (see below).

@@ -63,3 +63,15 @@ test('cache writes prevented count real requests; manual pings are kept apart, n
   assert.deepEqual(writesPrevented({ keepalive_misses_avoided: 7, manual_pings: { writes_avoided: 2 } }), { requests: 7, manual: 2 });
   assert.deepEqual(writesPrevented({}), { requests: 0, manual: 0 });
 });
+
+test('the cache strategy name is read back from the settings, and only for a named strategy', () => {
+  const { strategyName } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(strategyName({ keepalive: true }), 'auto'); // the proxy defaults are auto's numbers
+  assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 240, keepalive_max_pings: 2, keepalive_max_pings_1h: 1 }), 'auto');
+  assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 1 }), '1-ping');
+  assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 2, keepalive_max_pings_1h: 2 }), '2-ping');
+  assert.equal(strategyName({ head_ttl_1h: true }), '1-hour-head');
+  assert.equal(strategyName({}), 'none');
+  assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 120 }), ''); // hand-tuned: no name
+  assert.equal(strategyName(null), '');
+});

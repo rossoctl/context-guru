@@ -40,6 +40,22 @@ function writesPrevented(o) {
   return { requests: o.keepalive_misses_avoided || 0, manual: (o.manual_pings && o.manual_pings.writes_avoided) || 0 };
 }
 
+// The cache strategy's plugin name (context-guru-plugin/scripts/settings.py STRATEGIES), read back from
+// the account's cache settings: they hold numbers, not the name. '' when the settings match no named
+// strategy, so a hand-tuned account is never given a name it did not pick. Missing fields take the
+// proxy defaults (240 s; 2 pings; 1 ping on a 1-hour cache). The hosted settings form has no 1-hour
+// ping count, so there 2 pings reads as `auto`, the plugin's default, and not as `2-ping`.
+function strategyName(c) {
+  if (!c) return '';
+  if (!c.keepalive) return c.head_ttl_1h ? '1-hour-head' : 'none';
+  if ((c.keepalive_idle_seconds || 240) !== 240) return '';
+  const k = c.keepalive_max_pings || 2, k1h = c.keepalive_max_pings_1h || 1;
+  if (k === 1 && k1h === 1) return '1-ping';
+  if (k === 2 && k1h === 1) return 'auto';
+  if (k === 2 && k1h === 2) return '2-ping';
+  return '';
+}
+
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.
 // '' when there is nothing to say. `fmt` formats dollars.
 function capNote(o, fmt) {
@@ -53,4 +69,4 @@ function capNote(o, fmt) {
   return '';
 }
 
-if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented };
+if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName };

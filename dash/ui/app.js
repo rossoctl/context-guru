@@ -1782,7 +1782,12 @@ function renderSavedLedger(o, ka, partial) {
     el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') }),
       el('strong', { text: usd(parts.manual) })),
     parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
-  grid.appendChild(card('cache', 'saved-cache', 'Cache', '#/keepalive',
+  // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside
+  // "Preset". Read from the signed-in account's own settings; not guessed for a manager looking at
+  // everyone, nor for a local proxy, whose page does not see the plugin's strategy file.
+  const tn = account && account.tenant;
+  const sName = tn && tn.role !== 'manager' ? strategyName((tn.effective_config || {}).cache) : '';
+  grid.appendChild(card('cache', 'saved-cache', 'Cache' + (sName ? ' (' + sName + ')' : ''), '#/keepalive',
     'Keeps your prompt cache warm while you think, so the next turn reads it instead of writing it again.',
     [
       money('saved-cache-usd', cacheUSD, cacheRan),
