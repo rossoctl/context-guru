@@ -41,7 +41,7 @@ The "i" next to the title says how the total is added up. Every part is already 
     - **Tokens read instead of rewritten.** About how many tokens were read from the cache at the cheap rate instead of being written again. Shown with "≈" because it is worked out from the dollars.
     - **Waiting time saved.** How much time you did not wait because the cache was still warm. The "i" next to it explains the calculation (see below).
     - **Cache writes prevented.** How many real requests read a cache that would have expired without context-guru. Under it, "up to N more" counts your manual pings that found the cache warm. A ping is not a request you waited on, and two presses can find the same cache warm, so that part is an upper bound.
-- **Preset.** Removes old tool output and repeated text before it reaches the model. The card title carries the name of your preset.
+- **Preset.** Removes old tool output and repeated text before it reaches the model. The card title carries the name of your preset, such as `(xhigh)`. When less than 90% of the requests ran one preset, it says `(mostly xhigh)`.
 - **Tools and skills filter.** Leaves the tool and skill definitions the model does not need out of the prompt.
 
 **How the waiting time is worked out.** A request that must write the cache again is slower than a request that reads it.

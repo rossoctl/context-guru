@@ -13,6 +13,8 @@ def ins(table, d):
 for s in range(48):
     sid = 'demo-session-%03d' % s
     model = 'claude-haiku-4-5' if s % 5 == 0 else 'claude-sonnet-4-5'
+    # The Claude Code plugin's preset tiers. Most sessions on the top one.
+    preset = 'xhigh' if s % 12 else 'high'
     pin, prd, pwr, pout = P[model]
     t = now - random.randint(0, 13)*DAY - random.randint(0, DAY//2)
     # Large enough that some sessions pass 100k tokens: the Overview measures cache latency there.
@@ -40,7 +42,7 @@ for s in range(48):
         up = (random.uniform(9000, 16000) if miss != 'hit' else random.uniform(5000, 9000)) if big else random.uniform(900, 6000)
         kasv = round(random.uniform(.02, .35), 4) if ka and miss == 'hit' and i > 3 else 0
         rid = ins('requests', dict(ts=t, tenant_id='', session_id=sid, model=model, provider='anthropic', agent='claude-code',
-            preset='general', mode='active', route='/v1/messages', status=200, messages=i*2+1, tokens_before=before, tokens_after=after,
+            preset=preset, mode='active', route='/v1/messages', status=200, messages=i*2+1, tokens_before=before, tokens_after=after,
             attempted_tokens=int(before*.5), frozen_tokens=int(before*.45), saved_unique=unique, fresh_input=fr, cache_read=rd, cache_write=wr,
             output_tokens=out_t, cost_usd=cost, baseline_cost_usd=base, cg_llm_cost_usd=(0.004 if unique > 2000 and random.random() < .5 else 0),
             cg_latency_ms=random.uniform(5, 60), upstream_ms=up, token_accounting='complete', filtered_decl_tokens=fdt, decl_digest=dig, cache_saved_usd=rd*(pin-prd)/1e6,

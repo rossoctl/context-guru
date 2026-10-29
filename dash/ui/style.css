@@ -1592,7 +1592,6 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .ov-info[open] { flex-basis: 100%; }
 .ov-fig-k .ov-info[open] .tile-why-body { text-transform: none; letter-spacing: normal; }
 
-
 /* tools and skills to remove */
 .reco-list { list-style: none; margin: 0; padding: 0; }
 .reco-row { display: grid; grid-template-columns: 96px minmax(120px, 1fr) minmax(160px, 2fr) auto; gap: var(--sp-3);
@@ -1810,5 +1809,3 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 #strategy-form fieldset.field > label { display: block; margin-top: var(--sp-2); }
 #strategy-form #sf-target-ids { height: auto; max-width: 28rem; }
 #strategy-form fieldset.field > label:last-of-type { display: flex; flex-direction: column; gap: var(--sp-2); }
-
-

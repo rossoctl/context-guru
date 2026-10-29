@@ -1744,6 +1744,7 @@ function renderSavedLedger(o, ka, partial) {
       infoButton('total', 'Total saved', [
         'Total saved is the sum of the parts below: the cache, your preset, and the tools and skills filter.',
         'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
+        'The cache part is the most it could have saved: another session can keep the same cache warm. The preset and filter parts are estimates.',
         '"Without context-guru" is what you spent plus what was saved. The percent is the saved share of that.',
         'The provider’s own cache discount is not counted. You get it with or without context-guru.',
       ])),
