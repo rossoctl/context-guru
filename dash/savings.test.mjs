@@ -58,8 +58,8 @@ test('an empty window has no percent, not NaN', () => {
   assert.equal(t.pct, 0); assert.equal(t.without, 0);
 });
 
-test('cache writes prevented are the automatic ones plus the manual pings that found the cache warm', () => {
+test('cache writes prevented count real requests; manual pings are kept apart, not added', () => {
   const { writesPrevented } = createRequire(import.meta.url)('./ui/savings.js');
-  assert.equal(writesPrevented({ keepalive_misses_avoided: 7, manual_pings: { writes_avoided: 2 } }), 9);
-  assert.equal(writesPrevented({}), 0);
+  assert.deepEqual(writesPrevented({ keepalive_misses_avoided: 7, manual_pings: { writes_avoided: 2 } }), { requests: 7, manual: 2 });
+  assert.deepEqual(writesPrevented({}), { requests: 0, manual: 0 });
 });

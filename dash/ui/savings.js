@@ -1,4 +1,4 @@
-// The Overview's three savings as plain numbers: no DOM, so dash/savings.test.mjs can check that they
+// The Overview's savings as plain numbers: no DOM, so dash/savings.test.mjs can check that they
 // add up to the server's own total_saved_usd.
 //
 //   cache       keep-alive's net (an upper bound) plus the cache-reorder credit (what moving the stable part
@@ -32,10 +32,12 @@ function overviewTotals(o) {
   return { saved: p.total, spent, without, pct: share(p.total), share, parts: p };
 }
 
-// The cache writes context-guru prevented: real requests that resumed after the cache would have
-// expired and read it anyway (automatic pings), plus the user's own pings that found it warm.
+// The cache writes context-guru prevented. `requests` is real requests that resumed after the cache
+// would have expired and read it anyway: a measured count, and what the waiting time multiplies.
+// `manual` is the user's own pings that found the cache warm. A ping is not a request anyone waited
+// on, and a later ping can find the same entry warm, so it is an upper bound and kept apart.
 function writesPrevented(o) {
-  return (o.keepalive_misses_avoided || 0) + ((o.manual_pings && o.manual_pings.writes_avoided) || 0);
+  return { requests: o.keepalive_misses_avoided || 0, manual: (o.manual_pings && o.manual_pings.writes_avoided) || 0 };
 }
 
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.

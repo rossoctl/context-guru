@@ -9,8 +9,9 @@ package dash
 // instead). So it is the figure that joins total_saved_usd, and PingUSD is shown beside it for the
 // reader, not to be subtracted again.
 //
-// WritesAvoided is how many of the pings found the cache still warm, so the next turn read it
-// instead of writing it again. The Overview multiplies it by the measured write-vs-read time.
+// WritesAvoided is how many of the pings found the cache still warm (read it). It counts pings, not
+// later requests: two presses in one cache lifetime both count, so the Overview shows it as an
+// upper bound, apart from the measured count of requests.
 type ManualPings struct {
 	Count         int64   `json:"count"`
 	PingUSD       float64 `json:"ping_usd"`
@@ -44,4 +45,4 @@ const manualPing = `r.keepalive = 1 AND r.manual_ping = 1`
 const manualSelect = `COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.cost_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.manual_saved_usd ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN ` + manualPing + ` AND r.manual_saved_usd > 0 THEN 1 ELSE 0 END),0)`
+			COALESCE(SUM(CASE WHEN ` + manualPing + ` AND r.cache_read > 0 THEN 1 ELSE 0 END),0)`

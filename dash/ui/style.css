@@ -1591,7 +1591,7 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .ov-info { margin-top: 0; padding-top: 0; }
 .ov-info[open] { flex-basis: 100%; }
 .ov-fig-k .ov-info[open] .tile-why-body { text-transform: none; letter-spacing: normal; }
-.ov-foot { margin-top: var(--sp-3); max-width: 80ch; }
+
 
 /* tools and skills to remove */
 .reco-list { list-style: none; margin: 0; padding: 0; }
@@ -1789,8 +1789,6 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 @keyframes plot-grow { from { transform: scaleY(0); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .plot-line, .plot-col { animation: none; } .dv-bar { transition: none; } }
 
-/* an upper bound is drawn as a possibility, not as money in the bank */
-
 /* ═══ components ═══ */
 [data-testid=components-table] td:first-child .hint { margin: 0; max-width: 34ch; white-space: normal; }
 [data-testid=components-table] td:first-child strong { font-weight: 600; }
@@ -1813,5 +1811,4 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 #strategy-form #sf-target-ids { height: auto; max-width: 28rem; }
 #strategy-form fieldset.field > label:last-of-type { display: flex; flex-direction: column; gap: var(--sp-2); }
 
-/* the cache row's parts and the section total */
 

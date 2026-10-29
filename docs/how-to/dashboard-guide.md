@@ -25,14 +25,14 @@ tab's title says so. The sample data on these screenshots is invented (`scripts/
 
     ![The Overview tab, dark theme](../img/dashboard/overview-dark.png)
 
-**Total saved by context-guru.** One big number: the sum of every part below. Under it:
+**Total saved by context-guru.** One big number: the sum of every part below. It appears when the full figures have loaded; before that the card says "Loading…". Under it:
 
 - **Out of what.** "$30.30 saved, out of $245.62 without context-guru". *Without context-guru* is what you spent plus what was saved.
 - **The percent.** The saved share of that figure, for example **12% saved**.
 - **What you spent instead.** What the provider billed, plus our own model calls and pings.
 - **Input tokens removed.** The tokens your preset and the filter took out, out of all the input tokens the same traffic would have sent, with a percent.
 
-The "i" next to the title says how the total is added up. Every part is already net of what context-guru spent to make it. The provider's own cache discount is not counted: you get it with or without context-guru.
+The "i" next to the title says how the total is added up. Every part is already net of what context-guru spent to make it. The cache part is the most it could have saved (another session can keep the same cache warm); the preset and filter parts are estimates. The provider's own cache discount is not counted: you get it with or without context-guru.
 
 **One card for each part.** Each card shows the **money saved**, out of the same "without context-guru" figure, with its percent. The percents of the three cards add up to the total's percent. Each card also shows the **tokens** it saved, out of all input tokens, with a percent. Click a card's title to open its tab.
 
@@ -40,15 +40,15 @@ The "i" next to the title says how the total is added up. Every part is already 
     - **Automatic vs manual pings.** A small breakdown: what the automatic pings (your cache strategy) saved, and what your own presses of the Ping button saved. A *cache reorder* line shows when that step also earned money.
     - **Tokens read instead of rewritten.** About how many tokens were read from the cache at the cheap rate instead of being written again. Shown with "≈" because it is worked out from the dollars.
     - **Waiting time saved.** How much time you did not wait because the cache was still warm. The "i" next to it explains the calculation (see below).
-    - **Cache writes prevented.** How many times a request read a warm cache instead of writing it again, split into automatic and manual.
+    - **Cache writes prevented.** How many real requests read a cache that would have expired without context-guru. Under it, "up to N more" counts your manual pings that found the cache warm. A ping is not a request you waited on, and two presses can find the same cache warm, so that part is an upper bound.
 - **Preset.** Removes old tool output and repeated text before it reaches the model. The card title carries the name of your preset.
 - **Tools and skills filter.** Leaves the tool and skill definitions the model does not need out of the prompt.
 
 **How the waiting time is worked out.** A request that must write the cache again is slower than a request that reads it.
 
 1. The dashboard takes the large requests (100,000 tokens or more) in the selected period. Large requests are used because small ones vary too much for a fair comparison.
-2. It averages the time of the requests that read the cache, and of those that wrote it. On the screenshot: 12.2 s for a write and 7.0 s for a read, so **5.2 s** saved each time.
-3. Waiting time saved = that gap × the cache writes prevented.
+2. It averages the time of the requests that read the cache, and of those that wrote it. On the screenshot: 12.2 s for a write and 7.0 s for a read, so **5.2 s** saved each time, × 47 requests = about 4 minutes.
+3. Waiting time saved = that gap × the cache writes prevented. Only real requests count. Manual pings do not, because nobody waited on a ping.
 4. It needs at least 20 requests of each kind. With fewer, it shows "—" and says it cannot measure it yet.
 
 ![The Overview with the waiting-time explanation open](../img/dashboard/overview-info-light.png)

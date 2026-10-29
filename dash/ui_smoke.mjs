@@ -43,7 +43,7 @@ async function visit(view) {
       intro: head && !head.hidden ? (head.querySelector('.tab-intro') || {}).textContent : '',
       errors: panel ? [...panel.querySelectorAll('.empty.error, [role=alert]')].map((e) => e.textContent.trim().slice(0, 120)) : [],
       text: panel ? panel.innerText : '',
-      headings: panel ? [...panel.querySelectorAll('h1,h2,h3,summary,.lv-name h3,dt')].map((e) => e.textContent) : [],
+      headings: panel ? [...panel.querySelectorAll('h1,h2,h3,summary,dt')].map((e) => e.textContent) : [],
     };
   }, view);
   if (!info.visible) failures.push(`${view}: its panel did not open`);

@@ -68,7 +68,7 @@ func TestStatsReportsManualPingsApartFromTheKeepAlive(t *testing.T) {
 				t.Errorf("manual_pings = %v, want count 2, ping_usd 0.02, saved_usd 0.18 (net of the pings)", mp)
 			}
 			if mp["writes_avoided"].(float64) != 2 {
-				t.Errorf("manual_pings.writes_avoided = %v, want 2: both pings avoided a write", mp["writes_avoided"])
+				t.Errorf("manual_pings.writes_avoided = %v, want 2: both pings found the cache warm", mp["writes_avoided"])
 			}
 			if body["keepalive_pings"].(float64) != 1 || !near(body["keepalive_ping_usd"].(float64), 0.02) {
 				t.Errorf("the automatic keep-alive ledger counted manual pings: pings %v usd %v",
@@ -79,6 +79,22 @@ func TestStatsReportsManualPingsApartFromTheKeepAlive(t *testing.T) {
 				t.Errorf("total_saved_usd = %v, want 0.17", got)
 			}
 		})
+	}
+}
+
+// A manual ping that found the cache cold wrote it instead of reading it. It is not a write avoided.
+func TestManualPingThatMissedIsNoWriteAvoided(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	cold := manualRow(now-30_000, "s1", 0.05, 0)
+	cold.CacheRead, cold.CacheWrite = 0, 5000
+	seed(t, rec, manualRow(now-40_000, "s1", 0.01, 0.15), cold)
+	for _, path := range []string{"/api/stats?session=s1", "/api/stats?lean=1&session=s1"} {
+		_, body := get(t, a, path, "")
+		mp := body["manual_pings"].(map[string]any)
+		if mp["count"].(float64) != 2 || mp["writes_avoided"].(float64) != 1 {
+			t.Errorf("%s: manual_pings = %v, want count 2 and writes_avoided 1 (the cold ping wrote)", path, mp)
+		}
 	}
 }
 

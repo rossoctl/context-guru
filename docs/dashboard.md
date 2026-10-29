@@ -164,7 +164,7 @@ header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context
 per line when there are several headers). The proxy never forwards it upstream.
 
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
-`manual_pings` (`count`, `ping_usd`, and `saved_usd` net of the pings' cost). They are a savings
+`manual_pings` (`count`, `ping_usd`, `saved_usd` net of the pings' cost, and `writes_avoided`: the pings that found the cache warm). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
 The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive, so with
 automatic pings on it can overlap the keep-alive credit for the same avoided write. `saved_usd` is

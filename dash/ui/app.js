@@ -1722,12 +1722,19 @@ function renderSavedLedger(o, ka, partial) {
   // and the write premium taken as 1.15x input (1.25 write less 0.10 read). Shown with "≈".
   const providerSaved = o.cache_saved_usd || 0;
   const inPrice = o.cache_read > 0 && providerSaved > 0 ? providerSaved / (0.9 * o.cache_read) : 0;
-  const cacheGross = (o.keepalive_saved_usd || 0) + (mp.saved_usd || 0) + (mp.ping_usd || 0);
+  // Both halves are write-minus-read: the automatic credit is stored that way, and the manual net
+  // (the avoided write less the ping, which is a read) is the same difference.
+  const cacheGross = (o.keepalive_saved_usd || 0) + (mp.saved_usd || 0);
   const cacheTok = inPrice > 0 && cacheGross > 0 ? cacheGross / (1.15 * inPrice) : null;
-  const writes = writesPrevented(o);
+  // Writes prevented and the waiting time count REAL requests that read a cache that would have
+  // expired. A manual ping is not a request anyone waited on, so it is shown beside, as "up to".
+  const w = writesPrevented(o);
   const lat = ka && ka.latency;
   const latKnown = !!(lat && lat.known && lat.per_miss_ms > 0);
-  const waited = latKnown && writes > 0 ? lat.per_miss_ms * writes : null;
+  const waited = latKnown && w.requests > 0 ? lat.per_miss_ms * w.requests : null;
+  // The lean first read carries the money of the cache and the preset, but not the filter or the
+  // input-token columns. Until the full read lands, nothing that needs them is drawn.
+  const ready = priced && !partial;
 
   // ── The total ──
   const totalTok = presetTok + filterTok;
@@ -1740,7 +1747,7 @@ function renderSavedLedger(o, ka, partial) {
         '"Without context-guru" is what you spent plus what was saved. The percent is the saved share of that.',
         'The provider’s own cache discount is not counted. You get it with or without context-guru.',
       ])),
-    !priced
+    !ready
       ? el('p', { class: 'ov-none', text: partial ? 'Loading…' : 'Nothing priced yet in this period.' })
       : el('div', { class: 'ov-hero-body' },
         el('div', { class: 'ov-hero-money' },
@@ -1757,7 +1764,8 @@ function renderSavedLedger(o, ka, partial) {
   // ── One card per part ──
   const money = (tid, v, ran) => !ran ? el('p', { class: 'ov-none', text: 'Nothing saved yet in this period.' })
     : !priced ? el('p', { class: 'ov-none', text: 'Not priced yet.' })
-      : ovFigure(tid, 'Money saved', usd(v), 'of ' + usd(t.without), share(v, t.without), v < 0 ? 'neg' : 'good');
+      // The "of" and the percent wait for the full read: the whole is not known before it.
+      : ovFigure(tid, 'Money saved', usd(v), ready ? 'of ' + usd(t.without) : 'Loading…', ready ? share(v, t.without) : '', v < 0 ? 'neg' : 'good');
   const card = (id, tid, title, href, what, kids, info) => el('section', { class: 'ov-card', 'data-lever': id, 'data-testid': tid },
     el('div', { class: 'ov-card-head' },
       el('h3', {}, el('a', { href, title: 'Open the tab for ' + title }, title)), info || null),
@@ -1778,7 +1786,7 @@ function renderSavedLedger(o, ka, partial) {
     [
       money('saved-cache-usd', cacheUSD, cacheRan),
       cacheRan && priced ? brk : null,
-      cacheRan ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
+      cacheRan && ready ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
         cacheTok === null ? '—' : '≈ ' + compact(cacheTok), 'of ' + compact(inputWithout) + ' tokens',
         cacheTok === null ? '' : share(cacheTok, inputWithout)) : null,
       cacheRan ? el('div', { class: 'ov-fig', 'data-testid': 'saved-cache-latency' },
@@ -1786,13 +1794,14 @@ function renderSavedLedger(o, ka, partial) {
           'A request that must write the cache again is slower than one that reads it.',
           'We measure the gap on your own traffic in this period: the average time of large requests (100k+ tokens) that read the cache, against those that wrote it.'
             + (latKnown ? ' Here: ' + waitText(lat.miss_mean_ms) + ' for a write, ' + waitText(lat.hit_mean_ms) + ' for a read, so ' + waitText(lat.per_miss_ms) + ' saved each time.' : ''),
-          'Waiting time saved = that gap × the cache writes prevented.',
+          'Waiting time saved = that gap × the cache writes prevented: real requests that read a cache that would otherwise have expired.',
+          'Manual pings are not counted here. A ping is not a request you waited on.',
           'We need at least 20 requests of each kind to measure it. With fewer, it shows "—".',
         ])),
         el('div', { class: 'ov-fig-v', text: waited === null ? '—' : waitText(waited) }),
         el('div', { class: 'ov-fig-of', text: latKnown ? waitText(lat.per_miss_ms) + ' per write prevented' : !ka ? 'Measuring…' : 'not enough requests to measure yet' })) : null,
-      cacheRan ? ovFigure('saved-cache-writes', 'Cache writes prevented', num(writes),
-        num(o.keepalive_misses_avoided || 0) + ' automatic · ' + num(mp.writes_avoided || 0) + ' manual', '') : null,
+      cacheRan ? ovFigure('saved-cache-writes', 'Cache writes prevented', num(w.requests),
+        'requests that read a warm cache' + (w.manual ? ' · up to ' + num(w.manual) + ' more from manual pings that found it warm' : ''), '') : null,
     ],
     infoButton('cache', 'Cache', [
       'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
@@ -1806,7 +1815,7 @@ function renderSavedLedger(o, ka, partial) {
     'Removes old tool output and repeated text before it reaches the model.',
     [
       money('saved-compaction-usd', parts.compaction, o.requests > 0),
-      o.requests > 0 ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
+      o.requests > 0 && !partial ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
     ]));
