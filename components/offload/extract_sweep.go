@@ -104,6 +104,7 @@ type ExtractSweep struct {
 	protectLastN         int
 	ruleUnref            bool
 	ruleUnrefMinAge      int
+	premiumUSD           float64
 
 	mode markerMode
 }
@@ -202,8 +203,11 @@ type extractSweepConfig struct {
 	ProtectLastN *int `yaml:"protect_last_n"`
 	// RuleUnreferenced switches on rule (c): drop a tool output that nothing later references. Off by default.
 	// RuleUnreferencedMinAge: how many tool calls newer the output must have (0 = 30).
-	RuleUnreferenced       bool `yaml:"rule_unreferenced"`
-	RuleUnreferencedMinAge int  `yaml:"rule_unreferenced_min_age"`
+	// CompactionPremiumUSD is an EXPERIMENT knob (sweep v3): a premium added to the saving side of the gate when a
+	// cut postpones the compaction. 0 = the cost gate. See extract_sweep_warm.go.
+	CompactionPremiumUSD   float64 `yaml:"compaction_premium_usd"`
+	RuleUnreferenced       bool    `yaml:"rule_unreferenced"`
+	RuleUnreferencedMinAge int     `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -394,7 +398,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	return &ExtractSweep{
 		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
 		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
-		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, premiumUSD: v3.premiumUSD,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
@@ -1318,7 +1322,7 @@ func init() {
 		{Key: "selector", Type: components.FieldEnum, Default: selectorJudge, Options: []string{selectorJudge, selectorRule, selectorHybrid},
 			Hint: "Sweep v3, on the warm path (needs warm: true). Who picks the outputs to drop. judge (default): the model, as before. rule: rules only, no model call: a file read whose path was read or written again later, and a build, test or lint run that a later run of the same command repeats. hybrid: the rules first, then the model on the outputs the rules did not decide. rule and hybrid switch the v3 gates on."},
 		{Key: "fill_small", Type: components.FieldFloat, Default: 0,
-			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths, protect_last_n or rule_unreferenced switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.85. fill is linear in C between 200k and 1M."},
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths, protect_last_n or rule_unreferenced switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.70 (a general rule: 70% of the effective context). fill is linear in C between 200k and 1M."},
 		{Key: "fill_large", Type: components.FieldFloat, Default: 0,
 			Hint: "Sweep v3: the sweet spot as a share of C when C is 1M or more. 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.6."},
 		{Key: "min_drop_frac", Type: components.FieldFloat, Default: 0,
@@ -1327,6 +1331,8 @@ func init() {
 			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
 		{Key: "protect_paths", Type: components.FieldStrings,
 			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
+		{Key: "compaction_premium_usd", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3, an EXPERIMENT knob to measure quality, not a tuning knob. A premium in USD added to the saving side of the payback gate when a cut postpones the compaction (the turns counted from the prompt after the cut are more than those without it, which is any cut that removes something in the cut turns model). The gate then accepts when the saving to N plus this premium is more than the rewrite. 0 (default) is the cost gate: saving to N, no premium. A high value, for example 10, effectively turns the cost gate off in a $0 test, while the real cost is still logged. Every apply-stage decision logs premium_usd and passed_on_cost. Writing it switches the v3 gates on (with warm: true)."},
 		{Key: "rule_unreferenced", Type: components.FieldBool,
 			Hint: "Sweep v3 rule (c), off by default. Drop a tool output that nothing later in the conversation references: no later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). It is the recheck's referenced_later test, run over the whole later conversation, and it never drops an output that introduced no identifier. It needs selector rule or hybrid, and it obeys every protection. Its drops are counted under unreferenced. Writing it switches the v3 gates on (with warm: true)."},
 		{Key: "rule_unreferenced_min_age", Type: components.FieldInt, Default: defaultRuleUnrefMinAge, Min: 0,

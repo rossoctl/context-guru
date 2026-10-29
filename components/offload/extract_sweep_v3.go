@@ -57,7 +57,7 @@ const (
 	selectorHybrid = "hybrid"
 
 	defaultProtectLastN = 10
-	defaultFillSmall    = 0.85
+	defaultFillSmall    = 0.70
 	defaultFillLarge    = 0.6
 	defaultMinDropFrac  = 0.15
 
@@ -86,6 +86,7 @@ type v3Config struct {
 	protectLastN         int
 	ruleUnref            bool
 	ruleUnrefMinAge      int
+	premiumUSD           float64
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
@@ -101,7 +102,7 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		return out, fmt.Errorf("extract_llm_sweep: selector %q is not one of judge, rule, hybrid", cfg.Selector)
 	}
 	if cfg.FillSmall > 0 || cfg.FillLarge > 0 || cfg.MinDropFrac > 0 || len(cfg.ProtectTools) > 0 ||
-		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil || cfg.RuleUnreferenced {
+		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil || cfg.RuleUnreferenced || cfg.CompactionPremiumUSD != 0 {
 		out.on = true
 	}
 	if !out.on {
@@ -127,6 +128,9 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		if out.protectLastN < 0 {
 			out.protectLastN = 0
 		}
+	}
+	if cfg.CompactionPremiumUSD > 0 {
+		out.premiumUSD = cfg.CompactionPremiumUSD
 	}
 	out.ruleUnref, out.ruleUnrefMinAge = cfg.RuleUnreferenced, cfg.RuleUnreferencedMinAge
 	if out.ruleUnrefMinAge <= 0 {
@@ -769,6 +773,7 @@ type v3CutRec struct {
 	p, c, d          int
 	cSource          string
 	dShareP, pShareC float64
+	gated, onPremium bool
 	rules            map[string]int
 	judge            int
 	set              bool
@@ -846,7 +851,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 			}
 			return false, reason
 		}
-		*cut = v3CutRec{p: P, c: C, cSource: cSource, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
+		*cut = v3CutRec{p: P, c: C, cSource: cSource, gated: true, onPremium: !wa.passedOnCost, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
 		for _, o := range res.Valid {
 			if r, isRule := src.ruleOf[o.ToolUseID]; isRule {
 				cut.rules[r]++
@@ -887,6 +892,10 @@ type V3Stats struct {
 	// HybridRulesOnly counts hybrid attempts that went ahead on the rules alone: the judge gave no answer.
 	HybridRulesOnly int64 `json:"hybrid_rules_only,omitempty"`
 	Cuts            int64 `json:"cuts"`
+	// CutsOnCost and CutsOnPremium split the accepted, gated cuts by whether the saving to N beat the rewrite alone
+	// or needed compaction_premium_usd. A cold or changed-prefix cut runs no gate and is in neither.
+	CutsOnCost    int64 `json:"cuts_on_cost,omitempty"`
+	CutsOnPremium int64 `json:"cuts_on_premium,omitempty"`
 	// CSource counts the sweet-spot checks by where C came from: cutfrac (a summarizer's fraction of the effective
 	// context), compaction (the compaction point: operator, measured or assumed) or window (the model's window).
 	CSource map[string]int64 `json:"c_source,omitempty"`
@@ -939,7 +948,7 @@ func noteV3Expand(rule string) {
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.CutsOnCost > 0 || s.CutsOnPremium > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -1012,6 +1021,13 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 	}
 	v3Ledger.JudgeDrops += int64(r.judge)
 	v3Ledger.Cuts++
+	if r.gated {
+		if r.onPremium {
+			v3Ledger.CutsOnPremium++
+		} else {
+			v3Ledger.CutsOnCost++
+		}
+	}
 	v3Ledger.Recent = append(v3Ledger.Recent, V3Cut{Thread: threadLabel(tkey), AtMs: time.Now().UnixMilli(), Selector: selector,
 		P: r.p, C: r.c, CSource: r.cSource, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: rd, JudgeDrops: r.judge})
 	if len(v3Ledger.Recent) > maxV3Recent {
@@ -1022,7 +1038,7 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 func v3Counters() V3Stats {
 	v3Mu.Lock()
 	defer v3Mu.Unlock()
-	out := V3Stats{JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
+	out := V3Stats{CutsOnCost: v3Ledger.CutsOnCost, CutsOnPremium: v3Ledger.CutsOnPremium, JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
 	if len(v3Ledger.Refused) > 0 {
 		out.Refused = map[string]int64{}
 		for k, v := range v3Ledger.Refused {

@@ -659,13 +659,13 @@ A cut is one big removal, made late, when the conversation is near the point whe
    - A compaction point comes from the operator (`compaction_point` in the `MODEL_PRICES` table), or from the built-in
      table (measured or assumed). A model with no entry has none: the built-in table calls it `window_fallback`, and v3
      treats that as the window.
-   - Claude Code compacts a GLM near 167k billed of a 200k window. Without the field the sweet spot is 0.85 x 200k = 170k,
-     which that client never reaches. State it and the sweet spot is 0.85 x 167k = 142k:
+   - Claude Code compacts a GLM near 167k billed of a 200k window. Without the field the sweet spot is 0.70 x 200k = 140k,
+     which is a share of the window and not of where the client acts. State it and the sweet spot is 0.70 x 167k = 117k:
      `- {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}`.
      `compaction_point` is in billed tokens. It does not change `window`.
    - The summarizer and the dashboard (the compact-episode span, the summarize ledger and the replay cap) read the same figure, so an operator value applies to them too. Nothing changes
      unless the field is set.
-   - `fill(C)` is `fill_small` (0.85) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
+   - `fill(C)` is `fill_small` (0.70, a general rule of 70% of the effective context) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
 2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
    A refused cut does not start this wait. The sweep asks the judge no question during the wait.
 3. **Meaningful drop.** `D >= min_drop_frac x P` (default 0.15). `D` is the rule drops and the judge drops that survive the recheck.
@@ -677,6 +677,15 @@ A cut is one big removal, made late, when the conversation is near the point whe
    The gate accepts when `saving > rewrite` (strictly), as #720's does. The decision log also shows `N'`
    (`turns_after_cut`), the turns counted from the prompt after the cut, `(C - (P - D)) / g`, for reading only: nothing prices
    on it. N and N' come from one function (`turnsUntilCut`), shared with the co-reference horizon.
+
+   **`compaction_premium_usd` (default 0, an experiment knob).** It exists to find out whether cutting as much as possible
+   improves quality at all, with cost as a constraint and not the goal. When a cut postpones the compaction (N' is more than
+   N, which is any cut that removes something in the `cut` turns model), the gate adds the premium to the saving side and
+   accepts when `saving_to_N + premium > rewrite`. With 0 the gate is the cost gate above: saving to N, no credit. A high
+   value (for example 10) effectively turns the cost gate off in a $0 test, while the Opus-priced cost is still logged
+   (`saving_usd`, `rewrite_usd`). Every apply-stage decision logs `premium_usd` and `passed_on_cost` (true when the saving to
+   N beat the rewrite by itself), so a run shows which cuts needed the premium. `/stats` counts the accepted cuts as
+   `v3.cuts_on_cost` and `v3.cuts_on_premium`. Do not leave a premium set in production.
 
 `selector` picks who chooses the drops:
 

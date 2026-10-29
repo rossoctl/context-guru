@@ -797,7 +797,10 @@ type warmApply struct {
 	cSource          string
 	// Sweep v3: D by what chose it (set before the gate runs, so every apply-stage decision line carries it).
 	ruleD map[string]int
-	gate  func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
+	// Sweep v3 experiment premium: what the gate added to the saving, and whether the cost alone passed.
+	premium      float64
+	passedOnCost bool
+	gate         func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
 }
 
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
