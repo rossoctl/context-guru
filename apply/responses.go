@@ -517,6 +517,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
@@ -539,6 +540,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			if alias != res.Session {
+				loadSessionState(st, alias) // its clocks (cg:seen:, cg:ttl:) may be on disk only
+			}
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}

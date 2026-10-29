@@ -338,6 +338,7 @@ func (r *Recorder) ArchiveSessionFull(ctx context.Context, c coldCandidate) (int
 	if err != nil {
 		return 0, err
 	}
+	r.db.deleteSessionState(c.SessionID) // archived: its summary checkpoint goes with its rows
 	n, _ := res.RowsAffected()
 	if err := r.db.markArchived(c, ArchiveFull, path, int64(len(blob)), r.remote.Describe()); err != nil {
 		return n, err
