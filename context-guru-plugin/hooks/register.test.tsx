@@ -903,3 +903,32 @@ test('unavailable (route tripped or credential dead): no Ping button, "ping off:
   expect(await ui.find({ key: 'ping' })).toBeDefined()
   await ui.unmount()
 })
+
+// #771: the pane's `↻ next ping` counts with the band, one tick a second.
+test('the pane next-ping hint changes after one tick', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const hint = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const m = /↻ next ping (\d+:\d\d)/.exec(await dump(ui))
+    await ui.unmount()
+    return m?.[1]
+  }
+  const a = await hint()
+  await clock.advance(1000)
+  const b = await hint()
+  expect(a).toBeDefined()
+  expect(b).toBeDefined()
+  expect(b).not.toBe(a)
+})
+
+test('a planned ping time that has passed shows "pinging…" and keeps the button hidden, in band and pane', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW - 2_000 })
+  for (const surface of [BAND, PANE]) {
+    const ui = await $.ui.mount({ ...surface, surface: 'terminal' })
+    const all = await dump(ui)
+    expect(all).toMatch(/↻ pinging…/)
+    expect(all).not.toMatch(/0:00/)
+    expect(await ui.find({ key: 'ping' })).toBeUndefined()
+    await ui.unmount()
+  }
+})

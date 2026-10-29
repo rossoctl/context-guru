@@ -469,6 +469,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const snap = await read($, snapshot)
+    await read($, tick) // the `↻ next ping` countdown counts once a second, as in the band
     const v = view(snap, await $.clock.now())
     if (!v || !snap) {
       return <Text dimColor>No Context Guru data for this session yet. Send a prompt, or check /context-guru:doctor.</Text>

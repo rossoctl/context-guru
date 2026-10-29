@@ -137,9 +137,14 @@ function nextPingIn(e: Entry, now: number): number | undefined {
  * ping, and no automatic ping fires before the cache expires. */
 export const showPing = (v: View): boolean => v.main.isWarm && v.pingable !== false && v.main.nextPingS === undefined
 
-/** While the button is hidden for a planned ping: `↻ next ping 4:12` (`↻ ping 4:12` on a narrow band). */
-export const nextPingWords = (v: View, narrow: boolean): string | undefined =>
-  v.main.isWarm && v.pingable !== false && v.main.nextPingS !== undefined ? `↻ ${narrow ? '' : 'next '}ping ${clock(v.main.nextPingS)}` : undefined
+/** While the button is hidden for a planned ping: `↻ next ping 4:12` (`↻ ping 4:12` on a narrow band), `↻ pinging…` at 0:00. */
+export const nextPingWords = (v: View, narrow: boolean): string | undefined => {
+  const s = v.main.nextPingS
+  if (!v.main.isWarm || v.pingable === false || s === undefined) return undefined
+  // The planned time has passed and the next poll has not brought a new plan: the ping is going out now.
+  if (s < 1) return '↻ pinging…'
+  return `↻ ${narrow ? '' : 'next '}ping ${clock(s)}`
+}
 
 /** The status line's cache clock (statusline.py remaining_seconds, held_seconds, _until_cold): seconds until the
  * entry expires from the later of its start and end, negative once cold; the keep-alive plan's horizon while the
