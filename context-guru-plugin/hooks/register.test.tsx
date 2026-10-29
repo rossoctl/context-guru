@@ -817,6 +817,7 @@ const PLAN_CASES: [string, object, boolean][] = [
   ['no ping planned (keep-alive off)', {}, true],
   ['the next ping comes after expiry', { pings_left: 2, next_ping_ms: NOW + 300_000 }, true],
   ['next_ping_ms is 0 (no ping planned)', { pings_left: 2, next_ping_ms: 0 }, true],
+  ['a long held_until_ms does not move the choice: the next ping is after the entry\'s own expiry', { pings_left: 2, next_ping_ms: NOW + 300_000, held_until_ms: NOW + 3_600_000 }, true],
   ['an old proxy that sends pings_left but no next_ping_ms', { pings_left: 2 }, true],
 ]
 for (const [name, extra, shown] of PLAN_CASES) {
@@ -874,5 +875,15 @@ test('a stopped thread whose copy is released shows no Ping button', async ($, o
   await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'stopped' })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('band row 1 fits 60 columns with the longest hint, 59:59 on the 1-hour tier', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/↻ ping 59:5\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
   await ui.unmount()
 })
