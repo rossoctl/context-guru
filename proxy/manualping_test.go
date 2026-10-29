@@ -565,8 +565,7 @@ func TestManualPing409NotHeldCarriesThePingReason(t *testing.T) {
 	if w.Code != http.StatusConflict || out["error"] != "not held" {
 		t.Fatalf("nothing held = %d %v, want 409 not held", w.Code, out)
 	}
-	want := m.h.KeepAlivePingStates("", true, "sess-a")[""].Reason
-	if want == "" || out["ping_reason"] != want {
+	if want := m.h.keeper.Keeper.PingStates("", false, "sess-a").For("").Reason; want == "" || out["ping_reason"] != want {
 		t.Errorf("ping_reason = %v, want %q (the keeper's own)", out["ping_reason"], want)
 	}
 }

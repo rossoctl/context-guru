@@ -905,17 +905,14 @@ test('unavailable (route tripped or credential dead): no Ping button, "ping off:
 })
 
 // #771: the pane's `↻ next ping` counts with the band, one tick a second.
-test('the pane next-ping hint changes after one tick', async ($, on) => {
+test('the pane next-ping hint changes after one tick, without a new mount', async ($, on) => {
   await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
-  const hint = async () => {
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const m = /↻ next ping (\d+:\d\d)/.exec(await dump(ui))
-    await ui.unmount()
-    return m?.[1]
-  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const hint = async () => /↻ next ping (\d+:\d\d)/.exec(await dump(ui))?.[1]
   const a = await hint()
   await clock.advance(1000)
   const b = await hint()
+  await ui.unmount()
   expect(a).toBeDefined()
   expect(b).toBeDefined()
   expect(b).not.toBe(a)
