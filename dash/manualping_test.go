@@ -307,13 +307,13 @@ func TestCacheStateLeavesHeldUntilAndPingsLeftOutForAThreadWithNoPlan(t *testing
 	if body["pingable"] != true {
 		t.Fatalf("pingable = %v", body["pingable"])
 	}
-	for _, k := range []string{"held_until_ms", "pings_left"} {
+	for _, k := range []string{"held_until_ms", "pings_left", "next_ping_ms"} {
 		if _, ok := body[k]; ok {
 			t.Errorf("session: %s = %v for a thread held only for the button", k, body[k])
 		}
 	}
 	for _, th := range body["threads"].([]any) {
-		for _, k := range []string{"held_until_ms", "pings_left"} {
+		for _, k := range []string{"held_until_ms", "pings_left", "next_ping_ms"} {
 			if v, ok := th.(map[string]any)[k]; ok {
 				t.Errorf("thread: %s = %v", k, v)
 			}

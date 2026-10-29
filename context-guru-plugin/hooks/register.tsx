@@ -20,7 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { PaneData, Snapshot, ThreadView, View } from '../types'
-import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, pingReason, pingToast, reasonWords, rotatingTip, shortReason, signature, spark, stack, usd, view, weeklyTip, words } from './model'
+import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, nextPingWords, pingReason, pingToast, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -351,7 +351,8 @@ export const register: Register = on => {
               {m.coldUsd !== undefined && <Text color="warning">{usd(m.coldUsd)}</Text>}
             </Text>
           )}
-          {m.isWarm && v.pingable !== false && (
+          {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
+          {showPing(v) && (
             <Box>
               <Text> </Text>
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
@@ -520,7 +521,8 @@ export const register: Register = on => {
           ) : (
             <Text dimColor>○ cache cold: the next message writes it again</Text>
           )}
-          {m.isWarm && v.pingable !== false && (
+          {nextPingWords(v, false) !== undefined && <Text dimColor>{nextPingWords(v, false)}</Text>}
+          {showPing(v) && (
             <Box columnGap={2}>
               <Button key="ping" label={busy ? 'Pinging…' : 'Ping now'} variant="primary" hotkey="p" onPress={() => (busy ? undefined : ping($))} />
             </Box>

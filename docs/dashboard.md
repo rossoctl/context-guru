@@ -119,8 +119,9 @@ each `saved_usd` of `baseline_usd`. `baseline_usd` is what those requests would 
 context-guru (the uncompacted baseline plus the cache-split and keep-alive savings); `saved_usd` is
 that minus what was paid, context-guru's own model calls and pings included, so it never exceeds
 `baseline_usd`. Each listed thread carries its own pair. A thread the
-keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
-cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
+keep-alive still plans to ping also carries `pings_left`, `held_until_ms` and `next_ping_ms`: when its
+cache goes cold if nothing else is sent (the last planned ping's start plus the cache lifetime), and when
+the next planned ping fires. The mod hides its Ping button while that ping fires before the cache expires.
 
 The session and each thread also carry `next_warm_usd` and `next_cold_usd`: what the next request
 costs for the cached prefix if the cache is still warm (a cache read) or already cold (a rewrite;

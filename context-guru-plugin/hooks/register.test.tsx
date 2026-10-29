@@ -809,3 +809,55 @@ test('a long agent name (a general-purpose agent named by its description) is cu
   expect(row).not.toMatch(/rewrite round 4/)
   await ui.unmount()
 })
+
+// #771: the Ping button shows only when no automatic ping fires before the cache expires. The warm main cache here
+// ends at NOW - 60 s with a 300 s TTL, so it expires at NOW + 240 s.
+const PLAN_CASES: [string, object, boolean][] = [
+  ['a ping fires before expiry', { pings_left: 2, next_ping_ms: NOW + 100_000 }, false],
+  ['no pings left', { pings_left: 0, next_ping_ms: NOW + 100_000 }, true],
+  ['no ping planned (keep-alive off)', {}, true],
+  ['the next ping comes after expiry', { pings_left: 2, next_ping_ms: NOW + 300_000 }, true],
+  ['next_ping_ms is 0 (no ping planned)', { pings_left: 2, next_ping_ms: 0 }, true],
+  ['an old proxy that sends pings_left but no next_ping_ms', { pings_left: 2 }, true],
+]
+for (const [name, extra, shown] of PLAN_CASES) {
+  test(`Ping button, ${name}: band and pane agree (${shown ? 'shown' : 'hidden'})`, async ($, on) => {
+    await boot($, on, true, [], undefined as any, extra)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const bandText = await dump(band)
+    expect(!!(await band.find({ key: 'ping' }))).toBe(shown)
+    expect(/↻ next ping \d+:\d\d/.test(bandText)).toBe(!shown)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const paneText = await dump(pane)
+    expect(!!(await pane.find({ key: 'ping' }))).toBe(shown)
+    expect(/↻ next ping \d+:\d\d/.test(paneText)).toBe(!shown)
+    await pane.unmount()
+  })
+}
+
+test('hidden Ping shows the time of the next ping', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).toMatch(/↻ next ping 1:[34]\d/)
+  await ui.unmount()
+})
+
+test('a warm cache with a planned ping and pingable=false keeps the ping-off reason, not the next-ping words', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000, pingable: false, ping_reason: 'too large' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const all = await dump(ui)
+  expect(all).toMatch(/ping off/)
+  expect(all).not.toMatch(/next ping/)
+  await ui.unmount()
+})
+
+test('band row 1 fits 60 columns with the next-ping hint, warm', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/↻ ping \d+:\d\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
