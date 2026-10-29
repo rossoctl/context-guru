@@ -1556,26 +1556,41 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .sec-links a:hover { text-decoration: underline; }
 .sec-links a::after { content: " \2192"; }
 
-/* the three savings: a ledger, one row per lever */
-.saved-ledger { display: grid; }
-.ledger-head, .ledger-row { display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(240px, 1.5fr) minmax(200px, 1fr);
-  gap: var(--sp-5); align-items: start; }
-.ledger-head { font-size: 12px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .06em; padding-bottom: var(--sp-2); }
-.ledger-row { padding: var(--sp-4) 0; border-top: 1px solid var(--border-soft); }
-.ledger-row:first-of-type { border-top: 0; }
-.lv-name h3 { font-size: 16px; font-weight: 600; }
-.lv-name h3 a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--border); }
-.lv-name h3 a:hover { color: var(--accent); border-color: var(--accent); }
-.lv-name p { color: var(--fg-muted); font-size: 13px; margin-top: var(--sp-1); max-width: 34ch; }
-.lv-big strong { font-family: var(--serif); font-size: 34px; font-weight: 600; letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums; line-height: 1.1; color: var(--good); }
-.lv-big strong.neg { color: var(--bad); }
-.lv-tokens .lv-big strong { font-size: 26px; color: var(--fg); }
-.lv-of { color: var(--fg-muted); font-size: 13px; }
-.lv-sub { color: var(--fg-muted); font-size: 12.5px; margin-top: var(--sp-1); }
-.lv-none { color: var(--fg-muted); font-size: 14px; padding-top: 6px; }
-.lv-bar { display: block; height: 6px; margin-top: var(--sp-2); border-radius: 3px; background: var(--bg-sunken); overflow: hidden; }
-.lv-bar i { display: block; height: 100%; background: var(--good); border-radius: 3px; transition: width .6s cubic-bezier(.2,.7,.2,1); }
+/* the savings: one total, then one card per part */
+.saved-ledger { display: grid; gap: var(--sp-4); }
+.ov-hero { padding: var(--sp-5); border: 1px solid var(--border); border-radius: var(--r); background: var(--good-soft); }
+.ov-hero-head, .ov-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.ov-hero-head h3 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-muted); }
+.ov-hero-body { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--sp-6); flex-wrap: wrap; margin-top: var(--sp-2); }
+.ov-hero-v { font-family: var(--serif); font-size: 56px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.05;
+  font-variant-numeric: tabular-nums; color: var(--good); }
+.ov-hero-v.neg { color: var(--bad); }
+.ov-hero-of { font-size: 16px; color: var(--fg); margin-top: var(--sp-1); }
+.ov-hero-pct { font-family: var(--serif); font-size: 28px; font-weight: 600; color: var(--good); margin-top: var(--sp-2); font-variant-numeric: tabular-nums; }
+.ov-hero-spent { font-size: 13px; color: var(--fg-muted); margin-top: var(--sp-1); }
+.ov-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); }
+.ov-card { padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-raised); display: flex; flex-direction: column; }
+.ov-card-head h3 { font-size: 18px; font-weight: 600; }
+.ov-card-head h3 a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--border); }
+.ov-card-head h3 a:hover { color: var(--accent); border-color: var(--accent); }
+.ov-what { color: var(--fg-muted); font-size: 13px; margin-top: var(--sp-1); }
+.ov-figs { display: grid; gap: var(--sp-4); margin-top: var(--sp-4); }
+.ov-fig-k { font-size: 12px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .05em; display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.ov-fig-v { font-family: var(--serif); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15;
+  font-variant-numeric: tabular-nums; color: var(--fg); }
+.ov-fig-v.good { color: var(--good); }
+.ov-fig-v.neg { color: var(--bad); }
+.ov-hero-tok .ov-fig-v { font-size: 34px; }
+.ov-fig-of { font-size: 13px; color: var(--fg-muted); display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; }
+.ov-pct { font-weight: 700; color: var(--fg); padding: 0 var(--sp-2); border-radius: 999px; background: var(--bg-sunken); }
+.ov-split { list-style: none; margin: calc(-1 * var(--sp-2)) 0 0; padding: var(--sp-2) var(--sp-3); background: var(--bg-sunken); border-radius: var(--r); font-size: 13px; }
+.ov-split li { display: flex; justify-content: space-between; gap: var(--sp-3); padding: 2px 0; }
+.ov-split strong { font-variant-numeric: tabular-nums; }
+.ov-none { color: var(--fg-muted); font-size: 14px; }
+.ov-small { font-size: 12px; }
+.ov-info { margin-top: 0; padding-top: 0; }
+.ov-info[open] { flex-basis: 100%; }
+.ov-fig-k .ov-info[open] .tile-why-body { text-transform: none; letter-spacing: normal; }
 .ov-foot { margin-top: var(--sp-3); max-width: 80ch; }
 
 /* tools and skills to remove */
@@ -1619,8 +1634,8 @@ details.diag[open] > summary::before { content: "\2212"; }
 .chart { background: none; }
 
 @media (max-width: 860px) {
-  .ledger-head { display: none; }
-  .ledger-row { grid-template-columns: 1fr; gap: var(--sp-2); }
+  .ov-cards { grid-template-columns: 1fr; }
+  .ov-hero-v { font-size: 44px; }
   .reco-row { grid-template-columns: 1fr auto; }
   .reco-kind { grid-column: 1 / -1; }
   .reco-note { grid-column: 1 / -1; }
@@ -1632,7 +1647,7 @@ details.diag[open] > summary::before { content: "\2212"; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .view:not([hidden]) { animation: none; }
-  .tab::after, .lv-bar i, .tab { transition: none; }
+  .tab::after, .tab { transition: none; }
 }
 
 /* ═══ Plain-words tooltip: term(word, definition) in app.js ═══ */
@@ -1704,11 +1719,6 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 .bl:has(+ #view-tools) { display: none; } /* this tab leads with its own sentence and number */
 
 /* ═══ review round 1 ═══ */
-/* what kind of number is this: a visible label on every savings row */
-.kind-badge { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .02em; padding: 0 var(--sp-2);
-  border: 1px solid currentColor; border-radius: 999px; cursor: help; vertical-align: 1px; }
-.kind-badge.estimated { color: var(--info); }
-.kind-badge.upper-bound { color: var(--warn); border-style: dashed; }
 .reco-note-foot { margin-top: var(--sp-3); max-width: 80ch; }
 
 /* about the other tabs: grouped like the nav, one short line per tab */
@@ -1780,8 +1790,6 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 @media (prefers-reduced-motion: reduce) { .plot-line, .plot-col { animation: none; } .dv-bar { transition: none; } }
 
 /* an upper bound is drawn as a possibility, not as money in the bank */
-.lv-big strong.bound { color: var(--warn); }
-.lv-bar.bound i { background: transparent; border: 1px dashed var(--warn); box-sizing: border-box; }
 
 /* ═══ components ═══ */
 [data-testid=components-table] td:first-child .hint { margin: 0; max-width: 34ch; white-space: normal; }
@@ -1806,9 +1814,4 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 #strategy-form fieldset.field > label:last-of-type { display: flex; flex-direction: column; gap: var(--sp-2); }
 
 /* the cache row's parts and the section total */
-.lv-parts { margin-top: 2px; }
-.ledger-total { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) 0 0; margin-top: var(--sp-1); border-top: 1px solid var(--border); }
-.ledger-total strong { font-family: var(--serif); font-size: 22px; font-variant-numeric: tabular-nums; }
 
-.lv-id { font-weight: 400; color: var(--fg-muted); font-size: 14px; }
-.ledger-total strong.bound { color: var(--warn); }

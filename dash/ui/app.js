@@ -1642,21 +1642,14 @@ async function renderDiagnostics() {
  * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
  * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
-/** The names a reader knows their setup by. The preset is the one the window's requests mostly ran under; the
- *  cache strategy is read from the signed-in account's own configuration, and is not guessed for a manager looking
- *  at everyone. Both stay empty until known, and the row title then reads without a name. */
+/** The name a reader knows their preset by: the one the window's requests mostly ran under. The
+ *  name stays empty until known, and the card title then reads without it. */
 function presetName() {
   const g = (state.identity && state.identity.presets) || [];
   const live = g.filter((x) => x.key).sort((a, b) => b.requests - a.requests);
   if (!live.length) return '';
   const total = live.reduce((n, x) => n + x.requests, 0);
   return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
-}
-function strategyName() {
-  const t = account && account.tenant;
-  if (!t || t.role === 'manager') return '';
-  const c = (t.effective_config && t.effective_config.cache) || {};
-  return c.keepalive ? 'warm after ' + (c.keepalive_idle_seconds || 240) + ' s idle' : 'off';
 }
 async function loadOverviewIdentity() {
   try {
@@ -1666,129 +1659,168 @@ async function loadOverviewIdentity() {
   } catch (e) { /* the rows read fine without the name */ }
 }
 
-const KIND_TIP = {
-  'Estimated': 'Priced against what the removed text would have cost. It cannot be read off a bill.',
-  'Upper bound': 'The most it could have saved: another session may have kept the same cache warm.',
-};
 /** Waiting time in the unit that matches its size, so 411 ms never reads as "nothing". */
 function waitText(msv) {
   if (msv < 1000) return (msv / 1000).toFixed(2) + ' s';
   if (msv < 60000) return (msv / 1000).toFixed(1) + ' s';
   return dur(msv);
 }
+/** A share of a whole, with one decimal below 10% so a small saving does not read as 0%. */
+function share(v, of) {
+  if (!(of > 0)) return '—';
+  const p = (100 * v) / of;
+  return pct(p, Math.abs(p) < 10 ? 1 : 0);
+}
+/**
+ * infoButton is a round "i" that opens a short explanation under the card. A native <details>,
+ * like the tile "i", and it stays open across a refresh through the same openWhy registry.
+ */
+function infoButton(key, label, paras) {
+  const k = 'ov:' + key;
+  return el('details', {
+    class: 'tile-why ov-info', 'data-why': k, 'data-testid': 'info-' + key,
+    open: openWhy.has(k) ? 'open' : null,
+    ontoggle: (ev) => { if (ev.currentTarget.open) openWhy.add(k); else openWhy.delete(k); },
+  },
+  el('summary', { 'aria-label': 'How is "' + label + '" worked out?', title: 'How is "' + label + '" worked out?' }, 'i'),
+  el('div', { class: 'tile-why-body' }, paras.map((t) => el('p', { text: t }))));
+}
+/** One figure: a big number, then "of <whole>" and the percent, on one line under it. */
+function ovFigure(tid, label, value, of, pctText, cls) {
+  return el('div', { class: 'ov-fig', 'data-testid': tid },
+    el('div', { class: 'ov-fig-k', text: label }),
+    el('div', { class: 'ov-fig-v ' + (cls || ''), text: value }),
+    of ? el('div', { class: 'ov-fig-of' }, el('span', { text: of }),
+      pctText ? el('span', { class: 'ov-pct', text: pctText }) : null) : null);
+}
+
+/**
+ * The Overview's savings: one total, then one card for each part of context-guru.
+ *
+ * Every figure is one the server already computed (GET /api/stats, and the keep-alive ledger for
+ * the measured latency); the arithmetic here is sums and ratios of them (dash/ui/savings.js, tested
+ * by dash/savings.test.mjs). Dollars are set against what the same traffic would have cost without
+ * context-guru, so the parts' percents add up to the total's. A part with nothing recorded says so
+ * in words instead of printing a zero that could be an absence.
+ */
 function renderSavedLedger(o, ka, partial) {
   const host = clear($('#tiles'));
   const priced = ((o.accounting && o.accounting.complete) || 0) > 0;
-  const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0);
+  const t = overviewTotals(o);
+  const parts = t.parts;
+  const mp = o.manual_pings || {};
+  // Tokens. The preset's gross is every token it removed, counted on every request that would have
+  // carried it. The filter's is every declaration token left out. Both were never sent, so the
+  // whole is the input billed plus both.
   const input = (o.cache_read || 0) + (o.cache_write || 0) + (o.fresh_input || 0);
-  // Tokens a keep-alive ping kept as cheap reads instead of expensive rewrites. The ledger holds
-  // dollars only, so this is the dollar figure divided by the per-token price gap, with the input
-  // price recovered from the provider-cache line (cache_saved = reads x 0.9 x input price) and
-  // the write premium taken as 1.15x input (1.25 write less 0.10 read). Labelled "about".
+  const presetTok = Math.max(0, (o.tokens_before || 0) - (o.tokens_after || 0));
+  const filterTok = o.decl_filter_reads || 0;
+  const inputWithout = input + presetTok + filterTok;
+  // The cache does not remove tokens: it keeps them as cheap reads instead of a full rewrite. The
+  // ledger holds dollars only, so this is the dollar figure divided by the per-token price gap, with
+  // the input price recovered from the provider-cache line (cache_saved = reads x 0.9 x input price)
+  // and the write premium taken as 1.15x input (1.25 write less 0.10 read). Shown with "≈".
   const providerSaved = o.cache_saved_usd || 0;
   const inPrice = o.cache_read > 0 && providerSaved > 0 ? providerSaved / (0.9 * o.cache_read) : 0;
-  const kaTokens = inPrice > 0 && o.keepalive_saved_usd > 0 ? o.keepalive_saved_usd / (1.15 * inPrice) : null;
-  const waited = ka && ka.latency && ka.latency.known && o.keepalive_misses_avoided > 0
-    ? ka.latency.per_miss_ms * o.keepalive_misses_avoided : null;
-  const kaRan = o.keepalive_pings > 0 || o.keepalive_net_usd;
+  const cacheGross = (o.keepalive_saved_usd || 0) + (mp.saved_usd || 0) + (mp.ping_usd || 0);
+  const cacheTok = inPrice > 0 && cacheGross > 0 ? cacheGross / (1.15 * inPrice) : null;
+  const writes = writesPrevented(o);
+  const lat = ka && ka.latency;
+  const latKnown = !!(lat && lat.known && lat.per_miss_ms > 0);
+  const waited = latKnown && writes > 0 ? lat.per_miss_ms * writes : null;
+
+  // ── The total ──
+  const totalTok = presetTok + filterTok;
+  const hero = el('section', { class: 'ov-hero', 'data-testid': 'saved-total' },
+    el('div', { class: 'ov-hero-head' },
+      el('h3', { text: 'Total saved by context-guru' }),
+      infoButton('total', 'Total saved', [
+        'Total saved is the sum of the parts below: the cache, your preset, and the tools and skills filter.',
+        'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
+        '"Without context-guru" is what you spent plus what was saved. The percent is the saved share of that.',
+        'The provider’s own cache discount is not counted. You get it with or without context-guru.',
+      ])),
+    !priced
+      ? el('p', { class: 'ov-none', text: partial ? 'Loading…' : 'Nothing priced yet in this period.' })
+      : el('div', { class: 'ov-hero-body' },
+        el('div', { class: 'ov-hero-money' },
+          el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
+          el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
+            ' without context-guru'),
+          el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
+          el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' })),
+        el('div', { class: 'ov-hero-tok' },
+          ovFigure('saved-total-tokens', 'Input tokens removed', compact(totalTok),
+            'of ' + compact(inputWithout) + ' tokens', share(totalTok, inputWithout)))));
+  host.appendChild(hero);
+
+  // ── One card per part ──
+  const money = (tid, v, ran) => !ran ? el('p', { class: 'ov-none', text: 'Nothing saved yet in this period.' })
+    : !priced ? el('p', { class: 'ov-none', text: 'Not priced yet.' })
+      : ovFigure(tid, 'Money saved', usd(v), 'of ' + usd(t.without), share(v, t.without), v < 0 ? 'neg' : 'good');
+  const card = (id, tid, title, href, what, kids, info) => el('section', { class: 'ov-card', 'data-lever': id, 'data-testid': tid },
+    el('div', { class: 'ov-card-head' },
+      el('h3', {}, el('a', { href, title: 'Open the tab for ' + title }, title)), info || null),
+    el('p', { class: 'ov-what', text: what }),
+    el('div', { class: 'ov-figs' }, kids));
+  const grid = el('div', { class: 'ov-cards' });
+
+  // Cache: the automatic pings (and the cache reorder), plus your manual pings.
+  const cacheUSD = parts.cache + parts.manual;
+  const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
+  const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
+    el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
+    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') }),
+      el('strong', { text: usd(parts.manual) })),
+    parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
+  grid.appendChild(card('cache', 'saved-cache', 'Cache', '#/keepalive',
+    'Keeps your prompt cache warm while you think, so the next turn reads it instead of writing it again.',
+    [
+      money('saved-cache-usd', cacheUSD, cacheRan),
+      cacheRan && priced ? brk : null,
+      cacheRan ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
+        cacheTok === null ? '—' : '≈ ' + compact(cacheTok), 'of ' + compact(inputWithout) + ' tokens',
+        cacheTok === null ? '' : share(cacheTok, inputWithout)) : null,
+      cacheRan ? el('div', { class: 'ov-fig', 'data-testid': 'saved-cache-latency' },
+        el('div', { class: 'ov-fig-k' }, 'Waiting time saved ', infoButton('latency', 'Waiting time saved', [
+          'A request that must write the cache again is slower than one that reads it.',
+          'We measure the gap on your own traffic in this period: the average time of large requests (100k+ tokens) that read the cache, against those that wrote it.'
+            + (latKnown ? ' Here: ' + waitText(lat.miss_mean_ms) + ' for a write, ' + waitText(lat.hit_mean_ms) + ' for a read, so ' + waitText(lat.per_miss_ms) + ' saved each time.' : ''),
+          'Waiting time saved = that gap × the cache writes prevented.',
+          'We need at least 20 requests of each kind to measure it. With fewer, it shows "—".',
+        ])),
+        el('div', { class: 'ov-fig-v', text: waited === null ? '—' : waitText(waited) }),
+        el('div', { class: 'ov-fig-of', text: latKnown ? waitText(lat.per_miss_ms) + ' per write prevented' : !ka ? 'Measuring…' : 'not enough requests to measure yet' })) : null,
+      cacheRan ? ovFigure('saved-cache-writes', 'Cache writes prevented', num(writes),
+        num(o.keepalive_misses_avoided || 0) + ' automatic · ' + num(mp.writes_avoided || 0) + ' manual', '') : null,
+    ],
+    infoButton('cache', 'Cache', [
+      'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
+      'Manual pings: the same, when you press Ping.',
+      'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
+    ])));
+
+  // Your preset.
+  const named = presetName();
+  grid.appendChild(card('compaction', 'saved-compaction', 'Preset' + (named ? ' (' + named + ')' : ''), '#/components',
+    'Removes old tool output and repeated text before it reaches the model.',
+    [
+      money('saved-compaction-usd', parts.compaction, o.requests > 0),
+      o.requests > 0 ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
+        'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
+      capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
+    ]));
+
+  // Tools and skills filter.
   const filterRan = o.decl_filter_requests > 0;
-  const manualRan = !!(o.manual_pings && o.manual_pings.count > 0);
-  const parts = savedParts(o);
-  const levers = [
-    {
-      id: 'cache', tid: 'saved-cache', name: 'Cache strategy', named: strategyName, href: '#/keepalive', more: 'Cache strategy tab',
-      what: 'Keeps your prompt cache warm while you think, so the next turn is not billed in full.',
-      ran: kaRan || parts.reorder !== 0, usd: parts.cache, tok: kaTokens, approx: true,
-      // The cache row is keep-alive plus the cache-reorder credit; both are shown so the row can be checked.
-      parts: parts.reorder !== 0 ? [['cache strategy', parts.keepalive, true], ['cache reorder', parts.reorder, false]] : null,
-      extra: waited ? 'about ' + waitText(waited) + ' of waiting avoided over ' + num(o.keepalive_misses_avoided) + ' rewrites' : '',
-      kind: 'Upper bound', note: 'after its warm-up requests cost ' + usd(o.keepalive_ping_usd),
-      // The Keep-alive tab replays your own idle gaps to say whether to turn it on; the figure on this
-      // row is what already ran. Say so here, so the two cannot be read as a contradiction.
-      forecast: 'Whether a cache strategy pays off is a forecast from your own history. See the Cache strategy tab.',
-    },
-    {
-      id: 'compaction', tid: 'saved-compaction', name: 'Your preset', named: presetName, href: '#/components', more: 'Preset steps tab',
-      what: 'Old tool output and repeated text your preset removes before it reaches the model.',
-      ran: o.requests > 0, usd: parts.compaction, tok: o.saved_unique, of: o.tokens_before,
-      extra: '', kind: 'Estimated', note: 'after our own model calls', cap: capNote(o, usd),
-    },
-    {
-      id: 'filter', tid: 'saved-filter', name: 'Tools and skills filter', href: '#/tools', more: 'Inventory tab',
-      what: 'Tool and skill definitions the model never needed, left out of the prompt.',
-      ran: filterRan, usd: parts.filter, tok: o.decl_filter_reads, idle: partial ? 'Checking…' : 'Starts when tools and skills are left out of the prompt. The list below is how.',
-      extra: filterRan ? num(o.decl_filter_requests) + ' requests had tools filtered' : '',
-      kind: 'Estimated', note: 'saved when tools are left out of the prompt',
-    },
-    // The Ping button. Its own row and not a part of the cache strategy: a person pressed it, the strategy did not decide it.
-    // Hidden until a ping has been pressed, so a user who never uses the button sees no empty row.
-    ...(manualRan ? [{
-      id: 'manual', tid: 'saved-manual', name: 'Manual pings', href: '#/keepalive', more: 'Cache strategy tab',
-      what: 'Cache rewrites avoided because you pressed Ping to keep a warm cache warm.',
-      ran: true, usd: parts.manual, tok: null,
-      extra: num(o.manual_pings.count) + (o.manual_pings.count === 1 ? ' ping' : ' pings') + ' cost ' + usd(o.manual_pings.ping_usd),
-      kind: 'Upper bound', note: 'after the pings cost ' + usd(o.manual_pings.ping_usd) + '. May overlap the cache strategy when its automatic pings are on.',
-    }] : []),
-  ];
-  const head = el('div', { class: 'ledger-head', 'aria-hidden': 'true' },
-    el('span'), el('span', { text: 'Money' }), el('span', { text: 'Tokens' }));
-  host.appendChild(head);
-  for (const lv of levers) {
-    const share = priced && spent > 0 && lv.usd > 0 ? (100 * lv.usd) / spent : 0;
-    const bar = el('span', { class: 'lv-bar' + (lv.kind === 'Upper bound' ? ' bound' : ''), role: 'img',
-      'aria-label': share ? pct(share, share < 10 ? 1 : 0) + ' of spend' : 'nothing saved yet' }, el('i'));
-    // A style ATTRIBUTE would be blocked by the page's CSP; the CSSOM is not.
-    bar.firstChild.style.width = Math.max(share, share > 0 ? 1.5 : 0) + '%';
-    const ofTok = lv.of || input;
-    const money = !lv.ran || !priced
-      ? el('div', { class: 'lv-money lv-none' }, lv.ran ? 'Not priced yet' : (lv.idle || 'Nothing recorded yet'))
-      : el('div', { class: 'lv-money' },
-        // The keep-alive figure is the ledger's credit: the rewrites its pings may have avoided, minus what the
-        // pings cost. Other sessions can keep the same cache warm, so it is a ceiling and not a measured saving.
-        // It is said that way and drawn in the warning colour, not the savings green.
-        el('div', { class: 'lv-big' }, el('strong', { class: (lv.usd < 0 ? 'neg ' : '') + (lv.kind === 'Upper bound' ? 'bound' : ''),
-          text: (lv.kind === 'Upper bound' && lv.usd >= 0 ? 'up to ' : '') + usd(lv.usd) }),
-          el('span', { class: 'lv-of', text: (lv.kind === 'Upper bound' ? ' possible, of ' : ' saved of ') + usd(spent) + ' spent' })),
-        bar,
-        el('div', { class: 'lv-sub' }, el('span', { class: 'kind-badge ' + lv.kind.replace(' ', '-').toLowerCase(), title: KIND_TIP[lv.kind], text: lv.kind }),
-          ' ' + (share ? pct(share, share < 10 ? 1 : 0) + ' of spend · ' : '') + lv.note),
-        lv.parts ? el('div', { class: 'lv-sub lv-parts' }, lv.parts.filter((p) => p[1] !== 0 || p[2]).map((p, i) => el('span', {},
-          (i ? ' · ' : 'of which ') + p[0] + ' ' + usd(p[1]) + (p[2] ? ' (upper bound)' : ''))) ) : null,
-        lv.forecast ? el('div', { class: 'lv-sub' }, lv.forecast) : null,
-        lv.cap ? el('div', { class: 'lv-sub lv-capped', 'data-testid': 'replay-capped', text: lv.cap }) : null);
-    const tokens = lv.tok === null || lv.tok === undefined || !lv.ran
-      ? el('div', { class: 'lv-tokens lv-none' }, '—')
-      : el('div', { class: 'lv-tokens' },
-        el('div', { class: 'lv-big', title: lv.approx ? 'Estimated from the dollar figure at this window\'s average prices, assuming 5-minute cache writes. 1-hour writes make it an overestimate.' : null }, el('strong', { text: (lv.approx ? '≈ ' : '') + compact(lv.tok) }),
-          el('span', { class: 'lv-of', text: ' tokens of ' + compact(ofTok) })),
-        lv.extra ? el('div', { class: 'lv-sub', text: lv.extra }) : null);
-    host.appendChild(el('div', { class: 'ledger-row', 'data-lever': lv.id, 'data-testid': lv.tid },
-      el('div', { class: 'lv-name' },
-        el('h3', {}, el('a', { href: lv.href, title: 'Open the ' + lv.more }, lv.name), lv.named && lv.named() ? el('span', { class: 'lv-id', text: ' (' + lv.named() + ')' }) : null),
-        el('p', { text: lv.what })),
-      money, tokens));
-  }
-  // The three rows together; this equals the server's total_saved_usd (dash/savings.test.mjs). Held back
-  // until the full read lands, because the lean read does not carry the tools and skills filter.
-  if (!partial && priced) {
-    // Two parts, never one blended figure: the preset and filter savings are estimates, the cache strategy
-    // part is an upper bound, and the Cache strategy tab may say it does not pay off.
-    const est = parts.compaction + parts.filter;
-    // Manual pings join the cache part: both are cache rewrites avoided, and both are bounds, not measurements.
-    const cacheAll = parts.cache + parts.manual;
-    host.appendChild(el('div', { class: 'ledger-total', 'data-testid': 'saved-total' },
-      el('span', { text: 'Together' }),
-      el('span', {}, el('strong', { text: usd(est) }), el('span', { class: 'lv-of', text: ' estimated saved' })),
-      cacheAll >= 0
-        ? el('span', {}, el('strong', { class: 'bound', text: 'up to ' + usd(cacheAll) }), el('span', { class: 'lv-of', text: ' more, from your cache strategy' + (parts.manual ? ' and manual pings' : '') + ' (an upper bound)' }))
-        : el('span', {}, el('strong', { class: 'bound', text: usd(cacheAll) }), el('span', { class: 'lv-of', text: ' from your cache strategy: it cost more than it saved' })),
-      el('span', { class: 'lv-of', text: 'of ' + usd(spent) + ' spent' })));
-  }
-  const note = $('#ov-saved-note');
-  if (note) {
-    note.textContent = 'Spent = what the provider billed, plus our own model calls and cache-strategy requests.'
-      + (providerSaved > 0 ? ' Not counted: the provider\u2019s own cache discount (' + usd(providerSaved) + '), which you get with or without us.' : '');
-  }
+  grid.appendChild(card('filter', 'saved-filter', 'Tools and skills filter', '#/tools',
+    'Leaves tool and skill definitions the model does not need out of the prompt.',
+    partial && !filterRan ? [el('p', { class: 'ov-none', text: 'Loading…' })] : [
+      money('saved-filter-usd', parts.filter, filterRan),
+      filterRan ? ovFigure('saved-filter-tokens', 'Tokens removed', compact(filterTok),
+        'of ' + compact(inputWithout) + ' tokens', share(filterTok, inputWithout)) : null,
+    ]));
+  host.appendChild(grid);
 }
 
 /** Keep-alive's waiting-time figure comes from the keep-alive ledger. Best-effort and separate. */
@@ -1842,7 +1874,7 @@ async function loadOverviewTools() {
         el('span', { class: 'reco-usd', text: usd(r.usd), title: 'Estimated cost of carrying it in this window' })));
     }
     host.appendChild(list);
-    host.appendChild(el('p', { class: 'note reco-note-foot', text: 'Dollars are what carrying each one cost in the period selected above. The Tools and skills filter row is a separate, automatic saving; removing these is up to you.' }));
+    host.appendChild(el('p', { class: 'note reco-note-foot', text: 'Dollars are what carrying each one cost in the period selected above. The Tools and skills filter card is a separate, automatic saving; removing these is up to you.' }));
     const cmd = (c, why) => el('div', { class: 'cmd-line' }, el('code', { text: c }), copyButton(c), el('span', { class: 'cmd-why', text: why }));
     host.appendChild(el('div', { class: 'cmd-box' },
       el('p', { text: 'In Claude Code, run:' }),
@@ -4493,7 +4525,7 @@ const GROUPS = [
  * Written for someone who has never seen this dashboard: no component names, no jargon.
  */
 const TAB_INFO = {
-  overview: { short: 'Savings and what to remove', title: 'Overview', what: 'Is context-guru saving you money? The three savings it makes, in dollars and tokens, and what to remove next.' },
+  overview: { short: 'Savings and what to remove', title: 'Overview', what: 'How much context-guru saved you, in dollars and tokens, and what to remove next.' },
   keepalive: { short: 'Does your cache strategy pay off', title: 'Cache strategy', what: 'Whether your cache strategy (keeping the prompt cache warm while you think) paid for itself, and which one to use.',
     see: 'The verdict first, then who gained and who lost, how long your sessions sit idle, and a calculator. (Also called keep-alive.)' },
   tools: { short: 'Tools and skills you never use', title: 'Inventory', what: 'Every tool server and skill your requests carry, and the ones that were never used.',

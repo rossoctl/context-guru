@@ -67,6 +67,9 @@ func TestStatsReportsManualPingsApartFromTheKeepAlive(t *testing.T) {
 			if mp["count"].(float64) != 2 || !near(mp["ping_usd"].(float64), 0.02) || !near(mp["saved_usd"].(float64), 0.18) {
 				t.Errorf("manual_pings = %v, want count 2, ping_usd 0.02, saved_usd 0.18 (net of the pings)", mp)
 			}
+			if mp["writes_avoided"].(float64) != 2 {
+				t.Errorf("manual_pings.writes_avoided = %v, want 2: both pings avoided a write", mp["writes_avoided"])
+			}
 			if body["keepalive_pings"].(float64) != 1 || !near(body["keepalive_ping_usd"].(float64), 0.02) {
 				t.Errorf("the automatic keep-alive ledger counted manual pings: pings %v usd %v",
 					body["keepalive_pings"], body["keepalive_ping_usd"])

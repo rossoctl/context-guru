@@ -19,6 +19,25 @@ function savedParts(o) {
   return { cache, keepalive, reorder, compaction, filter, manual, total: cache + compaction + filter + manual, serverTotal: o.total_saved_usd || 0 };
 }
 
+// The headline on the Overview: the parts added up, against what the same traffic would have cost
+// without context-guru. Every saving is already net of what context-guru spent to make it (our own
+// model calls, the pings), so "without" is simply what was spent plus what was saved. The percent of
+// each part uses the same "without", so the parts' percents add up to the total's.
+function overviewTotals(o) {
+  const p = savedParts(o);
+  const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0)
+    + ((o.manual_pings && o.manual_pings.ping_usd) || 0);
+  const without = spent + p.total;
+  const share = (v) => (without > 0 ? (100 * v) / without : 0);
+  return { saved: p.total, spent, without, pct: share(p.total), share, parts: p };
+}
+
+// The cache writes context-guru prevented: real requests that resumed after the cache would have
+// expired and read it anyway (automatic pings), plus the user's own pings that found it warm.
+function writesPrevented(o) {
+  return (o.keepalive_misses_avoided || 0) + ((o.manual_pings && o.manual_pings.writes_avoided) || 0);
+}
+
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.
 // '' when there is nothing to say. `fmt` formats dollars.
 function capNote(o, fmt) {
@@ -32,4 +51,4 @@ function capNote(o, fmt) {
   return '';
 }
 
-if (typeof module !== 'undefined') module.exports = { savedParts, capNote };
+if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented };
