@@ -1,17 +1,31 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite" // the host (the dashboard) brings the driver; the tests stand in for it
 )
+
+// hostDB stands in for the dashboard's handle: a pool on a file the test owns.
+func hostDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
 
 func newDiskStore(t *testing.T, path string, o DiskOptions, opt Options) (*Memory, *Disk) {
 	t.Helper()
-	d, err := OpenDisk(path, o)
+	d, err := OpenDisk(hostDB(t, path), o)
 	if err != nil {
 		t.Fatalf("OpenDisk: %v", err)
 	}
@@ -208,7 +222,7 @@ func TestEverythingWritesContentKeys(t *testing.T) {
 	}
 }
 
-// At "off" (no path), no file is created.
+// At "off" (no database handed over), no file is created and nothing opens.
 func TestOffCreatesNoFile(t *testing.T) {
 	dir := t.TempDir()
 	m := NewMemory(stateOpts())
@@ -217,8 +231,8 @@ func TestOffCreatesNoFile(t *testing.T) {
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("files created with the disk store off: %v", ents)
 	}
-	if _, err := OpenDisk("", DiskOptions{}); err == nil {
-		t.Fatal("an empty path must not open a disk store")
+	if _, err := OpenDisk(nil, DiskOptions{}); err == nil {
+		t.Fatal("no database must not open a disk store")
 	}
 }
 
@@ -283,7 +297,7 @@ func TestDiskFailsOpen(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("this is not sqlite, it is a long enough text to fill a header....................................."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(bad, DiskOptions{}); err == nil {
+	if d, err := OpenDisk(hostDB(t, bad), DiskOptions{}); err == nil {
 		// The driver may open lazily; then every operation must fail soft.
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
@@ -296,7 +310,7 @@ func TestDiskFailsOpen(t *testing.T) {
 		d.Close()
 	}
 	// A directory that does not exist.
-	if _, err := OpenDisk(filepath.Join(dir, "no", "such", "dir", "s.db"), DiskOptions{}); err == nil {
+	if _, err := OpenDisk(hostDB(t, filepath.Join(dir, "no", "such", "dir", "s.db")), DiskOptions{}); err == nil {
 		t.Fatal("expected an error for an unwritable path")
 	}
 	// A database closed under the store.
@@ -328,7 +342,7 @@ func TestDiskReadOnlyFile(t *testing.T) {
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(path, DiskOptions{}); err == nil {
+	if d, err := OpenDisk(hostDB(t, path), DiskOptions{}); err == nil {
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
 		m.Put(SumPrefix+"t", []byte("y"))
@@ -338,20 +352,6 @@ func TestDiskReadOnlyFile(t *testing.T) {
 			t.Fatal("memory must keep working over a read-only file")
 		}
 		d.Close()
-	}
-}
-
-// The file is created with mode 0600.
-func TestDiskFileMode(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
-	_, d := newDiskStore(t, path, DiskOptions{}, stateOpts())
-	defer d.Close()
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
 

@@ -5,16 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	_ "modernc.org/sqlite" // pure-Go driver, the one the dashboard uses: the build stays CGO-free
 )
 
-// Disk is the optional on-disk copy of the SESSION STATE: the keys a session needs between turns
+// Disk is the optional database copy of the SESSION STATE: the keys a session needs between turns
 // (summary checkpoint, last billed input, freeze decisions and so on, see statePrefixes). It
 // backs a Memory store; it is not a Store itself.
 //
@@ -29,10 +26,10 @@ import (
 //   - Rewind payloads (the stash) never reach this type: PutStash does not call enqueue, and
 //     enqueue refuses every key outside statePrefixes.
 //
-// Fail open: every error is logged once, counted, and otherwise ignored. A request never waits on
+// Fail open: every error is logged once per operation, counted, and otherwise ignored. A request never waits on
 // a disk error. A crash loses at most flushEvery of writes; Close flushes the rest.
 //
-// Known limit: the file is not encrypted. Open creates it with mode 0600.
+// Known limit: the data is not encrypted. The file is the host's (the dashboard database).
 type Disk struct {
 	db        *sql.DB
 	metaOnly  bool
@@ -125,25 +122,17 @@ func (d *Disk) prefixes() []string {
 	return StatePrefixes
 }
 
-// OpenDisk opens (and creates) the state file at path with mode 0600. A non-nil error means the
-// caller runs memory only. The file is not created when OpenDisk is not called, which is how the
-// off switch works.
-func OpenDisk(path string, o DiskOptions) (*Disk, error) {
-	if path == "" {
-		return nil, fmt.Errorf("session state db: empty path")
+// OpenDisk makes a Disk over db, a database the HOST owns and keeps open: in the proxy, the
+// dashboard's. The state lives in its own table, session_state, which OpenDisk creates when it is
+// missing, so an older dashboard database gets it on the first open. Disk never closes db and
+// never touches another table.
+//
+// It uses db's own connection pool, so SQLite serializes this writer and the host's in the same
+// process. The flush is one short transaction. A non-nil error means the caller runs memory only.
+func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
+	if db == nil {
+		return nil, fmt.Errorf("session state: no database")
 	}
-	// Create the file ourselves so the mode is 0600 whatever the umask. SQLite gives its -wal and
-	// -shm files the mode of the main file.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	_ = f.Close()
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(2)
 	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
 	defer cancel()
 	for _, q := range []string{
@@ -151,7 +140,6 @@ func OpenDisk(path string, o DiskOptions) (*Disk, error) {
 		`CREATE INDEX IF NOT EXISTS session_state_updated ON session_state(updated)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
-			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -171,6 +159,48 @@ func OpenDisk(path string, o DiskOptions) (*Disk, error) {
 	d.sweep()
 	go d.run()
 	return d, nil
+}
+
+// DeleteSessionState deletes one session's rows from db's session_state table (every thread, and
+// the drop records). The host calls it when it deletes or archives the session. A missing table is
+// not an error. Rows of a session whose id continues the given one after a ':' go too: the key
+// format cannot tell them apart, and state is rebuilt from traffic.
+func DeleteSessionState(db *sql.DB, session string) (int64, error) {
+	if db == nil || session == "" {
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	defer cancel()
+	var n int64
+	for _, p := range StatePrefixes {
+		if hasAnyPrefix(p, globalPrefixes) {
+			continue
+		}
+		lo := p + session
+		rows, err := db.QueryContext(ctx, `SELECT key FROM session_state WHERE key >= ? AND key < ?`,
+			[]byte(lo), []byte(lo+"\xff"))
+		if err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, err
+		}
+		var del [][]byte
+		for rows.Next() {
+			var k []byte
+			if rows.Scan(&k) == nil && boundaryOK(string(k), session, []string{p}) {
+				del = append(del, k)
+			}
+		}
+		rows.Close()
+		for _, k := range del {
+			if _, err := db.ExecContext(ctx, `DELETE FROM session_state WHERE key = ?`, k); err != nil {
+				return n, err
+			}
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Errors reports how many disk operations failed since open.
@@ -265,7 +295,8 @@ func (d *Disk) sweepAt(now time.Time) {
 	}
 }
 
-// Close flushes pending rows and closes the file. Safe to call twice.
+// Close flushes pending rows and stops the flusher. It does NOT close the database: the host owns
+// it. Safe to call twice.
 func (d *Disk) Close() error {
 	if d == nil {
 		return nil
@@ -274,7 +305,6 @@ func (d *Disk) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.stop)
 		<-d.done
-		err = d.db.Close()
 	})
 	return err
 }

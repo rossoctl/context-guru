@@ -2,6 +2,7 @@ package apply_test
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/store"
+	_ "modernc.org/sqlite"
 )
 
 // After a restart (a new store on the same file), the first request of a session restores the
@@ -19,7 +21,12 @@ import (
 func TestBodyOptsLoadsSessionStateFromDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	open := func() (*store.Memory, *store.Disk) {
-		d, err := store.OpenDisk(path, store.DiskOptions{})
+		db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		d, err := store.OpenDisk(db, store.DiskOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

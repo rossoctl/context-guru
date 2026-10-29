@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -113,16 +114,16 @@ func main() {
 			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
 				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
 
-		// Session state on disk (#769). OFF by default: empty path = the memory-only store, exactly
-		// as before. On, the summary checkpoint and the other session state survive a restart and a
-		// long pause. The file is separate from the dashboard database, so a proxy without a
-		// dashboard can use it. Created with mode 0600, not encrypted.
-		sessionStateDB = flag.String("session-state-db", envOr("SESSION_STATE_DB", ""),
-			"path of the session state file (SQLite). Empty = off: state lives in memory only and is lost on a restart or after store.ttl_seconds idle. On: state is also written here, kept 24h in memory unless store.state_ttl_seconds says otherwise, and loaded back when its session returns. Not encrypted (mode 0600)")
+		// Session state in the dashboard database (#769). ON whenever the dashboard is on, because
+		// the dashboard database is the one file the proxy already keeps. Off without the
+		// dashboard: the memory-only store, as before. --session-state=false is the one off switch.
+		// The state has its own table there (session_state), kept by its own retention.
+		sessionState = flag.Bool("session-state", envBool("SESSION_STATE", true),
+			"with --dashboard: keep the session state (summary checkpoint, billed input, freeze decisions) in the dashboard database, so it survives a restart and a pause longer than store.ttl_seconds. Memory keeps it 24h and a returning session is loaded from the database. --session-state=false keeps today's memory-only store. Not encrypted. Ignored without --dashboard and with --upstreams")
 		sessionStateMetaOnly = flag.Bool("session-state-metadata-only", envBool("SESSION_STATE_METADATA_ONLY", false),
-			"with --session-state-db: write only metadata keys (counts, hashes, ids) to the file, never the summary text or other content keys")
+			"with --session-state: write only metadata keys (counts, hashes, ids) to the file, never the summary text or other content keys")
 		sessionStateRetention = flag.Duration("session-state-retention", envDuration("SESSION_STATE_RETENTION", store.DefaultDiskRetention),
-			"with --session-state-db: delete a session's rows this long after its last write")
+			"with --session-state: delete a session's rows this long after its last write")
 
 		// Dashboard. Off by default so an existing deployment's behavior and route
 		// table are unchanged until asked for; on, it adds /dashboard/ + /api/*.
@@ -274,11 +275,6 @@ func main() {
 	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
-	}
-	// With the disk copy on, the state keys stay 24h in memory (a session that comes back later is
-	// loaded from disk). An explicit store.state_ttl_seconds wins. With it off nothing changes.
-	if *sessionStateDB != "" && cfg.Store.StateTTLSeconds == 0 {
-		cfg.Store.StateTTLSeconds = int(store.DefaultStateTTL / time.Second)
 	}
 
 	// Refuse a bad --idle-exit HERE, immediately after the config is resolved and before
@@ -563,30 +559,37 @@ func main() {
 	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
 		adaptOverride = *dashDB + ".adapt.json"
 	}
-	pstore := cfg.NewStore()
-	if *sessionStateDB != "" && tenants == nil {
-		// Hosted multi-tenant mode builds a store per tenant; the disk copy is single-tenant only.
-		if mem, ok := pstore.(*store.Memory); ok {
-			d, err := store.OpenDisk(*sessionStateDB, store.DiskOptions{
-				MetadataOnly: *sessionStateMetaOnly, Retention: *sessionStateRetention})
-			if err != nil {
-				// Fail open: run memory only.
-				slog.Warn("context-guru: session state file unusable; state stays in memory only",
-					"path", *sessionStateDB, "err", err)
-			} else {
-				mem.AttachDisk(d)
-				defer d.Close()
-				slog.Info("context-guru: session state on disk", "path", *sessionStateDB,
-					"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
-			}
-		}
-	} else if *sessionStateDB != "" {
-		slog.Warn("context-guru: --session-state-db is ignored in hosted multi-tenant mode")
+	// Session state in the dashboard database (#769). The store gets the recorder's own handle, so
+	// the proxy opens no second file and one pool serializes both writers.
+	stateDB := (*sql.DB)(nil)
+	switch {
+	case !*sessionState:
+	case !*dashOn || rec == nil:
+		// Memory only, as before. Nothing to say: the dashboard is off.
+	case tenants != nil:
+		slog.Warn("context-guru: the session state database is off in hosted multi-tenant mode (--upstreams): each tenant has its own in-memory store")
+	case rec.DB().Path() == "":
+		slog.Warn("context-guru: the session state database is off: the dashboard database is in memory, so nothing would survive a restart")
+	default:
+		stateDB = rec.DB().SQL()
 	}
-	if *sessionStateDB != "" && tenants == nil {
-		if _, isMem := pstore.(*store.Memory); !isMem {
-			slog.Warn("context-guru: --session-state-db is ignored because the state store is disabled (--store=false)",
-				"path", *sessionStateDB)
+	if stateDB != nil && (cfg.Store.Enabled == nil || *cfg.Store.Enabled) && cfg.Store.StateTTLSeconds == 0 {
+		// The state keys stay 24h in memory; a session that returns later is loaded from the
+		// database. An explicit store.state_ttl_seconds wins.
+		cfg.Store.StateTTLSeconds = int(store.DefaultStateTTL / time.Second)
+	}
+	pstore := cfg.NewStore()
+	if stateDB != nil {
+		if mem, ok := pstore.(*store.Memory); !ok {
+			slog.Warn("context-guru: the session state database is off because the state store is disabled (--store=false)")
+		} else if d, err := store.OpenDisk(stateDB, store.DiskOptions{
+			MetadataOnly: *sessionStateMetaOnly, Retention: *sessionStateRetention}); err != nil {
+			slog.Warn("context-guru: session state table unusable; state stays in memory only", "err", err)
+		} else {
+			mem.AttachDisk(d)
+			defer d.Close() // flushes; deferred after rec.Close, so it runs first (LIFO)
+			slog.Info("context-guru: session state in the dashboard database",
+				"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
 		}
 	}
 	h := proxy.New(pipe, pstore, agg, proxy.Options{

@@ -375,6 +375,7 @@ func (r *Recorder) evictSessions(cands []coldCandidate) (int64, error) {
 		if derr != nil {
 			return freed, derr
 		}
+		r.db.deleteSessionState(c.SessionID)
 		d, _ := res.RowsAffected()
 		freed += d
 		// Not a warning about a retry — a statement that data is gone. Anyone reading
