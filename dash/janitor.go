@@ -371,11 +371,14 @@ func (r *Recorder) evictSessions(cands []coldCandidate) (int64, error) {
 			// full, which is what this option asks for.
 			continue
 		}
+		// The alias ids are read before the rows go: the state under them must leave with
+		// the session's own (#772).
+		aliases := r.db.sessionAliases(c.SessionID)
 		res, derr := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
 		if derr != nil {
 			return freed, derr
 		}
-		r.db.deleteSessionState(c.SessionID)
+		r.db.deleteSessionState(c.SessionID, aliases...)
 		d, _ := res.RowsAffected()
 		freed += d
 		// Not a warning about a retry — a statement that data is gone. Anyone reading

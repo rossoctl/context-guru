@@ -192,6 +192,12 @@ func DeleteSessionState(db *sql.DB, session string) (int64, error) {
 				del = append(del, k)
 			}
 		}
+		// A scan that fails midway deletes less than it found; the caller must hear about
+		// the failure rather than take the partial delete for the whole one (#772).
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return n, err
+		}
 		rows.Close()
 		for _, k := range del {
 			if _, err := db.ExecContext(ctx, `DELETE FROM session_state WHERE key = ?`, k); err != nil {

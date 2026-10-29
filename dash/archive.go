@@ -334,11 +334,14 @@ func (r *Recorder) ArchiveSessionFull(ctx context.Context, c coldCandidate) (int
 	if err := r.putVerified(ctx, path, blob); err != nil {
 		return 0, err
 	}
+	// The alias ids are read before the rows go: the state under them must leave with the
+	// session's own (#772).
+	aliases := r.db.sessionAliases(c.SessionID)
 	res, err := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
 	if err != nil {
 		return 0, err
 	}
-	r.db.deleteSessionState(c.SessionID) // archived: its summary checkpoint goes with its rows
+	r.db.deleteSessionState(c.SessionID, aliases...) // archived: its summary checkpoint goes with its rows
 	n, _ := res.RowsAffected()
 	if err := r.db.markArchived(c, ArchiveFull, path, int64(len(blob)), r.remote.Describe()); err != nil {
 		return n, err

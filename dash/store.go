@@ -30,6 +30,10 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// dropProbe, when set, runs inside DropOldestSessions between picking the victims and
+	// deleting them. Test seam for the window #772 closed: a request landing there must not
+	// change which sessions the delete removes.
+	dropProbe func()
 	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
 	// checks it; SQLite's mode=ro and query_only refuse any other.
 	readOnly bool
@@ -413,12 +417,67 @@ func (d *DB) Close() error {
 func (d *DB) SQL() *sql.DB { return d.sql }
 
 // deleteSessionState removes the session's rows from the session_state table, when a session
-// is archived or deleted here. Best effort: the state is rebuilt from traffic, so a failure only
-// logs. The retention prune does NOT call it: state follows its own retention.
-func (d *DB) deleteSessionState(session string) {
+// is archived or deleted here. The aliases are the session's content-derived ids (the
+// session_alias column): the request path keeps state under them too (cg:seen:, cg:ttl:), so
+// without removing it a deleted session's state outlived it until retention (#772). Best
+// effort: the state is rebuilt from traffic, so a failure only logs. The retention prune does
+// NOT call it: state follows its own retention.
+func (d *DB) deleteSessionState(session string, aliases ...string) {
 	if _, err := store.DeleteSessionState(d.sql, session); err != nil {
 		slog.Warn("dash: could not delete the session state of a removed session", "session", session, "err", err)
 	}
+	for _, a := range aliases {
+		d.deleteAliasState(a)
+	}
+}
+
+// deleteAliasState removes the state rows under one content-derived alias, unless the alias is
+// still in use: another session's rows carry it, or a live session's own id IS it (a headerless
+// turn derives the alias as its session id). Those sessions read that state, so it must survive
+// this session's removal.
+func (d *DB) deleteAliasState(alias string) {
+	if alias == "" {
+		return
+	}
+	var n int
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE session_alias = ? OR session_id = ?`,
+		alias, alias).Scan(&n)
+	if err != nil {
+		// Cannot tell: keep the rows and say so. Retention bounds them either way.
+		slog.Warn("dash: could not tell whether a removed session's alias is still in use",
+			"alias", alias, "err", err)
+		return
+	}
+	if n > 0 {
+		return
+	}
+	if _, err := store.DeleteSessionState(d.sql, alias); err != nil {
+		slog.Warn("dash: could not delete the session state of a removed session", "session", alias, "err", err)
+	}
+}
+
+// sessionAliases lists the distinct alias ids stored on the given sessions' rows, minus each
+// row's own session id (a headerless turn's id IS its alias, and its rows store none). Read
+// BEFORE the rows are deleted: the alias is a column, and the column goes with them.
+func (d *DB) sessionAliases(sessions ...string) []string {
+	if len(sessions) == 0 {
+		return nil
+	}
+	rows, err := d.sql.Query(`SELECT DISTINCT session_alias FROM requests
+		WHERE session_alias <> '' AND session_alias <> session_id
+		AND session_id IN (`+placeholders(len(sessions))+`)`, anyArgs(sessions)...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if rows.Scan(&a) == nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Path returns the on-disk path ("" when in-memory).
@@ -869,6 +928,42 @@ func (d *DB) optimize() {
 //
 // "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
 // that is still in use must not be evicted because it started a week ago.
+//
+// The victims are picked ONCE, and the delete removes exactly that set (#772). The
+// delete used to re-run the ordering subquery itself, so a request landing between the
+// pick and the delete could change the order: the rows it removed were then not the rows
+// the state cleanup acted on, and a session that stayed lost its state to one that went.
+// One statement, so one transaction. The pick stays outside it, like every other read
+// here (ArchiveSessionFull reads its events outside its delete too): a read-then-write
+// transaction on this shared pool can fail to upgrade its WAL snapshot when the
+// session-state flush commits in between.
+func (d *DB) DropOldestSessions(n int) (int64, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	victims := d.oldestSessionIDs(n) // before the delete: afterwards they cannot be found
+	if len(victims) == 0 {
+		return 0, nil
+	}
+	if d.dropProbe != nil {
+		d.dropProbe()
+	}
+	// The aliases are columns of the rows about to go, so they are read before the delete.
+	aliases := d.sessionAliases(victims...)
+	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (`+placeholders(len(victims))+`)`,
+		anyArgs(victims)...)
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range victims {
+		d.deleteSessionState(id)
+	}
+	for _, a := range aliases {
+		d.deleteAliasState(a)
+	}
+	return res.RowsAffected()
+}
+
 func (d *DB) oldestSessionIDs(n int) []string {
 	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
 	if err != nil {
@@ -885,20 +980,12 @@ func (d *DB) oldestSessionIDs(n int) []string {
 	return out
 }
 
-func (d *DB) DropOldestSessions(n int) (int64, error) {
-	if n <= 0 {
-		return 0, nil
+func anyArgs(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
 	}
-	victims := d.oldestSessionIDs(n) // before the delete: afterwards they cannot be found
-	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
-		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
-	if err != nil {
-		return 0, err
-	}
-	for _, id := range victims {
-		d.deleteSessionState(id)
-	}
-	return res.RowsAffected()
+	return out
 }
 
 // TenantRowCounts reports how many request rows each tenant holds. The caller
