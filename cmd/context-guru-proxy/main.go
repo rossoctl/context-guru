@@ -568,7 +568,7 @@ func main() {
 		// Memory only, as before. Nothing to say: the dashboard is off.
 	case tenants != nil:
 		slog.Warn("context-guru: the session state database is off in hosted multi-tenant mode (--upstreams): each tenant has its own in-memory store")
-	case rec.DB().Path() == "":
+	case rec.DB().Path() == "" || rec.DB().Path() == ":memory:":
 		slog.Warn("context-guru: the session state database is off: the dashboard database is in memory, so nothing would survive a restart")
 	default:
 		stateDB = rec.DB().SQL()
