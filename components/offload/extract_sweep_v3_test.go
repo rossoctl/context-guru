@@ -134,8 +134,8 @@ func TestV3FillFollowsTheCutPoint(t *testing.T) {
 	for _, c := range []struct {
 		c    int
 		want float64
-	}{{100_000, 0.85}, {200_000, 0.85}, {500_000, 0.85 + (0.6-0.85)*300.0/800.0}, {1_000_000, 0.6}, {2_000_000, 0.6}} {
-		if got := v3Fill(c.c, 0.85, 0.6); got < c.want-1e-9 || got > c.want+1e-9 {
+	}{{100_000, 0.70}, {200_000, 0.70}, {500_000, 0.70 + (0.6-0.70)*300.0/800.0}, {1_000_000, 0.6}, {2_000_000, 0.6}} {
+		if got := v3Fill(c.c, 0.70, 0.6); got < c.want-1e-9 || got > c.want+1e-9 {
 			t.Errorf("fill(%d) = %v, want %v", c.c, got, c.want)
 		}
 	}
@@ -166,24 +166,25 @@ func TestV3CutPointFollowsTheSummarizerThenTheCompactionPointThenTheWindow(t *te
 	check("window not exact", 0, "")
 }
 
-// The sweet spot is a share of the EFFECTIVE context: 0.85 x 167k, not 0.85 x the 200k window.
+// The sweet spot is a share of the EFFECTIVE context: 0.70 x 167k, not 0.70 x the 200k window.
 func TestV3SweetSpotUsesTheOperatorCompactionPoint(t *testing.T) {
+	// 125k is in the sweet spot of the effective context, 0.70 x 167k = 117k, and under that of the window, 0.70 x 200k = 140k.
 	r := newV3Rig(t, "v3-eff", v3Rule)
 	r.window, r.c, r.cSource = 200_000, 167_000, string(compactionpoint.Operator)
 	r.request(0)
-	_, rep := r.request(150_000)
+	_, rep := r.request(125_000)
 	if rep.Events[eventAppliedWarm] != 2 || r.refused("not_in_sweet_spot") != 0 {
-		t.Fatalf("operator C = 167k: 150k is in the sweet spot (0.85 x 167k = 142k). events %v refused %v", rep.Events, v3Counters().Refused)
+		t.Fatalf("operator C = 167k: 125k is in the sweet spot (0.70 x 167k = 117k). events %v refused %v", rep.Events, v3Counters().Refused)
 	}
-	// The same figure with no operator value: C is the 200k window, and 150k is under 0.85 x 200k.
+	// The same figure with no operator value: C is the 200k window, and 125k is under 0.70 x 200k = 140k.
 	r = newV3Rig(t, "v3-eff2", v3Rule)
 	r.window, r.c, r.cSource = 200_000, 200_000, string(compactionpoint.WindowFallback)
 	r.request(0)
-	r.request(150_000)
-	r.request(150_000)
-	_, rep = r.request(150_000)
+	r.request(125_000)
+	r.request(125_000)
+	_, rep = r.request(125_000)
 	if rep.Events[eventAppliedWarm] != 0 || r.refused("not_in_sweet_spot") == 0 {
-		t.Fatalf("window C = 200k: 150k is below 170k. events %v refused %v", rep.Events, v3Counters().Refused)
+		t.Fatalf("window C = 200k: 125k is below 140k. events %v refused %v", rep.Events, v3Counters().Refused)
 	}
 }
 
@@ -644,7 +645,7 @@ func TestV3IsOffByDefaultAndTheSettingsAreChecked(t *testing.T) {
 		t.Error("an unknown selector was accepted")
 	}
 	e = shippedSweep(t, warmCfg+"selector: rule\n")
-	if !e.v3 || e.fillSmall != 0.85 || e.fillLarge != 0.6 || e.minDropFrac != 0.15 || e.protectLastN != 10 {
+	if !e.v3 || e.fillSmall != 0.70 || e.fillLarge != 0.6 || e.minDropFrac != 0.15 || e.protectLastN != 10 {
 		t.Fatalf("v3 defaults wrong: %+v", e)
 	}
 }
@@ -1321,5 +1322,123 @@ func TestV3TheRemovedCreditKeyIsRefusedWithAReason(t *testing.T) {
 	_, err := newExtractSweep([]byte("warm: true\ncredit_avoided_compaction: true\n"))
 	if err == nil || !strings.Contains(err.Error(), "credit_avoided_compaction") || !strings.Contains(err.Error(), "DELAYS") {
 		t.Fatalf("err = %v, want a refusal that says why", err)
+	}
+}
+
+// An unset or out-of-range fill reads as the default 0.70 and 0.6, not as an old value.
+func TestV3FillDefaultsAreSeventyAndSixty(t *testing.T) {
+	for _, cfg := range []string{v3Rule, v3Rule + "fill_small: 2\nfill_large: -1\n"} {
+		e := shippedSweep(t, cfg)
+		if e.fillSmall != 0.70 || e.fillLarge != 0.6 {
+			t.Fatalf("cfg %q: fill = %v / %v, want 0.70 / 0.6", cfg, e.fillSmall, e.fillLarge)
+		}
+	}
+	if e := shippedSweep(t, v3Rule+"fill_small: 0.8\n"); e.fillSmall != 0.8 {
+		t.Fatalf("a written fill_small was ignored: %v", e.fillSmall)
+	}
+	// 0.70 > 0.6: the line still falls with C.
+	if !(v3Fill(200_000, 0.70, 0.6) > v3Fill(600_000, 0.70, 0.6) && v3Fill(600_000, 0.70, 0.6) > v3Fill(1_000_000, 0.70, 0.6)) {
+		t.Fatal("fill must fall from 0.70 at 200k to 0.6 at 1M")
+	}
+}
+
+// ---- compaction_premium_usd: an EXPERIMENT knob ----
+
+// The t99-like case where the saving to N does not pay: the premium is what lets it through.
+func premiumCfg() string {
+	cfg := strings.Replace(v3Rule, "warm_expected_turns: 200\n", "", 1)
+	return strings.Replace(cfg, "warm_max_turns: 200", "warm_max_turns: 1000", 1)
+}
+
+func premiumRun(t *testing.T, name, cfg string) (WarmDecision, V3Stats) {
+	t.Helper()
+	resetWarmForTest()
+	r := newV3Rig(t, name, cfg)
+	r.c, r.window = 167_000, 200_000
+	r.request(0)
+	var d WarmDecision
+	for i := 0; i < 4; i++ {
+		r.request(144_000 + i*1_000)
+		if cur, ok := lastWarmDecision(); ok && cur.Stage == "apply" && cur.TurnsModel == turnsModelCut && d.Stage == "" {
+			d = cur
+		}
+	}
+	return d, v3Counters()
+}
+
+func TestV3PremiumZeroIsTheCostGate(t *testing.T) {
+	zero, zs := premiumRun(t, "v3-prem0", premiumCfg())
+	none, ns := premiumRun(t, "v3-prem-none", premiumCfg()+"compaction_premium_usd: 0\n")
+	if zero.Accept || zs.Cuts != 0 || !strings.HasPrefix(zero.Reason, "does_not_pay") {
+		t.Fatalf("fixture: the cost gate must refuse this case: %+v", zero)
+	}
+	if zero.Reason != none.Reason || zero.Accept != none.Accept || zero.Saving != none.Saving || ns.Cuts != zs.Cuts {
+		t.Fatalf("premium 0 differs from no premium: %+v vs %+v", zero, none)
+	}
+	if zero.PremiumUSD != 0 || zero.PassedOnCost == nil || *zero.PassedOnCost {
+		t.Fatalf("decision = %+v, want premium_usd 0 and passed_on_cost false (logged on every apply-stage decision)", zero)
+	}
+}
+
+func TestV3APremiumLetsARefusedCaseThroughAndMarksIt(t *testing.T) {
+	d, v := premiumRun(t, "v3-prem10", premiumCfg()+"compaction_premium_usd: 10\n")
+	if !d.Accept || v.Cuts != 1 {
+		t.Fatalf("decision = %+v cuts %d, want the premium to let the cut through", d, v.Cuts)
+	}
+	if d.PremiumUSD != 10 || d.PassedOnCost == nil || *d.PassedOnCost {
+		t.Fatalf("decision = %+v, want premium_usd 10 and passed_on_cost false", d)
+	}
+	if v.CutsOnPremium != 1 || v.CutsOnCost != 0 {
+		t.Fatalf("stats = on cost %d, on premium %d, want 0 and 1", v.CutsOnCost, v.CutsOnPremium)
+	}
+	if d.Saving >= d.Rewrite {
+		t.Fatalf("the real cost must still be logged and still lose: saving %v rewrite %v", d.Saving, d.Rewrite)
+	}
+}
+
+func TestV3ACutThatPaysOnCostIsCountedOnCostEvenWithAPremium(t *testing.T) {
+	// A short pace and a long horizon so the saving to N pays by itself.
+	cfg := v3Rule + "compaction_premium_usd: 10\n"
+	r := newV3Rig(t, "v3-prem-cost", cfg)
+	r.request(0)
+	r.request(175_000)
+	d, _ := lastWarmDecision()
+	v := v3Counters()
+	if !d.Accept || v.CutsOnCost != 1 || v.CutsOnPremium != 0 || d.PassedOnCost == nil || !*d.PassedOnCost {
+		t.Fatalf("decision = %+v stats = %+v, want a cut on cost, passed_on_cost true", d, v)
+	}
+}
+
+// The premium needs a postponement: it is 0 in the other turns models and when nothing is removed.
+func TestV3PremiumNeedsAPostponement(t *testing.T) {
+	e := shippedSweep(t, premiumCfg()+"compaction_premium_usd: 10\n")
+	if p := e.postponementPremium(turnsEstimate{Model: turnsModelCut, Raw: 10, RawAfter: 20}); p != 10 {
+		t.Fatalf("premium = %v, want 10 when the cut postpones the compaction", p)
+	}
+	for _, te := range []turnsEstimate{
+		{Model: turnsModelCut, Raw: 10},                    // nothing removed: no N'
+		{Model: turnsModelSoFar, Raw: 10, RawAfter: 20},    // not the cut model
+		{Model: turnsModelExpected, Raw: 10, RawAfter: 20}, // not the cut model
+	} {
+		if p := e.postponementPremium(te); p != 0 {
+			t.Errorf("premium = %v for %+v, want 0", p, te)
+		}
+	}
+}
+
+func TestV3PremiumIsOffWithoutV3(t *testing.T) {
+	plain := shippedSweep(t, "compaction_premium_usd: 10\n")
+	if plain.v3 || plain.premiumUSD != 0 {
+		t.Fatalf("a premium switched something on without warm: v3 %v premium %v", plain.v3, plain.premiumUSD)
+	}
+	if p := plain.postponementPremium(turnsEstimate{Model: turnsModelCut, Raw: 10, RawAfter: 20}); p != 0 {
+		t.Fatalf("premium = %v off v3", p)
+	}
+	if e := shippedSweep(t, warmCfg); e.premiumUSD != 0 {
+		t.Fatal("a premium is set by default")
+	}
+	// A premium alone switches v3 on, like every v3 setting.
+	if e := shippedSweep(t, warmCfg+"compaction_premium_usd: 3\n"); !e.v3 || e.premiumUSD != 3 {
+		t.Fatalf("compaction_premium_usd must switch v3 on: %+v", e)
 	}
 }

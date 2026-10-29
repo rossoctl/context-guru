@@ -783,7 +783,15 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		if e.v3 {
 			d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
 		}
-		if !(saving > rewrite) {
+		// EXPERIMENT (sweep v3, compaction_premium_usd): the premium joins the saving side when the cut postpones the
+		// compaction. passed_on_cost says the cost gate alone would have accepted. With a premium of 0 nothing changes.
+		premium := e.postponementPremium(te)
+		passedOnCost := saving > rewrite
+		if e.v3 {
+			d.PremiumUSD, d.PassedOnCost = premium, &passedOnCost
+			wa.premium, wa.passedOnCost = premium, passedOnCost
+		}
+		if !(saving+premium > rewrite) {
 			if deep {
 				return false, "does_not_pay_deep"
 			}
@@ -1013,7 +1021,12 @@ func (e *ExtractSweep) warmWorthAsking(c *components.Ctx, req *bschemas.BifrostC
 	if e.v3 {
 		d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
 	}
-	if !(saving > rewrite) {
+	premium := e.postponementPremium(te)
+	if e.v3 {
+		passed := saving > rewrite
+		d.PremiumUSD, d.PassedOnCost = premium, &passed
+	}
+	if !(saving+premium > rewrite) {
 		sweepWarmNotWorth.Add(1)
 		noteWarmTrigger("does_not_pay")
 		d.Reason = "does_not_pay"
@@ -1419,6 +1432,11 @@ type WarmDecision struct {
 	// after the cut (N', for reading only), both capped by warm_max_turns and before the wait-cause weight.
 	TurnsNoCut    float64 `json:"turns_no_cut,omitempty"`
 	TurnsAfterCut float64 `json:"turns_after_cut,omitempty"`
+	// PremiumUSD is the experiment premium the gate added to the saving (0 unless compaction_premium_usd is set and
+	// the cut postpones the compaction). PassedOnCost says the saving to N alone beat the rewrite, so a run shows
+	// which cuts needed the premium. Sweep v3 only.
+	PremiumUSD   float64 `json:"premium_usd,omitempty"`
+	PassedOnCost *bool   `json:"passed_on_cost,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1439,7 +1457,7 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
 		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
 		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource, "rule_d", ruleDString(d.RuleD),
-		"turns_no_cut", d.TurnsNoCut, "turns_after_cut", d.TurnsAfterCut)
+		"turns_no_cut", d.TurnsNoCut, "turns_after_cut", d.TurnsAfterCut, "premium_usd", d.PremiumUSD, "passed_on_cost", passedOnCostString(d.PassedOnCost))
 }
 
 func warmDecisionsCopy() []WarmDecision {
@@ -1550,4 +1568,26 @@ func SeedCarriedCountersForTest() (reset func()) {
 	sweepWarmCarriedExpired.Store(4)
 	sweepWarmCarriedCapped.Store(5)
 	return resetWarmForTest
+}
+
+// postponementPremium is the experiment premium (compaction_premium_usd) when this cut postpones the compaction:
+// the turns counted from the prompt after the cut are more than those without it. That holds for any cut that
+// removes something in the cut turns model. It is 0 off v3, with the setting at 0, and in the other turns models.
+// The default of 0 leaves the gate as the cost gate: saving to N, no credit.
+func (e *ExtractSweep) postponementPremium(te turnsEstimate) float64 {
+	if !e.v3 || e.premiumUSD <= 0 || te.Model != turnsModelCut || !(te.RawAfter > te.Raw) {
+		return 0
+	}
+	return e.premiumUSD
+}
+
+// passedOnCostString renders PassedOnCost for the log line: "" when the decision is not a v3 one.
+func passedOnCostString(p *bool) string {
+	switch {
+	case p == nil:
+		return ""
+	case *p:
+		return "true"
+	}
+	return "false"
 }
