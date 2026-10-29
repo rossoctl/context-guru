@@ -165,3 +165,99 @@ func TestTwoRewritesWithOneChangeIDFailTheCheck(t *testing.T) {
 		t.Fatalf("Checks = %+v, want one unique_change failure", res.Checks)
 	}
 }
+
+// onThread runs q as a request of the given thread in session s1. req.run is always "main".
+func onThread(ts *Trackers, th Thread, q req) Result {
+	r := ts.BeginRequest(RequestMeta{RequestID: "r-" + th.ID, Session: "s1", At: q.at}, q.client, q.clientBPs)
+	for _, op := range q.ops {
+		r.Add(op)
+	}
+	fwd, fbp := q.fwd, q.fwdBPs
+	if fwd.Pos == nil {
+		fwd = q.client
+	}
+	if fbp == nil {
+		fbp = q.clientBPs
+	}
+	r.EndRequest(th, fwd, fbp, q.facts)
+	return r.Compute(q.usage)
+}
+
+func hasOp(res Result, id string) bool {
+	for _, p := range res.Ops {
+		if p.OpID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// One session, three threads (main, a side thread and a subagent). A change on main stays active
+// and is priced only on main. Each thread's Version lock moves only on its own requests. Two
+// threads that report the same ChangeID, as the operator derives the same one for the same output,
+// are not a unique_change failure, because that check runs inside one request.
+func TestThreadsOfOneSessionKeepTheirOwnChangesAndVersions(t *testing.T) {
+	const change = "active:cg:cmdfilter:c40e"
+	ts := NewTrackers()
+	main, side, sub := Thread{ID: "main"}, Thread{ID: "p:side", Parent: "main"}, Thread{ID: "a:sub", Parent: "main"}
+	rs := ex2Requests()
+	versions := func(m, s, a uint64) {
+		t.Helper()
+		if got := [3]uint64{stateOf(ts, "main").Version, stateOf(ts, "p:side").Version, stateOf(ts, "a:sub").Version}; got != [3]uint64{m, s, a} {
+			t.Fatalf("versions (main, p:side, a:sub) = %v, want %v", got, [3]uint64{m, s, a})
+		}
+	}
+
+	// main reports the change once, so it is active on main.
+	onThread(ts, main, rs[0])
+	onThread(ts, main, rs[1])
+	versions(2, 0, 0)
+	if a := stateOf(ts, "main").Active; len(a) != 1 || a[0].ChangeID != "cg:cmdfilter:c40e" {
+		t.Fatalf("main Active = %+v, want the cmdfilter change", a)
+	}
+
+	// The other threads start empty: main's active change is not priced on them, and their
+	// first requests leave main's lock alone.
+	for _, th := range []Thread{side, sub} {
+		res := onThread(ts, th, rs[0])
+		if hasOp(res, change) || len(res.Ops) != 0 {
+			t.Fatalf("%s: ops %+v, want none: main's change must not reach another thread", th.ID, res.Ops)
+		}
+		noChecks(t, res)
+	}
+	versions(2, 1, 1)
+	if len(stateOf(ts, "p:side").Active) != 0 || len(stateOf(ts, "a:sub").Active) != 0 {
+		t.Fatal("a change on main must not become active on another thread")
+	}
+
+	// main's next request prices the active change, and only main's lock moves.
+	res := onThread(ts, main, rs[2])
+	if op := findOp(t, res, change); op.Saved != (TierTokens{CacheRead: 7000}) {
+		t.Fatalf("main active op %+v, want 7000 read", op)
+	}
+	versions(3, 1, 1)
+
+	// The side thread and the subagent both report the same ChangeID in their own requests. Each
+	// prices it once, as new, and neither fails unique_change.
+	for _, th := range []Thread{side, sub} {
+		res := onThread(ts, th, rs[1])
+		op := findOp(t, res, "op1")
+		if op.ChangeID != "cg:cmdfilter:c40e" || op.Saved.CacheWrite5m != 7000 {
+			t.Fatalf("%s: op %+v, want the change priced as new (7000 write)", th.ID, op)
+		}
+		noChecks(t, res)
+	}
+	versions(3, 2, 2)
+
+	// Each thread now holds the change on its own, and main's stays at its own version.
+	for _, name := range []string{"main", "p:side", "a:sub"} {
+		if a := stateOf(ts, name).Active; len(a) != 1 {
+			t.Fatalf("%s Active = %+v, want exactly one change", name, a)
+		}
+	}
+	res = onThread(ts, side, rs[2])
+	if findOp(t, res, change).Saved != (TierTokens{CacheRead: 7000}) {
+		t.Fatalf("p:side active op %+v, want 7000 read", findOp(t, res, change))
+	}
+	versions(3, 3, 2)
+}

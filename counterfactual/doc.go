@@ -50,10 +50,10 @@
 //     SettingChange.At; with no At it starts at the read and adds penalty_unknown. Row 3 and row 4
 //     need the read to be below the prediction by more than the tolerance of decision 3.
 //  9. Phase. With no previous fingerprint, no TTL, no cached extent inside the TTL, or a gap past a minimum or unknown
-//     lifetime, the phase is unknown and penalty_unknown is added (§6.4); a read in the usage then
+//     lifetime with no ping, the phase is unknown and penalty_unknown is added (§6.4); a read in the usage then
 //     makes it hot up to the read extent, with no rescue. The cold expiry adds an empty break
 //     (§5.2 row 5).
-//  10. A rescue (§4.4) needs a ping after the previous request, a request gap past an exact TTL, an
+//  10. A rescue (§4.4) needs a ping after the previous request, a request gap past an exact or minimum TTL, an
 //     entry gap inside it, and a read larger than the write. Its tokens are the smaller of the ping's
 //     read (converted with the ratio) and Usage.CacheRead, at the TTL of EntryFacts.TTL.
 //  11. A spend is never priced in tokens: its Call is passed through (D4). A setting is not priced

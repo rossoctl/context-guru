@@ -1,6 +1,6 @@
 {
- "id": "keepalive/ping/minimum-lifetime/no-rescue",
- "description": "OpenAI GPT-5.6: the entry lifetime is a 30-minute minimum, not a proven expiry (R45). A ping at minute 30 reads the 11,060 tokens, and the next request arrives at minute 35 and reads them too. A gap past a minimum proves nothing, so the phase is unknown until the read in the usage proves the entry: it becomes hot. A rescue claims the entry would have expired, which a minimum cannot show, so none is credited and the window is only the ping's cost, 11,060 x $0.30 + 10 x $3.00 + $15.00 per million = -$0.00336. mask's 5,940 tokens are read, not written: +$0.00178.",
+ "id": "keepalive/ping/minimum-lifetime/rescue",
+ "description": "OpenAI GPT-5.6: the entry lifetime is a 30-minute minimum, and the owner decision is that 30 minutes is 30 minutes (R45). Turn 1 caches 17,000 tokens. A ping at minute 30 reads them and renews the entry. The next request arrives at minute 35, 35 minutes after turn 1 and so past the lifetime, but 5 minutes after the ping and so inside it. The rescue is credited: 17,000 x ($3.75 - $0.30) = +$0.05865. The ping costs 17,000 x $0.30 + 10 x $3.00 + $15.00 per million = -$0.00513. Total +$0.05352.",
  "source": "more_examples.md#B3",
  "dims": {
   "kind": "rescue",
@@ -72,24 +72,7 @@
      }
     ]
    },
-   "add": [
-    {
-     "id": "o1",
-     "kind": "rewrite",
-     "operator": "context-guru.mask",
-     "at": {
-      "section": "messages",
-      "index": 1
-     },
-     "sizeBefore": {
-      "bytes": 24000
-     },
-     "sizeAfter": {
-      "bytes": 240
-     },
-     "changeId": "cg:mask:4a90"
-    }
-   ],
+   "add": [],
    "end": {
     "thread": {
      "id": "main"
@@ -110,15 +93,15 @@
        "bytes": 12000
       },
       {
-       "hash": 9215220295725055461,
-       "bytes": 240
+       "hash": 11608045664679988289,
+       "bytes": 24000
       },
       {
-       "hash": 8099914972667036346,
+       "hash": 17195989329813874534,
        "bytes": 12000
       },
       {
-       "hash": 9829950327744007510,
+       "hash": 17438703347596249554,
        "bytes": 12000
       }
      ]
@@ -147,7 +130,7 @@
    "usage": {
     "input": 0,
     "cacheRead": 0,
-    "cacheWrite": 11060,
+    "cacheWrite": 17000,
     "cacheWrite1h": 0
    },
    "expected": {
@@ -158,16 +141,7 @@
      "cacheWrite": 17000,
      "cacheWrite1h": 0
     },
-    "ops": [
-     {
-      "changeId": "cg:mask:4a90",
-      "saved": {
-       "cacheWrite5m": 5940
-      },
-      "caused": {},
-      "estimated": true
-     }
-    ],
+    "ops": [],
     "unpriced": [
      {
       "reason": "penalty_unknown"
@@ -198,7 +172,7 @@
        "model": "agent-model",
        "usage": {
         "input": 10,
-        "cacheRead": 11060,
+        "cacheRead": 17000,
         "cacheWrite": 0,
         "cacheWrite1h": 0,
         "output": 1
@@ -224,7 +198,7 @@
        "model": "agent-model",
        "usage": {
         "input": 10,
-        "cacheRead": 11060,
+        "cacheRead": 17000,
         "cacheWrite": 0,
         "cacheWrite1h": 0,
         "output": 1
@@ -316,19 +290,19 @@
        "bytes": 12000
       },
       {
-       "hash": 9215220295725055461,
-       "bytes": 240
+       "hash": 11608045664679988289,
+       "bytes": 24000
       },
       {
-       "hash": 8099914972667036346,
+       "hash": 17195989329813874534,
        "bytes": 12000
       },
       {
-       "hash": 9829950327744007510,
+       "hash": 17438703347596249554,
        "bytes": 12000
       },
       {
-       "hash": 14673721351171212477,
+       "hash": 8453938350694027169,
        "bytes": 2000
       }
      ]
@@ -362,7 +336,7 @@
    },
    "usage": {
     "input": 0,
-    "cacheRead": 11060,
+    "cacheRead": 17000,
     "cacheWrite": 500,
     "cacheWrite1h": 0
    },
@@ -370,19 +344,26 @@
     "phase": "hot",
     "baselineUsage": {
      "input": 0,
-     "cacheRead": 17000,
-     "cacheWrite": 500,
+     "cacheRead": 0,
+     "cacheWrite": 17500,
      "cacheWrite1h": 0
     },
-    "ops": [
+    "ops": [],
+    "effects": [
      {
-      "changeId": "cg:mask:4a90",
+      "kind": "rescue",
+      "changeId": "ka:main:w-oa",
       "saved": {
-       "cacheRead": 5940
+       "cacheWrite5m": 17000
       },
-      "caused": {},
-      "estimated": true,
-      "note": "the read proves the entry, so the saving is a read"
+      "caused": {
+       "cacheRead": 17000
+      },
+      "to": {
+       "section": "messages",
+       "index": 3
+      },
+      "note": "without the ping the 30-minute entry would have expired; write becomes read"
      }
     ],
     "boundary": {

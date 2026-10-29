@@ -420,10 +420,13 @@ func (c *calcState) phaseAndBoundary(res *Result) {
 		switch {
 		case gap <= f.TTL:
 			c.phase, c.prevExt = PhaseHot, mustFlat(prev.Forwarded, *c.s.Cache.Extent)
-		case f.Lifetime != LifetimeExact:
-			// a minimum or unknown lifetime cannot prove an expiry (R45)
+		case f.Lifetime == LifetimeUnknown:
+			// an unknown lifetime cannot prove an expiry (R45)
 		case !f.LastPing.IsZero() && entryGap <= f.TTL && f.PingRead != nil:
+			// a minimum counts as the lifetime for a rescue: 30 minutes is 30 minutes
 			c.phase, c.prevExt, c.pingHot = PhaseHot, mustFlat(prev.Forwarded, *f.PingRead), true
+		case f.Lifetime == LifetimeMinimum:
+			// with no ping, a gap past a minimum proves no expiry (R45)
 		default:
 			c.phase = PhaseCold
 		}

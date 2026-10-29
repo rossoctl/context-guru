@@ -68,7 +68,7 @@ and a ping rescue.
 |---|---|---|---|
 | B1 | A ping inside the TTL. | No rescue. A window with only a cost. | Agrees. |
 | B2 | A ping after expiry (the entry gap is above the TTL). | `cold`, no rescue. | Probably agrees. |
-| B3 | GPT-5.6, a 35-minute gap, a ping. | A `minimum` lifetime gives no rescue (R45). | Differs: cg credits after 30 minutes. |
+| B3 | GPT-5.6, a 35-minute gap, a ping. | A rescue: 30 minutes is 30 minutes, so the ping kept the entry. | Agrees: cg credits after 30 minutes. |
 | B4 | A 1h entry, a 9-minute gap, a ping. | No rescue: the entry was alive. | Differs: cg uses the 5m TTL. |
 | B5 | Two pings in one window, then one rescue. | The credit is the smaller of what the last ping read and what the request read. Both pings cost. | Agrees. |
 | B6 | A main thread and a subagent, each with a window. | State per thread. The session total adds both. | Not covered. |
@@ -141,7 +141,7 @@ and a ping rescue.
 ## 4. Suggested order
 
 1. **D2, D3, E1, E3 and F6.** They use cg operators and test spec logic that no case reaches.
-2. **B3 and B4.** They are the two `differs` entries that the spec already announces (§10.2).
+2. **B4.** It is the one `differs` entry that the spec already announces (§10.2). B3 agrees since the owner decision on the 30-minute minimum.
 3. **C1 and C3.** They show whether cg's novelty rule fails on position alone.
 4. **A1.** It is the client-edit break.
 
@@ -168,9 +168,8 @@ F2, F4, F5, H2, H5. Where the result is not what the plan predicted or needs a n
 - **A1** expects a break effect that moves no token. The client's last breakpoint before the edit is also
   where the provider stopped reading, so nothing moves. Whether the library should add the effect at all
   when nothing moves is not stated in §5.2. The case lists this in `open`.
-- **A4** agrees with cg, so it needs no entry in `differences.json`. **B3** and **B4** differ, as the plan
-  said. The play adapter leaves the provider and the TTL tier unset, so these two cases show cg's default
-  5m floor, not a measured GPT-5.6 or 1h session.
+- **A4** agrees with cg, so it needs no entry in `differences.json`. **B3** and **B4** now agree too: the play adapter
+  passes the provider and the TTL tier, so cg uses its 30-minute and 1h floors.
 - **E3, E4, E5** are listed `notCovered`. cg books its `headttl` credit outside the per-component figures
   and the adapter does not feed it, so cg shows 0.
 - **C3, H5** and **F2** were not predicted to differ in this way. **C3** and **F2** differ for the reasons

@@ -726,10 +726,11 @@ conditions of the current `keepaliveSavedUSD`:
 2. The **request gap** (§5.2), from the previous real request of the thread, is longer than the
    entry's TTL, so without a ping the entry would have expired. The TTL is the lifetime of the
    breakpoint that wrote the entry, so a 1h entry is not rescued after 9 minutes. And the lifetime
-   is `exact`: on a `minimum` provider an elapsed gap cannot prove that the entry would have
-   expired (R45), so no rescue is added. This is stricter than the current
-   `keepaliveCreditFloorMs`, which credits OpenAI GPT-5.6+ after its 30-minute minimum, and uses
-   the 5m TTL for a 1h entry. Both are `differs` entries (§10.2).
+   is `exact` or `minimum`. A `minimum` is taken as the lifetime when a ping is what kept the entry:
+   30 minutes is 30 minutes, so a rescue is added after a gap past it. This matches the current
+   `keepaliveCreditFloorMs`, which credits OpenAI GPT-5.6+ after its 30-minute minimum. With no ping,
+   a gap past a `minimum` still proves no expiry (R45), and an `unknown` lifetime never gives a rescue.
+   The current code uses the 5m TTL for a 1h entry, which is a `differs` entry (§10.2).
 3. The provider read more than it wrote.
 4. The tokens are the smaller of what the last ping read and what this request read.
 
@@ -1015,9 +1016,9 @@ The phase is found **before** the rows, from the gaps. It is the **cache state**
 | Case | `CachePhase` | `Extent` |
 |---|---|---|
 | A previous fingerprint exists, and the request gap ≤ TTL | `hot` | `prevExtent` |
-| A previous fingerprint exists, request gap > TTL, entry gap ≤ TTL, `PingRead` is set, and the lifetime is `exact` | `hot`, and the library adds a rescue with `ChangeID = EntryFacts.PingWindow` (§4.4) | `PingRead` |
+| A previous fingerprint exists, request gap > TTL, entry gap ≤ TTL, `PingRead` is set, and the lifetime is `exact` or `minimum` | `hot`, and the library adds a rescue with `ChangeID = EntryFacts.PingWindow` (§4.4) | `PingRead` |
 | A previous fingerprint exists, request gap > TTL, entry gap > TTL, and the lifetime is `exact` | `cold`. A ping was sent but too late: its window gets no rescue | nil |
-| A previous fingerprint exists, request gap > TTL, and the lifetime is `minimum` or `unknown` | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
+| A previous fingerprint exists, request gap > TTL, no qualifying ping, and the lifetime is `minimum` or `unknown` | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
 | No previous fingerprint for this thread | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
 
 **A read in the usage is evidence.** The provider bills a read only for an entry it holds. So when
@@ -1044,8 +1045,8 @@ not exist, in the unsafe direction. The host already carries part of this distin
 (`keepaliveCreditFloorMs`: pre-5.6 OpenAI is never credited, exactly because `Minimum` cannot stand
 in for proof of expiry). The host sets `EntryFacts.Lifetime` from the same source
 (`apply.CacheLifetime`), and the table above routes a `Minimum`-with-no-proof gap to `unknown`, not
-`cold`. §6.4 then applies (`penalty_unknown`). For the same reason a `minimum` provider gets no
-rescue (§4.4): a rescue is a claim that the entry would have expired.
+`cold`. §6.4 then applies (`penalty_unknown`). A `minimum` provider does get a rescue
+when a ping kept the entry (§4.4): the owner decision is that 30 minutes is 30 minutes.
 
 ### 5.3 Tokens for each position
 
@@ -1534,8 +1535,8 @@ The places where the current code is meant to give a different figure are in one
 - `notCovered`: the current code prices something the model does not. The case is listed in §11.
 
 Known `differs` entries from this spec, for the keep-alive credit (§4.4): the current code credits a
-rescue on OpenAI GPT-5.6+ after the 30-minute minimum, and credits a 1h entry after a 5m gap
-(`providerCacheTTLMs`, `dash/event.go`). This spec credits neither.
+1h entry after a 5m gap (`providerCacheTTLMs`, `dash/event.go`). This spec does not. Both agree on a
+rescue on OpenAI GPT-5.6+ after the 30-minute minimum.
 
 **Rounding.** The case list and the examples compute in micro-dollars, exactly, and round once, half
 up, when a figure is shown. A total adds the exact amounts.
@@ -1602,7 +1603,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 22. Observe mode: a `DryRun` change shown on every request; then the switch to enforce, with its
     break (§4.6).
 23. The same tool output twice in one session: two `ChangeID`s (§4.2 rule 6).
-24. A ping on a `minimum` provider: no rescue (§4.4). A ping on a 1h entry after 9 minutes: no rescue.
+24. A ping on a `minimum` provider past its minimum: a rescue (§4.4). A ping on a 1h entry after 9 minutes: no rescue.
 25. A subagent's first request that reads the main thread's `tools` and `system`: `hot` from the
     usage, not `unknown` (§5.2).
 
