@@ -442,8 +442,8 @@ func (d *DB) deleteSessionState(sessions, aliases []string) {
 // inUseIDs tells which of the given keys a request row still uses, as a session's alias or as
 // a session's own id. TWO queries for the whole list, not one per key: this runs on the writer
 // goroutine during eviction passes, and requests holds millions of rows in production. An
-// unreadable answer says every key is in use — keeping rows is the safe side, and retention
-// bounds them.
+// answer that cannot be read — the query fails to open, a row fails to scan, or the scan ends
+// early — says every key is in use. Keeping rows is the safe side, and retention bounds them.
 func (d *DB) inUseIDs(keys []string) map[string]bool {
 	inUse := map[string]bool{}
 	if len(keys) == 0 {
@@ -453,26 +453,45 @@ func (d *DB) inUseIDs(keys []string) map[string]bool {
 		`SELECT DISTINCT session_alias FROM requests WHERE session_alias IN (`,
 		`SELECT DISTINCT session_id FROM requests WHERE session_id IN (`,
 	}
+	// giveUp keeps the promise above however the answer breaks: every key counts as in use.
+	// Logged once per call, whatever the failure and however many queries it hits.
 	var warned bool
+	giveUp := func(err error) {
+		if !warned {
+			slog.Warn("dash: could not tell whether a removed session's state is still in use",
+				"err", err)
+			warned = true
+		}
+		for _, k := range keys {
+			inUse[k] = true
+		}
+	}
 	for _, q := range queries {
 		for _, chunk := range chunkStrings(keys) {
 			rows, err := d.sql.QueryContext(d.readCtx(), q+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
 			if err != nil {
-				if !warned {
-					slog.Warn("dash: could not tell whether a removed session's state is still in use",
-						"err", err)
-					warned = true
-				}
-				for _, k := range keys {
-					inUse[k] = true
-				}
+				giveUp(err)
 				return inUse
 			}
 			for rows.Next() {
 				var k string
-				if rows.Scan(&k) == nil {
-					inUse[k] = true
+				// A row that fails to scan says the same thing as a query that fails to open:
+				// the answer is not trustworthy, and a key it could not deliver must not read
+				// as unused.
+				if err := rows.Scan(&k); err != nil {
+					rows.Close()
+					giveUp(err)
+					return inUse
 				}
+				inUse[k] = true
+			}
+			// A scan that fails midway ends the loop early: the keys it did not reach would
+			// read as unused, and the caller would then delete state a live session still
+			// reads. That is the one unsafe direction this function must never fail in.
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				giveUp(err)
+				return inUse
 			}
 			rows.Close()
 		}
@@ -963,7 +982,10 @@ func (d *DB) optimize() {
 // delete used to re-run the ordering subquery itself, so a request landing between the
 // pick and the delete could change the order: the rows it removed were then not the rows
 // the state cleanup acted on, and a session that stayed lost its state to one that went.
-// One statement, so one transaction. The pick stays outside it, like every other read
+// The delete runs in chunks of sqlChunk ids, each chunk one statement and so one
+// transaction. A failed chunk returns before the state cleanup, so victims the earlier
+// chunks already removed keep their state until retention — the safe direction. The pick
+// stays outside the deletes, like every other read
 // here (ArchiveSessionFull reads its events outside its delete too): a read-then-write
 // transaction on this shared pool can fail to upgrade its WAL snapshot when the
 // session-state flush commits in between.
