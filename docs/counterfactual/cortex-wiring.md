@@ -301,8 +301,8 @@ would misattribute it. Keying by thread gives the right baseline for every rule 
   needs only the previous request of the same thread, so the store does not grow with the length of a
   session. The active context operations of a thread are also kept, because `Compute` applies them
   again. They grow with the number of live changes, not with the number of requests, and a change that
-  ends is removed. That bound holds only if the end rule works (design §11, question 12). If it does
-  not, the list can grow without limit.
+  ends is removed. That bound holds only if the end rule finds the end (design §11, question 12). If it
+  does not, the list can grow without limit.
 - **Restart:** the whole `ThreadState` is lost. The fingerprint heals on the next request: only that
   request gets `penalty_unknown`. The active context operations do not heal: the context operators
   do not report them again, so every later request of the thread misses their saving and fails the

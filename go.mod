@@ -6,6 +6,12 @@ go 1.26.4
 // plus the proxy engine the context-guru-proxy binary embeds.
 require github.com/maximhq/bifrost/core v1.7.0
 
+// counterfactual is a module of its own (design D7) that this module's tests import. go.work links
+// them for development; the replace keeps GOWORK=off and go mod tidy working.
+require github.com/rossoctl/context-guru/counterfactual v0.0.0
+
+replace github.com/rossoctl/context-guru/counterfactual => ./counterfactual
+
 require (
 	github.com/alexaandru/go-sitter-forest/c v1.9.4
 	github.com/alexaandru/go-sitter-forest/c_sharp v1.9.6
@@ -53,7 +59,6 @@ require (
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rossoctl/context-guru/counterfactual v0.0.0
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -68,5 +73,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/rossoctl/context-guru/counterfactual => ./counterfactual

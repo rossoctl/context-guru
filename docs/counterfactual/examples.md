@@ -384,7 +384,7 @@ where it started, and `Compute` applies it again on every later turn:
 - `expand`, reported on turn 1: the `context_guru_expand` tool added (300 tokens).
 - `mask`, reported on turn 3: 4,000 tokens (message 3) reduced to a 60-token marker.
 
-How `Compute` knows that these three are still active is not decided (design §11, question 12).
+`Compute` knows that these three are still active because none of them has ended (design §11, question 12).
 
 Turn 4 forwarded messages 0 to 8, and the provider cached them.
 

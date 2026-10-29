@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/counterfactual/opscases"
 	"github.com/rossoctl/context-guru/dash"
@@ -22,6 +24,10 @@ import (
 // fixtureModel has no tokenizer correction, so BilledTokenFactor is 1 and the comparison is in
 // the case's own tokens (design §11 question 3 covers the correction).
 const fixtureModel = "fixture-model"
+
+// threadKey is the key of the removals a request replays: its session and its thread. A change
+// reported on one thread is replayed on that thread only, never on another thread of the session.
+func threadKey(s opscases.Step) string { return s.Begin.Meta.Session + "\x00" + s.End.Thread.ID }
 
 // Played is the current code's figure for one step of a case, in micro-dollars.
 type Played struct {
@@ -47,21 +53,33 @@ func micros(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
 // each step.
 //
 // The old logic wants, on every request, the tokens removed (gross) and how many of them are a
-// first removal (unique). The new model reports a change once and replays it, so Play does the
-// bookkeeping the old pipeline did: it keeps every rewrite it has seen and lists all of them on
-// each later request. The first request of a change is unique; a replay is gross only.
+// first removal (unique). The new model reports a change once and replays it, so Play keeps every
+// rewrite it has seen, per thread, and lists all of them on each later request. Whether a removal
+// is unique is not decided here: Play asks the live Recorder.MarkUnique, so a case catches any
+// scoping that code has.
 //
 // A ping is a KeepAlive row, a rescued request carries KeepAlivePings, and a summarizer call is
 // CGLLMCostUSD. The old code takes that cost as a given from the caller, so Play prices the call
 // with the rates of the model the case names.
-func Play(c opscases.Case) []Played {
+func Play(t testing.TB, c opscases.Case) []Played {
+	// The unique-versus-replay split is the live recorder's own: Recorder.MarkUnique, which the proxy
+	// calls for every component of every request. Running it here, and not a copy of its rule, is
+	// what lets a case catch a scoping difference in it (for example a change that main reported
+	// being seen as a replay on another thread).
+	rec, err := dash.NewRecorder(dash.Options{DBPath: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+
 	type change struct {
 		id, operator string
 		delta        int
 	}
-	seen := map[string][]change{} // per session: the old pipeline kept its removals for one session only
+	seen := map[string][]change{} // per thread (see threadKey)
 	var out []Played
 
+	lastTail := map[string]uint64{} // per session: the hash of the volatile half cachesplit last moved the breakpoint past
 	var prevAt time.Time
 	requests := 0
 	pings, pingRead := 0, int64(0)
@@ -89,16 +107,14 @@ func Play(c opscases.Case) []Played {
 			continue
 		}
 
-		first := map[string]bool{}
 		var cgLLM float64
 		var llmChange string
 		for _, op := range s.Add {
 			switch op.Kind {
 			case cf.KindRewrite:
-				sess := s.Begin.Meta.Session
+				sess := threadKey(s)
 				// the fixtures use 4 bytes a token
 				seen[sess] = append(seen[sess], change{op.ChangeID, op.Operator, (op.SizeBefore.Bytes - op.SizeAfter.Bytes) / 4})
-				first[op.ChangeID] = true
 			case cf.KindSpend:
 				if op.Call != nil {
 					cgLLM += float64(c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)) / 1e12
@@ -107,10 +123,23 @@ func Play(c opscases.Case) []Played {
 			}
 		}
 
+		// An OpenAI model keeps its name so that cg picks its own provider's keep-alive floor
+		// (keepaliveCreditFloorMs); every other case stays on the fixture model.
+		model, provider := fixtureModel, ""
+		if strings.Contains(s.Begin.Meta.Model, "gpt-") {
+			model, provider = s.Begin.Meta.Model, string(bschemas.OpenAI)
+		}
+		cacheTTL := ""
+		if s.End.Facts.TTL == "1h" {
+			cacheTTL = apply.TTLEphemeral1h
+		}
+
 		price := priceOf(c.StepRate(s))
 		at := s.Begin.Meta.At
 		e := &dash.Event{
-			Model:        fixtureModel,
+			Model:        model,
+			Provider:     provider,
+			CacheTTL:     cacheTTL,
 			FreshInput:   int64(s.Usage.Input),
 			CacheRead:    int64(s.Usage.CacheRead),
 			CacheWrite:   int64(s.Usage.CacheWrite),
@@ -119,14 +148,30 @@ func Play(c opscases.Case) []Played {
 			TokensAfter:  opscases.Tokens(s.End.Forwarded),
 			CGLLMCostUSD: cgLLM,
 		}
-		var ids []string
-		for _, ch := range seen[s.Begin.Meta.Session] {
-			gross, unique := max(ch.delta, 0), 0
-			if first[ch.id] {
-				unique = gross
+		// cachesplit: the forwarded system block it split is the stable half, and the block after
+		// it is the volatile tail. A session's first request counts as a changed tail.
+		for _, op := range s.Add {
+			if op.Kind != cf.KindRewrite || op.Operator != "context-guru.cachesplit" {
+				continue
 			}
+			i := s.End.Forwarded.Start[1] + op.At.Index
+			if i+1 >= len(s.End.Forwarded.Pos) {
+				continue
+			}
+			sess, tail := s.Begin.Meta.Session, s.End.Forwarded.Pos[i+1].Hash
+			e.SplitStableTokens = opscases.Tokens(cf.Body{Pos: s.End.Forwarded.Pos[i : i+1]})
+			e.TailChanged = lastTail[sess] != tail
+			lastTail[sess] = tail
+		}
+		var ids []string
+		for _, ch := range seen[threadKey(s)] {
+			gross := max(ch.delta, 0)
+			// the content key of a removal is the change's own ID: the operator derives it from the
+			// removed content, as the live pipeline's CacheKeys are
+			component := strings.TrimPrefix(ch.operator, "context-guru.")
+			unique := rec.MarkUnique("t1", component, []string{ch.id}, gross)
 			e.Components = append(e.Components, dash.CompRow{
-				Component: strings.TrimPrefix(ch.operator, "context-guru."), Kind: "rewrite", Acted: true, Mutated: true,
+				Component: component, Kind: "rewrite", Acted: true, Mutated: true,
 				SavedGross: gross, SavedUnique: unique,
 			})
 			e.SavedUnique += unique
@@ -153,6 +198,13 @@ func Play(c opscases.Case) []Played {
 		}
 		if e.KeepAliveSavedUSD > 0 {
 			p.ByChange[s.End.Facts.PingWindow] += micros(e.KeepAliveSavedUSD)
+		}
+		if e.CachesplitSavedUSD > 0 {
+			for _, op := range s.Add {
+				if op.Operator == "context-guru.cachesplit" {
+					p.ByChange[op.ChangeID] += micros(e.CachesplitSavedUSD)
+				}
+			}
 		}
 		if cgLLM > 0 {
 			p.ByChange[llmChange] -= micros(cgLLM)
@@ -255,7 +307,7 @@ func TestCasesAgreeWithCurrentLogic(t *testing.T) {
 	differences := opscases.Differences()
 	for _, c := range opscases.All() {
 		t.Run(c.ID, func(t *testing.T) {
-			report, diffs := Compare(c, Play(c))
+			report, diffs := Compare(c, Play(t, c))
 			t.Logf("%s\n%s", c.Description, report)
 			d, listed := differences[c.ID]
 			if !listed {

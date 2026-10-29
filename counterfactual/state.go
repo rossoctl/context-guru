@@ -42,6 +42,8 @@ func (t *Tracker) snapshot() ThreadState {
 }
 
 // Trackers holds one Tracker for each thread. It is safe for concurrent use.
+// A Tracker is never evicted, so memory grows with every thread for the life of the process. Whether
+// and when to drop an idle thread is open, with persistence (design §11, question 13).
 type Trackers struct {
 	mu sync.Mutex
 	m  map[string]*Tracker

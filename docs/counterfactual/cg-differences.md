@@ -1,432 +1,324 @@
 # Where cg's saving differs from the expected figure
 
-**Status:** report, generated from commit `d8a3c4ae` of branch `docs/context-operations-spec`.
-**Reproduce:** `go test ./dash/ -run TestCasesAgreeWithCurrentLogic -v` from the repo root (needs
-the `go.work` that links the root module to `counterfactual/`).
+**Status:** report, generated from commit `5accdd46` of branch `docs/context-operations-spec`.
+**Reproduce:** `go test ./dash/ -run TestCasesAgreeWithCurrentLogic -v` from the repo root. The root
+module and `counterfactual/` must be linked by `go.work`.
 
 ## 1. What this report compares
 
-context-guru (**cg**) edits LLM requests: it shortens tool outputs, removes unused tool
-declarations, replaces old messages with a summary. Each edit makes the request cheaper, and cg
-reports how much money that saved. The report is built by `dash.Event.Price` in `dash/event.go`.
+context-guru (**cg**) edits LLM requests. It shortens tool outputs, removes unused tool
+declarations and replaces old messages with a summary. Each edit makes the request cheaper, and cg
+reports how much money that saved. The figure comes from `dash.Event.Price` in `dash/event.go`.
 
-The `counterfactual` library (the "spec" in this report) is a proposal to compute the same saving by
-one shared rule. Its rule is the **counterfactual**: *if this change had never been made, how would
-the provider have billed these tokens on this request?* Where the spec and cg disagree, one of them
-is wrong, or they answer different questions. This report lists the disagreements.
+The `counterfactual` library (the "spec") computes the same saving by one shared rule. The rule is
+the **counterfactual**: *if this change had never been made, how would the provider have billed these
+tokens on this request?* Where the spec and cg disagree, one of them is wrong, or they answer
+different questions. This report groups the disagreements by the cause in cg's logic.
 
-**How the two sides were produced**
+**How the two sides are produced**
 
-- **Expected figure** (the spec). Each case is a sequence of requests of one conversation. I wrote the
-  expected tokens by hand from `examples.md`, then checked them: the billed bill minus the
-  no-change bill must equal the sum of tokens saved minus tokens caused (conservation), and every
-  dollar total must match the document it came from. `Compute`, the library function that would
-  produce these figures, is **not implemented yet**. So "expected" means "what the spec's rules give
-  when applied by hand", and it is a specification, not a measured result.
-- **cg's figure.** The test calls the real `dash.Event.Price` for every request of every case and
-  reads `BaselineCostUSD`, `Components[i].SavedUSD`, `KeepAliveSavedUSD` and `CachesplitSavedUSD`.
-  The only code I wrote on that side is the adapter `Play` in `dash/counterfactual_play_test.go`, which
-  turns a case into a `dash.Event`. One assumption in it matters and is repeated below: the first
-  request of a change counts as a "unique" removal, and later requests as "replays".
+- **Expected figure.** Each case in `counterfactual/opscases/cases/` is a sequence of requests. The
+  expected tokens were written by hand from the spec's rules. Each case passes two checks: billed
+  bill minus no-change bill equals tokens saved minus tokens caused, and each dollar total matches
+  the document it came from. This run did **not** call `counterfactual.Compute`. So "expected" means
+  "what the spec's rules give", not a measured result.
+- **cg's figure.** The test calls the real `dash.Event.Price` for every request of every case. The
+  only code written on that side is the adapter `Play` in `dash/counterfactual_play_test.go`. It
+  turns a case into a `dash.Event`. It treats the first request of a change as a "unique" removal
+  and later requests as "replays".
 
-Of nine cases, **four agree** with cg to the micro-dollar and **five differ**
-(case 3 only on its per-component line: its request totals agree). The cases that
-agree are listed in section 8 so the reader knows what was not found wrong.
+**Result.** There are **59 cases**. **33 agree** with cg to within 1 µ$ (rounding). **26 differ**.
+The test passes because each known difference is listed in
+`counterfactual/opscases/differences.json`: 18 as `differs` and 8 as `notCovered`. A listed case that
+starts to agree fails the test, so the list cannot go stale. The previous report had 9 cases and 5
+differences. The set grew because the case library grew, not because cg changed.
 
 ## 2. Terms
 
 | Term | Meaning |
 |---|---|
 | Tier | The rate a token is billed at: **input** (fresh), **cache write** (1.25 times input on Anthropic), **cache read** (0.1 times input). |
-| Hot / cold | Hot: the provider still holds the cached prefix, so it reads it. Cold: the entry expired (5 minutes), so the prefix is written again. |
-| Prefix, breakpoint | The provider caches the start of the prompt (tools, then system, then messages), but only up to a `cache_control` breakpoint. |
+| Hot / cold | Hot: the provider still holds the cached prefix, so it reads it. Cold: the entry expired, so the prefix is written again. |
+| Prefix, breakpoint | The provider caches the start of the prompt (tools, then system, then messages) up to a `cache_control` breakpoint. |
 | B\* | The end of the prefix the provider would have read on this request if no edit had happened. |
 | Saved / caused | Tokens the provider did not bill because of an edit, and tokens it billed because of an edit. |
-| Break | An edit changes the prompt inside the cached prefix, so the provider can no longer read from the first changed position onward and writes it again. It is a **cost** of the edit. |
+| Break | An edit changes the prompt inside the cached prefix. The provider cannot read from the first changed position onward and writes it again. It is a **cost** of the edit. |
 | µ$ | Micro-dollar, $0.000001. |
 
-**Rates used in every case** (per million tokens): input $3.00, cache write $3.75, cache read $0.30,
-output $15.00. Case 5 adds a second model with its own rates, given there. These are test rates, not
-production rates.
+**Rates in most cases** (per million tokens): input $3.00, cache write $3.75, cache read $0.30,
+output $15.00. Some cases use a second model with its own rates, given in the case file. These are
+test rates, not production rates.
 
-**The two pricing rules compared.** The spec prices a removed token at the tier it would have had at
-its *position*: before B\* it would have been read, after B\* and up to the last breakpoint it would
-have been written. cg prices it by *novelty*, in `baselineDeltaUSD` (`dash/event.go:1020`): the first
-time a token is removed it is priced as a **write**, and on later requests it is priced at the tier
-this request actually paid, by `repeatRate` (`dash/event.go:1081`). That works when the removed
-content is new, which is the normal case. It does not look at where the content sits relative to the
-cache, which is what cases 2 and 3 expose.
+**The two pricing rules.** The spec prices a removed token at the tier it would have had at its
+*position*: before B\* a read, after B\* and up to the last breakpoint a write, after the last
+breakpoint input. cg prices it by *novelty*. The first time content is removed it is a **write**
+(`uniqueRate`, `dash/event.go:894`). On later requests it is the tier this request paid
+(`repeatRate`, `dash/event.go:1163`). cg builds the no-change bill by adding the priced removed
+tokens to the billed cost (`baselineDeltaUSD`, `dash/event.go:1102`). It never re-bills the client
+body. Causes 1 to 3 all follow from this design.
 
-## 3. Summary
+## 3. Summary of root causes
 
-| # | Case | Spec total | cg total | Where the problem is | Section |
-|---|---|---:|---:|---|---|
-| 1 | Summary that breaks the cache | +$0.01675 | +$0.02883 | cg: the cache break is billed but not charged to the change | 4 |
-| 2 | Edit inside the cached prefix | −$0.05960 (this change) | +$0.07481 | cg: prices a first removal as a write, no break. Also depends on an open spec question | 5 |
-| 3 | Added tool declaration | totals agree | 0 for that item | cg: an addition is clamped to zero. Partly my adapter | 6 |
-| 4 | Model change | −$0.03680 | $0 | cg has no concept of a setting. Spec rates are undecided | 7.1 |
-| 5 | Effort change | −$0.11040 | $0 | cg has no concept of a setting | 7.2 |
+| # | Root cause in cg | Cases | Spec total − cg total (µ$, sum of case gaps) | Kind |
+|---|---|---:|---:|---|
+| 1 | No cache-break charge: an edit inside the cached prefix is never billed to the edit | 9 | 644,501 | cg defect |
+| 2 | The rate follows novelty, not position or usage | 3 | 29,475 | cg defect |
+| 3 | Growth is clamped to zero and an ended change is still credited | 3 | 38,400 | cg defect |
+| 4 | cg has no concept of a setting change | 4 | 378,350 | different question |
+| 5 | The keep-alive credit floor is wrong, or the adapter hides it | 2 | 72,657 | cg defect or adapter, unverified |
+| 6 | Credits that cg books outside the per-component figure are not fed by the adapter | 4 | 27,450 | adapter, not evidence |
+| 7 | No check for an edit that no operation reports | 1 | 1,500 | missing check |
+
+Gaps are the absolute difference of each case's thread total (section 10 lists every case). Causes
+1 and 2 overlap in six cases. Each case is counted once, under its main cause.
 
 ---
 
-## 4. Case 1: a summary that costs money first, then pays back
+## 4. Cause 1: no cache-break charge
 
-*Case id `rewrite+spend/summary/break-then-payback/5m`, from `examples.md` example 4.*
+**The logic.** `Event.Price` has no term for tokens that moved from read to write because an edit
+changed the prompt above them. The extra write cost is already inside the billed figure. cg counts
+it in the bill and never charges it to the edit. So the edit looks cheaper than it is, and often
+looks like a gain when it is a loss.
 
-### The situation
+cg knows this cost elsewhere. `components/offload/prefix_econ.go:14-20` states the rule
+(`S × T > 11.5 × W`) that decides whether to break the prefix. The decision uses the 11.5 factor.
+The saving reported afterward does not.
 
-A summarizer replaces three old messages (10,000 tokens) with a 500-token summary. The call that
-writes the summary costs money before it saves anything. The prompt is built from three parts:
-**4,000 tokens of tools, a 4,000-token system prompt**, and the messages. The system prompt and the
-tools do not change, and they matter for one figure below: the provider reads up to the end of
-`system`, which is 8,000 tokens. The client's prompt on request A is 21,500 tokens; the forwarded one
-is 12,000. Four requests follow in time:
+| Case | Spec µ$ | cg µ$ | Gap µ$ | Note |
+|---|---:|---:|---:|---|
+| `rewrite+spend/summary/break-then-payback/5m` | 16,750 | 28,825 | 12,075 | Break only. 3,500 tokens move read to write (500 summary + 3,000 tail). cg already prices a summarizer's removal as a read, so the gap is exactly the break: 3,500 × ($3.75 − $0.30). |
+| `rewrite/coref-break-inside-prefix/hot/5m` | 33,524 | 167,935 | 134,411 | Cause 2 adds to it. `coref` cuts a 20,000-token output inside the cached prefix. The spec books a loss, cg books +74,813 µ$ for that edit on turn 7. |
+| `rewrite/break-then-payback-turns/hot/5m` | 76,920 | 214,920 | 138,000 | Same sign error as `coref`. Later hot turns and the cold turn agree. |
+| `rewrite/searchfold-inside-prefix/hot/5m` | −49,275 | 9,375 | 58,650 | The 14,500-token break is not charged. Issue 496: the dashboard showed a hit. |
+| `rewrite/replay-at-new-position/hot/5m` | 10,050 | 44,550 | 34,500 | A second occurrence is compacted at depth. |
+| `rewrite/two-spans-two-tiers/hot/5m` | −43,275 | 32,625 | 75,900 | One read span and one write span. cg uses one rate and no break. |
+| `rewrite/toolschema-mid-session/break-then-saving/5m` | −81,600 | 8,100 | 89,700 | Trimming a cached tool declaration breaks the whole prefix once. cg books +7,500 µ$ on that turn where the spec books −82,200 µ$. |
+| `rewrite/decision-flips-inside-prefix/hot/5m` | −26,805 | 7,695 | 34,500 | Request 2 breaks the cache. Request 4 returns the original and the spec charges a 6,000-token break to the ended change (design open question 12). |
+| `rewrite/expand-first-injection/break-once/5m` | −66,765 | 0 | 66,765 | An injected tool declaration changes `tools` and breaks the whole prefix once (−66,675 µ$), then costs −90 µ$ per turn. cg books neither. Also cause 3. |
 
-| Request | When | Cache | What happens |
-|---|---|---|---|
-| 0 | minute 0 | cold | Caches 21,000 tokens. |
-| A | +1 minute | hot | The summary is applied. It sits at the start of the messages, so every message changes. |
-| B | +2 minutes | hot | The summary is cached now. |
-| C | +17 minutes | cold | The cache expired. |
+**Worked example, `summary/break-then-payback`.** Request A: the provider reads 8,000 tokens (tools
++ system) and writes 4,000. With no summary it would read 21,000 and write 500. The no-change bill
+is 8,175 µ$. The bill with the summary is 17,400 µ$. cg computes the no-change bill as the billed
+17,400 µ$ plus the 9,500 removed tokens at the read rate (2,850 µ$) = 20,250 µ$. The true
+no-change bill is 8,175 µ$. The 12,075 µ$ gap is the break.
 
-### How the expected figures were computed
+**What was not verified.** `chargeRowCosts` and `causedWriteUSD` (`dash/compactepisode.go`,
+`:727`, `:801`) charge the whole cache write of a compaction turn to the summary, as a stated upper
+bound. This run did not call that code. Reading it, the charge would be 4,000 × $3.75 = 15,000 µ$
+for request A, against the spec's 12,075 µ$. So the episode view may be close but not equal. It is
+unverified which view a user sees. It is also unverified whether the live pipeline would choose
+`coref` on a prompt like this one. If it would not, the `coref` cases are theoretical.
 
-*The spec's rule, step by step, per request.*
+---
 
-**Request A.** The provider can read only up to the end of `system` (4,000 tools + 4,000 system = 8,000
-tokens), because the first message has changed. It writes the other 4,000 tokens: the 500-token summary, the 3,000-token tail and a new
-500-token message. Without the summary the provider would have read all 21,000 cached tokens and
-written the 500 new ones.
+## 5. Cause 2: the rate follows novelty, not position or usage
 
-| Item | Calculation | µ$ |
-|---|---|---:|
-| No-change bill (baseline) | 21,000 × $0.30 + 500 × $3.75 | 8,175 |
-| Bill with the summary | 8,000 × $0.30 + 4,000 × $3.75 | 17,400 |
-| Summarizer call | 10,000 × $1.00 + 500 × $5.00 (summarizer rates) | −12,500 |
-| Saving of the removed tokens | 9,500 × $0.30 (they would have been read) | +2,850 |
-| Cache break | 3,500 × ($3.75 − $0.30): summary (500) and tail (3,000) written, not read | −12,075 |
-| **Request A, net** | 2,850 − 12,075 − 12,500 | **−21,725** |
+**The logic.** `uniqueRate` returns `CacheWrite` for any first removal that is not a summarizer.
+It does not look at where the content sits (inside the cached prefix, after B\*, after the last
+breakpoint, or with no breakpoint) or at what the usage block shows.
 
-Check: baseline − billed bill = 8,175 − 17,400 = −9,225 = 2,850 − 12,075. The call is separate.
+| Case | Spec µ$ | cg µ$ | Gap µ$ | What the spec does |
+|---|---:|---:|---:|---|
+| `boundary/state-lost-reads-cache` | 1,650 | 20,625 | 18,975 | With no history, the usage still shows 18,500 tokens read. A read in the usage is evidence. The 5,500 replaced tokens are a read ($0.30), not a write ($3.75). |
+| `rewrite/after-last-breakpoint/input/5m` | 21,000 | 26,250 | 5,250 | Tokens after the last client breakpoint are billed as input ($3.00), not write. |
+| `rewrite/no-breakpoint/input/5m` | 21,000 | 26,250 | 5,250 | With no breakpoint in the body every token is input. |
 
-**Requests B and C** need no break. B: 9,500 × $0.30 = +2,850. C is cold, so the 9,500 tokens would
-have been written: 9,500 × $3.75 = +35,625.
+The six position cases in section 4 also carry this error. It is not separate money there. Fixing
+the break without fixing the rate would still leave `coref` pricing 19,950 tokens at the write
+rate. Fixing the rate alone would still leave the break uncharged.
 
-**Thread total:** −21,725 + 2,850 + 35,625 = **+16,750 µ$ ($0.01675)**.
+**Open point in the spec.** The rule for B\* (design §5.1) snaps to the client's own breakpoints. A
+literal reading puts B\* at the end of `system` for the `coref` case, and then the removed tokens
+are writes, which is cg's answer with no break. The earlier four-model review (section 9) concluded
+that B\* is the end of the longest prefix the request's own breakpoints could have hit, which is
+message 11. The spec text should say this. Until it does, the `coref` expected figure depends on an
+undecided rule.
 
-### What cg computed
+---
 
-| Request | Expected µ$ | cg µ$ |
+## 6. Cause 3: growth is clamped to zero and an ended change is still credited
+
+**The logic.** `ComponentSavedUSD` clamps a negative gross to zero (`dash/event.go:849-852`). A
+change that *adds* tokens has no cost in cg. `Event.Saved()` (`dash/event.go:557`) works on the
+whole request, so the request total can still net correctly. The per-change line does not. Cg also
+has no term for a change that ends: it keeps crediting the change that is no longer applied.
+
+| Case | Spec µ$ | cg µ$ | Gap µ$ | Note |
+|---|---:|---:|---:|---|
+| `rewrite/four-operations/hot/5m` | 81,879 | 81,879 | 0 | Totals agree. Only the `expand` line differs: the spec books −90 µ$ per hot turn, cg books 0. |
+| `rewrite/fixed-restore-cost/hot/5m` | 525 | 18,225 | 17,700 | A restore grows the body. The spec books the growth as a cost. cg books 0 for it and credits the `mask` in full every turn (issue 481). |
+| `rewrite/restore-in-place/hot/5m` | −2,475 | 18,225 | 20,700 | The original goes back and the mask ends. The provider holds the marker, so 6,000 tokens move read to write. cg keeps crediting the mask (+1,350 µ$) and books no break (issue 481). |
+
+**Unverified.** Whether the live pipeline reports `expand` as a component at all. If it does not,
+cg has no row for it, and the difference is "no row", not "a row of zero". The adapter passes
+`max(delta, 0)` the same way the clamp does, so the test cannot tell the two apart.
+
+---
+
+## 7. Cause 4: cg has no concept of a setting change
+
+**The logic.** cg measures what *its own edits* saved. A router that changes the model, or a client
+that changes `effort` or toggles web search, is not a cg edit. `AttributeCache`
+(`dash/event.go:1181`) sends a model it has not seen to `cold_start` and never reports it as a bust.
+cg does not read `effort`. `baselineDeltaUSD` adds only removed tokens. So cg books nothing.
+
+| Case | Spec µ$ | cg µ$ | Gap µ$ |
+|---|---:|---:|---:|
+| `setting/model-change/break` | −36,800 | 0 | 36,800 |
+| `setting/effort-change/break-from-messages` | −110,400 | 0 | 110,400 |
+| `setting/web-search-toggle/break-from-system` | −120,750 | 0 | 120,750 |
+| `setting/nil-position/penalty-unknown` | −110,400 | 0 | 110,400 |
+
+Four related cases agree because they have no break to price: `setting/effort-change/read-intact-no-break`
+and others.
+
+**This is not a defect in cg.** It is a different question. The difference matters only if the
+product must show a user that a setting change cost them a cache. All four are marked `notCovered`.
+
+**Open and unverified.**
+
+- Which rates price a model-change break. The case uses the small model's rates (−36,800 µ$). At
+  the large model's rates it is −138,000 µ$. Against "stayed on the large model" the net is
+  −25,250 µ$, which mixes the break with the rate difference. This is design open question 10.
+- That a real model renders `effort` ahead of the messages only. This comes from
+  `cached-prefix.md`, not from a test. Public documentation establishes only that a change to
+  thinking parameters breaks the cache.
+- `setting/nil-position/penalty-unknown` assumes a setting with no position falls back to the read
+  the usage shows, plus a `penalty_unknown` entry. cg has no unpriced list.
+
+---
+
+## 8. Causes 5 to 7: smaller or weaker differences
+
+### Cause 5: keep-alive credit floor (2 cases, unverified)
+
+`keepaliveSavedUSD` credits a ping only when the gap exceeds `keepaliveCreditFloorMs`
+(`dash/event.go:1069`).
+
+| Case | Spec µ$ | cg µ$ | Gap µ$ |
+|---|---:|---:|---:|
+| `keepalive/ping-on-1h-entry/no-rescue/1h` | −3,045 | 31,455 | 34,500 |
+| `keepalive/ping/minimum-lifetime/no-rescue` | 20,694 | 58,851 | 38,157 |
+
+- **1h entry.** The spec measures the gap against the TTL of the breakpoint that *wrote* the entry
+  (1h), so a 9-minute return is no rescue. cg takes the TTL the *returning* request asked for. The
+  adapter does not pass `CacheTTL`, so the test ran with the 5-minute default. This run did not
+  measure a real 1h session.
+- **Minimum lifetime.** For GPT-5.6 and later the floor is OpenAI's documented *minimum* lifetime
+  (30 minutes). A minimum proves no expiry, so the spec gives no rescue. The comment on
+  `providerCacheTTLMs` says OpenAI's minimum must not be used as proof of expiry, yet
+  `keepaliveCreditFloorMs` uses it as the floor. This looks like a real inconsistency. The adapter
+  leaves `Provider` unset, so the test fell back to the 5-minute floor and did not run that branch.
+  **Unverified**: set `Provider` in `Play` to confirm.
+
+### Cause 6: credits booked outside the per-component figure (4 cases, adapter)
+
+cg books `CachesplitSavedUSD` and the head-TTL credit in their own columns. `Play` does not feed
+them, so cg shows 0.
+
+| Case | Spec µ$ | cg µ$ |
 |---|---:|---:|
-| 0 | 0 | 0 |
-| A | −21,725 | **−9,650** |
-| B | 2,850 | 2,850 |
-| C | 35,625 | 35,625 |
-| **Total** | **16,750** | **28,825** |
+| `split/delivered/stable-half-read` | 10,350 | 0 |
+| `ttl/head-1h/never-read` | −6,750 | 0 |
+| `ttl/head-1h/read-after-3-minutes` | −6,750 | 0 |
+| `ttl/head-1h/read-after-20-minutes` | 3,600 | 0 |
 
-cg is higher by 12,075 µ$ on request A, **72% above the spec on the thread total**. B and C agree.
+These cases are **not evidence about** cg's cachesplit or head-TTL logic. They show what the
+adapter does not cover.
 
-On request A, cg computes: bill with the summary 17,400 + the removed 9,500 tokens priced at the read
-rate (`uniqueRate` returns `CacheRead` for a summarizer on a hot cache, `dash/event.go:811-819`) =
-20,250 as "the bill without the summary". The saving is 20,250 − 17,400 = 2,850, and after the
-12,500 call it is −9,650.
+### Cause 7: no check for an unreported edit (1 case)
 
-### Where the problem is
-
-**In cg.** `baselineDeltaUSD` (`dash/event.go:1041-1043`) builds the no-change bill by adding only the
-*removed tokens* to the billed cost. The no-change bill therefore comes out as 20,250 µ$, where the
-real one is 8,175 µ$. The 12,075 µ$ gap is exactly the break: the summary forced the provider to
-write 3,500 tokens that it would otherwise have read, and that extra cost is already inside the
-billed 17,400. cg counts the cost in the bill and never attributes it to the summary, so the
-summary looks cheaper than it is.
-
-cg does have a debit for this elsewhere. `chargeRowCosts` and `causedWriteUSD`
-(`dash/compactepisode.go:797-813`, `:1012`) charge the whole cache write of the compaction turn to
-the summary, as a stated upper bound. I did **not** run that code, because `Event.Price` is the
-function that produces the per-request figure. By my reading it would charge 4,000 × $3.75 = 15,000
-µ$ here, against the spec's 12,075 µ$. The spec counts only the tokens that were read before and are
-written now (3,500), and not the 500 new tokens that were written anyway. So even the episode view
-would not match the spec exactly, but it would be much closer. **Unverified**: which of the two views
-a user sees for this case.
+`unpriced/unknown-kind-and-unreported-edit`: the spec (§6.5 checks 1 and 6) refuses to price a body
+edit that no operation reports, and an unknown kind is left unpriced. cg has no such check and
+books 1,500 µ$ for the size gap between the client and the forwarded body. The mechanism was not
+traced.
 
 ---
 
-## 5. Case 2: an edit inside the cached prefix
-
-*Case id `rewrite/coref-break-inside-prefix/hot/5m`, from `examples.md` examples 6 and 7.*
-
-### The situation
-
-On turn 7 of a conversation, an edit called `coref` reduces message 5, a 20,000-token tool output, to
-a 50-token marker. Turn 6 had cached everything through message 11, so message 5 sits **inside the
-cached prefix**. The client did not change anything. The edit changes the prompt at message 5, so
-the provider can no longer read from there onward.
-
-The client has two breakpoints only: the end of `system` and the end of the body. So the provider
-reads `tools` and `system` (15,300 tokens) and writes everything after them again.
-
-Four other edits are still active from earlier turns (the tools removal, the added expand tool,
-`mask`, `cmdfilter`), and their figures are in the totals.
-
-### How the expected figures were computed
-
-| Item | Calculation | µ$ |
-|---|---|---:|
-| Client body, if nothing had been edited | 73,000 read + 2,000 written (the new 2,000 tokens) | 29,400 |
-| Bill with all edits | 15,300 read + 21,010 written | 83,377.5 |
-| Saving of `coref` | 19,950 × $0.30 (the grep output would have been read) | +5,985 |
-| Break | 19,010 × ($3.75 − $0.30): messages 0 to 4, the marker and messages 6 to 11 move from read to write | −65,584.5 |
-| `coref`, net | | **−59,599.5** |
-
-The 19,010 tokens are 11,060 + 50 + 7,900. The 2,000 new tokens are written in both bills, so they
-cancel. Request 7 as a whole, with the other four edits: 29,400 − 83,377.5 = **−53,977.5 µ$**.
-
-At this saving rate `coref` needs about 10 more hot turns after this one (59,599.5 ÷ 5,985) to repay its net cost.
-
-### What cg computed
-
-| | Expected µ$ | cg µ$ |
-|---|---:|---:|
-| `coref` | −59,599 | **+74,813** |
-| Request 7 as a whole | −53,977 | **+80,434** |
-| Thread total (turns 1 to 7) | 33,524 | 167,935 |
-
-cg says `coref` **saved** $0.0748 on this turn. The spec says it **cost** $0.0596.
-
-cg computes the saving as 19,950 tokens × $3.75, the write rate: `uniqueRate` returns
-`CacheWrite` for any component that is not a summarizer (`dash/event.go:819`), because the first
-removal of content is assumed to be new content that would have been written. It adds no break.
-
-### Where the problem is
-
-**Two places, and one of them is open.**
-
-1. **In cg, a wrong assumption for this edit.** `coref` removes content that is already cached. The
-   write-rate assumption in `uniqueRate` and `baselineDeltaUSD` (`dash/event.go:811-819`, `:1041`)
-   is right for `cmdfilter` on a brand-new message, and wrong here. `Event.Price` has no term for the
-   break at all. The 74,813 figure is 19,950 × $3.75, and the real effect is the opposite sign.
-
-   cg also tries to keep this situation from happening. The comment at `components/component.go:473-479`
-   says that, when `CacheAware` is set, offloaders must restrict their mutations to the uncached
-   tail. `coref` and `extract_llm` are the two components that **choose** to break the prefix on
-   purpose, when the batch repays it: `components/offload/prefix_econ.go:14-20` states the rule
-   (`S × T > 11.5 × W`) and the 11.5 factor. So cg *knows* the break costs 11.5 read-equivalents per
-   token, in the decision to act. It does not carry that cost into the saving it reports after.
-   **Unverified**: whether the live pipeline would ever choose this edit on this prompt. If it would
-   not, this case cannot happen in production, and the difference is theoretical.
-
-2. **In the spec, an open question.** The spec's rule for B\* (design §5.1) snaps to the client's
-   own breakpoints. I tried reading it literally for this case: the client's only breakpoints are the
-   end of `system` and the last message, so the literal B\* is the end of `system`, not message 11.
-   Then `coref`'s 19,950 tokens come after B\* and are priced as writes, which is **cg's answer**
-   (+74,813) with no break. The same literal reading also contradicts `examples.md` example 2. I
-   worked this out by hand and did not run it. So this case's expected figure depends on a decision
-   the spec has not made. It is listed in the case's `open` field.
-
-### A related, smaller difference: the added tool
-
-Turn 7, and turns 1 to 5, also show `expand`, a 300-token tool that cg's pipeline adds to every
-request. The spec books it as a cost of 300 tokens (−$0.00009 per hot turn, −$0.001125 on the first).
-cg books **0** for it. See case 3.
-
----
-
-## 6. Case 3: an added tool declaration
-
-*Case id `rewrite/four-operations/hot/5m`, from `examples.md` example 6.*
-
-### The situation
-
-On turn 5, four edits are active: `tool-prune` removes three tool declarations (−8,000 tokens),
-`mask` reduces one message (−3,940), `cmdfilter` reduces the new message (−7,100), and `expand`
-**adds** a 300-token tool (+300). The client body is 71,000 tokens and the forwarded one 52,260.
-
-### How the expected figures were computed
-
-Turn 5 is hot, and turn 4 left messages 0 to 8 cached.
-
-| Edit | Tokens | Tier | µ$ |
-|---|---:|---|---:|
-| `tool-prune` | −8,000 | read (tools come first) | +2,400 |
-| `mask` | −3,940 | read | +1,182 |
-| `cmdfilter` | −7,100 | write (message 9 is new) | +26,625 |
-| `expand` | **+300** | read: it is before B\*, so a cost | **−90** |
-| **Net** | | | **+30,117** |
-
-Check: baseline 63,000 read + 8,000 written = 48,900; billed 51,360 read + 900 written = 18,783;
-48,900 − 18,783 = 30,117.
-
-### What cg computed
-
-The request total is **30,117, the same as the spec**. Only the line for `expand` differs: the spec
-books −90 µ$, cg books 0. The same happens on turns 1 to 4 (−1,125 then −90 each) and on turn 7 of
-case 2. The thread total is unaffected.
-
-### Where the problem is
-
-**In cg, as a design gap, and partly in my test adapter.**
-
-- `Report.Saved()` (`components/component.go:967-972`) returns 0 when a component's tokens *grow*.
-  `Event.Saved()` (`dash/event.go:474`) does the same per request. `ComponentSavedUSD` clamps a
-  negative gross to zero (`dash/event.go:766-769`). So cg has no way to show an *addition* as a
-  cost for one component.
-- The request total still agrees, because `Event.Saved()` works on the whole request, where the
-  added 300 tokens net against the removed ones.
-- My adapter `Play` passes `max(delta, 0)` for `expand`, the same way. **I did not check whether the
-  live pipeline reports `expand` as a component at all.** If it does not, then cg has no row for it
-  and the difference is real but lives in "no row", not in "a row of zero". The case's
-  `differences.json` entry says this.
-
-This is the weakest of the five differences. The money is small and the totals agree.
-
----
-
-## 7. Cases 4 and 5: a change of setting
-
-Both start from the same request 4: a conversation of 40,000 cached tokens (`tools` 5,000,
-`system` 3,000, `messages` 32,000) on `large-model` at `effort` high. Request 5 adds one 1,000-token
-message and changes **one setting**. The bodies of the two requests are identical up to the new
-message: a setting is not content.
-
-The spec does **not** price the change itself, because the alternative is not observable (what would
-the old setting have written?). It prices the one thing that is measurable: the cache break the
-change causes. cg has no concept of a setting, so it prices nothing.
-
-### 7.1 Case 4: a model change
-
-*Case id `setting/model-change/break`, from `examples.md` example 5a.*
-
-**Situation.** A router moves request 5 to `small-model`. The provider keeps a separate cache for each
-model, so the new model starts cold: request 5 reads **0** where request 4 left 40,000 cached, and it
-writes all 41,000 tokens. The setting sits at `tools[0]`, the start of the prompt, so the break covers
-the whole 40,000-token prefix.
-
-**Rates.** `small-model`: input $0.80, cache write $1.00, cache read $0.08 per million tokens.
-
-**Expected figure.** The moved tokens are priced at the rates of the model that serves the request
-after the change (the proposed rule, not yet decided, see below):
-
-| Item | Calculation | µ$ |
-|---|---|---:|
-| Break | 40,000 × ($1.00 − $0.08) | −36,800 |
-| Check: baseline bill | 40,000 × $0.08 + 1,000 × $1.00 | 4,200 |
-| Check: billed | 41,000 × $1.00 | 41,000 |
-
-4,200 − 41,000 = −36,800. At the large model's rates the break would be 40,000 × ($3.75 − $0.30) =
-−138,000 instead. The choice matters by a factor of 3.75, and it is **open question 10** of the
-design. Also, −36,800 compares the bill against a baseline that never existed. Against "stayed on
-the large model" the net would be −25,250, which mixes the break with the difference in rates.
-
-**What cg computed.** 0. cg's baseline for this request is 41,000, the same as the bill.
-`AttributeCache` (`dash/event.go:1096-1100`) sends a model it has not seen to `cold_start`, and its
-comment says a first use of a model "must never be reported as a bust". `baselineDeltaUSD` adds only
-removed tokens, and nothing was removed.
-
-**Where the problem is.** In neither place: **cg is not wrong, it answers a different question.**
-cg measures what its *own edits* saved. A router that changes the model is not a cg edit, and cg
-deliberately does not treat a model change as a cache failure. The difference is real only if the
-product needs to show the user that a model change cost them a cache. The case is marked
-`notCovered` for that reason. Open: which rates price the break.
-
-### 7.2 Case 5: an effort change
-
-*Case id `setting/effort-change/break-from-messages`, from `examples.md` example 5b.*
-
-**Situation.** A router lowers `effort` from high to low on the same `large-model`. Where the provider
-renders `effort` into the prompt depends on the model (`cached-prefix.md`). Here it is a model that
-renders it ahead of the messages only, so `tools` and `system` stay valid and `messages` do not. The
-provider reads 8,000 tokens and writes the other 33,000.
-
-**Why the spec needs a position.** The two bodies are identical up to the new message, so a
-comparison of body hashes finds nothing. The setting therefore carries a position, `messages[0]`
-(`SettingChange.At`). Without it the library has no way to tell where the break starts.
-
-**Expected figure.**
-
-| Item | Calculation | µ$ |
-|---|---|---:|
-| Break | 32,000 × ($3.75 − $0.30): messages 0 to 3 move from read to write | −110,400 |
-| Check: baseline bill | 40,000 × $0.30 + 1,000 × $3.75 | 15,750 |
-| Check: billed | 8,000 × $0.30 + 33,000 × $3.75 | 126,150 |
-
-15,750 − 126,150 = −110,400.
-
-**What cg computed.** 0, for the same reason as case 4. cg does not read `effort` at all: it appears
-only as a filter parameter in `dash/api.go:1188`.
-
-**Where the problem is.** As in case 4, cg does not model it. **Unverified in this case:** that a
-real model renders effort ahead of the messages only. I took that from `cached-prefix.md`, which says
-it varies by model, and I did not test a real model. Public documentation establishes only that a change to thinking
-parameters breaks the cache, not where `effort` is rendered, so this premise is an assumption.
-
----
-
-## 8. Cases that agree with cg
-
-These four match cg to the micro-dollar, so they are **not** evidence of a problem. They show that,
-for a plain removal of new or cached-and-read content, the two rules give the same answer.
-
-| Case | Thread total µ$ | What it covers |
-|---|---:|---|
-| Single rewrite, hot (example 1) | 26,250 | A shortened new message, priced as a write |
-| Same rewrite replayed hot, hot, cold (example 2) | 54,600 | The same 7,000 tokens as write, read, write |
-| Tool removal with three spans (example 3) | 62,400 | The removal is before B\*: read when hot, write when cold |
-| Keep-alive ping and the request it rescues (example 8) | 31,455 | A ping costs 3,045 µ$ and the rescue saves 34,500 |
-
-## 9. Limits of this report
-
-- **The expected figures are by hand.** `Compute` does not exist. If a figure here is wrong, the case
-  file is wrong, and the spec's rule should be re-read. Every case passes the conservation check and
-  its document total, which catches arithmetic errors but not a wrong rule.
-- **The tests use a flat 4 bytes per token.** The library converts every size with the request's own
-  ratio, so cg's model-specific factor (1.69 for Sonnet and Opus, `internal/tokens/billedfactor.go`) is
-  not an input. Real ratios differ from 4, and no case tests another ratio yet.
-- **The adapter `Play` is mine.** It feeds `dash.Event.Price` the "unique versus replayed" split that
-  the real pipeline computes in `FromTrace`. A different split would change cg's figure in cases 1
-  and 2.
-- **The B\* rule is undecided** (section 5), and it decides whether case 2 is a defect in cg or a
-  question about the spec.
-- **No production traffic was used.** Whether any of these situations occurs, and how often, is not
-  known from this report.
-
-## 10. Independent review by four models
-
-Four models on the LiteLLM proxy each received this report and checked cases 1 to 5 from general
-knowledge and Anthropic's public prompt-caching documentation. They did not see `design.md` or any
-repo file. Each recomputed the figures and judged who is right in principle.
-
-Model substitutions: `aws/gpt-6-astra` was refused by the proxy (403, no access for the key), so
-`azure/gpt-6.1-sol` answered in its place. `aws/kimi-k2.5` is not on the proxy, so
-`azure/FW-Kimi-K3` answered. Each model ran once. The verdicts are opinions, not measurements.
-
-| Case | Opus 5.5 | Sonnet 5.5 | GPT-6.1-sol | Kimi K3 | Consensus |
-|---|---|---|---|---|---|
-| 1. Summary that breaks the cache | SPEC-RIGHT (high) | SPEC-RIGHT (high) | SPEC-RIGHT (high) | SPEC-RIGHT (high) | **Spec right, 4 of 4.** cg never charges the 3,500-token read-to-write break to the summary. |
-| 2. Edit inside the cached prefix | SPEC-RIGHT (high) | SPEC-RIGHT (med-high) | SPEC-RIGHT (med) | SPEC-RIGHT (med) | **Spec right, 4 of 4.** Cached content would have been read, so a write-rate price has the wrong sign. |
-| 3. Added tool declaration | SPEC-RIGHT (med) | SPEC-RIGHT (med) | SPEC-RIGHT (med) | DIFFERENT-QUESTION (med) | **Spec right, 3 of 4.** All agree the totals match and cg's clamp only hides a real cost. |
-| 4. Model change | DIFFERENT-QUESTION (med) | DIFFERENT-QUESTION (high) | DIFFERENT-QUESTION (high) | DIFFERENT-QUESTION (high) | **Different question, 4 of 4.** A router's switch is not a cg edit. |
-| 5. Effort change | DIFFERENT-QUESTION (med) | DIFFERENT-QUESTION (med) | UNDECIDABLE (med) | DIFFERENT-QUESTION (med) | **Different question, 3 of 4.** The cache break is plausible but the premise is unverified. |
-
-**Arithmetic.** All four confirmed every expected figure in sections 4 to 7 (16,750, −59,599.5,
-−53,977.5, 30,117, −36,800, −110,400) and cg's figures (28,825 and 74,812.5 on the changed lines).
-No model found an error in a total.
-
-**B\* (section 5, open question).** All four said the same: B\* is neither the client's literal
-breakpoints nor an unbounded "longest cached prefix". It is the end of the longest cached prefix
-that the request's own breakpoints could actually have hit: written earlier, not expired, and
-within the provider's lookback of about 20 blocks. For case 2 that makes B\* message 11, which
-supports the spec's expected figure and makes the literal reading in section 5 item 2 the wrong one.
-
-**Errors found in this report** (not in the totals):
-
-1. Case 1 (section 4) says the tail is 3,500 tokens. All four say it is **3,000**: 500 summary +
-   3,000 tail + 500 new = 4,000. The 3,500 in the break is summary plus tail.
-2. Case 2 says `coref` needs "about 11 more hot turns". Three models say **about 10** more, because
-   this turn's 5,985 is already netted in (59,599.5 ÷ 5,985 ≈ 10). Eleven counts this turn too.
-3. Case 4 (three models): the spec's −36,800 prices the break at the small model's rates, which
-   compares against a baseline that never existed. Against "stayed on the large model" the net is
-   −25,250, and that mixes the break with the rate difference. This sharpens open question 10.
-4. Section 1 counts case 3 among the five that differ, though its request totals agree. Two models
-   flagged the inconsistency. Only the per-component line differs.
-5. Case 5 (GPT-6.1-sol, Sonnet): the claim that `effort` renders ahead of the messages is not
-   established by public documentation. The documented case is a change to thinking parameters.
+## 9. Cases that agree with cg
+
+33 of 59 cases agree. They are **not** evidence of a problem. For a plain removal of new content,
+a removal before B\* read when hot and written when cold, or a keep-alive ping and its rescue, the
+two rules give the same answer.
+
+Two of them differ by 1 µ$ and count as agreeing (rounding):
+`keepalive/ping-timeout-unknown-result/5m` and
+`rewrite+spend/extract-llm-sweep/fallback-ask-fresh-input/5m`.
+
+Examples: single rewrite, hot (26,250 µ$); rewrite replayed hot, hot, cold (54,600 µ$); tool
+removal with three spans (62,400 µ$); keep-alive ping and the request it rescues (31,455 µ$);
+four operations at the request level (81,879 µ$); three refused-spend cases; five split cases that
+have no effect; session isolation.
+
+## 10. Every case, thread total in µ$
+
+Cases that agree are omitted. See section 9.
+
+| Case | Cause | Spec | cg | Gap |
+|---|---:|---:|---:|---:|
+| boundary/state-lost-reads-cache | 2 | 1,650 | 20,625 | 18,975 |
+| rewrite/after-last-breakpoint/input/5m | 2 | 21,000 | 26,250 | 5,250 |
+| rewrite/no-breakpoint/input/5m | 2 | 21,000 | 26,250 | 5,250 |
+| rewrite+spend/summary/break-then-payback/5m | 1 | 16,750 | 28,825 | 12,075 |
+| rewrite/break-then-payback-turns/hot/5m | 1 | 76,920 | 214,920 | 138,000 |
+| rewrite/coref-break-inside-prefix/hot/5m | 1 | 33,524 | 167,935 | 134,411 |
+| rewrite/decision-flips-inside-prefix/hot/5m | 1 | −26,805 | 7,695 | 34,500 |
+| rewrite/expand-first-injection/break-once/5m | 1 | −66,765 | 0 | 66,765 |
+| rewrite/replay-at-new-position/hot/5m | 1 | 10,050 | 44,550 | 34,500 |
+| rewrite/searchfold-inside-prefix/hot/5m | 1 | −49,275 | 9,375 | 58,650 |
+| rewrite/toolschema-mid-session/break-then-saving/5m | 1 | −81,600 | 8,100 | 89,700 |
+| rewrite/two-spans-two-tiers/hot/5m | 1 | −43,275 | 32,625 | 75,900 |
+| rewrite/four-operations/hot/5m | 3 | 81,879 | 81,879 | 0 (line only) |
+| rewrite/fixed-restore-cost/hot/5m | 3 | 525 | 18,225 | 17,700 |
+| rewrite/restore-in-place/hot/5m | 3 | −2,475 | 18,225 | 20,700 |
+| setting/model-change/break | 4 | −36,800 | 0 | 36,800 |
+| setting/effort-change/break-from-messages | 4 | −110,400 | 0 | 110,400 |
+| setting/web-search-toggle/break-from-system | 4 | −120,750 | 0 | 120,750 |
+| setting/nil-position/penalty-unknown | 4 | −110,400 | 0 | 110,400 |
+| keepalive/ping-on-1h-entry/no-rescue/1h | 5 | −3,045 | 31,455 | 34,500 |
+| keepalive/ping/minimum-lifetime/no-rescue | 5 | 20,694 | 58,851 | 38,157 |
+| split/delivered/stable-half-read | 6 | 10,350 | 0 | −10,350 |
+| ttl/head-1h/never-read | 6 | −6,750 | 0 | 6,750 |
+| ttl/head-1h/read-after-3-minutes | 6 | −6,750 | 0 | 6,750 |
+| ttl/head-1h/read-after-20-minutes | 6 | 3,600 | 0 | −3,600 |
+| unpriced/unknown-kind-and-unreported-edit | 7 | 0 | 1,500 | 1,500 |
+
+In 30 request steps the *baseline bill* also disagrees with the spec's. In 27 of them cg's no-change
+bill is higher, for example 33,675 against 14,700 µ$ (`boundary/state-lost-reads-cache` step 0). In 3
+it is lower (`split` and `ttl` cases, cause 6). This is the additive baseline of section 2 made
+visible.
+
+## 11. Limits of this report
+
+- **Expected figures are by hand.** This run did not execute `counterfactual.Compute`. A wrong
+  case file or a wrong rule is not caught by the conservation check, which catches arithmetic
+  errors only.
+- **The tests use a flat 4 bytes per token** and a fixture model with no tokenizer correction. The
+  real cg factor (1.69 for Sonnet and Opus, `internal/tokens/billedfactor.go`) is not an input, and
+  no case tests another ratio.
+- **The adapter `Play` is not the live pipeline.** It supplies the unique-versus-replay split that
+  `FromTrace` computes in production. A different split changes cg's figure for causes 1 and 2. It
+  also omits `Provider`, `CacheTTL`, the cachesplit credit and the head-TTL credit (causes 5 and 6).
+- **B\* is not settled in the spec** (section 5).
+- **No production traffic was used.** How often any of these situations occurs is not known.
+- **The line numbers in this report** match commit `5accdd46`. They moved since the previous report.
+
+## 12. Earlier independent review (not repeated)
+
+For the previous version of this report, four models on the LiteLLM proxy each checked the first
+five cases (summary break, coref, added tool, model change, effort change) from general knowledge
+and public prompt-caching documentation. They did not see the repo. The models were Opus 5.5, Sonnet
+5.5, `azure/gpt-6.1-sol` (in place of a refused `aws/gpt-6-astra`) and `azure/FW-Kimi-K3` (in place
+of an absent `aws/kimi-k2.5`). **They were not run again for this version.** Their verdicts are
+opinions, not measurements.
+
+| Cause here | Earlier case | Consensus |
+|---|---|---|
+| 1 | Summary that breaks the cache; edit inside the cached prefix | Spec right, 4 of 4 for each. Cached content would have been read, so a write-rate price has the wrong sign. |
+| 3 | Added tool declaration | Spec right, 3 of 4. Totals match and cg's clamp hides a real cost. |
+| 4 | Model change; effort change | Different question, 4 of 4 and 3 of 4. The effort premise is unverified. |
+
+All four confirmed the arithmetic of the earlier totals. They also agreed on the B\* reading in
+section 5. Two errors they found in the earlier text (the tail is 3,000 tokens, and `coref` repays in
+about 10 more turns, not 11) are corrected here.

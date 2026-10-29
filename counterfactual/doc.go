@@ -50,24 +50,29 @@
 //     SettingChange.At; with no At it starts at the read and adds penalty_unknown. Row 3 and row 4
 //     need the read to be below the prediction by more than the tolerance of decision 3.
 //  9. Phase. With no previous fingerprint, no TTL, no cached extent inside the TTL, or a gap past a minimum or unknown
-//     lifetime, the phase is unknown and penalty_unknown is added (§6.4); a read in the usage then
+//     lifetime with no ping, the phase is unknown and penalty_unknown is added (§6.4); a read in the usage then
 //     makes it hot up to the read extent, with no rescue. The cold expiry adds an empty break
 //     (§5.2 row 5).
-//  10. A rescue (§4.4) needs a ping after the previous request, a request gap past an exact TTL, an
+//  10. A rescue (§4.4) needs a ping after the previous request, a request gap past an exact or minimum TTL, an
 //     entry gap inside it, and a read larger than the write. Its tokens are the smaller of the ping's
 //     read (converted with the ratio) and Usage.CacheRead, at the TTL of EntryFacts.TTL.
 //  11. A spend is never priced in tokens: its Call is passed through (D4). A setting is not priced
 //     (R50); it only gives its ChangeID to a break. ComputeStandalone marks any operation that is not
 //     a spend as ReasonNotSpend.
+//  12. The end of an in-place change is inferred (§11 question 12): the forwarded item at its position
+//     has the client item's size again (cumulative hashes cannot be compared when another change sits
+//     earlier), or a splice or a client edit removed the position. cachesplit and headttl are priced as
+//     the split, ttlPremium and ttlRescue effects. Conservation is checked against the bill with a
+//     tolerance of the rounding plus one token.
 //
 // # Not implemented
 //
-// These parts of the design are not implemented. Compute adds no figure for them:
+// These parts of the design are not implemented. Compute adds no figure for them. Compute does not
+// recover from a panic: it leaves the ThreadState unchanged, and the host wraps the call to fail open.
 //
 //   - Result.Interaction on a rescued request (§6.2). It is always zero.
-//   - The order check (§6.5 check 2). The attribution check (5) holds by construction: a break only
-//     takes the ChangeID of an operation of the same request. The sum, unique-ChangeID and spans
-//     checks run in checks(), the conservation check (6) in conservation().
+//   - The order check (§6.5 check 2). The attribution check (5) holds by
+//     construction: a break only takes the ChangeID of an operation of the same request.
 //   - The split effect is found only inside the cache TTL with a hot phase (split()), and the
 //     ttlPremium and ttlRescue effects only for a ChangeID with the "headttl:" prefix (headTTL());
 //     both are emitted by Compute, but a host must report the matching operation for them to appear.

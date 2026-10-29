@@ -21,6 +21,10 @@ const (
 // deterministic and does no I/O (R26). If it panics, the ThreadState is unchanged, because the
 // replace is its last step. If another request replaced the ThreadState after EndRequest, Compute
 // calculates again from the current one and sets Result.Recomputed (R53).
+//
+// Call it once for each request. A second call prices the request against the ThreadState the first
+// call stored, so the active changes count again; use Preview to price a request again. Compute does
+// not recover from a panic: the host wraps the call so that a failure leaves the request unpriced.
 func (r *Request) Compute(usage Usage) Result {
 	if !r.ended {
 		return r.notEnded()
@@ -281,16 +285,25 @@ func (c *calcState) forwardPositions() {
 }
 
 // restored says whether the operator stopped applying a change that edited an item in place: the
-// forwarded item at the change's position is the client's own item again (same hash), although the
-// change made it smaller or larger. The end is inferred from the bodies, because the operator reports
-// nothing after the first request (§4.5). A change with a splice ends through the splice (toFwd).
+// forwarded item at the change's position is the client's own item again, although the change made
+// it smaller or larger. The end is inferred from the bodies, because the operator reports nothing
+// after the first request (§4.5). A change with a splice ends through the splice (toFwd).
+//
+// The hashes are cumulative, so they match only while no other change sits earlier in the body. With
+// two active in-place changes the later one is restored under the earlier one's smaller prefix and
+// the hashes differ. The item's own size does not depend on the prefix, so the test is the size: the
+// forwarded item has the client item's size again, and the change gave it another (sp.before differs
+// from sp.after here). Another operator rewriting the item to exactly that size would look restored.
 func (c *calcState) restored(it *item, sp span, fp Position) bool {
 	if it.op.DryRun || it.op.MessageSplice != nil || sp.before.Bytes == 0 || sp.before.Bytes == sp.after.Bytes {
 		return false // a DryRun forwards the client's own item by design
 	}
 	ci, ok1 := c.client.flat(sp.from)
 	fi, ok2 := c.fwd.flat(fp)
-	return ok1 && ok2 && c.client.Pos[ci].Hash == c.fwd.Pos[fi].Hash
+	if !ok1 || !ok2 {
+		return false
+	}
+	return c.client.Pos[ci].Bytes == c.fwd.Pos[fi].Bytes
 }
 
 // insertionPoint is the flat client position where content added at p sits: the position itself, or
@@ -407,10 +420,13 @@ func (c *calcState) phaseAndBoundary(res *Result) {
 		switch {
 		case gap <= f.TTL:
 			c.phase, c.prevExt = PhaseHot, mustFlat(prev.Forwarded, *c.s.Cache.Extent)
-		case f.Lifetime != LifetimeExact:
-			// a minimum or unknown lifetime cannot prove an expiry (R45)
+		case f.Lifetime == LifetimeUnknown:
+			// an unknown lifetime cannot prove an expiry (R45)
 		case !f.LastPing.IsZero() && entryGap <= f.TTL && f.PingRead != nil:
+			// a minimum counts as the lifetime for a rescue: 30 minutes is 30 minutes
 			c.phase, c.prevExt, c.pingHot = PhaseHot, mustFlat(prev.Forwarded, *f.PingRead), true
+		case f.Lifetime == LifetimeMinimum:
+			// with no ping, a gap past a minimum proves no expiry (R45)
 		default:
 			c.phase = PhaseCold
 		}
@@ -796,10 +812,9 @@ func (c *calcState) conservation(res *Result) {
 
 func tierSum(t TierTokens) int { return t.Input + t.CacheWrite5m + t.CacheWrite1h + t.CacheRead }
 
-// checks runs the sum, spans and unique-ChangeID checks (§6.5). The conservation check runs in
-// conservation(). The order check is not implemented, and the attribution check is not run because
-// it holds by construction: the library only gives a break the ChangeID of one of the request's
-// operations.
+// checks runs the sum, spans and unique-ChangeID checks (§6.5). The order and attribution checks
+// are not run here (conservation is, in calc): attribution holds by construction, because the library
+// only gives a break the ChangeID of one of the request's operations.
 func (c *calcState) checks(res *Result) {
 	var got [3]int
 	seen := map[string]bool{}

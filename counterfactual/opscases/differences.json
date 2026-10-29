@@ -242,8 +242,8 @@
  },
  {
   "case": "split/delivered/stable-half-read",
-  "kind": "notCovered",
-  "reason": "design \u00a74.4 (split) and \u00a76.2: Play does not feed cg's cachesplit credit (CachesplitSavedUSD), which cg books outside the per-component figures, so the adapter shows 0. The case is the contrast for split/reported-not-delivered and is not evidence about cg's cachesplit logic.",
+  "kind": "differs",
+  "reason": "design \u00a74.4 (split) and \u00a76.2: the play adapter now feeds cg's cachesplit inputs (SplitStableTokens and TailChanged), and cg still books 0. cachesplitSavedUSD (dash/event.go) credits only when the request wrote fewer tokens than the stable half (CacheWrite < SplitStableTokens), a deliberately blunt test that errs towards refusing. Here the request also writes its changed tail and the new message (6,300 tokens against a 3,000-token stable half), so cg refuses a credit the spec gives: 3,000 x ($3.75 - $0.30).",
   "allow": [
    {
     "step": 1
@@ -251,36 +251,6 @@
    {
     "step": 1,
     "change": "cg:cachesplit:e4d1"
-   }
-  ],
-  "total": true
- },
- {
-  "case": "keepalive/ping-on-1h-entry/no-rescue/1h",
-  "kind": "differs",
-  "reason": "design \u00a74.4 condition 2: the entry gap is measured against the TTL of the breakpoint that wrote the entry, here 1h, so a 9-minute return is no rescue. cg credits the 34,500 \u00b5$ because the floor it compares with is the 5m TTL (keepaliveCreditFloorMs). The play adapter does not pass the event's CacheTTL, so this case shows the default floor, not a measured 1h session; the spec's own row announces the difference (\u00a710.2).",
-  "allow": [
-   {
-    "step": 2
-   },
-   {
-    "step": 2,
-    "change": "ka:main:w-b4"
-   }
-  ],
-  "total": true
- },
- {
-  "case": "keepalive/ping/minimum-lifetime/no-rescue",
-  "kind": "differs",
-  "reason": "design \u00a74.4 condition 2 and R45: a minimum lifetime proves no expiry, so no rescue. cg credits the return after the 30-minute floor for GPT-5.6+ (keepaliveCreditFloorMs), and the play adapter leaves Provider unset, so cg falls back to its 5m floor and credits the 35-minute gap. Either way cg books a rescue the spec refuses; the spec's own row announces it (\u00a710.2).",
-  "allow": [
-   {
-    "step": 2
-   },
-   {
-    "step": 2,
-    "change": "ka:main:w-oa"
    }
   ],
   "total": true
@@ -456,6 +426,28 @@
   "allow": [
    {
     "step": 1
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "threads/change-stays-on-its-thread",
+  "kind": "differs",
+  "reason": "design \u00a74.2 and R24 (each thread has its own state): the library prices a change reported on a thread as new on that thread, so the side thread and the subagent each book 7,000 tokens as a write (26,250 \u00b5$). cg's unique-versus-replay split is Recorder.MarkUnique (dash/capture.go), keyed by tenant, component and content key, with no session or thread. The same removed output that main already had is a replay on every other thread, so cg books it as a read (2,100 \u00b5$) and under-reports the saving by 24,150 \u00b5$ on each. Which is right depends on whether the thread has its own cache entry (the library's view) or reads main's (cg's).",
+  "allow": [
+   {
+    "step": 5
+   },
+   {
+    "step": 5,
+    "change": "cg:cmdfilter:c40e"
+   },
+   {
+    "step": 6
+   },
+   {
+    "step": 6,
+    "change": "cg:cmdfilter:c40e"
    }
   ],
   "total": true

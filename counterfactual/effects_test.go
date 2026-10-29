@@ -263,15 +263,31 @@ func TestAPingInsideTheTTLIsNotCredited(t *testing.T) {
 	noEffects(t, res)
 }
 
-// R45: on a minimum lifetime a gap proves no expiry. A read in the usage makes it hot, with no rescue.
-func TestAMinimumLifetimeIsUnknownAndGetsNoRescue(t *testing.T) {
-	f := pingFacts()
+// R45: on a minimum lifetime a gap proves no expiry. With no ping, a read in the usage makes the
+// request hot, with no rescue.
+func TestAMinimumLifetimeWithNoPingIsUnknownAndGetsNoRescue(t *testing.T) {
+	f := exact5m
 	f.Lifetime = LifetimeMinimum
 	res := ex8(28*time.Minute, f)
 	if res.Phase != PhaseHot || !hasUnpriced(res, ReasonPenaltyUnknown) {
 		t.Fatalf("phase %q unpriced %+v, want hot from the read and penalty_unknown", res.Phase, res.Unpriced)
 	}
 	noEffects(t, res)
+}
+
+// A ping that kept a minimum-lifetime entry alive is a rescue: 30 minutes is 30 minutes, so the
+// minimum is taken as the lifetime when a ping is what kept the entry.
+func TestAPingOnAMinimumLifetimeIsARescue(t *testing.T) {
+	f := pingFacts()
+	f.Lifetime = LifetimeMinimum
+	res := ex8(28*time.Minute, f)
+	if res.Phase != PhaseHot {
+		t.Fatalf("phase %q, want hot", res.Phase)
+	}
+	e := effect(t, res, EffectRescue)
+	if e.ChangeID != "ka:main:w1" || e.Saved != (TierTokens{CacheWrite5m: 10000}) || e.Caused != (TierTokens{CacheRead: 10000}) {
+		t.Fatalf("rescue %+v, want 10000 write->read", e)
+	}
 }
 
 // Example 5a: a model change starts at tools[0], so the whole cached prefix is written again.

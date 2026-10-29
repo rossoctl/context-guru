@@ -84,14 +84,14 @@ def eop(change, saved=None, caused=None, note=None, call=None):
 
 
 def step(sec, rid, client, fwd, cbp, fbp, add, usage, exp, session="s1", model="agent-model",
-         params=None, facts=None):
+         params=None, facts=None, thread=None):
     meta = {"requestId": rid, "session": session, "model": model, "at": ts(sec), "billing": {"mode": "api"}}
     if params:
         meta["params"] = params
     return {
         "begin": {"meta": meta, "client": client, "clientBreakpoints": cbp},
         "add": add,
-        "end": {"thread": {"id": "main"}, "forwarded": fwd, "breakpoints": fbp,
+        "end": {"thread": thread or {"id": "main"}, "forwarded": fwd, "breakpoints": fbp,
                 "facts": facts or {"ttl": "5m", "lifetime": "exact"}},
         "usage": usage,
         "expected": exp,
@@ -956,6 +956,36 @@ def c12():
                 DIMS("rewrite", "afterBStar", "miss", sessions="2"), [a0, a1, b0])
 
 
+# One session, three threads: a change on main is priced only on main.
+def c_threads():
+    side, sub = {"id": "p:side", "parent": "main"}, {"id": "a:sub", "parent": "main"}
+    C1, F1 = M_BASE + [("m9", 8000)], M_BASE + [("m9f", 1000)]
+    C2, F2 = C1 + [("m10", 500)], F1 + [("m10", 500)]
+    first = lambda sec, rid, th: sim(sec, rid, ([], SYS1, M_BASE), ([], SYS1, M_BASE), [], "unknown", thread=th)
+    new = lambda sec, rid, th: sim(sec, rid, ([], SYS1, C1), ([], SYS1, F1), [eop(CF, saved=TT(cacheWrite5m=7000),
+                                   note="new content on this thread, would have been written")], "hot",
+                                   add=[cmdfilter_op()], prev=(30000, 30000), boundary=P("messages", 8), thread=th)
+    again = lambda sec, rid, th: sim(sec, rid, ([], SYS1, C2), ([], SYS1, F2), [eop(CF, saved=TT(cacheRead=7000),
+                                     note="applied again on the thread that reported it")], "hot",
+                                     prev=(38000, 31000), boundary=P("messages", 9), thread=th)
+    steps = [first(0, "main-0", None), new(10, "main-1", None),
+             first(20, "side-0", side), first(30, "sub-0", sub),
+             again(70, "main-2", None),
+             new(80, "side-1", side), new(90, "sub-1", sub),
+             again(150, "side-2", side)]
+    write(case("threads/change-stays-on-its-thread",
+               "One session, three threads: main, p:side and a:sub. main reports a cmdfilter change and then applies "
+               "it again, +$0.02625 as new and +$0.00210 when applied again. The side thread and the subagent send the "
+               "same body and carry no change, so main's change is priced on neither: they have no op. Later each "
+               "reports the same ChangeID in its own request. Each prices it as new (a write), and no unique_change "
+               "failure is raised, because that check runs inside one request. The side thread then applies it again, "
+               "as a read. Each thread keeps its own state, so main's change is never applied to another thread. (The "
+               "Version lock of each thread is checked by TestThreadsOfOneSessionKeepTheirOwnChangesAndVersions, not by "
+               "a case.)",
+               ISSUES, DIMS("rewrite", "afterBStarToL", "hit", threads="3"), steps),
+          "threads-change-stays-on-its-thread")
+
+
 # Cases 14 (#45) and 15 (#567): breakpoint operators that report success.
 SPL = "cg:cachesplit:e4d1"
 
@@ -1220,28 +1250,42 @@ def a4_b3():
     Fm = [("m0", 3000), ("m1f", 60), ("m2", 3000), ("m3", 3000)]
     op = rewrite("o1", "context-guru.mask", "messages", 1, 6000, 60, MK4)
     for cid, sid, ping in (("keepalive/no-ping/minimum-lifetime/evidence-hot", "A4", False),
-                           ("keepalive/ping/minimum-lifetime/no-rescue", "B3", True)):
+                           ("keepalive/ping/minimum-lifetime/rescue", "B3", True)):
         ses = "s-oa-ping" if ping else "s-oa"
-        s0 = sim(0, "r0", ([], SYS10, Cm), ([], SYS10, Fm), [eop(MK4, saved=TT(cacheWrite5m=5940))], "unknown",
-                 add=[op], facts=facts, session=ses, model="gpt-5.6")
+        # The ping variant carries no rewrite: a rescue prices the baseline as an expired entry, and the
+        # library does not yet tier an operation under a rescue (see the note in design.md §4.4).
+        if ping:
+            Fm, op = Cm, None
+        s0 = sim(0, "r0", ([], SYS10, Cm), ([], SYS10, Fm), [eop(MK4, saved=TT(cacheWrite5m=5940))] if op else [],
+                 "unknown", add=[op] if op else [], facts=facts, session=ses, model="gpt-5.6")
         steps = [s0]
         f1 = dict(facts)
         at = 2400
         if ping:
             KAW = "ka:main:w-oa"
-            steps.append(ping_step(1800, ses, KAW, ping_call(cacheRead=11060)))
+            steps.append(ping_step(1800, ses, KAW, ping_call(cacheRead=17000)))
             f1.update(lastPing=ts(1800), pingRead=P("messages", 3), pingWindow=KAW)
             at = 2100
-        steps.append(sim(at, "r1", ([], SYS10, Cm + [("m4", 500)]), ([], SYS10, Fm + [("m4", 500)]),
-                         [eop(MK4, saved=TT(cacheRead=5940), note="the read proves the entry, so the saving is a read")],
-                         "hot", prev=(17000, 11060), boundary=P("messages", 3), facts=f1, session=ses, model="gpt-5.6"))
         if ping:
-            desc = ("OpenAI GPT-5.6: the entry lifetime is a 30-minute minimum, not a proven expiry (R45). A ping at "
-                    "minute 30 reads the 11,060 tokens, and the next request arrives at minute 35 and reads them too. "
-                    "A gap past a minimum proves nothing, so the phase is unknown until the read in the usage proves "
-                    "the entry: it becomes hot. A rescue claims the entry would have expired, which a minimum cannot "
-                    "show, so none is credited and the window is only the ping's cost, 11,060 x $0.30 + 10 x $3.00 + "
-                    "$15.00 per million = -$0.00336. mask's 5,940 tokens are read, not written: +$0.00178.")
+            # The ping kept a 30-minute entry alive past 30 minutes: 30 minutes is 30 minutes, so
+            # without the ping the entry is taken to have expired and the whole body would be written.
+            steps.append(sim(at, "r1", ([], SYS10, Cm + [("m4", 500)]), ([], SYS10, Fm + [("m4", 500)]),
+                             [], "hot", prev=(17000, 17000), boundary=P("messages", 3), facts=f1, session=ses,
+                             model="gpt-5.6", base=U(write=17500),
+                             effects=[effect("rescue", KAW, saved=TT(cacheWrite5m=17000), caused=TT(cacheRead=17000),
+                                             to=P("messages", 3),
+                                             note="without the ping the 30-minute entry would have expired; write becomes read")]))
+        else:
+            steps.append(sim(at, "r1", ([], SYS10, Cm + [("m4", 500)]), ([], SYS10, Fm + [("m4", 500)]),
+                             [eop(MK4, saved=TT(cacheRead=5940), note="the read proves the entry, so the saving is a read")],
+                             "hot", prev=(17000, 11060), boundary=P("messages", 3), facts=f1, session=ses, model="gpt-5.6"))
+        if ping:
+            desc = ("OpenAI GPT-5.6: the entry lifetime is a 30-minute minimum, and the owner decision is that 30 "
+                    "minutes is 30 minutes (R45). Turn 1 caches 17,000 tokens. A ping at minute 30 reads them and "
+                    "renews the entry. The next request arrives at minute 35, 35 minutes after turn 1 and so past the "
+                    "lifetime, but 5 minutes after the ping and so inside it. The rescue is credited: 17,000 x "
+                    "($3.75 - $0.30) = +$0.05865. The ping costs 17,000 x $0.30 + 10 x $3.00 + $15.00 per million = "
+                    "-$0.00513. Total +$0.05352.")
         else:
             desc = ("OpenAI GPT-5.6, 40 minutes after the last request, past the 30-minute minimum. The gap proves "
                     "nothing, so the phase starts unknown. The provider read 11,060 tokens, which is evidence the entry "
@@ -1711,7 +1755,7 @@ if __name__ == "__main__":
     for old in os.listdir(OUT):  # the generator owns this directory: drop cases that no longer exist
         if old.endswith(".json"):
             os.remove(os.path.join(OUT, old))
-    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12,
+    for f in (ex12, ex3, ex4, ex5, ex67, ex8, ex9, c01, c02, c03_04, c05, c06, c07, c08, c09, c10, c11, c12, c_threads,
               c14, c15, c16, c17, c18, a1, a2, a3, a4_b3, b1_b2, b4, b5, c1_, c2_, c3_, c5, d2, d3, d4,
               d5, d6, e2, e345, f245, h2, h5):
         f()

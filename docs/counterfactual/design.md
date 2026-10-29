@@ -226,10 +226,10 @@ write price, reporting, granularity). It grows as each provider is read.
 | D8 | Which hosts compute dollars from context operations? | **Both: Cortex and the context-guru proxy.** The proxy stops using its own saving rules (`dash/event.go`) when it switches. The comparison of request fingerprints (§5) is inside `Compute`, so the proxy does not need Cortex to find B\*. |
 | D9 | How is the implementation validated? | **Against an exhaustive list of test cases made with the current computation** (§10), before any host switches. |
 | D10 | How is the cache state used? | **As an input to every price.** The tier of a content change depends on the state (§6.2). A change in how the provider bills content that is already there (a cache effect, §4.4) is priced as the difference between two states. |
-| D11 | What happens to a change that a later change ends? | **`Compute` finds that it has ended and stops applying it.** The context operator reports nothing after the first request (D14), so it cannot say that a change ended. No link names the change that ended it. How `Compute` finds the end is **not defined** (§11, question 12). The measurement at each context operator's own input (R29) gives the right price and stops any double count, while the change is in the state. Each change keeps the total it had until then (§4.5). |
+| D11 | What happens to a change that a later change ends? | **`Compute` finds that it has ended and stops applying it.** The context operator reports nothing after the first request (D14), so it cannot say that a change ended. No link names the change that ended it. `Compute` infers the end from the bodies and the splice (§11, question 12). The measurement at each context operator's own input (R29) gives the right price and stops any double count, while the change is in the state. Each change keeps the total it had until then (§4.5). |
 | D12 | Where does the thread ID come from? | **From the engine's `internal/thread`, in both hosts**, carried on the request. The host keeps one fingerprint per thread, keyed by `thread.Key`, and compares each request with its own thread's previous request (wiring document, W5.2). |
 | D13 | How does the model serve a subscription user? | **The library does not change.** It already returns tokens for each tier (D3). The request carries a `Billing` fact. The host converts tokens to dollars for an API user, and to usage-limit units for a subscription user, with an API-equivalent dollar figure beside it, marked as such (§7.1). |
-| D14 | Is `Compute` stateful? | **The library is stateful. `Compute` is deterministic.** A context operator reports a change once, on the first request. `Compute` applies it again on later requests until it ends, so a result depends on earlier requests. The state is a `ThreadState`, kept by the Tracker, one for each thread. `Compute` is a method of the request record. The record takes a copy of the `ThreadState` in `EndRequest`, because the thread is known only after the plugins ran (§6.1). As its last step `Compute` replaces the thread's `ThreadState` with the new one, so the host has nothing to commit and cannot forget to. A failure or a panic leaves the old `ThreadState`. Two requests of one thread at the same time (a retry, parallel calls of one agent) are safe: the replace is guarded by the `Version` of the `ThreadState` (optimistic locking, R53, §6.1). Rejected: a lock from `EndRequest` to `Compute`, because requests of one thread would wait for each other. `Preview` does the same calculation and stores nothing, for pricing an old request again and for a look that must not move the thread forward. A test case is a sequence of requests. Rejected: `Compute` returning the new state and a separate `Commit`. It is purely functional, but a host that forgets the commit gets a wrong figure with no error. Rejected: `Compute` writing the state in the middle of the call, because a failure would leave it half updated. What the state holds, and how a change ends, are open (§11, questions 11 and 12). |
+| D14 | Is `Compute` stateful? | **The library is stateful. `Compute` is deterministic.** A context operator reports a change once, on the first request. `Compute` applies it again on later requests until it ends, so a result depends on earlier requests. The state is a `ThreadState`, kept by the Tracker, one for each thread. `Compute` is a method of the request record. The record takes a copy of the `ThreadState` in `EndRequest`, because the thread is known only after the plugins ran (§6.1). As its last step `Compute` replaces the thread's `ThreadState` with the new one, so the host has nothing to commit and cannot forget to. A failure or a panic leaves the old `ThreadState`. Two requests of one thread at the same time (a retry, parallel calls of one agent) are safe: the replace is guarded by the `Version` of the `ThreadState` (optimistic locking, R53, §6.1). Rejected: a lock from `EndRequest` to `Compute`, because requests of one thread would wait for each other. `Preview` does the same calculation and stores nothing, for pricing an old request again and for a look that must not move the thread forward. A test case is a sequence of requests. Rejected: `Compute` returning the new state and a separate `Commit`. It is purely functional, but a host that forgets the commit gets a wrong figure with no error. Rejected: `Compute` writing the state in the middle of the call, because a failure would leave it half updated. What the state holds is open (§11, question 11). How a change ends is decided (§11, question 12). |
 
 ## 3. Requirements
 
@@ -360,8 +360,8 @@ numbers are not used: those requirements were dropped.
   prices the tiers and sums dollars. This is the rule of the tool-prune accounting (cortex#952).
 - **R35.** A later change can end earlier ones (a summary of reduced messages). The model shows
   this by `Compute` no longer applying the earlier change, not by a link and not by the context
-  operator: after its first report the context operator says nothing about the change. How `Compute`
-  finds the end is open (§11, question 12). The totals of the earlier changes until then do not
+  operator: after its first report the context operator says nothing about the change. `Compute`
+  infers the end (§11, question 12). The totals of the earlier changes until then do not
   change (§4.5).
 
 ### E. Operability
@@ -690,7 +690,7 @@ space on its first request. On a later request the client body can grow only at 
 by a client edit, so its client-space position is still valid until the client edits before it.
 Then the library maps it into forwarded space through this request's splices, as for a reported
 operation. A client edit before an active change, or a client compaction, is a case for the end
-rule (§11, question 12).
+rule (§11, question 12): it ends the change.
 
 ### 4.4 Cache effects
 
@@ -726,10 +726,11 @@ conditions of the current `keepaliveSavedUSD`:
 2. The **request gap** (§5.2), from the previous real request of the thread, is longer than the
    entry's TTL, so without a ping the entry would have expired. The TTL is the lifetime of the
    breakpoint that wrote the entry, so a 1h entry is not rescued after 9 minutes. And the lifetime
-   is `exact`: on a `minimum` provider an elapsed gap cannot prove that the entry would have
-   expired (R45), so no rescue is added. This is stricter than the current
-   `keepaliveCreditFloorMs`, which credits OpenAI GPT-5.6+ after its 30-minute minimum, and uses
-   the 5m TTL for a 1h entry. Both are `differs` entries (§10.2).
+   is `exact` or `minimum`. A `minimum` is taken as the lifetime when a ping is what kept the entry:
+   30 minutes is 30 minutes, so a rescue is added after a gap past it. This matches the current
+   `keepaliveCreditFloorMs`, which credits OpenAI GPT-5.6+ after its 30-minute minimum. With no ping,
+   a gap past a `minimum` still proves no expiry (R45), and an `unknown` lifetime never gives a rescue.
+   The current code uses the 5m TTL for a 1h entry, which is a `differs` entry (§10.2).
 3. The provider read more than it wrote.
 4. The tokens are the smaller of what the last ping read and what this request read.
 
@@ -763,8 +764,8 @@ summary replaces messages 0 to 8, and messages 3 and 5 were reduced by `mask` an
 **A change ends when `Compute` stops applying it.** The context operator reports a change once (D14), so
 after that it cannot report that the change ended, and there is no field that names the change
 that ended it. `Compute` has to find the end by itself, and drop the change from the state of the
-thread. **The rule that finds the end is not defined** (§11, question 12). What follows describes
-what must hold once the end is found. It does not say how the end is found.
+thread. **The rule that finds the end is decided** (§11, question 12): `Compute` infers it from the
+bodies and the splice. What follows describes what must hold once the end is found.
 
 1. **The price.** Each request is priced from its own cache result (D6). A change that has ended saves
    nothing on later requests. Its total until then does not change, so a change that did not pay back
@@ -822,10 +823,10 @@ holds for the Tracker. It is the risk of the new rule. What the new design does 
 2. **What the checks do not catch.** A check works on sizes for each section. Two errors of the same
    size in one section cancel out. The checks also do not say which change is wrong. And a failed check
    does not stop pricing: the figure is still produced, with the failure in `Result.Checks`.
-3. **The end rule is not defined.** `Compute` must find by itself that a change has ended, because the
-   context operator reports nothing after the first request. Until that rule exists (§11, question 12),
-   the guard in point 1 is the only protection, and it detects an error after the fact. It does not
-   prevent one.
+3. **The end rule is an inference.** `Compute` must find by itself that a change has ended, because the
+   context operator reports nothing after the first request (§11, question 12). A change that ends
+   with bytes identical to the changed form is not found. For that case the guard in point 1 is the
+   only protection, and it detects an error after the fact. It does not prevent one.
 
 **A lost state does not heal by itself.** This is new, and it is the main cost of the rule. If the
 Tracker loses a thread's state (a restart, an eviction, a thread that is created again), the context
@@ -861,7 +862,7 @@ row 1 adds a break with that `ChangeID`. That is the real cost of leaving observ
 
 So the state grows with the number of changes that are alive in the thread, and not with the number of
 requests. If nothing ever ended, it would grow with the session. That is why the end rule (§11,
-question 12) decides whether the memory is bounded.
+question 12) decides whether the memory is bounded: a change that is not found ending stays.
 
 **What does not change.**
 
@@ -876,8 +877,8 @@ removes the same declarations from every request. It reports the change once. `C
 the removed set and the config, so it is the same for the same config. The Tracker holds the rest.
 
 **A config change of a stateless context operator.** A new `remove` list (for example, a hot reload) gives
-a new `ChangeID`. The old change ends and a new one starts. How `Compute` learns that the old change
-ended is the open end rule (§11, question 12). If the new list removes a declaration
+a new `ChangeID`. The old change ends and a new one starts. `Compute` learns that the old change
+ended by the end rule (§11, question 12). If the new list removes a declaration
 that the old list kept, the forwarded body changes inside the cached prefix. The library then adds
 a break that carries tool-prune's `ChangeID` (§5.2). That is the real cost of the config change.
 
@@ -1015,9 +1016,9 @@ The phase is found **before** the rows, from the gaps. It is the **cache state**
 | Case | `CachePhase` | `Extent` |
 |---|---|---|
 | A previous fingerprint exists, and the request gap ≤ TTL | `hot` | `prevExtent` |
-| A previous fingerprint exists, request gap > TTL, entry gap ≤ TTL, `PingRead` is set, and the lifetime is `exact` | `hot`, and the library adds a rescue with `ChangeID = EntryFacts.PingWindow` (§4.4) | `PingRead` |
+| A previous fingerprint exists, request gap > TTL, entry gap ≤ TTL, `PingRead` is set, and the lifetime is `exact` or `minimum` | `hot`, and the library adds a rescue with `ChangeID = EntryFacts.PingWindow` (§4.4) | `PingRead` |
 | A previous fingerprint exists, request gap > TTL, entry gap > TTL, and the lifetime is `exact` | `cold`. A ping was sent but too late: its window gets no rescue | nil |
-| A previous fingerprint exists, request gap > TTL, and the lifetime is `minimum` or `unknown` | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
+| A previous fingerprint exists, request gap > TTL, no qualifying ping, and the lifetime is `minimum` or `unknown` | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
 | No previous fingerprint for this thread | `unknown`, unless `Usage.CacheRead` proves a read (below) | nil |
 
 **A read in the usage is evidence.** The provider bills a read only for an entry it holds. So when
@@ -1044,8 +1045,8 @@ not exist, in the unsafe direction. The host already carries part of this distin
 (`keepaliveCreditFloorMs`: pre-5.6 OpenAI is never credited, exactly because `Minimum` cannot stand
 in for proof of expiry). The host sets `EntryFacts.Lifetime` from the same source
 (`apply.CacheLifetime`), and the table above routes a `Minimum`-with-no-proof gap to `unknown`, not
-`cold`. §6.4 then applies (`penalty_unknown`). For the same reason a `minimum` provider gets no
-rescue (§4.4): a rescue is a claim that the entry would have expired.
+`cold`. §6.4 then applies (`penalty_unknown`). A `minimum` provider does get a rescue
+when a ping kept the entry (§4.4): the owner decision is that 30 minutes is 30 minutes.
 
 ### 5.3 Tokens for each position
 
@@ -1534,8 +1535,8 @@ The places where the current code is meant to give a different figure are in one
 - `notCovered`: the current code prices something the model does not. The case is listed in §11.
 
 Known `differs` entries from this spec, for the keep-alive credit (§4.4): the current code credits a
-rescue on OpenAI GPT-5.6+ after the 30-minute minimum, and credits a 1h entry after a 5m gap
-(`providerCacheTTLMs`, `dash/event.go`). This spec credits neither.
+1h entry after a 5m gap (`providerCacheTTLMs`, `dash/event.go`). This spec does not. Both agree on a
+rescue on OpenAI GPT-5.6+ after the 30-minute minimum.
 
 **Rounding.** The case list and the examples compute in micro-dollars, exactly, and round once, half
 up, when a figure is shown. A total adds the exact amounts.
@@ -1602,7 +1603,7 @@ drops the combinations that cannot occur, and states the reason for each drop in
 22. Observe mode: a `DryRun` change shown on every request; then the switch to enforce, with its
     break (§4.6).
 23. The same tool output twice in one session: two `ChangeID`s (§4.2 rule 6).
-24. A ping on a `minimum` provider: no rescue (§4.4). A ping on a 1h entry after 9 minutes: no rescue.
+24. A ping on a `minimum` provider past its minimum: a rescue (§4.4). A ping on a 1h entry after 9 minutes: no rescue.
 25. A subagent's first request that reads the main thread's `tools` and `system`: `hot` from the
     usage, not `unknown` (§5.2).
 
@@ -1681,8 +1682,9 @@ Each has test cases that are marked `differs` or `notCovered` in `differences.js
     - **a splice removed its position** (a summary replaced it, or the client compacted), or the client
       edited at or before it (§4.3, §5.2);
     - **the client's own item is back at its position.** The forwarded item at the change's position has
-      the same hash as the client item, although the change made it smaller or larger. This is a restore
-      in place. A `DryRun` is exempt, because it forwards the client's item by design;
+      the client item's size again, although the change made it smaller or larger. This is a restore
+      in place. The size is compared, not the hash, because the hashes are cumulative and differ when
+      another change sits earlier in the body. A `DryRun` is exempt, because it forwards the client's item by design;
     - **for content the operator added** (a size before of zero), the client edited something before
       its position. Its position is in forwarded space, so the client body having nothing there does not
       end it.
