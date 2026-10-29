@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -384,5 +386,81 @@ func TestPutDoesNotWriteSynchronously(t *testing.T) {
 	d.mu.Unlock()
 	if q != 1 {
 		t.Fatalf("pending = %d, want 1", q)
+	}
+}
+
+// The loaded-session record has a hard cap and drops the oldest id on insert.
+func TestLoadedRecordIsCapped(t *testing.T) {
+	m, d := newDiskStore(t, filepath.Join(t.TempDir(), "state.db"), DiskOptions{}, stateOpts())
+	defer d.Close()
+	for i := 0; i < maxLoaded+100; i++ {
+		m.LoadSession(fmt.Sprintf("s%d", i))
+	}
+	m.mu.Lock()
+	n, o := len(m.loadedAt), len(m.loadedOrder)
+	_, oldest := m.loadedAt["s0"]
+	_, newest := m.loadedAt[fmt.Sprintf("s%d", maxLoaded+99)]
+	m.mu.Unlock()
+	if n > maxLoaded || o > maxLoaded {
+		t.Fatalf("record grew to %d / %d, cap %d", n, o, maxLoaded)
+	}
+	if oldest || !newest {
+		t.Fatalf("oldest kept = %v, newest kept = %v", oldest, newest)
+	}
+}
+
+// A failed read clears the mark, so the next request retries.
+func TestFailedLoadAllowsRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	m1, d1 := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	m1.Put(SumPrefix+"s", []byte("CP"))
+	d1.Close()
+	m2, d2 := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	// Break the read: the table is renamed away, then restored.
+	if _, err := d2.db.Exec(`ALTER TABLE session_state RENAME TO session_state_x`); err != nil {
+		t.Fatal(err)
+	}
+	m2.LoadSession("s")
+	if _, err := d2.db.Exec(`ALTER TABLE session_state_x RENAME TO session_state`); err != nil {
+		t.Fatal(err)
+	}
+	m2.LoadSession("s")
+	defer d2.Close()
+	if got, ok := m2.Get(SumPrefix + "s"); !ok || string(got) != "CP" {
+		t.Fatalf("retry after a failed load: %q %v", got, ok)
+	}
+}
+
+// At the pending cap, an update to a key already waiting is kept; a new key is dropped.
+func TestPendingCapKeepsUpdates(t *testing.T) {
+	_, d := newDiskStore(t, filepath.Join(t.TempDir(), "state.db"), DiskOptions{FlushEvery: time.Hour}, stateOpts())
+	defer d.Close()
+	now := time.Now()
+	for i := 0; i < maxPending; i++ {
+		d.enqueue(fmt.Sprintf("%ss%d", SumPrefix, i), []byte("old"), now)
+	}
+	d.enqueue(SumPrefix+"s0", []byte("new"), now)
+	d.enqueue(SumPrefix+"extra", []byte("x"), now)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if string(d.pending[SumPrefix+"s0"].val) != "new" {
+		t.Fatal("update to a waiting key was dropped at the cap")
+	}
+	if _, ok := d.pending[SumPrefix+"extra"]; ok || len(d.pending) != maxPending {
+		t.Fatal("a new key must be dropped at the cap")
+	}
+}
+
+// Each distinct failing op is logged once, and every failure is counted.
+func TestEachOpLoggedOnce(t *testing.T) {
+	_, d := newDiskStore(t, filepath.Join(t.TempDir(), "state.db"), DiskOptions{}, stateOpts())
+	defer d.Close()
+	d.fail("a", errors.New("x"))
+	d.fail("a", errors.New("x"))
+	d.fail("b", errors.New("y"))
+	n := 0
+	d.logged.Range(func(_, _ any) bool { n++; return true })
+	if n != 2 || d.Errors() != 3 {
+		t.Fatalf("ops logged %d, errors %d", n, d.Errors())
 	}
 }

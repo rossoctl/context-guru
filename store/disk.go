@@ -46,7 +46,7 @@ type Disk struct {
 	stop       chan struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
-	logOnce    sync.Once
+	logged     sync.Map // op -> struct{}: each distinct op is logged once
 	errN       atomic.Int64
 }
 
@@ -178,10 +178,10 @@ func (d *Disk) Errors() int64 { return d.errN.Load() }
 
 func (d *Disk) fail(op string, err error) {
 	d.errN.Add(1)
-	d.logOnce.Do(func() {
+	if _, seen := d.logged.LoadOrStore(op, struct{}{}); !seen {
 		slog.Warn("context-guru: session state disk error; continuing with memory only for what fails",
 			"op", op, "err", err)
-	})
+	}
 }
 
 // enqueue records a state write for the next flush. It never blocks on the disk.
@@ -191,7 +191,9 @@ func (d *Disk) enqueue(key string, val []byte, now time.Time) {
 	}
 	cp := append([]byte(nil), val...)
 	d.mu.Lock()
-	if len(d.pending) < maxPending {
+	// At the cap a NEW key is dropped, but an update to a key already waiting is kept: otherwise
+	// the flush would write the older value.
+	if _, waiting := d.pending[key]; waiting || len(d.pending) < maxPending {
 		d.pending[key] = pendingRow{val: cp, updated: now.UnixMilli()}
 	}
 	d.mu.Unlock()
@@ -286,9 +288,9 @@ type diskRow struct {
 // session, on any thread. It may also return a key of a session whose id starts with this one
 // (for example "a:b" for "a"): those rows are real state of another session and restoring them
 // is harmless.
-func (d *Disk) loadSession(session string) []diskRow {
+func (d *Disk) loadSession(session string) ([]diskRow, bool) {
 	if session == "" {
-		return nil
+		return nil, true
 	}
 	var (
 		conds []string
@@ -307,14 +309,14 @@ func (d *Disk) loadSession(session string) []diskRow {
 	rows, err := d.db.QueryContext(ctx, `SELECT key, val FROM session_state WHERE `+strings.Join(conds, " OR "), args...)
 	if err != nil {
 		d.fail("load", err)
-		return nil
+		return nil, false
 	}
 	defer rows.Close()
 	var out []diskRow
 	for rows.Next() {
 		var k, v []byte
 		if err := rows.Scan(&k, &v); err != nil {
-			d.fail("scan", err) // a corrupt row: skip it, keep the rest
+			d.fail("scan", err) // a corrupt row: skip it, keep the rest (not a failed load)
 			continue
 		}
 		key := string(k)
@@ -325,8 +327,9 @@ func (d *Disk) loadSession(session string) []diskRow {
 	}
 	if err := rows.Err(); err != nil {
 		d.fail("load", err)
+		return out, false
 	}
-	return out
+	return out, true
 }
 
 // boundaryOK checks the byte after the session id. Keys continue with ":" (id), "\x00" (thread),
@@ -402,17 +405,16 @@ func (m *Memory) LoadSession(session string) {
 		m.mu.Unlock()
 		return
 	}
-	m.loadedAt[session] = now
-	if len(m.loadedAt) > 4096 {
-		for s, at := range m.loadedAt {
-			if now.Sub(at) >= life {
-				delete(m.loadedAt, s)
-			}
-		}
-	}
+	m.markLoaded(session, now)
 	m.mu.Unlock()
 
-	rows := d.loadSession(session) // outside the lock: this is a disk read
+	rows, ok := d.loadSession(session) // outside the lock: this is a disk read
+	if !ok {
+		// A failed read must not block a retry for a whole lifetime.
+		m.mu.Lock()
+		delete(m.loadedAt, session)
+		m.mu.Unlock()
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -422,6 +424,23 @@ func (m *Memory) LoadSession(session string) {
 		}
 		m.putLocked(r.key, r.val)
 	}
+}
+
+// maxLoaded bounds the loaded-session record, like noteLost bounds its marks: past it the OLDEST
+// id is dropped on insert. A dropped id costs one more disk read when that session returns.
+const maxLoaded = 4096
+
+// markLoaded records a load. The caller holds m.mu. No scan: eviction pops the oldest id.
+func (m *Memory) markLoaded(session string, now time.Time) {
+	if _, ok := m.loadedAt[session]; !ok {
+		for len(m.loadedAt) >= maxLoaded && len(m.loadedOrder) > 0 {
+			oldest := m.loadedOrder[0]
+			m.loadedOrder = m.loadedOrder[1:]
+			delete(m.loadedAt, oldest)
+		}
+		m.loadedOrder = append(m.loadedOrder, session)
+	}
+	m.loadedAt[session] = now
 }
 
 // AttachDisk makes d the write-through copy of this store's state. Call it once, before serving.

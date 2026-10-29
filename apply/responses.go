@@ -540,6 +540,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			if alias != res.Session {
+				loadSessionState(st, alias) // its clocks (cg:seen:, cg:ttl:) may be on disk only
+			}
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}

@@ -359,7 +359,8 @@ type Memory struct {
 	disk *Disk
 	// loadedAt is when each session was last seen by LoadSession. A session seen within the state
 	// lifetime still has its state in memory, so it is not read from disk again.
-	loadedAt map[string]time.Time
+	loadedAt    map[string]time.Time
+	loadedOrder []string // insertion order of loadedAt, oldest first
 }
 
 // Options configures a Memory store; the zero value yields sane defaults.

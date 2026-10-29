@@ -583,6 +583,12 @@ func main() {
 	} else if *sessionStateDB != "" {
 		slog.Warn("context-guru: --session-state-db is ignored in hosted multi-tenant mode")
 	}
+	if *sessionStateDB != "" && tenants == nil {
+		if _, isMem := pstore.(*store.Memory); !isMem {
+			slog.Warn("context-guru: --session-state-db is ignored because the state store is disabled (--store=false)",
+				"path", *sessionStateDB)
+		}
+	}
 	h := proxy.New(pipe, pstore, agg, proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
