@@ -86,8 +86,17 @@ func TestCacheStateShowsTheKeepAlivePlan(t *testing.T) {
 	if body["held_until_ms"] != want || body["pings_left"] != 2.0 {
 		t.Errorf("top level held_until_ms/pings_left = %v/%v, want %v/2", body["held_until_ms"], body["pings_left"], want)
 	}
+	if body["next_ping_ms"] != float64(now+170_000) {
+		t.Errorf("top level next_ping_ms = %v, want %v", body["next_ping_ms"], now+170_000)
+	}
 	for _, th := range body["threads"].([]any) {
 		th := th.(map[string]any)
+		if th["main"] == true && th["next_ping_ms"] != float64(now+170_000) {
+			t.Errorf("main thread next_ping_ms = %v, want %v", th["next_ping_ms"], now+170_000)
+		}
+		if th["main"] == false && th["next_ping_ms"] != nil {
+			t.Errorf("a thread with no plan must not claim a next ping: %v", th)
+		}
 		if th["main"] == true && th["held_until_ms"] != want {
 			t.Errorf("main thread held_until_ms = %v, want %v", th["held_until_ms"], want)
 		}

@@ -121,8 +121,9 @@ each `saved_usd` of `baseline_usd`. `baseline_usd` is what those requests would 
 context-guru (the uncompacted baseline plus the cache-split and keep-alive savings); `saved_usd` is
 that minus what was paid, context-guru's own model calls and pings included, so it never exceeds
 `baseline_usd`. Each listed thread carries its own pair. A thread the
-keep-alive still plans to ping also carries `pings_left` and `held_until_ms`: when its cache goes
-cold if nothing else is sent (the last planned ping's start plus the cache lifetime).
+keep-alive still plans to ping also carries `pings_left`, `held_until_ms` and `next_ping_ms`: when its
+cache goes cold if nothing else is sent (the last planned ping's start plus the cache lifetime), and when
+the next planned ping fires. The mod hides its Ping button while that ping fires before the cache expires.
 
 The session and each thread also carry `next_warm_usd` and `next_cold_usd`: what the next request
 costs for the cached prefix if the cache is still warm (a cache read) or already cold (a rewrite;
@@ -146,11 +147,12 @@ while the proxy holds the thread. When it is false, `ping_reason` is one of:
 `too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
 `unavailable` (the route is failing in a row, or the provider refused this credential),
 `pings used` (the planned pings ran out and the proxy let go of the thread),
-`stopped` (the proxy stopped the thread after a miss, a refused ping or a failure),
+`stopped` (the proxy stopped the thread after a miss, a refused ping or a failure, and has let go of its copy),
 `expired` (a manual-only hold ran out) and
 `no entry` (nothing is known about the thread: the proxy restarted, or has seen no request on it since).
 While a thread whose planned pings ran out is still held and its cache can still be warm, a press is allowed,
-under the same cost ceiling and 30-second gap. A press stays refused after a miss or a refused ping.
+under the same cost ceiling and 30-second gap. A press is also allowed after a miss or a refused ping, while the proxy
+still holds the copy: the refusal may not repeat, and no automatic ping is left to keep the cache warm.
 
 **Ping with keep-alive off.** A request that carries `x-context-guru-ping: 1` is held for the button
 even when the account has no automatic keep-alive. Nothing is pinged for it. The proxy keeps the body and

@@ -554,3 +554,18 @@ func TestAManualOnlyHoldSetsNeitherHeldUntilNorPingsLeft(t *testing.T) {
 	m.h.keeper.Sweep(m.clock.now())
 	check("after a sweep", get())
 }
+
+// #771: a 409 "not held" carries the keeper's own ping_reason, so a press that raced the release of a thread's
+// copy does not leave the client to guess from a cache-state copy that may be 15 s old.
+func TestManualPing409NotHeldCarriesThePingReason(t *testing.T) {
+	m := newManualHost(t)
+	m.hold(t, "", "sess-a", "", 50*time.Second)
+	m.h.keeper.RetireSession("", "sess-a")
+	w, out := m.post(`{"session":"sess-a"}`)
+	if w.Code != http.StatusConflict || out["error"] != "not held" {
+		t.Fatalf("nothing held = %d %v, want 409 not held", w.Code, out)
+	}
+	if want := m.h.keeper.Keeper.PingStates("", false, "sess-a").For("").Reason; want == "" || out["ping_reason"] != want {
+		t.Errorf("ping_reason = %v, want %q (the keeper's own)", out["ping_reason"], want)
+	}
+}
