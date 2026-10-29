@@ -325,13 +325,17 @@ the dashboard off the fallback is the proxy's start time, and `--restart-grace=f
 the rule off in every case.
 
 The recorder learns a refresh under BOTH session ids a conversation uses: the request's own
-id, and the content-derived alias id (the capture path derives it off the body, on the
-writer goroutine, through the pipeline's own envelope transform — the same door
-`apply.EnforcedSessionIDFor` is — because toolfilter's skills half rewrites the head message
-the session hash reads, and a hash of the pristine body is a key no request ever derives;
-it stores the alias on the row). That is what makes the alias widening hold in
-both directions — a headerless turn asks for the alias id alone, because its own derived id
-IS the alias, so the header turns' warmth must already sit under that key. The startup seed
+id, and the alias id — the id a HEADERLESS turn of the same body runs under: the metadata
+session id when the body carries one (`metadata.user_id`, `metadata.taskId`), else the
+content hash of the transformed head. One rule resolves it on both sides (`apply.graceAliasID`
+on the ask side, `apply.EnforcedSessionIDFor`'s empty-explicit-id path on the record side,
+over the pipeline's own envelope transform — because toolfilter's skills half rewrites the
+head message the session hash reads, and a hash of the pristine body is a key no request
+ever derives; the record side stores the alias on the row). That is what makes the alias
+widening hold in both directions — a headerless turn asks for the alias id alone, because
+its own derived id IS the alias, so the header turns' warmth must already sit under that
+key. The cold decision's own alias clocks (idle, TTL) still key on the bare content hash
+and do not bridge to a metadata id — old behavior, unchanged by #766. The startup seed
 recovers both keys from the requests table, with two limits: a row written before the alias
 column existed has no alias to recover, so a seesaw-id tenant's first headerless request
 after an UPGRADE can read as expired (one turn, once), and a keep-alive ping carries no body

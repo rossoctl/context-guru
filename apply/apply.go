@@ -553,11 +553,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session header comes and goes (see the clock note below). The restart grace asks
 			// the lookup for the thread's keys under BOTH ids, because a refresh under either
 			// one kept the provider's single entry warm (#766).
+			//
+			// Two alias values, two jobs. graceAlias is the id a HEADERLESS turn of this body
+			// runs under — the metadata session id when the body carries one, else the content
+			// hash — and it is the ONE rule the record side also derives (graceAliasID), so
+			// the keys the grace asks for and the keys the recorder warms cannot drift apart.
+			// alias below stays the bare content hash: it keys the cold decision's own clocks
+			// (aliasSeen, sessionTTL, RecordCacheTouch), which this change does not touch.
 			sys, firstUser := schema.SessionHead(norm)
 			alias := session.Scoped(o.Tenant, "", sys, firstUser)
-			aliasKey := thread.Key(alias, tr.Thread.ID)
-			aliasParentKey := inheritKey(alias, threadParent, threadInherits)
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, aliasKey, aliasParentKey,
+			graceAlias := graceAliasID(o.Tenant, body, norm)
+			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
 				len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
@@ -1390,6 +1398,19 @@ func NormalizeMessages(provider bschemas.ModelProvider, body []byte) []bschemas.
 func sessionIDFrom(tenant, explicitSess string, body []byte, norm []bschemas.ChatMessage) string {
 	sys, firstUser := schema.SessionHead(norm)
 	return session.Scoped(tenant, explicitSession(explicitSess, body), sys, firstUser)
+}
+
+// graceAliasID is the ONE rule for the restart grace's alias id (#766): the id a turn of
+// this body runs under when no session header is present — the METADATA session id when
+// the body carries one (metadata.user_id / metadata.taskId), else the content hash of the
+// head — always derived over the TRANSFORMED body, the same input the pipeline's own turn
+// derives its id from. Both sides of the grace resolve it through here: the ask side (the
+// alias keys handed to Tracker.TurnFrom) calls it directly, and the record side reaches the
+// identical sessionIDFrom(tenant, "", ...) through EnforcedSessionIDFor's empty-explicit-id
+// path over the same transform. Two private copies of this rule drifted apart twice (#766
+// rounds 3 and 4: the pristine body, then the bare hash); one rule cannot.
+func graceAliasID(tenant string, body []byte, norm []bschemas.ChatMessage) string {
+	return sessionIDFrom(tenant, "", body, norm)
 }
 
 // SessionIDFor derives the session id apply WOULD use for a request, without running a pipeline.

@@ -477,6 +477,149 @@ func TestTheRestartGraceProtectsAHeaderlessTurnWhenToolfilterRewritesTheHead(t *
 	}
 }
 
+// metadataUserRequest is an Anthropic body carrying Claude Code's metadata session id: a
+// JSON-object user_id whose session_id half survives the agent's own context compaction
+// (see session.ExplicitID).
+func metadataUserRequest() []byte {
+	return []byte(`{"model":"aws/claude-sonnet-5","max_tokens":64,` +
+		`"metadata":{"user_id":"{\"session_id\":\"5f1d2a3b-4c5e-6f7a-8b9c-0d1e2f3a4b5c\"}"},` +
+		`"messages":[` +
+		`{"role":"user","content":"please fix the failing test"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"ok"}]},` +
+		`{"role":"user","content":"please fix the failing test again"}]}`)
+}
+
+// metadataTaskRequest is the same shape with Bob Shell's bare taskId.
+func metadataTaskRequest() []byte {
+	return []byte(`{"model":"aws/claude-sonnet-5","max_tokens":64,` +
+		`"metadata":{"taskId":"0f1e2d3c-4b5a-4978-8776-a5b4c3d2e1f0"},` +
+		`"messages":[` +
+		`{"role":"user","content":"please fix the failing test"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"ok"}]},` +
+		`{"role":"user","content":"please fix the failing test again"}]}`)
+}
+
+// theRestartGraceBridgesAHeaderTurnToMetadataWarmth is the round-5 regression body: a
+// conversation whose body carries a metadata session id runs HEADERLESS before the restart
+// (its own derived id IS the metadata id), and its first turn after the restart carries the
+// session header. That turn must ask for the metadata id as its alias — the ONE rule the
+// record side also derives. Round 4 regressed this: the ask side still asked the bare
+// content hash, which no metadata-carrying turn ever runs under, so the warm prefix was
+// rewritten.
+func theRestartGraceBridgesAHeaderTurnToMetadataWarmth(t *testing.T, body []byte) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "d.db")
+	rec, err := dash.NewRecorder(dash.Options{DBPath: dbPath, BatchSize: 1,
+		FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	// The two ids the fixture must tell apart: the metadata id a headerless turn runs
+	// under, and the bare content hash the round-4 ask side asked for instead.
+	metaID := apply.SessionIDFor("", "", bschemas.Anthropic, body)
+	bare := derivedSession(t, body)
+	if metaID == "" {
+		t.Fatal("the body derived no metadata session id")
+	}
+	if metaID == bare {
+		t.Fatal("fixture does not exercise the bug: the metadata id equals the bare content hash")
+	}
+
+	cfg, agg, pipe := codesafePipeline(t)
+	h1 := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		OpenAIUpstream:    up.URL,
+		Preset:            cfg.Preset,
+		Dashboard:         rec,
+		Prices:            fixedPricer{},
+	})
+	srv1 := httptest.NewServer(h1.Mux())
+	defer srv1.Close()
+	// The conversation's last pre-restart request: headerless, so its own id is the
+	// metadata id, one minute before the restart, well inside the 5-minute lifetime.
+	sendBody(t, srv1, "", body)
+	waitForRows(t, rec, 1)
+
+	t0 := time.Now().UnixMilli()
+	h2, rec2 := restartedHandler(t, up.URL, dbPath, t0, t0-2*60*60*1000)
+	srv2 := httptest.NewServer(h2.Mux())
+	defer srv2.Close()
+	// The warmth must sit under the metadata id: the headerless turn's own key.
+	if at, ok := rec2.ThreadRefreshedAt(metaID); !ok || at < t0-60_000 {
+		t.Fatalf("the metadata id's grace clock = (%d, %v), want the headerless request's time", at, ok)
+	}
+	// The first request after the restart carries the session header: it asks for
+	// {header id, alias id}, and the alias id must be the metadata id.
+	sendBody(t, srv2, "sess-header", body)
+	waitForRows(t, rec2, 1)
+
+	turn := row(t, rec2, "sess-header")
+	if turn.AttemptedTokens != 0 || turn.FrozenTokens == 0 {
+		t.Fatalf("header turn after metadata headerless ones: %d of %d tokens attempted; want the whole request frozen (the metadata id's clock protects it)",
+			turn.AttemptedTokens, turn.TokensBefore)
+	}
+}
+
+func TestTheRestartGraceProtectsAHeaderTurnAfterUserMetadataHeaderlessOnes(t *testing.T) {
+	theRestartGraceBridgesAHeaderTurnToMetadataWarmth(t, metadataUserRequest())
+}
+
+func TestTheRestartGraceProtectsAHeaderTurnAfterTaskMetadataHeaderlessOnes(t *testing.T) {
+	theRestartGraceBridgesAHeaderTurnToMetadataWarmth(t, metadataTaskRequest())
+}
+
+// The no-metadata, no-header shape is unchanged by the round-5 rule (issue #766): a
+// conversation that runs headerless on both sides of the restart asks for its own
+// content-hash id — the alias and the own id are the same string — and the warmth the
+// first turn left under it protects the second. This is a control, not a regression test:
+// it passes at 74ca2a96 too, which is the point.
+func TestAHeaderlessOnlyConversationIsUnchangedAcrossARestart(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "d.db")
+	rec, err := dash.NewRecorder(dash.Options{DBPath: dbPath, BatchSize: 1,
+		FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	body := anthropicRequest("aws/claude-sonnet-5")
+	derived := derivedSession(t, body)
+
+	cfg, agg, pipe := codesafePipeline(t)
+	h1 := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		OpenAIUpstream:    up.URL,
+		Preset:            cfg.Preset,
+		Dashboard:         rec,
+		Prices:            fixedPricer{},
+	})
+	srv1 := httptest.NewServer(h1.Mux())
+	defer srv1.Close()
+	sendBody(t, srv1, "", body)
+	waitForRows(t, rec, 1)
+
+	t0 := time.Now().UnixMilli()
+	h2, rec2 := restartedHandler(t, up.URL, dbPath, t0, t0-2*60*60*1000)
+	srv2 := httptest.NewServer(h2.Mux())
+	defer srv2.Close()
+	if at, ok := rec2.ThreadRefreshedAt(derived); !ok || at < t0-60_000 {
+		t.Fatalf("the content-hash id's grace clock = (%d, %v), want the first request's time", at, ok)
+	}
+	sendBody(t, srv2, "", body)
+	waitForRows(t, rec2, 1)
+
+	second := row(t, rec2, derived)
+	if second.AttemptedTokens != 0 || second.FrozenTokens == 0 {
+		t.Fatalf("second headerless turn of a no-metadata conversation: %d of %d tokens attempted; want the whole request frozen (its own id's clock protects it)",
+			second.AttemptedTokens, second.TokensBefore)
+	}
+}
+
 // Issue #766, round 3: mode is PER TENANT in hosted mode, so the grace lookup must decline
 // an observe tenant's keys even on a proxy whose own mode is sync. One tenant's configuration
 // document sets mode: observe. After a restart, that tenant's live thread — unknown to the
