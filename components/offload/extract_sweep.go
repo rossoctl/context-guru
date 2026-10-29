@@ -104,7 +104,6 @@ type ExtractSweep struct {
 	protectLastN         int
 	ruleUnref            bool
 	ruleUnrefMinAge      int
-	creditAvoided        bool
 
 	mode markerMode
 }
@@ -203,10 +202,8 @@ type extractSweepConfig struct {
 	ProtectLastN *int `yaml:"protect_last_n"`
 	// RuleUnreferenced switches on rule (c): drop a tool output that nothing later references. Off by default.
 	// RuleUnreferencedMinAge: how many tool calls newer the output must have (0 = 30).
-	// CreditAvoidedCompaction credits the compaction a cut avoids within the horizon. nil = on in v3, off otherwise.
-	CreditAvoidedCompaction *bool `yaml:"credit_avoided_compaction"`
-	RuleUnreferenced        bool  `yaml:"rule_unreferenced"`
-	RuleUnreferencedMinAge  int   `yaml:"rule_unreferenced_min_age"`
+	RuleUnreferenced       bool `yaml:"rule_unreferenced"`
+	RuleUnreferencedMinAge int  `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -250,6 +247,7 @@ const maxAskItems = 12
 var sweepBannedKeys = []struct {
 	key, why string
 }{
+	{"credit_avoided_compaction", "a cut only DELAYS the compaction: it happens anyway, and it removes the dropped outputs anyway. The gate prices the saving on the turns until that compaction (N) and credits nothing for an avoided one. Remove the key"},
 	{"strategy", "an adjudicator selects no compaction strategy — it returns a verdict, not a program"},
 	{"rewrite", "nothing is rewritten, so there is no rewrite to validate; the output is kept verbatim or removed"},
 	{"aggressiveness", "there is no compaction target to teach: the only question asked is whether the output is spent"},
@@ -396,7 +394,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	return &ExtractSweep{
 		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
 		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
-		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, creditAvoided: v3.creditAvoided,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
@@ -1320,7 +1318,7 @@ func init() {
 		{Key: "selector", Type: components.FieldEnum, Default: selectorJudge, Options: []string{selectorJudge, selectorRule, selectorHybrid},
 			Hint: "Sweep v3, on the warm path (needs warm: true). Who picks the outputs to drop. judge (default): the model, as before. rule: rules only, no model call: a file read whose path was read or written again later, and a build, test or lint run that a later run of the same command repeats. hybrid: the rules first, then the model on the outputs the rules did not decide. rule and hybrid switch the v3 gates on."},
 		{Key: "fill_small", Type: components.FieldFloat, Default: 0,
-			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths or protect_last_n switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.85. fill is linear in C between 200k and 1M."},
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths, protect_last_n or rule_unreferenced switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.85. fill is linear in C between 200k and 1M."},
 		{Key: "fill_large", Type: components.FieldFloat, Default: 0,
 			Hint: "Sweep v3: the sweet spot as a share of C when C is 1M or more. 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.6."},
 		{Key: "min_drop_frac", Type: components.FieldFloat, Default: 0,
@@ -1329,8 +1327,6 @@ func init() {
 			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
 		{Key: "protect_paths", Type: components.FieldStrings,
 			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
-		{Key: "credit_avoided_compaction", Type: components.FieldBool,
-			Hint: "Sweep v3 gate. A cut postpones the client's compaction. When the compaction would have come within the horizon (warm_max_turns) and the cut pushes it past, the gate also credits the cost of that compaction (the summary call reading the prompt at C, and the cache rewrite of the summary-sized prompt after it). If the compaction still comes within the horizon the cut only delays it and nothing is credited. Unset = on in v3 and off otherwise; write false to turn it off. It does nothing without v3."},
 		{Key: "rule_unreferenced", Type: components.FieldBool,
 			Hint: "Sweep v3 rule (c), off by default. Drop a tool output that nothing later in the conversation references: no later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). It is the recheck's referenced_later test, run over the whole later conversation, and it never drops an output that introduced no identifier. It needs selector rule or hybrid, and it obeys every protection. Its drops are counted under unreferenced. Writing it switches the v3 gates on (with warm: true)."},
 		{Key: "rule_unreferenced_min_age", Type: components.FieldInt, Default: defaultRuleUnrefMinAge, Min: 0,
