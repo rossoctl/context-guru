@@ -887,3 +887,19 @@ test('band row 1 fits 60 columns with the longest hint, 59:59 on the 1-hour tier
   expect(row).toMatch(/hide  dash ↗$/)
   await ui.unmount()
 })
+
+// #771: the server reports a stopped thread with a tripped route or a dead credential as `unavailable`. The button
+// stays hidden and the band says why; when the mark clears the server says pingable again and the button shows.
+test('unavailable (route tripped or credential dead): no Ping button, "ping off: upstream failing"; shown again once it clears', async ($, on) => {
+  const extra: { v: object } = { v: { pingable: false, ping_reason: 'unavailable' } }
+  await boot($, on, true, [], undefined as any, extra.v)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await dump(ui)).toMatch(/ping off: upstream failing/)
+  await ui.unmount()
+  Object.assign(extra.v, { pingable: true, ping_reason: undefined })
+  await clock.advance(16_000)
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.unmount()
+})

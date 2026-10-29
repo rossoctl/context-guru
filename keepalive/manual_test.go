@@ -260,3 +260,63 @@ func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 		t.Errorf("PingNow on a stopped thread = %v, want a ping to be sent", err)
 	}
 }
+
+// #771: a press on a STOPPED thread runs the checks the scheduled ping runs right before it sends. A tripped
+// route or a dead credential refuses it and reports "unavailable"; once the mark clears the thread is
+// pingable again while its copy is held. A thread stopped by a miss or a refused ping is not blocked.
+func TestAPressOnAStoppedThreadChecksTheRouteAndTheCredential(t *testing.T) {
+	stop := func(k *Keeper) *kaEntry {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		for _, e := range k.live {
+			e.stopped, e.cred = true, "cred-x"
+			return e
+		}
+		t.Fatal("no live entry")
+		return nil
+	}
+	for _, c := range []struct {
+		name  string
+		mark  func(k *Keeper, e *kaEntry, now time.Time)
+		clear func(k *Keeper)
+	}{
+		{"tripped route",
+			func(k *Keeper, e *kaEntry, now time.Time) {
+				k.routeTripped[routeKey(e.tenant, e.endpoint, e.route, e.model)] = now.Add(time.Hour)
+			},
+			func(k *Keeper) { k.routeTripped = map[string]time.Time{} }},
+		{"dead credential",
+			func(k *Keeper, e *kaEntry, now time.Time) { k.markCredDeadLocked(e.tenant, e.cred, e.model, 401, now) },
+			func(k *Keeper) { k.credDead = map[string]time.Time{} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k, _, clock := manualKeeper(t)
+			e := stop(k)
+			k.mu.Lock()
+			c.mark(k, e, clock.now())
+			k.mu.Unlock()
+			if st := k.PingStates("t1", false, sess1.Session).For(""); st.Pingable || st.Reason != ReasonUnavailable {
+				t.Errorf("state = %+v, want not pingable, %q", st, ReasonUnavailable)
+			}
+			if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
+				t.Errorf("press = %v, want ErrNotHeld", err)
+			}
+			k.mu.Lock()
+			c.clear(k)
+			k.mu.Unlock()
+			if st := k.PingStates("t1", false, sess1.Session).For(""); !st.Pingable {
+				t.Errorf("after the mark cleared: %+v, want pingable", st)
+			}
+			if _, err := k.PingNow(ManualRequest{Key: sess1}); errors.Is(err, ErrNotHeld) {
+				t.Errorf("after the mark cleared, press = %v, want a ping", err)
+			}
+		})
+	}
+	t.Run("miss-stopped stays pingable", func(t *testing.T) {
+		k, _, _ := manualKeeper(t)
+		stop(k)
+		if st := k.PingStates("t1", false, sess1.Session).For(""); !st.Pingable {
+			t.Errorf("state = %+v, want pingable", st)
+		}
+	})
+}

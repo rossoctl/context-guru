@@ -85,7 +85,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	now := k.now()
 	k.mu.Lock()
 	e, ok := k.live[id]
-	if !ok || e.manualExpired(now) {
+	if !ok || e.manualExpired(now) || k.stoppedAndBlockedLocked(e, now) {
 		k.mu.Unlock()
 		return ManualResult{}, ErrNotHeld
 	}

@@ -145,6 +145,8 @@ func (k *Keeper) PingStates(tenant string, all bool, session string) PingStateMa
 			continue
 		}
 		switch {
+		case k.stoppedAndBlockedLocked(e, now):
+			out[e.thread] = PingState{Reason: ReasonUnavailable}
 		// A stopped entry still holds the body and key until its hold ends, and it plans no ping, so a
 		// press can work and is the only thing left to keep the cache warm (#771).
 		case e.manualExpired(now):
@@ -162,6 +164,15 @@ func (k *Keeper) PingStates(tenant string, all bool, session string) PingStateMa
 		}
 	}
 	return out
+}
+
+// stoppedAndBlockedLocked is true for a stopped entry whose route breaker is tripped or whose credential is
+// marked dead: the two checks the scheduled ping runs right before it sends (Sweep). A press on such a thread
+// would fail the same way, so it is refused and reported "unavailable". Once the mark clears, the thread is
+// pingable again while its copy is held. A thread stopped by a miss or a refused ping is not blocked. k.mu must be held.
+func (k *Keeper) stoppedAndBlockedLocked(e *kaEntry, now time.Time) bool {
+	return e.stopped && (k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.route, e.model), now) ||
+		k.credIsDeadLocked(e.tenant, e.cred, e.model, now))
 }
 
 // entryCeiling is the per-ping ceiling this entry answers to: its policy's, or the one a manual-only
