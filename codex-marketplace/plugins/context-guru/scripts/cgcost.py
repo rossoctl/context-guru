@@ -211,13 +211,13 @@ def coverage_line(spend: dict, S: Style) -> list[str]:
 
 def by_project(spend: dict, proj: Projects) -> dict[str, float]:
     out: dict[str, float] = {}
-    for sd in spend.get("session_days", []):
+    for sd in (spend.get("session_days") or []):
         out[proj.name(sd["session"])] = out.get(proj.name(sd["session"]), 0.0) + sd["usd"]
     return out
 
 
 def day_axis(spend: dict, n_days: int) -> list[int]:
-    last = max((d["day"] for d in spend.get("daily", [])), default=0)
+    last = max((d["day"] for d in (spend.get("daily") or [])), default=0)
     return [last - (n_days - 1 - i) * DAY_MS for i in range(n_days)]
 
 
@@ -269,7 +269,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     rows = [[k, str(c["n"]), ktok(c["tokens"]), usd(c["usd"]), bar(c["usd"] / extra if extra else 0), CAUSE_WORDS[k] if k in CAUSE_WORDS else ""]
             for k, c in sorted(rw.items(), key=lambda kv: -kv[1]["usd"])]
     L += table(rows, "lrrrll")
-    gaps = [g for g in spend.get("idle_gaps", []) if g["n"]]
+    gaps = [g for g in (spend.get("idle_gaps") or []) if g["n"]]
     if gaps:
         gtot = sum(g["usd"] for g in gaps) or 1
         L += ["", S.b("How long you were away before an expiry")]
@@ -280,7 +280,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     L += ["", S.b("Costliest rewrites")]
     L += table([[dt.datetime.fromtimestamp(e["ts"] / 1000, tz=o["tz"]).strftime("%a %H:%M"), proj.name(e["session"]),
                  short_model(e["model"]), ktok(e["context"]) + " ctx", ("after " + fmt_dur(e["gap_s"])) if e["gap_s"] >= 0 else "first message",
-                 e["cause"], usd(e["usd"])] for e in spend.get("top_rewrites", [])[:5]], "llllllr")
+                 e["cause"], usd(e["usd"])] for e in (spend.get("top_rewrites") or [])[:5]], "llllllr")
     avoid = sum(rw[k]["usd"] for k in AVOIDABLE if k in rw)
     L += ["", f"  Possibly avoidable (everything except session starts): {usd(avoid)}  [measured spend, not a promised saving]"]
     L += coverage_line(spend, S)
@@ -303,7 +303,7 @@ def compact_economics(rate: dict, ctx: int) -> dict:
 
 def cmd_compact(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     now = o["now"]
-    live = [s for s in spend.get("live", []) if now - s["last_ts"] <= 2 * 3600_000]
+    live = [s for s in (spend.get("live") or []) if now - s["last_ts"] <= 2 * 3600_000]
     if not live:
         return ["No session has touched the cache in the last 2 hours, so there is nothing warm to protect."]
     L = [S.b("Cache state of your recent sessions") + S.dim("  (context and last touch measured; the rest is estimate)")]
@@ -412,7 +412,7 @@ def cmd_unused(tools: dict | None, last: dict | None, o: dict, S: Style, days: f
 # 5. trends
 
 def series(spend: dict, n: int, pick) -> list[float]:
-    by = {d["day"]: d for d in spend.get("daily", [])}
+    by = {d["day"]: d for d in (spend.get("daily") or [])}
     return [pick(by[d]) if d in by else 0.0 for d in day_axis(spend, n)]
 
 
@@ -464,7 +464,7 @@ def cmd_trends(spend: dict, tools: dict | None, o: dict, S: Style, proj: Project
         mrows.append([m["model"], spark(v), usd(m["usd"]["total"]), pct(m["usd"]["total"], total), delta(v)])
     L += ["", S.b("By model") + S.dim("   (last column: second half of the window vs first)")] + table(mrows, "llrrr")
     per: dict[str, dict[int, float]] = {}
-    for sd in spend.get("session_days", []):
+    for sd in (spend.get("session_days") or []):
         per.setdefault(proj.name(sd["session"]), {})
         per[proj.name(sd["session"])][sd["day"]] = per[proj.name(sd["session"])].get(sd["day"], 0.0) + sd["usd"]
     axis = day_axis(spend, n)

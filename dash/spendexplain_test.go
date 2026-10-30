@@ -292,3 +292,21 @@ func TestSpendExplainLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
 			"must not credit it either (0.08 is the unbounded look-back)", got)
 	}
 }
+
+// #781: an empty window sends every list as [], never null. A client that reads a list with
+// .get(key, []) gets None for a null (the key is present), and cg.py insights details crashed on it.
+func TestSpendExplainSendsEmptyListsNotNull(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	_, body := get(t, a, "/api/spend/explain", "127.0.0.1:1")
+	for _, k := range []string{"idle_gaps", "top_rewrites", "models", "sessions", "daily", "session_days", "live"} {
+		v, ok := body[k]
+		if !ok {
+			t.Errorf("%s: missing", k)
+			continue
+		}
+		if _, isList := v.([]any); !isList {
+			t.Errorf("%s = %v (%T), want an empty list", k, v, v)
+		}
+	}
+}
