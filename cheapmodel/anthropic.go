@@ -221,8 +221,9 @@ type PrefixUsage struct {
 //     effectively every turn — appending the ask directly after it is a guaranteed 400 ("role
 //     'system' must precede an 'assistant' message or end the array"). insertAskMessage leaves
 //     that system message where it is and appends a short synthetic assistant turn plus the ask
-//     after it. The only existing byte it changes is the last message's cache_control, which moves
-//     onto the appended message (#721); everything before that message is byte-identical.
+//     after it. It changes no existing byte: it copies the last message's breakpoint onto the
+//     appended bridge (#721), and only while the request stays at or under the provider's
+//     4-breakpoint cap (#776).
 //
 // Everything else about the body is preserved untouched, because every byte before the appended
 // message is prefix and any edit to it costs the cache read this method exists for. `stream` is the
@@ -414,8 +415,9 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 // adjudication contract and inventory, paid at the write rate on every question. On the short
 // bridge the write is a few tokens and the ask stays fresh input. So a trailing USER message that
 // carries a breakpoint also gets the bridge (user, assistant "Understood.", user is a legal
-// sequence), and the breakpoint lands on it. A trailing user message with no breakpoint gets no
-// bridge, and a trailing assistant message keeps its breakpoint where it is.
+// sequence), and a copy of the breakpoint lands on it, below the cap only. At the cap the bridge is
+// still sent, with no breakpoint. A trailing user message with no breakpoint gets no bridge, and a
+// trailing assistant message keeps its breakpoint where it is.
 //
 // WHY A TRAILING SYSTEM MESSAGE CANNOT BE FOLLOWED BY THE ASK DIRECTLY. Anthropic's own rule —
 // this codebase already enforces it offline, see schema.ValidateShapeFor's RuleSystemPosition and
@@ -500,10 +502,10 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 	return sjson.SetRawBytes(prefixBody, "messages", []byte("["+strings.Join(parts, ",")+"]"))
 }
 
-// askBridgeFor is the bridge text for a last message of role lastRole, given whether a breakpoint
-// moves with it. A trailing system message always needs one (the position rule). A trailing user
-// message needs one only when it carries a breakpoint to move, so the breakpoint lands on a short
-// message and the ask stays fresh input; see insertAskMessage.
+// askBridgeFor is the bridge text for a last message of role lastRole, given whether that message
+// carries a breakpoint. A trailing system message always needs one (the position rule). A trailing
+// user message needs one only when it carries a breakpoint, so the copy lands on a short message and
+// the ask stays fresh input; see insertAskMessage.
 func askBridgeFor(lastRole string, hasBreakpoint bool) string {
 	if b := AskBridge(lastRole); b != "" {
 		return b

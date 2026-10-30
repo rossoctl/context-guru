@@ -577,7 +577,7 @@ func TestInsertAskMessageAddsNoBreakpointWhenTheLastHasNone(t *testing.T) {
 
 // #725 review: a trailing user message WITHOUT a breakpoint needs no bridge; a trailing assistant
 // message keeps its breakpoint where it is and the ask follows it directly.
-func TestInsertAskMessageBridgeOnlyWhereABreakpointMoves(t *testing.T) {
+func TestInsertAskMessageBridgeOnlyWhereABreakpointIsCopied(t *testing.T) {
 	out, err := insertAskMessage([]byte(`{"messages":[{"role":"user","content":"a"}]}`), "ask")
 	if err != nil {
 		t.Fatal(err)
