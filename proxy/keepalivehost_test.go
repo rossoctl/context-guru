@@ -38,6 +38,17 @@ const kaBody = `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,
 	`"messages":[{"role":"user","content":[{"type":"text","text":"hi",` +
 	`"cache_control":{"type":"ephemeral"}}]}]}`
 
+// kaToolBody is kaBody ending at a tool_result turn: the shape on which a keep-alive substitute may
+// stand in for a planned ping (#776; docs/design.md, "Keep-alive: the cache strategy comes first").
+const kaToolBody = `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+	`"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}],` +
+	`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}},` +
+	`{"type":"text","text":"Current branch: main","cache_control":{"type":"ephemeral"}}],` +
+	`"messages":[{"role":"user","content":"hi"},` +
+	`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]},` +
+	`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok",` +
+	`"cache_control":{"type":"ephemeral"}}]}]}`
+
 // testClock is a settable clock the ping goroutines may read concurrently with the test
 // advancing it.
 type testClock struct {

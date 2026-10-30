@@ -82,7 +82,7 @@ func TestKeepAliveSubstitutesCacheAwareSummarizerForAPing(t *testing.T) {
 	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
 	kaCandidate(t, "sess-1", st, model)
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
@@ -117,7 +117,7 @@ func TestKeepAliveSubstituteFallsBackToPingOnFailure(t *testing.T) {
 	model := &fakeSummaryModel{err: errors.New("upstream refused")}
 	kaCandidate(t, "sess-1", st, model)
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -151,8 +151,8 @@ func TestKeepAliveSubstituteRespectsTheCostCapAndFallsBackToAPing(t *testing.T) 
 	pol := kaPolicy()
 	pol.MaxUSDPerPing = 0.02 // ping ≈ $0.0076; summary ≈ $0.0456 — only the summary trips this
 	at := clock.now()
-	rec(k, pol, sess1, at.Add(-time.Second), kaBody, http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
-	rec(k, pol, sess1, at, kaBody, http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
+	rec(k, pol, sess1, at.Add(-time.Second), kaToolBody, http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
+	rec(k, pol, sess1, at, kaToolBody, http.StatusOK, Usage{CacheRead: 20000, CacheWrite: 0}, true)
 	if k.Stats().Live != 1 {
 		t.Fatalf("the session was not tracked — its PING cost must stay inside the cap for this "+
 			"test to isolate the substitute's own guard (live=%d)", k.Stats().Live)
@@ -190,7 +190,7 @@ func TestKeepAliveSubstituteRespectsPreExpiryPhaseNotJustKeeperTiming(t *testing
 
 	pol := kaPolicy()
 	pol.HeadTTL1h = true
-	recordOne(t, k, pol, kaBody, clock.now())
+	recordOne(t, k, pol, kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -254,7 +254,7 @@ func TestKeepAliveRefreshBelowBreakEvenPingsNormally(t *testing.T) {
 	// cache-write, worth roughly $0.001 — far short of the $0.02 refresh it would cost.
 	buildRefreshCandidate(t, "sess-1", st, model, tailFiller(2))
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -288,7 +288,7 @@ func TestKeepAliveRefreshAboveBreakEvenRefreshes(t *testing.T) {
 	// test above.
 	buildRefreshCandidate(t, "sess-1", st, model, tailFiller(100))
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
@@ -325,7 +325,7 @@ func TestKeepAliveSubstituteFiresOncePreExpiryPhaseIsLive(t *testing.T) {
 
 	// Default 5-minute TTL (no HeadTTL1h): a ping at 280s idle has 20s of a 5-minute lifetime
 	// left, which is inside the default 60s pre-expiry window.
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
@@ -358,7 +358,7 @@ func TestKeepAliveSummaryCallCountsAsExactlyOnePing(t *testing.T) {
 	kaCandidateWithCacheState(t, "sess-1", st, model, "pre_expiry", 60)
 
 	start := clock.now()
-	recordOne(t, k, kaPolicy(), kaBody, start)
+	recordOne(t, k, kaPolicy(), kaToolBody, start)
 
 	// Ping 1, at 281s idle: inside the default 60s pre-expiry window of the default 5-minute
 	// TTL — creates the reserve.
@@ -419,7 +419,7 @@ func TestKeepAliveSummaryCallCountsAsOnePingWithThreeMaxPings(t *testing.T) {
 	pol := kaPolicy()
 	pol.MaxPings = 3
 	start := clock.now()
-	recordOne(t, k, pol, kaBody, start)
+	recordOne(t, k, pol, kaToolBody, start)
 
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("ping 1 did not fire (%d)", n)
@@ -499,7 +499,7 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	recThread := func(th string, at time.Time) {
 		for i := 0; i < 2; i++ {
 			rec(k, kaPolicy(), Key{Tenant: "t1", Session: sess, Thread: th},
-				at.Add(time.Duration(i)*time.Second), kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
+				at.Add(time.Duration(i)*time.Second), kaToolBody, http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
 	}
 	// The subagent goes idle first, so its ping comes due ALONE: it must run the SUBAGENT's call.
@@ -580,7 +580,7 @@ func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
 	model := &usageSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	spentBefore := math.Float64frombits(k.spentUSD.Load())
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
@@ -626,7 +626,7 @@ func TestKeepAliveSummaryCallThatDoesNotCommitIsDeferred(t *testing.T) {
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &truncSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && fs.n() == 0 {

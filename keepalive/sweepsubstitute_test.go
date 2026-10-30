@@ -55,6 +55,18 @@ func sweepToolMsg(id, text string) bschemas.ChatMessage {
 }
 
 // sweepConversation is a user turn and n large tool outputs with wire ids.
+// kaToolBody is kaBody ending at a tool_result turn, the shape on which the sweep's question may stand in
+// for a planned ping (#776): after it the question renews the turn's cache entry (#777).
+const kaToolBody = `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":true,` +
+	`"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}],` +
+	`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}},` +
+	`{"type":"text","text":"Current branch: main","cache_control":{"type":"ephemeral"}}],` +
+	`"messages":[{"role":"user","content":"hi"},` +
+	`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]},` +
+	`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok",` +
+	`"cache_control":{"type":"ephemeral"}}]},` +
+	`{"role":"system","content":"reminder"}]}`
+
 func sweepConversation(n int) []bschemas.ChatMessage {
 	user := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&user, "fix the failing tests")
@@ -93,7 +105,7 @@ func TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
@@ -134,7 +146,7 @@ func TestTheWaitCauseComesFromTheEstablishingResponse(t *testing.T) {
 	registerSweep(t, st, &sweepAsker{cacheRead: 48576}, "claude-sonnet-5", sweepConversation(2))
 	at := clock.now()
 	for _, d := range []time.Duration{-time.Second, 0} {
-		k.Record(Record{Key: sess1, StartedAt: at.Add(d), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		k.Record(Record{Key: sess1, StartedAt: at.Add(d), Body: []byte(kaToolBody), Provider: bschemas.Anthropic,
 			Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
 			UsageOK: true, ToolUseNames: []string{"Read", "Bash"}, Policy: kaPolicy(), Header: kaHeader(),
 			Hold: fakeOf(k).hold(sess1)})
@@ -154,7 +166,7 @@ func TestKeepAliveSecondPingOfASpanIsPlain(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	k.Sweep(clock.advance(281 * time.Second))
@@ -174,7 +186,7 @@ func TestKeepAliveSweepQuestionFallsBackToAPingOnFailure(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576, err: errors.New("upstream 529")}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -204,7 +216,7 @@ func TestKeepAliveSendsAPlainPingWhereTheQuestionWouldBreakTheCache(t *testing.T
 	registerSweep(t, st, asker, "claude-haiku-4-5", msgs)
 
 	before := k.Stats().SweepModelDeclined
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if asker.calls.Load() != 0 {
@@ -230,7 +242,7 @@ func TestKeepAliveSweepQuestionRespectsTheCostCap(t *testing.T) {
 	pol.MaxUSDPerPing = 0.02 // ping ≈ $0.0076; the question ≈ $0.0836
 	at := clock.now()
 	for _, d := range []time.Duration{-time.Second, 0} {
-		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+		rec(k, pol, sess1, at.Add(d), kaToolBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
@@ -246,7 +258,7 @@ func TestKeepAliveSweepQuestionRespectsTheCostCap(t *testing.T) {
 func TestKeepAliveWithNoSweepRegistrationSendsAnOrdinaryPing(t *testing.T) {
 	k, fs, clock := testKeeper(t)
 	before := k.Stats().SweepNoCandidate
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 || k.sweepSubstituted.Load() != 0 {
@@ -267,7 +279,7 @@ func TestKeepAliveSummaryTakesThePingBeforeTheSweep(t *testing.T) {
 	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
 	kaCandidate(t, "sess-1", st, model)
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
@@ -294,7 +306,7 @@ func TestNoKeepAliveNoQuestion(t *testing.T) {
 			st := store.NewMemory(store.Options{MaxEntries: 400})
 			asker := &sweepAsker{cacheRead: 48576}
 			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
-			recordOne(t, k, tc.pol(), kaBody, clock.now())
+			recordOne(t, k, tc.pol(), kaToolBody, clock.now())
 			if n := k.Sweep(clock.advance(281 * time.Second)); n != 0 {
 				t.Fatalf("a ping fired (%d) where the keeper should track nothing", n)
 			}
@@ -319,7 +331,7 @@ func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
 	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
 		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	before := k.Stats().SweepNoInventory
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if asker.calls.Load() != 0 || fs.n() != 1 {
@@ -343,7 +355,7 @@ func TestKeepAliveSurvivesAPanicInTheQuestion(t *testing.T) {
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	registerSweep(t, st, panicAskerKA{}, "claude-sonnet-5", sweepConversation(3))
 	before := k.Stats().SweepPanics
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -366,7 +378,7 @@ func TestKeepAliveSurvivesAPanicInTheKeepersOwnQuestionCode(t *testing.T) {
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if fs.n() != 1 {
@@ -408,7 +420,7 @@ func TestWhenTheSummarizerTriggerFiresTheSummaryTakesThePingAndTheSweepDoesNotAs
 	kaCandidate(t, "sess-1", st, model)
 	before := k.Stats().SweepSummaryOwnedPing
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
@@ -435,7 +447,7 @@ func TestWhenTheSummarizerTriggerDoesNotFireTheSweepAsks(t *testing.T) {
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
 	before := k.Stats().SweepSummaryOwnedPing
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitSweepOutcome(t, k, fs)
 	if k.sweepSubstituted.Load() != 1 || asker.calls.Load() != 1 || fs.n() != 0 {
@@ -463,7 +475,7 @@ func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
 	for _, th := range []string{"", "a:B"} {
 		for i := 0; i < 2; i++ {
 			rec(k, kaPolicy(), Key{Tenant: "t1", Session: "sess-1", Thread: th},
-				t0.Add(time.Duration(i)*time.Second), kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
+				t0.Add(time.Duration(i)*time.Second), kaToolBody, http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
 	}
 	if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
@@ -499,7 +511,7 @@ func TestAClaimedPingFreesTheThreadAndTheSlotOnEveryExit(t *testing.T) {
 	st.Put("abcdef0", []byte("the stashed original"))
 	registerSweep(t, st, asker, "claude-sonnet-5", []bschemas.ChatMessage{small,
 		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second)) // declines: no inventory, ordinary ping
 	waitPings(t, k, 1)
 	_ = fs
@@ -524,7 +536,7 @@ func TestWhenTheSummaryDeclinesTheSweepStillDoesNotAskAndAPlainPingGoesOut(t *te
 	kaCandidate(t, "sess-1", st, model)
 	before := k.Stats().SweepSummaryOwnedPing
 
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	if model.calls.Load() != 1 || k.summarySubstituted.Load() != 0 {
@@ -604,7 +616,7 @@ func TestTheAnswerCostIsBookedOnceOnThePingRowTheQuestionReplaced(t *testing.T) 
 	sink := &reportSink{}
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	registerSweep(t, st, &sweepAsker{cacheRead: 48576}, "claude-sonnet-5", sweepConversation(3))
-	recordWithSink(k, sink, sess1, clock.now())
+	recordBodyWithSink(k, sink, sess1, clock.now(), kaToolBody)
 	// The registration is for "sess-1" with no thread: sess1's session id is the same.
 	k.Sweep(clock.advance(281 * time.Second))
 	waitSweepOutcome(t, k, fd)
@@ -670,7 +682,7 @@ func TestAPingTheSweepQuestionReplacedUsesNoStep(t *testing.T) {
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
-	recordOne(t, k, pol, kaBody, clock.now())
+	recordOne(t, k, pol, kaToolBody, clock.now())
 	key := thread.Key("sess-1", "")
 	k.mu.Lock()
 	before, had := k.lastVary[sess1.id()]
@@ -729,7 +741,7 @@ func TestAFailedSweepQuestionFallsToAPlainPingAndAsksOnceWhenItBilled(t *testing
 				asker = ba
 			}
 			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
-			recordOne(t, k, pol, kaBody, clock.now())
+			recordOne(t, k, pol, kaToolBody, clock.now())
 			k.Sweep(clock.advance(281 * time.Second))
 			waitPings(t, k, 1)
 			k.Sweep(clock.advance(281 * time.Second))
@@ -807,7 +819,7 @@ func TestTheSweepCeilingPricesEveryBatchAndLowersTheCount(t *testing.T) {
 			pol.MaxUSDPerPing = tc.ceiling
 			at := clock.now()
 			for _, d := range []time.Duration{-time.Second, 0} {
-				rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+				rec(k, pol, sess1, at.Add(d), kaToolBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 			}
 			k.Sweep(clock.advance(281 * time.Second))
 			waitPings(t, k, 1)
@@ -886,7 +898,7 @@ func TestStatsPublishesTheBatchCountersFromOneSnapshot(t *testing.T) {
 	pol.MaxUSDPerPing = 0.20 // admits 2 of the 4 planned
 	at := clock.now()
 	for _, d := range []time.Duration{-time.Second, 0} {
-		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+		rec(k, pol, sess1, at.Add(d), kaToolBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
@@ -955,7 +967,7 @@ func TestANoCapPolicyAsksEveryBatchEndToEnd(t *testing.T) {
 	pol.MaxUSDPerPing = -1 // no cap
 	at := clock.now()
 	for _, d := range []time.Duration{-time.Second, 0} {
-		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
+		rec(k, pol, sess1, at.Add(d), kaToolBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)

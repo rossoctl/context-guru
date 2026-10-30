@@ -131,6 +131,16 @@ type kaEntry struct {
 	// wait cause the sweep's question stores with its held answer (#404, #453).
 	toolUseNames []string
 	usageOK      bool
+	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
+	// (endsAtTextTurn, #776): roles and block types only. Never on OpenAI: its cache has no breakpoints
+	// and no text-turn rule, so a substitute there renews the prefix like a ping. Then the sweep's question cannot renew the
+	// turn's cache entry, so it never takes a planned ping and asks once at extraSlot instead.
+	endsAtText bool
+	// extraAsked latches that span's one extra request (extraDue), sent or attempted.
+	extraAsked bool
+	// pingRunning is set while one of e's own pings is out (Sweep sets it, fire clears it), so the extra
+	// request never starts before the last plain ping's response is in.
+	pingRunning bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -191,6 +201,40 @@ type kaEntry struct {
 func (e *kaEntry) due(now time.Time) bool {
 	return !e.stopped && !e.manualOnly && e.pol.On() && e.pings < e.pol.MaxPings &&
 		!now.Before(e.startedAt.Add(e.pol.Idle))
+}
+
+// extraSlotMargin is how far before the hold deadline the extra request (extraDue) goes out. The
+// deadline timer releases the entry at the slot itself; the margin, many sweep ticks wide, keeps the
+// request ahead of it, and the cache the last plain ping renewed is still warm then.
+const extraSlotMargin = 30 * time.Second
+
+// extraWaiting reports whether e's span ended at a text turn, spent its planned pings, and has not yet
+// sent its one extra request. Called with k.mu held.
+func (e *kaEntry) extraWaiting() bool {
+	return e.endsAtText && !e.extraAsked && !e.stopped && !e.manualOnly && e.pol.On() &&
+		e.pings >= e.pol.MaxPings && e.pings > 0 && !e.pingRunning
+}
+
+// extraSlot is when e's one extra request goes out (#776): extraSlotMargin before the normal hold
+// deadline, 210 s after the last planned ping at the 5-minute defaults. The same slot for the sweep
+// question and for either kind of summary, so the hold limit never changes. A pre_expiry summary
+// accepts it through extraSummaryWindow.
+//
+// A short Idle (keepalive_idle_seconds can be any positive value) would put Idle - extraSlotMargin at
+// or before the last ping. The slot is then two sweep ticks after it instead; extraWaiting also waits
+// for that ping's response.
+func (e *kaEntry) extraSlot() time.Time {
+	return e.startedAt.Add(max(e.pol.Idle-extraSlotMargin, 2*tick))
+}
+
+// extraDue reports whether e's one extra request is due (#776). After a turn that ends at a text turn,
+// every planned ping is plain, as the strategy plans; the summary or the sweep question then goes out
+// once, at extraSlot. It sends no ping and moves no clock, so the strategy's cover is exactly what it
+// is without it, and nothing follows it. Called with k.mu held.
+func (e *kaEntry) extraDue(now time.Time) bool {
+	// A slot missed (a real request in flight, a slow tick) is never sent late: not past the normal
+	// hold deadline.
+	return e.extraWaiting() && !now.Before(e.extraSlot()) && now.Before(e.startedAt.Add(e.pol.Idle))
 }
 
 // hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
@@ -459,6 +503,11 @@ type Keeper struct {
 	// sweepBatchesLowered counts sweeps where the per-ping cost ceiling admitted fewer questions than the
 	// sweep planned, so fewer were asked (#132).
 	sweepBatchesLowered atomic.Int64
+	// sweepExtraAsked counts extra sweep questions sent after the last planned ping (#776), and
+	// sweepExtraSkipped the extra slots where the claim gave the sweep no question to send.
+	sweepExtraAsked, sweepExtraSkipped atomic.Int64
+	// summaryExtraSent counts summaries sent as that extra request.
+	summaryExtraSent atomic.Int64
 }
 
 // New builds a Keeper. o.Dispatcher is required. o.Now defaults to time.Now; o.Go defaults to
@@ -829,7 +878,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		toolUseNames: r.ToolUseNames, usageOK: usageOK,
+		toolUseNames: r.ToolUseNames, usageOK: usageOK, endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
@@ -1179,6 +1228,25 @@ func (k *Keeper) Sweep(now time.Time) int {
 			}
 			continue
 		}
+		if e.extraWaiting() && e.pingable() && k.inflight[key] == 0 && k.extraReadyLocked(e, now) {
+			// The same re-check a planned ping gets below: the extra slot waits a full Idle after the last
+			// ping, and a breaker can trip or a credential be marked dead in that time. Nothing is sent.
+			if k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.route, e.model), now) ||
+				k.credIsDeadLocked(e.tenant, e.cred, e.model, now) {
+				e.stopped = true
+				continue
+			}
+			// The extra request (extraDue): sent from the held copy, before any release. It is not a ping:
+			// e.pings and e.startedAt stay, so no ping follows it, and the deadline timer still runs.
+			e.extraAsked = true
+			raw := append([]byte(nil), e.body...)
+			mask(raw)
+			due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
+				route: e.route, provider: e.provider, model: e.model,
+				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
+				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt})
+			continue
+		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
 			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
 				k.setReasonLocked(e.key, e.autoReleaseReason())
@@ -1214,6 +1282,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		prevStartedAt := e.startedAt
 		e.startedAt = now
 		e.pings++
+		e.pingRunning = true
 		// An UNMASKED copy for this ping, zeroized by fire when it is done. The entry's own copy
 		// stays masked, so the long-lived hold never contains a readable transcript.
 		raw := append([]byte(nil), e.body...)
@@ -1258,6 +1327,9 @@ type pingJob struct {
 	// job runs on its own goroutine and must hold a copy rather than reach back into the entry.
 	emitter components.Emitter
 	ping    int
+	// extra marks the one extra sweep question after the last planned ping (kaEntry.extraDue): it sends
+	// the question or nothing, never an ordinary ping.
+	extra bool
 	// vary is the output-budget step this ping was actually sent with (Keeper.nextVaryLocked), set
 	// in fire at dispatch time and read by record1 for the audit row.
 	vary int
@@ -1278,6 +1350,11 @@ func (k *Keeper) fire(j pingJob) {
 	// limiter refusal, the pingBody failure and a panic all release it.
 	defer func() {
 		zero(j.raw) // the unmasked body copy this ping was handed
+		if !j.extra {
+			k.mu.Lock()
+			j.e.pingRunning = false // this ping is done, whatever its outcome (kaEntry.pingRunning)
+			k.mu.Unlock()
+		}
 	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the
@@ -1308,6 +1385,10 @@ func (k *Keeper) fire(j pingJob) {
 	// sweep asks only when it did not. They never both run from the keeper. One gap remains: the in-flight
 	// check is check-then-act, so a detached summary that a real request starts after the look can
 	// overlap the sweep's question (see ClaimPing; PR C decides whether to close it).
+	if j.extra {
+		k.fireExtra(j)
+		return
+	}
 	if k.fireSubstitute(j) {
 		return
 	}
@@ -1681,10 +1762,17 @@ type Stats struct {
 	// Sweep* are extract_llm_sweep's share of Pings (#404): the question it sends in place of a ping.
 	// SweepSubstituted climbing while SweepAsked/SweepHeld lag means the question reaches the
 	// provider and its answers do not parse. SweepModelDeclined is sweep_model_declined (#422): pings
-	// sent plain because the question would break the cache on that model.
+	// sent plain because the question would break the cache on that model. SweepExtraAsked and
+	// SummaryExtraSent count the extra request after the last planned ping that follows a text turn
+	// (#776), by kind. SweepExtraSkipped counts every extra slot that sent nothing at all: the thread
+	// was busy, the summary declined (the sweep does not ask after it), or the question declined or
+	// failed. Each of those also counts under its own substitute reason.
 	SweepSubstituted   int64 `json:"keepalive_sweep_substituted"`
 	SweepAskFailed     int64 `json:"keepalive_sweep_ask_failed"`
 	SweepOverBudget    int64 `json:"keepalive_sweep_over_budget"`
+	SweepExtraAsked    int64 `json:"keepalive_sweep_extra_asked"`
+	SweepExtraSkipped  int64 `json:"keepalive_sweep_extra_skipped"`
+	SummaryExtraSent   int64 `json:"keepalive_summary_extra_sent"`
 	SweepAsked         int64 `json:"sweep_asked"`
 	SweepHeld          int64 `json:"sweep_held"`
 	SweepModelDeclined int64 `json:"sweep_model_declined"`
@@ -1815,6 +1903,9 @@ func (k *Keeper) Stats() Stats {
 		SweepSubstituted:                   k.sweepSubstituted.Load(),
 		SweepAskFailed:                     k.sweepAskFailed.Load(),
 		SweepOverBudget:                    k.sweepOverBudget.Load(),
+		SweepExtraAsked:                    k.sweepExtraAsked.Load(),
+		SweepExtraSkipped:                  k.sweepExtraSkipped.Load(),
+		SummaryExtraSent:                   k.summaryExtraSent.Load(),
 		SweepAsked:                         sw.Asked,
 		SweepHeld:                          sw.Held,
 		SweepModelDeclined:                 sw.ModelDeclined,
@@ -1957,6 +2048,75 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 // outside the keeper (the adapt-cache report's currentPlan).
 func PredictorFor(id string) (func(stopReason string) float64, bool) { return predictorFor(id) }
 
+// extraReadyLocked reports whether e's extra request is due now, and that there is one to send: a
+// summarizer candidate or a sweep candidate. Called with k.mu held.
+func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
+	if !e.extraDue(now) {
+		return false
+	}
+	tk := thread.Key(e.session, e.thread)
+	_, _, hasSummary := offload.KeepAliveCandidateState(tk)
+	return hasSummary || offload.HasSweepPingCandidate(tk)
+}
+
+// fireExtra sends the one extra request (kaEntry.extraDue) under the same claim, ceilings and latches
+// as a substitute that takes a ping. ONE request, and nothing after it: the strategy's pings are
+// already spent.
+//
+// WHEN A SUMMARY IS DUE, ONLY THE SUMMARY GOES, even if it declines. The sweep question then does not go
+// in that span. The owner's rule, 2026-10-30: "as for sweep after summary. dont do that. it can
+// probably have the sweep question pay a cache write like the problem with the ping... so we should
+// probably just do summary at that point". The sweep question takes the slot only when no summary is
+// registered for the thread at all.
+func (k *Keeper) fireExtra(j pingJob) {
+	claim := offload.ClaimPing(thread.Key(j.session, j.thread))
+	defer claim.Release()
+	switch claim.Choice {
+	case offload.PingSummary:
+		if k.fireSummarySubstitute(j) {
+			k.summaryExtraSent.Add(1)
+			return
+		}
+	case offload.PingSweep:
+		if k.fireSweepSubstitute(j) {
+			k.sweepExtraAsked.Add(1)
+			return
+		}
+	}
+	k.sweepExtraSkipped.Add(1)
+}
+
+// endsAtTextLocked reads e.endsAtText under the keeper's lock.
+func (e *kaEntry) endsAtTextLocked(k *Keeper) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return e.endsAtText
+}
+
+// endsAtTextTurn reports whether body's last message that is not a role:system reminder is anything
+// other than a user turn that ends with a tool_result block. It reads roles and block types only.
+// A body it cannot read counts as a text turn, the side on which the sweep never replaces a ping.
+//
+// WHY IT MATTERS (#776). The sweep's question reads the turn's cache entry. After a tool_result turn
+// it also renews it (#777), so it may stand in for a strategy ping. After a text turn the provider
+// never renews an entry from a later request, so a question in a ping's place would let the cache
+// expire inside the strategy's warm period.
+func endsAtTextTurn(body []byte) bool {
+	msgs := gjson.GetBytes(body, "messages").Array()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		role := msgs[i].Get("role").String()
+		if role == "system" || role == "developer" {
+			continue
+		}
+		if role != "user" {
+			return true
+		}
+		blocks := msgs[i].Get("content").Array()
+		return len(blocks) == 0 || blocks[len(blocks)-1].Get("type").String() != "tool_result"
+	}
+	return true
+}
+
 // fireSubstitute runs the one substitute the claim names for this ping and reports whether it took the
 // ping. The claim is released by a defer, so every exit frees the thread, a panic included. The sweep's
 // collection slot is released the same way inside SweepPingSubstitute, so a claimed ping holds neither
@@ -1966,11 +2126,20 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 	defer claim.Release()
 	switch claim.Choice {
 	case offload.PingSummary:
+		if j.e.endsAtTextLocked(k) {
+			return false // a plain ping, as the strategy plans; the summary waits for the extra slot
+		}
 		return k.fireSummarySubstitute(j)
 	case offload.PingSweep:
+		if j.e.endsAtTextLocked(k) {
+			return false // a plain ping, as the strategy plans; the question waits for the extra slot
+		}
 		return k.fireSweepSubstitute(j)
 	case offload.PingNone:
 		// Nothing registered. Both lookups decline and count their own no-candidate reason.
+		if j.e.endsAtTextLocked(k) {
+			return false
+		}
 		return k.fireSummarySubstitute(j) || k.fireSweepSubstitute(j)
 	}
 	return false
