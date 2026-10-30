@@ -177,3 +177,26 @@ func TestNoExtraQuestionOnAStoppedSpan(t *testing.T) {
 		t.Errorf("asks %d after a ping that wrote, want 0", asker.calls.Load())
 	}
 }
+
+// GUARD for docs/design.md "Keep-alive: the cache strategy comes first". After a text turn, no planned
+// ping of any plan length is replaced by the sweep's question: the strategy's pings all go out plain,
+// and the question (if any) comes after the last one. A change that breaks this fails here.
+func TestGuardNoPlannedPingIsReplacedAfterATextTurn(t *testing.T) {
+	for _, maxPings := range []int{1, 2, 3} {
+		k, fs, clock := testKeeper(t)
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		asker := &sweepAsker{cacheRead: 48576}
+		registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+		pol := kaPolicy()
+		pol.MaxPings = maxPings
+		recordOne(t, k, pol, kaBody, clock.now())
+		for i := 1; i <= maxPings; i++ {
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, int64(i))
+			if fs.n() != i || asker.calls.Load() != 0 || k.sweepSubstituted.Load() != 0 {
+				t.Fatalf("plan of %d, ping %d: plain %d, asks %d; a planned ping was replaced after a text turn "+
+					"(see docs/design.md, Keep-alive: the cache strategy comes first)", maxPings, i, fs.n(), asker.calls.Load())
+			}
+		}
+	}
+}

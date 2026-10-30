@@ -245,6 +245,31 @@ The related fail-*open* on `MaxCachedIdx`: `prevLen` returning 0 on a store miss
 Terminal-Bench requests). `cg:len:` is now pinned and the sliding TTL keeps it alive, so it
 no longer expires mid-session — but inverting `TailOnly` to fail *closed* is a separate change.
 
+## Keep-alive: the cache strategy comes first
+
+The cache strategy decides how long the cache stays warm after the user's last turn (for example
+2 pings at 240 s and 480 s, or 1 ping at 59 minutes on the 1-hour tier). **Nothing the keep-alive
+sends may shorten that.**
+
+- **A request sent in place of a ping** (the sweep question, the summarizer's substitute, any future
+  one) may replace a planned ping **only when it renews the same cache entry** the plain ping renews.
+- **After a tool-result turn it does** (since #777): the request keeps the turn's breakpoint, so it
+  reads and renews the turn's entry.
+- **After a text turn it does not.** The provider renews an entry that ends at a text turn only for
+  the exact same request. A request that appends a question is not that request.
+- **When it cannot renew the entry,** every planned ping stays plain. The request goes out once,
+  after the last planned ping, and nothing goes out after it. A user who comes back inside the
+  strategy's warm period is covered exactly as without it. A user who comes back later pays the
+  re-write the strategy would have paid anyway.
+- "Text turn" is read from metadata only: the role and block type of the held request's last
+  non-system message (`keepalive.endsAtTextTurn`).
+
+History: #716 measured the miss, #776 / #777 / #779 fixed it for the sweep, #778 measures it before
+each release. `keepalive/sweeptextturn_test.go` guards the rule for the sweep.
+
+**Known gap (owner to decide).** The summarizer's keep-alive substitute still takes a planned ping
+after a text turn. See #779.
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable

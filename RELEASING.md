@@ -150,6 +150,7 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
   7. the insights rows add up to the headline;
   8. the dashboard loads every tab;
   9. a bypassed request gets its token count.
+- **Always check the cache strategy (#776):** after a text turn, every planned ping is plain and reads the full prefix. The sweep question comes only after the last planned ping.
 - Keep the session small. Report the spend.
 - Record the evidence for each check: request rows, API output, status-line output.
 - At the end, stop the proxy by its own pid and remove everything the check created. Report any state the check changed outside its own directories.
