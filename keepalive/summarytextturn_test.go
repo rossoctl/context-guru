@@ -3,6 +3,7 @@ package keepalive
 import (
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,22 +204,98 @@ func TestASweepAndAPreExpirySummarySendOneExtraRequest(t *testing.T) {
 	}
 }
 
-// #776: a summary that declines in the extra slot leaves the same slot to the sweep question. Still one
-// request goes out, and nothing after it.
-func TestADecliningSummaryLeavesTheSlotToTheSweep(t *testing.T) {
+// #776, the owner's rule: when a summary is due in the extra slot, only the summary goes. A summary
+// that declines there leaves the slot empty; the sweep question does not go in that span.
+func TestADecliningSummaryIsNotFollowedByTheSweep(t *testing.T) {
+	for _, state := range []string{"pre_expiry", "any"} {
+		t.Run(state, func(t *testing.T) {
+			k, fs, clock := testKeeper(t)
+			model := &fakeSummaryModel{err: errSummaryDown}
+			kaCandidateWithCacheState(t, "sess-1", store.NewMemory(store.Options{MaxEntries: 400}), model, state, 0)
+			asker := &sweepAsker{cacheRead: 48576}
+			registerSweep(t, store.NewMemory(store.Options{MaxEntries: 400}), asker, "claude-sonnet-5", sweepConversation(3))
+			twoPlainPings(t, k, fs, clock, model)
+			k.Sweep(clock.advance(250 * time.Second))
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) && k.Stats().SweepExtraSkipped == 0 {
+				time.Sleep(time.Millisecond)
+			}
+			for i := 0; i < 3; i++ {
+				k.Sweep(clock.advance(281 * time.Second))
+			}
+			if model.calls.Load() != 1 || asker.calls.Load() != 0 || fs.n() != 2 {
+				t.Errorf("summary calls %d, asks %d, plain %d; want 1, 0, 2", model.calls.Load(), asker.calls.Load(), fs.n())
+			}
+		})
+	}
+}
+
+// #776: with no summary registered, the sweep question takes the extra slot.
+func TestWithNoSummaryTheSweepTakesTheExtraSlot(t *testing.T) {
 	k, fs, clock := testKeeper(t)
-	model := &fakeSummaryModel{err: errSummaryDown}
-	kaCandidateWithCacheState(t, "sess-1", store.NewMemory(store.Options{MaxEntries: 400}), model, "pre_expiry", 0)
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, store.NewMemory(store.Options{MaxEntries: 400}), asker, "claude-sonnet-5", sweepConversation(3))
-	twoPlainPings(t, k, fs, clock, model)
+	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	k.Sweep(clock.advance(281 * time.Second))
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 2)
 	k.Sweep(clock.advance(250 * time.Second))
 	waitSweepOutcome(t, k, fs)
-	for i := 0; i < 3; i++ {
-		k.Sweep(clock.advance(281 * time.Second))
+	if asker.calls.Load() != 1 || fs.n() != 2 || k.Stats().SweepExtraAsked != 1 {
+		t.Errorf("asks %d, plain %d, extra asked %d; want 1, 2, 1", asker.calls.Load(), fs.n(), k.Stats().SweepExtraAsked)
 	}
-	if model.calls.Load() != 1 || asker.calls.Load() != 1 || fs.n() != 2 {
-		t.Errorf("summary calls %d, asks %d, plain %d; want 1, 1, 2", model.calls.Load(), asker.calls.Load(), fs.n())
+}
+
+// #779 review: the extra slot gets the same route-breaker and dead-credential re-check as a planned
+// ping. A trip after the last planned ping sends nothing, and stops the span.
+func TestTheExtraSlotSkipsATrippedRouteOrADeadCredential(t *testing.T) {
+	for _, mark := range []string{"route tripped", "credential dead"} {
+		t.Run(mark, func(t *testing.T) {
+			k, fs, clock := testKeeper(t)
+			model := &fakeSummaryModel{out: "<summary>s</summary>"}
+			kaCandidateWithCacheState(t, "sess-1", store.NewMemory(store.Options{MaxEntries: 400}), model, "any", 0)
+			twoPlainPings(t, k, fs, clock, model)
+			k.mu.Lock()
+			e := k.live[sess1.id()]
+			switch mark {
+			case "route tripped":
+				k.routeTripped[routeKey(e.tenant, e.endpoint, e.route, e.model)] = clock.now().Add(time.Hour)
+			case "credential dead":
+				e.cred = "cred-x" // the caller's credential fingerprint; "" (a server-held key) is never dead
+				k.markCredDeadLocked(e.tenant, e.cred, e.model, http.StatusUnauthorized, clock.now())
+			}
+			k.mu.Unlock()
+			k.Sweep(clock.advance(250 * time.Second))
+			k.Sweep(clock.advance(1 * time.Second))
+			if model.calls.Load() != 0 || fs.n() != 2 {
+				t.Errorf("summary calls %d, plain %d; want 0 and 2 (nothing on a %s)", model.calls.Load(), fs.n(), mark)
+			}
+			k.mu.Lock()
+			stopped := e.stopped
+			k.mu.Unlock()
+			if !stopped {
+				t.Errorf("the span is not stopped after a %s", mark)
+			}
+		})
+	}
+}
+
+// #779 review: with a short Idle the slot would fall at or before the last ping. It is then two sweep
+// ticks after it, and never while that ping is still out.
+func TestAShortIdleExtraWaitsForTheLastPing(t *testing.T) {
+	last := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	e := &kaEntry{pol: Policy{KeepAlive: true, Idle: 20 * time.Second, MaxPings: 2}, startedAt: last,
+		endsAtText: true, pings: 2}
+	if got := e.extraSlot().Sub(last); got != 2*tick {
+		t.Errorf("short-Idle slot = last ping + %v, want %v", got, 2*tick)
+	}
+	e.pingRunning = true
+	if e.extraWaiting() {
+		t.Error("the extra waits while the last ping is still out")
+	}
+	e.pingRunning = false
+	if !e.extraWaiting() {
+		t.Error("the extra does not wait once the last ping is done")
 	}
 }
 
@@ -271,3 +348,62 @@ func TestOnOpenAIASummaryStillTakesAPlannedPing(t *testing.T) {
 }
 
 var errSummaryDown = errors.New("summary model down")
+
+// #779 review, end to end: with a short Idle, a sweep tick that passes the extra slot while the last
+// plain ping is still out sends nothing; the extra goes only after that ping returns.
+func TestAShortIdleExtraIsNotSentWhileTheLastPingIsOut(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	block := false
+	k, fs, clock := testKeeperWith(t, func(o *Options) {
+		o.Go = func(f func()) { go f() }
+	})
+	fs.mu.Lock()
+	fs.resp = func(DispatchRequest) (Usage, int, error) {
+		mu.Lock()
+		b := block
+		mu.Unlock()
+		if b {
+			<-release
+		}
+		return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
+	}
+	fs.mu.Unlock()
+	model := &fakeSummaryModel{out: "<summary>s</summary>"}
+	kaCandidateWithCacheState(t, "sess-1", store.NewMemory(store.Options{MaxEntries: 400}), model, "any", 0)
+	pol := kaPolicy()
+	pol.Idle = 20 * time.Second
+	recordOne(t, k, pol, kaBody, clock.now())
+	k.Sweep(clock.advance(21 * time.Second))
+	waitPings(t, k, 1)
+	mu.Lock()
+	block = true // ping 2 hangs until release
+	mu.Unlock()
+	k.Sweep(clock.advance(21 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && fs.n() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	k.Sweep(clock.advance(5 * time.Second)) // past the short-Idle slot (2 ticks), ping 2 still out
+	time.Sleep(50 * time.Millisecond)
+	if model.calls.Load() != 0 {
+		t.Fatalf("the extra went out %d times while the last ping was still out", model.calls.Load())
+	}
+	close(release)
+	waitPings(t, k, 2)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		k.mu.Lock()
+		running := k.live[sess1.id()] != nil && k.live[sess1.id()].pingRunning
+		k.mu.Unlock()
+		if !running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	k.Sweep(clock.advance(1 * time.Second))
+	waitPings(t, k, 3)
+	if model.calls.Load() != 1 {
+		t.Errorf("the extra went out %d times after the last ping returned, want 1", model.calls.Load())
+	}
+}

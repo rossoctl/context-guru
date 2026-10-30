@@ -262,16 +262,21 @@ sends may shorten that.**
   strategy's warm period is covered exactly as without it. A user who comes back later pays the
   re-write the strategy would have paid anyway.
 - **Which request takes that slot.** One slot, 30 s before the normal hold deadline: 210 s after the
-  last ping at the 5-minute defaults. **The hold limit never changes.** One request only. The claim
-  decides, as for any ping: the summarizer's substitute first, then the sweep question if the
-  summary declines. Nothing goes out after that slot, and a missed slot is never sent late.
+  last ping at the 5-minute defaults. **The hold limit never changes.** One request only, and
+  nothing after it. A missed slot is never sent late. The slot gets the same route-breaker and
+  dead-credential check as a planned ping.
+- **When a summary is due, only the summary goes**, even if it declines. The sweep question does not
+  go in that span: after a declined summary it could pay a cache write, the same problem as the ping.
+  The sweep question takes the slot only when no summary is due. The owner's rule, 2026-10-30: "as
+  for sweep after summary. dont do that. it can probably have the sweep question pay a cache write
+  like the problem with the ping... so we should probably just do summary at that point".
 - **A `cache_state: pre_expiry` summary at that slot.** For this one request only, its pre-expiry
   window widens to cover the slot, so it runs about 90 s before the cache expires instead of in the
   usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window. The owner chose
   this on 2026-10-30: "give it more time, it can run on the 210 sec mark".
 - "Text turn" is read from metadata only: the role and block type of the held request's last
-  non-system message (`keepalive.endsAtTextTurn`). It never applies on OpenAI, whose cache has no
-  breakpoints and no text-turn rule.
+  non-system message. It is an internal flag on the held entry, not a published metric. It never
+  applies on OpenAI, whose cache has no breakpoints and no text-turn rule.
 
 History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it before each release.
 `keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every

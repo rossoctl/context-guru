@@ -138,6 +138,9 @@ type kaEntry struct {
 	endsAtText bool
 	// extraAsked latches that span's one extra request (extraDue), sent or attempted.
 	extraAsked bool
+	// pingRunning is set while one of e's own pings is out (Sweep sets it, fire clears it), so the extra
+	// request never starts before the last plain ping's response is in.
+	pingRunning bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -209,15 +212,19 @@ const extraSlotMargin = 30 * time.Second
 // sent its one extra request. Called with k.mu held.
 func (e *kaEntry) extraWaiting() bool {
 	return e.endsAtText && !e.extraAsked && !e.stopped && !e.manualOnly && e.pol.On() &&
-		e.pings >= e.pol.MaxPings && e.pings > 0
+		e.pings >= e.pol.MaxPings && e.pings > 0 && !e.pingRunning
 }
 
 // extraSlot is when e's one extra request goes out (#776): extraSlotMargin before the normal hold
 // deadline, 210 s after the last planned ping at the 5-minute defaults. The same slot for the sweep
 // question and for either kind of summary, so the hold limit never changes. A pre_expiry summary
 // accepts it through extraSummaryWindow.
+//
+// A short Idle (keepalive_idle_seconds can be any positive value) would put Idle - extraSlotMargin at
+// or before the last ping. The slot is then two sweep ticks after it instead; extraWaiting also waits
+// for that ping's response.
 func (e *kaEntry) extraSlot() time.Time {
-	return e.startedAt.Add(e.pol.Idle - extraSlotMargin)
+	return e.startedAt.Add(max(e.pol.Idle-extraSlotMargin, 2*tick))
 }
 
 // extraDue reports whether e's one extra request is due (#776). After a turn that ends at a text turn,
@@ -1222,6 +1229,13 @@ func (k *Keeper) Sweep(now time.Time) int {
 			continue
 		}
 		if e.extraWaiting() && e.pingable() && k.inflight[key] == 0 && k.extraReadyLocked(e, now) {
+			// The same re-check a planned ping gets below: the extra slot waits a full Idle after the last
+			// ping, and a breaker can trip or a credential be marked dead in that time. Nothing is sent.
+			if k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.route, e.model), now) ||
+				k.credIsDeadLocked(e.tenant, e.cred, e.model, now) {
+				e.stopped = true
+				continue
+			}
 			// The extra request (extraDue): sent from the held copy, before any release. It is not a ping:
 			// e.pings and e.startedAt stay, so no ping follows it, and the deadline timer still runs.
 			e.extraAsked = true
@@ -1268,6 +1282,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		prevStartedAt := e.startedAt
 		e.startedAt = now
 		e.pings++
+		e.pingRunning = true
 		// An UNMASKED copy for this ping, zeroized by fire when it is done. The entry's own copy
 		// stays masked, so the long-lived hold never contains a readable transcript.
 		raw := append([]byte(nil), e.body...)
@@ -1335,6 +1350,11 @@ func (k *Keeper) fire(j pingJob) {
 	// limiter refusal, the pingBody failure and a panic all release it.
 	defer func() {
 		zero(j.raw) // the unmasked body copy this ping was handed
+		if !j.extra {
+			k.mu.Lock()
+			j.e.pingRunning = false // this ping is done, whatever its outcome (kaEntry.pingRunning)
+			k.mu.Unlock()
+		}
 	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the
@@ -1743,8 +1763,10 @@ type Stats struct {
 	// SweepSubstituted climbing while SweepAsked/SweepHeld lag means the question reaches the
 	// provider and its answers do not parse. SweepModelDeclined is sweep_model_declined (#422): pings
 	// sent plain because the question would break the cache on that model. SweepExtraAsked and
-	// SweepExtraSkipped are the extra question after the last planned ping that follows a text turn
-	// (#776): sent, or skipped because the claim offered the sweep no question.
+	// SummaryExtraSent count the extra request after the last planned ping that follows a text turn
+	// (#776), by kind. SweepExtraSkipped counts every extra slot that sent nothing at all: the thread
+	// was busy, the summary declined (the sweep does not ask after it), or the question declined or
+	// failed. Each of those also counts under its own substitute reason.
 	SweepSubstituted   int64 `json:"keepalive_sweep_substituted"`
 	SweepAskFailed     int64 `json:"keepalive_sweep_ask_failed"`
 	SweepOverBudget    int64 `json:"keepalive_sweep_over_budget"`
@@ -2038,10 +2060,14 @@ func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
 }
 
 // fireExtra sends the one extra request (kaEntry.extraDue) under the same claim, ceilings and latches
-// as a substitute that takes a ping. ONE request: the claim names who owns the slot, the summary
-// before the sweep (as for any ping); the sweep question goes only if the summary declines, in the
-// same slot, as main does for a ping. Any other "no" sends nothing: the strategy's pings are already
-// spent, and nothing goes out after this slot.
+// as a substitute that takes a ping. ONE request, and nothing after it: the strategy's pings are
+// already spent.
+//
+// WHEN A SUMMARY IS DUE, ONLY THE SUMMARY GOES, even if it declines. The sweep question then does not go
+// in that span. The owner's rule, 2026-10-30: "as for sweep after summary. dont do that. it can
+// probably have the sweep question pay a cache write like the problem with the ping... so we should
+// probably just do summary at that point". The sweep question takes the slot only when no summary is
+// registered for the thread at all.
 func (k *Keeper) fireExtra(j pingJob) {
 	claim := offload.ClaimPing(thread.Key(j.session, j.thread))
 	defer claim.Release()
@@ -2049,10 +2075,6 @@ func (k *Keeper) fireExtra(j pingJob) {
 	case offload.PingSummary:
 		if k.fireSummarySubstitute(j) {
 			k.summaryExtraSent.Add(1)
-			return
-		}
-		if offload.HasSweepPingCandidate(thread.Key(j.session, j.thread)) && k.fireSweepSubstitute(j) {
-			k.sweepExtraAsked.Add(1)
 			return
 		}
 	case offload.PingSweep:
