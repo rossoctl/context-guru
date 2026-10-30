@@ -1,6 +1,9 @@
 package counterfactual
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,5 +190,31 @@ func TestARestoreIsFoundWhileAnEarlierChangeStaysApplied(t *testing.T) {
 	reqs[2].run(ts)
 	if got := ids(); len(got) != 1 || got[0] != "opA" {
 		t.Fatalf("after opB was restored: active %v, want only opA", got)
+	}
+}
+
+// A failed check is logged at warning level by Compute, once for each failure, and never by Preview.
+func TestAFailedCheckIsLoggedAsAWarning(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	ts := NewTrackers()
+	rs := ex2Requests()
+	rs[0].run(ts)
+	q := rs[1]
+	q.fwd = mk(nil, ex2Sys, with(ex2Msgs, b("f9", 900))) // 100 bytes smaller than the operation reports
+	r := q.begin(ts)
+
+	if res := r.Preview(q.usage); len(res.Checks) == 0 || buf.Len() != 0 {
+		t.Fatalf("Preview: %d checks, log %q, want checks and no log", len(res.Checks), buf.String())
+	}
+	res := r.Compute(q.usage)
+	if len(res.Checks) == 0 {
+		t.Fatal("Compute: no check failed, the scenario is wrong")
+	}
+	if got := strings.Count(buf.String(), "level=WARN msg=\"counterfactual check failed\""); got != len(res.Checks) {
+		t.Fatalf("%d warnings for %d failed checks:\n%s", got, len(res.Checks), buf.String())
 	}
 }

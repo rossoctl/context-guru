@@ -248,7 +248,8 @@ numbers are not used: those requirements were dropped.
   the model, not for context-guru or Cortex. A contract test in
   each repo pins it.
 - **R26.** `Compute` is deterministic: its result depends only on its record and on the
-  `ThreadState` that the record started from, and it does no I/O. The Tracker holds the `ThreadState`.
+  `ThreadState` that the record started from, and it does no I/O. The one exception is a warning through
+  `log/slog` for each failed check (§6.5); it does not change the figure. The Tracker holds the `ThreadState`.
   As its last step `Compute` replaces it with the new one; a failure leaves the old one (D14). The same
   `ThreadState` and the same request give the same figure in the context-guru proxy and in Cortex.
   `Preview` gives the same figure and stores nothing.
@@ -1117,7 +1118,7 @@ func (r *Request) Add(op Operation)
 func (r *Request) EndRequest(thread Thread, forwarded Body, breakpoints []Breakpoint, facts EntryFacts)
 
 // 4. After the response. The billed usage is the only input that arrives late.
-//    Compute is deterministic and does no I/O (R26). It prices the request, then replaces the
+//    Compute is deterministic and does no I/O (R26), except a slog warning for each failed check (§6.5). It prices the request, then replaces the
 //    thread's ThreadState with the new one as its last step. If Compute fails or panics, the
 //    ThreadState is unchanged.
 func (r *Request) Compute(usage Usage) Result
@@ -1357,7 +1358,9 @@ one. It shows the gross saving, and marks the net as `Estimated`.
 
 ### 6.5 Checks
 
-The library reports failed checks in `Result.Checks`. A failure does not stop pricing.
+The library reports failed checks in `Result.Checks`. A failure does not stop pricing. `Compute` also
+logs each failure at warning level with `log/slog` (message `counterfactual check failed`, with the
+check, the operator, the detail, and the request, session and thread IDs). `Preview` logs nothing.
 
 1. **Sum:** for each section, the context operations that are applied, and not `DryRun` —
    `SizeBefore.Bytes − SizeAfter.Bytes` adds up to the client size minus the forwarded size, in
@@ -1422,7 +1425,7 @@ missing, report too little and say why.
 | `counterfactual.Compute` panics | The host recovers, writes no saving for the request, and increments `ops_price_panics`. The request and its spend record are unchanged. |
 | A malformed context operation (unknown kind, negative size) | Goes to `Unpriced` with a reason. The other context operations are priced. |
 | A `spend` whose `Call` has no usage (a ping that timed out: the host sent it and read no response) | `Unpriced` with `ping_result_unknown`. The cost is missing, not zero, so the window must not show its rescue as a net gain. The rescue is still credited from the read on the request that follows (§4.4) |
-| Sum check fails | Pricing goes on. The failure is counted for each plugin on `/v1/pipeline`. |
+| Sum check fails | Pricing goes on. A warning is logged. The failure is counted for each plugin on `/v1/pipeline`. |
 | No previous fingerprint for the thread | `Boundary` is nil, §6.4. |
 | Response has no usage | Nothing is priced, as today. |
 | No rate for a tier | `Saving.Provenance` is empty, as today. Tokens are on the record. |

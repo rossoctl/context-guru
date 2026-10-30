@@ -2,6 +2,7 @@ package counterfactual
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -34,8 +35,19 @@ func (r *Request) Compute(usage Usage) Result {
 		s := t.snapshot()
 		res, next := r.calc(s, usage)
 		if t.replace(s.Version, next) {
+			r.warnChecks(res)
 			return res
 		}
+	}
+}
+
+// warnChecks logs each failed check (§6.5) at warning level, once for each request: Compute calls it
+// after the replace succeeded, so a retry does not log twice, and Preview never logs. It is the only
+// output of the package. Detail holds numbers only, so no content is logged.
+func (r *Request) warnChecks(res Result) {
+	for _, f := range res.Checks {
+		slog.Warn("counterfactual check failed", "check", f.Check, "operator", f.Operator,
+			"detail", f.Detail, "request", r.Meta.RequestID, "session", r.Meta.Session, "thread", r.Thread.ID)
 	}
 }
 
