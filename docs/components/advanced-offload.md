@@ -22,6 +22,12 @@ resolvable `<<cg:HASH>>` marker. It never rewrites anything.
 > **It is on in `xhigh`** (#404). The sweep asks at the ping and applies on the next cold request
 > whenever it is enabled. `shadow: true` still turns it into a measurement that applies nothing.
 
+> **Which ping (#776).** The question takes the **last** planned ping of an idle span, never ping 1.
+> Ping 1 is always a plain ping. A plan of one ping (the 1-hour tier's default) sends no question.
+> Why: the question reads the turn's cache entry but does not renew one that ends at a text turn, so
+> a question as ping 1 let the entry expire, and the plain ping 2 after it wrote the whole conversation
+> again.
+
 ### Why it is separate from `extract_llm`
 
 `extract_llm` does the right thing on a **warm** turn: a cheap model trims one recent tool output

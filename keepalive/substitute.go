@@ -377,7 +377,8 @@ func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 
-// fireSweepSubstitute sends extract_llm_sweep's question instead of this due ping (#404). Returns true
+// fireSweepSubstitute sends extract_llm_sweep's question instead of this due ping (#404), which is the
+// last planned ping of the span (sweepMayAsk, #776; fireSubstitute checks it). Returns true
 // when the question stood in for the ping; the caller then sends no ordinary ping. Every other
 // outcome returns false and the ordinary ping goes out, so a ping is never lost to this.
 //

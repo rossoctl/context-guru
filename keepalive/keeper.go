@@ -1221,7 +1221,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-			ping: e.pings, prevStartedAt: prevStartedAt})
+			ping: e.pings, sweepMayAsk: sweepMayAsk(e.pings, e.pol.MaxPings), prevStartedAt: prevStartedAt})
 	}
 	k.mu.Unlock()
 
@@ -1258,6 +1258,9 @@ type pingJob struct {
 	// job runs on its own goroutine and must hold a copy rather than reach back into the entry.
 	emitter components.Emitter
 	ping    int
+	// sweepMayAsk is whether extract_llm_sweep's question may take this ping (sweepMayAsk), decided
+	// in Sweep from the entry's own count and plan.
+	sweepMayAsk bool
 	// vary is the output-budget step this ping was actually sent with (Keeper.nextVaryLocked), set
 	// in fire at dispatch time and read by record1 for the audit row.
 	vary int
@@ -1957,6 +1960,23 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 // outside the keeper (the adapt-cache report's currentPlan).
 func PredictorFor(id string) (func(stopReason string) float64, bool) { return predictorFor(id) }
 
+// sweepMayAsk reports whether the sweep's question may take ping number ping (1-based) of a span
+// planned for maxPings pings. Only the LAST planned ping, and only on a plan of 2 pings or more.
+//
+// THE FIRST PING IS ALWAYS PLAIN (#776). The question reads the turn's cache entry but renews it only
+// when the turn ends at a tool_result: no later request renews an entry that ends at a text turn. A
+// question as ping 1 after a text turn therefore let the entry expire, and ping 2 wrote the whole
+// conversation again (22 of 80 such misses, $50.18 in 3.9 days on one laptop, after #777 fixed the
+// tool_result case). A plain ping 1 renews the entry whatever the turn shape, and the question at the
+// last ping costs only what a ping would have, with nothing left to renew after it.
+//
+// A ONE-PING PLAN NEVER ASKS. Its only ping would be the question, so after a text turn nothing would
+// renew the entry and the cache would end at the first lifetime instead of the second. The 1-hour
+// tier's default plan is one ping, so a 1-hour thread sends plain pings and no question.
+func sweepMayAsk(ping, maxPings int) bool {
+	return maxPings >= 2 && ping >= maxPings
+}
+
 // fireSubstitute runs the one substitute the claim names for this ping and reports whether it took the
 // ping. The claim is released by a defer, so every exit frees the thread, a panic included. The sweep's
 // collection slot is released the same way inside SweepPingSubstitute, so a claimed ping holds neither
@@ -1968,10 +1988,13 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 	case offload.PingSummary:
 		return k.fireSummarySubstitute(j)
 	case offload.PingSweep:
+		if !j.sweepMayAsk {
+			return false // a plain ping; the question waits for the last ping (sweepMayAsk)
+		}
 		return k.fireSweepSubstitute(j)
 	case offload.PingNone:
 		// Nothing registered. Both lookups decline and count their own no-candidate reason.
-		return k.fireSummarySubstitute(j) || k.fireSweepSubstitute(j)
+		return k.fireSummarySubstitute(j) || (j.sweepMayAsk && k.fireSweepSubstitute(j))
 	}
 	return false
 }

@@ -85,6 +85,22 @@ func waitSweepOutcome(t *testing.T, k *Keeper, fs *fakeDispatcher) {
 	}
 }
 
+// firstPlainPing sends a span's ping 1 and checks it went out plain: the sweep's question waits for
+// the last planned ping (sweepMayAsk, #776). The caller's own next Sweep is the question's ping.
+func firstPlainPing(t *testing.T, k *Keeper, clock *testClock) {
+	t.Helper()
+	before := k.pings.Load()
+	sub := k.sweepSubstituted.Load()
+	fd := fakeOf(k)
+	sent := fd.n()
+	k.Sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, before+1)
+	if k.sweepSubstituted.Load() != sub || fd.n() != sent+1 {
+		t.Fatalf("ping 1 was not a plain ping (substituted %d -> %d, plain %d -> %d)",
+			sub, k.sweepSubstituted.Load(), sent, fd.n())
+	}
+}
+
 // ⭐ POINT 1 (A1): the question takes the place of the ping. It is counted once as THE ping for the
 // span, no ordinary ping is sent, and the answer is held for the thread with its wait cause (point 12).
 func TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing(t *testing.T) {
@@ -94,6 +110,7 @@ func TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing(t *testing.T) {
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
 
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
@@ -102,11 +119,11 @@ func TestKeepAliveSendsTheSweepQuestionInPlaceOfTheNextPing(t *testing.T) {
 		t.Fatalf("sweepSubstituted = %d, want 1 (ask failed %d, over budget %d, ordinary pings %d)",
 			k.sweepSubstituted.Load(), k.sweepAskFailed.Load(), k.sweepOverBudget.Load(), fs.n())
 	}
-	if fs.n() != 0 {
-		t.Errorf("sent %d ordinary pings: the question must replace the ping, not add to it", fs.n())
+	if fs.n() != 1 {
+		t.Errorf("sent %d ordinary pings, want 1 (ping 1): the question must replace ping 2, not add to it", fs.n())
 	}
-	if got := k.pings.Load(); got != 1 {
-		t.Errorf("pings = %d, want 1: a substituted ping counts once", got)
+	if got := k.pings.Load(); got != 2 {
+		t.Errorf("pings = %d, want 2: a substituted ping counts once", got)
 	}
 	if asker.calls.Load() != 1 {
 		t.Errorf("asked %d times, want 1", asker.calls.Load())
@@ -139,6 +156,7 @@ func TestTheWaitCauseComesFromTheEstablishingResponse(t *testing.T) {
 			UsageOK: true, ToolUseNames: []string{"Read", "Bash"}, Policy: kaPolicy(), Header: kaHeader(),
 			Hold: fakeOf(k).hold(sess1)})
 	}
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
 	waitSweepOutcome(t, k, fs)
 	_, _, waiting, ok := offload.HeldSweepAnswerForTest(st, thread.Key("sess-1", ""))
@@ -175,10 +193,11 @@ func TestKeepAliveSweepQuestionFallsBackToAPingOnFailure(t *testing.T) {
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(2))
 
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
-	if fs.n() != 1 {
-		t.Fatalf("sent %d ordinary pings after the question failed, want 1", fs.n())
+	waitPings(t, k, 2)
+	if fs.n() != 2 {
+		t.Fatalf("sent %d ordinary pings after the question failed, want 2", fs.n())
 	}
 	if k.sweepSubstituted.Load() != 0 || k.sweepAskFailed.Load() != 1 {
 		t.Errorf("substituted %d, failed %d, want 0 and 1", k.sweepSubstituted.Load(), k.sweepAskFailed.Load())
@@ -205,13 +224,14 @@ func TestKeepAliveSendsAPlainPingWhereTheQuestionWouldBreakTheCache(t *testing.T
 
 	before := k.Stats().SweepModelDeclined
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
+	waitPings(t, k, 2)
 	if asker.calls.Load() != 0 {
 		t.Fatalf("the question was sent %d times on a model it breaks the cache of", asker.calls.Load())
 	}
-	if fs.n() != 1 {
-		t.Fatalf("sent %d ordinary pings, want 1", fs.n())
+	if fs.n() != 2 {
+		t.Fatalf("sent %d ordinary pings, want 2", fs.n())
 	}
 	if got := k.Stats().SweepModelDeclined - before; got != 1 {
 		t.Errorf("sweep_model_declined moved by %d, want 1", got)
@@ -232,13 +252,14 @@ func TestKeepAliveSweepQuestionRespectsTheCostCap(t *testing.T) {
 	for _, d := range []time.Duration{-time.Second, 0} {
 		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
+	waitPings(t, k, 2)
 	if asker.calls.Load() != 0 {
 		t.Errorf("an over-budget question was dispatched %d times", asker.calls.Load())
 	}
-	if k.sweepOverBudget.Load() != 1 || fs.n() != 1 {
-		t.Errorf("over-budget %d, ordinary pings %d, want 1 and 1", k.sweepOverBudget.Load(), fs.n())
+	if k.sweepOverBudget.Load() != 1 || fs.n() != 2 {
+		t.Errorf("over-budget %d, ordinary pings %d, want 1 and 2", k.sweepOverBudget.Load(), fs.n())
 	}
 }
 
@@ -247,10 +268,11 @@ func TestKeepAliveWithNoSweepRegistrationSendsAnOrdinaryPing(t *testing.T) {
 	k, fs, clock := testKeeper(t)
 	before := k.Stats().SweepNoCandidate
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
-	if fs.n() != 1 || k.sweepSubstituted.Load() != 0 {
-		t.Fatalf("ordinary pings %d, substituted %d, want 1 and 0", fs.n(), k.sweepSubstituted.Load())
+	waitPings(t, k, 2)
+	if fs.n() != 2 || k.sweepSubstituted.Load() != 0 {
+		t.Fatalf("ordinary pings %d, substituted %d, want 2 and 0", fs.n(), k.sweepSubstituted.Load())
 	}
 	if k.Stats().SweepNoCandidate-before < 1 {
 		t.Error("the missing registration was not counted")
@@ -320,10 +342,11 @@ func TestKeepAliveWithZeroCandidatesSendsAPlainPing(t *testing.T) {
 		sweepToolMsg("toolu_s", strings.Repeat("a spent line\n", 900)+expand.Marker("abcdef0"))})
 	before := k.Stats().SweepNoInventory
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
-	if asker.calls.Load() != 0 || fs.n() != 1 {
-		t.Fatalf("question asks %d, ordinary pings %d, want 0 and 1", asker.calls.Load(), fs.n())
+	waitPings(t, k, 2)
+	if asker.calls.Load() != 0 || fs.n() != 2 {
+		t.Fatalf("question asks %d, ordinary pings %d, want 0 and 2", asker.calls.Load(), fs.n())
 	}
 	if k.Stats().SweepNoInventory-before != 1 {
 		t.Error("the empty inventory was not counted")
@@ -344,10 +367,11 @@ func TestKeepAliveSurvivesAPanicInTheQuestion(t *testing.T) {
 	registerSweep(t, st, panicAskerKA{}, "claude-sonnet-5", sweepConversation(3))
 	before := k.Stats().SweepPanics
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
-	if fs.n() != 1 {
-		t.Fatalf("sent %d ordinary pings after the panic, want 1", fs.n())
+	waitPings(t, k, 2)
+	if fs.n() != 2 {
+		t.Fatalf("sent %d ordinary pings after the panic, want 2", fs.n())
 	}
 	if k.Stats().SweepPanics-before != 1 {
 		t.Errorf("the panic was not counted (%d)", k.Stats().SweepPanics-before)
@@ -367,10 +391,11 @@ func TestKeepAliveSurvivesAPanicInTheKeepersOwnQuestionCode(t *testing.T) {
 	asker := &sweepAsker{cacheRead: 48576}
 	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
-	if fs.n() != 1 {
-		t.Fatalf("sent %d ordinary pings after the keeper-level panic, want 1", fs.n())
+	waitPings(t, k, 2)
+	if fs.n() != 2 {
+		t.Fatalf("sent %d ordinary pings after the keeper-level panic, want 2", fs.n())
 	}
 	if k.sweepAskFailed.Load() != 1 || k.sweepSubstituted.Load() != 0 {
 		t.Errorf("ask failed %d, substituted %d, want 1 and 0", k.sweepAskFailed.Load(), k.sweepSubstituted.Load())
@@ -436,10 +461,11 @@ func TestWhenTheSummarizerTriggerDoesNotFireTheSweepAsks(t *testing.T) {
 	before := k.Stats().SweepSummaryOwnedPing
 
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
 	waitSweepOutcome(t, k, fs)
-	if k.sweepSubstituted.Load() != 1 || asker.calls.Load() != 1 || fs.n() != 0 {
-		t.Errorf("substituted %d, asks %d, ordinary pings %d, want 1, 1, 0",
+	if k.sweepSubstituted.Load() != 1 || asker.calls.Load() != 1 || fs.n() != 1 {
+		t.Errorf("substituted %d, asks %d, ordinary pings %d, want 1, 1, 1",
 			k.sweepSubstituted.Load(), asker.calls.Load(), fs.n())
 	}
 	if got := k.Stats().SweepSummaryOwnedPing - before; got != 0 {
@@ -466,15 +492,19 @@ func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
 				t0.Add(time.Duration(i)*time.Second), kaBody, http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
 	}
-	if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
-		t.Fatalf("fired %d pings, want 2 (both threads due at once)", n)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && k.pings.Load() < 2 {
-		time.Sleep(time.Millisecond)
-	}
-	if got := k.pings.Load(); got != 2 {
-		t.Fatalf("pings = %d, want 2: one per thread, never 2 on one thread", got)
+	// Ping 1: thread A's summary takes it; thread B's is plain (the question waits for its last ping).
+	// Ping 2: thread A sends a plain ping (the summary is spent), thread B's question takes it.
+	for i := int64(1); i <= 2; i++ {
+		if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
+			t.Fatalf("tick %d fired %d pings, want 2 (both threads due at once)", i, n)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && k.pings.Load() < 2*i {
+			time.Sleep(time.Millisecond)
+		}
+		if got := k.pings.Load(); got != 2*i {
+			t.Fatalf("pings = %d after tick %d, want %d: one per thread per tick, never 2 on one thread", got, i, 2*i)
+		}
 	}
 	if sumA.calls.Load() != 1 {
 		t.Errorf("summary calls on thread A = %d, want 1", sumA.calls.Load())
@@ -482,8 +512,8 @@ func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
 	if asker.calls.Load() != 1 {
 		t.Errorf("sweep asks = %d, want 1 (thread B only)", asker.calls.Load())
 	}
-	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
-		t.Errorf("summary %d, sweep %d, ordinary %d, want 1, 1, 0",
+	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 1 || fs.n() != 2 {
+		t.Errorf("summary %d, sweep %d, ordinary %d, want 1, 1, 2",
 			k.summarySubstituted.Load(), k.sweepSubstituted.Load(), fs.n())
 	}
 }
@@ -606,6 +636,7 @@ func TestTheAnswerCostIsBookedOnceOnThePingRowTheQuestionReplaced(t *testing.T) 
 	registerSweep(t, st, &sweepAsker{cacheRead: 48576}, "claude-sonnet-5", sweepConversation(3))
 	recordWithSink(k, sink, sess1, clock.now())
 	// The registration is for "sess-1" with no thread: sess1's session id is the same.
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
 	waitSweepOutcome(t, k, fd)
 	if k.sweepSubstituted.Load() != 1 {
@@ -665,7 +696,7 @@ func TestAnOrdinaryPingCarriesNoSweepAnswerCost(t *testing.T) {
 func TestAPingTheSweepQuestionReplacedUsesNoStep(t *testing.T) {
 	k, fs, clock := testKeeper(t)
 	pol := kaPolicy()
-	pol.MaxPings = pingVary + 4
+	pol.MaxPings = 2 // ping 1 plain, ping 2 the question (sweepMayAsk)
 	pol.MinPrefixTokens = 0
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	asker := &sweepAsker{cacheRead: 48576}
@@ -678,29 +709,33 @@ func TestAPingTheSweepQuestionReplacedUsesNoStep(t *testing.T) {
 	if had {
 		t.Fatalf("fixture: a step already exists (%d)", before)
 	}
-	k.Sweep(clock.advance(281 * time.Second)) // the question takes the ping
+	firstPlainPing(t, k, clock) // ping 1 is plain and takes step 0
+	k.mu.Lock()
+	before = k.lastVary[sess1.id()]
+	k.mu.Unlock()
+	k.Sweep(clock.advance(281 * time.Second)) // the question takes ping 2
 	waitSweepOutcome(t, k, fs)
-	if k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
+	if k.sweepSubstituted.Load() != 1 || fs.n() != 1 {
 		t.Fatalf("the question did not replace the ping (substituted %d, plain %d)", k.sweepSubstituted.Load(), fs.n())
 	}
 	k.mu.Lock()
-	_, used := k.lastVary[sess1.id()]
+	after := k.lastVary[sess1.id()]
 	k.mu.Unlock()
-	if used {
-		t.Fatal("the substituted ping used up an output-budget step")
+	if after != before {
+		t.Fatalf("the substituted ping used up an output-budget step (%d -> %d)", before, after)
 	}
-	// Two plain pings follow (the question is spent: asked once per idle period). They must differ.
+	// The next span's ping 1 is plain, and must differ from the last plain ping before it.
 	_ = key
-	k.Sweep(clock.advance(281 * time.Second))
+	recordOne(t, k, pol, kaBody, clock.advance(time.Second))
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 3)
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	if len(fs.sent) < 2 {
+	if len(fs.sent) != 2 {
 		t.Fatalf("sent %d plain pings, want 2", len(fs.sent))
 	}
 	if bytes.Equal(fs.sent[0].Body, fs.sent[1].Body) {
-		t.Error("two consecutive plain pings after a substituted one are byte-identical")
+		t.Error("two consecutive plain pings around a substituted one are byte-identical")
 	}
 }
 
@@ -729,17 +764,22 @@ func TestAFailedSweepQuestionFallsToAPlainPingAndAsksOnceWhenItBilled(t *testing
 				asker = ba
 			}
 			registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+			// Two idle spans of 2 pings each. Only ping 2 of a span may ask (sweepMayAsk), so the question
+			// gets one try per span; the latch decides whether the second span asks again.
 			recordOne(t, k, pol, kaBody, clock.now())
-			k.Sweep(clock.advance(281 * time.Second))
-			waitPings(t, k, 1)
+			firstPlainPing(t, k, clock)
 			k.Sweep(clock.advance(281 * time.Second))
 			waitPings(t, k, 2)
+			recordOne(t, k, pol, kaBody, clock.advance(time.Second))
+			firstPlainPing(t, k, clock)
+			k.Sweep(clock.advance(281 * time.Second))
+			waitPings(t, k, 4)
 			calls := sa.calls.Load()
 			if ba != nil {
 				calls = ba.calls.Load()
 			}
 			if calls != tc.wantAsked {
-				t.Errorf("the question was asked %d times over two pings, want %d", calls, tc.wantAsked)
+				t.Errorf("the question was asked %d times over two spans, want %d", calls, tc.wantAsked)
 			}
 			k.mu.Lock()
 			retried := sess1Entry(k).retried
@@ -809,8 +849,9 @@ func TestTheSweepCeilingPricesEveryBatchAndLowersTheCount(t *testing.T) {
 			for _, d := range []time.Duration{-time.Second, 0} {
 				rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 			}
+			firstPlainPing(t, k, clock)
 			k.Sweep(clock.advance(281 * time.Second))
-			waitPings(t, k, 1)
+			waitPings(t, k, 2)
 			if got := asker.calls.Load(); got != tc.wantAsks {
 				t.Fatalf("the sweep asked %d questions, want %d (a ceiling of $%.2f)", got, tc.wantAsks, tc.ceiling)
 			}
@@ -820,8 +861,8 @@ func TestTheSweepCeilingPricesEveryBatchAndLowersTheCount(t *testing.T) {
 			if got := k.sweepOverBudget.Load(); got != tc.wantRefuse {
 				t.Errorf("sweep_over_budget = %d, want %d", got, tc.wantRefuse)
 			}
-			if tc.wantAsks == 0 && fs.n() != 1 {
-				t.Errorf("ordinary pings %d, want 1 when not even one answer fits", fs.n())
+			if tc.wantAsks == 0 && fs.n() != 2 {
+				t.Errorf("ordinary pings %d, want 2 (ping 1 and ping 2) when not even one answer fits", fs.n())
 			}
 			// And the candidates the ceiling left out are COUNTED, not silently lost.
 			if lowered := tc.wantAsks > 0 && tc.wantAsks < 4; lowered {
@@ -888,8 +929,9 @@ func TestStatsPublishesTheBatchCountersFromOneSnapshot(t *testing.T) {
 	for _, d := range []time.Duration{-time.Second, 0} {
 		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
+	waitPings(t, k, 2)
 	s := k.Stats()
 	want := offload.SweepBatchCounters()
 	if s.SweepAskBatches != want.Batches || s.SweepAskBatches != 2 {
@@ -957,8 +999,9 @@ func TestANoCapPolicyAsksEveryBatchEndToEnd(t *testing.T) {
 	for _, d := range []time.Duration{-time.Second, 0} {
 		rec(k, pol, sess1, at.Add(d), kaBody, http.StatusOK, Usage{CacheRead: 20000}, true)
 	}
+	firstPlainPing(t, k, clock)
 	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 1)
+	waitPings(t, k, 2)
 	if got := asker.calls.Load(); got != 4 {
 		t.Fatalf("a no-cap policy asked %d questions, want all 4 planned", got)
 	}
