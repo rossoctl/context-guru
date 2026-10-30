@@ -89,6 +89,18 @@ type sweepDropRec struct {
 	Tokens int    `json:"tokens"`
 	AtMs   int64  `json:"at_ms"`
 	Kind   string `json:"kind"` // "cold", "changed_prefix" or "warm"
+	// Rule says what chose the drop when sweep v3 was on: a rule name, or "judge". Empty otherwise. A name
+	// only, so an expand can be counted per rule. No content.
+	Rule string `json:"rule,omitempty"`
+	// Sweep v3 only. Tool is the name of the tool whose output this was, TKind its class (read, edit, command or
+	// other), and Target a HASH of the file path or command of that call (callTarget). The path itself is never
+	// stored. A later tool call whose target hashes the same is a re-read of what the drop removed. RereadAt is how
+	// many messages have been scanned for one; Reread is set once one was seen.
+	Tool     string `json:"tool,omitempty"`
+	TKind    string `json:"tkind,omitempty"`
+	Target   string `json:"target,omitempty"`
+	RereadAt int    `json:"reread_at,omitempty"`
+	Reread   bool   `json:"reread,omitempty"`
 	// Idents are short hashes of the identifiers the output introduced. A later turn that uses one,
 	// without expanding, is the referenced_later signal.
 	Idents []string `json:"idents,omitempty"`
@@ -446,6 +458,9 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 		if first {
 			rec.Expanded = true
 			putDrop(st, rec)
+			if rec.Rule != "" {
+				noteV3Expand(rec.Rule)
+			}
 			if !note.First {
 				note.First, note.Overlap = true, overlap
 				note.Warm = rec.Kind == dropKindWarm
@@ -607,6 +622,9 @@ func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *component
 
 	// 2. References to earlier drops.
 	e.scanReferences(req, rep, c, tkey)
+	if e.v3 {
+		e.scanRereads(req, c, tkey)
+	}
 
 	// 3. A held answer.
 	ak, ac := e.applyHeld(req, rep, c, tkey)
@@ -740,6 +758,17 @@ func modelAuthoredText(m bschemas.ChatMessage) string {
 	return s
 }
 
+// ruleNamer is implemented by the sweep v3 sources, which know what chose each drop.
+type ruleNamer interface{ ruleFor(toolID string) string }
+
+// ruleOfSource is the rule that chose a drop, or "" for a source that does not say (everything but v3).
+func ruleOfSource(src heldSource, toolID string) string {
+	if rn, ok := src.(ruleNamer); ok {
+		return rn.ruleFor(toolID)
+	}
+	return ""
+}
+
 // pendingDrop is a drop applied to req but not yet recorded.
 type pendingDrop struct {
 	rec    sweepDropRec
@@ -774,14 +803,41 @@ type warmApply struct {
 	removedBilled int
 	turns, netUSD float64
 	deep          bool
-	gate          func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
+	// Sweep v3: D as a share of P, and P as a share of C, set by the v3 gate.
+	dShareP, pShareC float64
+	cutPoint         int
+	cSource          string
+	// Sweep v3: D by what chose it (set before the gate runs, so every apply-stage decision line carries it).
+	ruleD map[string]int
+	// Sweep v3 experiment premium: what the gate added to the saving, and whether the cost alone passed.
+	premium      float64
+	passedOnCost bool
+	gate         func(res recheckResult, raw []bschemas.ChatMessage) (ok bool, reason string)
 }
 
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
 // drops after the change point). Anything else leaves the answer held and the request unchanged.
 func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string) (keys []string, changed int) {
-	return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
+	if !e.v3 {
+		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
+	}
+	var protected map[string]bool
+	var claimed []string
+	src := v3Filtered{heldSource: storeHeld{c.Store}, claimed: &claimed, plan: func() map[string]bool {
+		if protected == nil {
+			protected = e.v3Plan(c, req).protectedID
+		}
+		return protected
+	}}
+	var before map[string]bool
+	src.onClaim = func() { before = v3MarkedIDs(c, req) }
+	keys, changed = e.applyHeldFrom(src, nil, req, rep, c, tkey)
+	if changed > 0 {
+		// Sweep v3: a cold or changed-prefix apply is a cut. It is counted and it starts the growth wait.
+		e.v3ColdCut(c, req, tkey, claimed, before, nil)
+	}
+	return keys, changed
 }
 
 // applyHeldFrom is applyHeld over any source. With warm == nil it is the cold apply, exactly. With warm
@@ -943,6 +999,11 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			later = append(later, o)
 		}
 	}
+	// Sweep v3 records which tool and which target (a hash) each drop came from, to see a re-read later.
+	var v3calls map[string]v3Call
+	if e.v3 {
+		v3calls = v3Calls(req)
+	}
 	for _, o := range now {
 		idx, ok := rawToolMessage(req.Input, o.ToolUseID)
 		if !ok {
@@ -970,7 +1031,8 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		pending = append(pending, pendingDrop{idx: idx, before: before, rec: sweepDropRec{
 			Thread: tkey, ToolUseID: o.ToolUseID, CK: extract.ContentKey(content), Marker: key,
 			Tokens: saved, AtMs: time.Now().UnixMilli(), Kind: kind,
-			Idents: res.identsOf(o.ToolUseID), Seen: len(raw),
+			Idents: res.identsOf(o.ToolUseID), Seen: len(raw), Rule: ruleOfSource(src, o.ToolUseID),
+			Tool: v3calls[o.ToolUseID].lname(), TKind: v3calls[o.ToolUseID].tkind(), Target: v3calls[o.ToolUseID].target(), RereadAt: rereadStart(e.v3, len(raw)),
 		}})
 		changed++
 		if key != "" {
@@ -1021,6 +1083,11 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			ev = eventAppliedChangedPrefix
 		}
 		rep.EventN(ev, n)
+		if e.v3 {
+			for _, p := range pending {
+				noteV3Dropped(p.rec.TKind)
+			}
+		}
 		if warmGated {
 			noteWarmSweep(tkey, WarmSweep{Drops: n, RemovedLocal: removedNow(pending), RemovedBilled: warm.removedBilled,
 				RewriteBilled: warm.rewriteBilled, ConvBefore: convBefore, ConvAfter: localTokens(req.Input),

@@ -285,9 +285,16 @@ func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g 
 	if c.CutFrac > 0 {
 		cut = c.CutFrac * cut
 	}
+	return rewriteHorizon{N: turnsUntilCut(cut, billedAfter, growth), Model: horizonModelBilled}
+}
+
+// turnsUntilCut is THE definition of the turns left: (cut - the billed prompt AFTER the removal) / (billed
+// growth per turn), never below 0. cacheRewriteHorizon (coref) and the warm gate (sweep v3) both use it, so
+// "a removal postpones the cut" is counted one way.
+func turnsUntilCut(cut, billedAfter, growth float64) float64 {
 	n := (cut - billedAfter) / growth
 	if n < 0 {
-		n = 0
+		return 0
 	}
-	return rewriteHorizon{N: n, Model: horizonModelBilled}
+	return n
 }

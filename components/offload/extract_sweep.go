@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,19 @@ type ExtractSweep struct {
 	// warmExpectedTurns, when > 0, is the session length the warm gate assumes (warm_expected_turns).
 	warmExpectedTurns int
 
+	// v3 is sweep v3 (rules, protection, one big cut at a sweet spot) on the warm path. OFF unless a v3 setting
+	// is written. With it off, the warm path is exactly what it was. See extract_sweep_v3.go.
+	v3                   bool
+	selector             string
+	fillSmall, fillLarge float64
+	minDropFrac          float64
+	protectTools         map[string]bool
+	protectPaths         []*regexp.Regexp
+	protectLastN         int
+	ruleUnref            bool
+	ruleUnrefMinAge      int
+	premiumUSD           float64
+
 	mode markerMode
 }
 
@@ -173,6 +187,27 @@ type extractSweepConfig struct {
 	// then expects max(this - turns so far, 0) more. 0 (the default) = unset: the turns left are estimated
 	// from the billed growth per turn up to the cut.
 	WarmExpectedTurns int `yaml:"warm_expected_turns"`
+	// Sweep v3 on the warm path (extract_sweep_v3.go). All off by default. They do nothing without warm: true.
+	//
+	// Selector: judge (the default, as before), rule (rules only, no model call) or hybrid (rules, then the judge).
+	Selector string `yaml:"selector"`
+	// FillSmall and FillLarge: the sweet spot as a share of C, at C = 200k and at C = 1M. 0 = unset.
+	FillSmall float64 `yaml:"fill_small"`
+	FillLarge float64 `yaml:"fill_large"`
+	// MinDropFrac: a cut must remove at least this share of the billed prompt. 0 = unset.
+	MinDropFrac float64 `yaml:"min_drop_frac"`
+	// ProtectTools and ProtectPaths: tool names and path globs whose outputs are never dropped.
+	ProtectTools []string `yaml:"protect_tools"`
+	ProtectPaths []string `yaml:"protect_paths"`
+	// ProtectLastN: the newest tool results that are never dropped. nil = 10 when v3 is on.
+	ProtectLastN *int `yaml:"protect_last_n"`
+	// RuleUnreferenced switches on rule (c): drop a tool output that nothing later references. Off by default.
+	// RuleUnreferencedMinAge: how many tool calls newer the output must have (0 = 30).
+	// CompactionPremiumUSD is an EXPERIMENT knob (sweep v3): a premium added to the saving side of the gate when a
+	// cut postpones the compaction. 0 = the cost gate. See extract_sweep_warm.go.
+	CompactionPremiumUSD   float64 `yaml:"compaction_premium_usd"`
+	RuleUnreferenced       bool    `yaml:"rule_unreferenced"`
+	RuleUnreferencedMinAge int     `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -216,6 +251,7 @@ const maxAskItems = 12
 var sweepBannedKeys = []struct {
 	key, why string
 }{
+	{"credit_avoided_compaction", "a cut only DELAYS the compaction: it happens anyway, and it removes the dropped outputs anyway. The gate prices the saving on the turns until that compaction (N) and credits nothing for an avoided one. Remove the key"},
 	{"strategy", "an adjudicator selects no compaction strategy — it returns a verdict, not a program"},
 	{"rewrite", "nothing is rewritten, so there is no rewrite to validate; the output is kept verbatim or removed"},
 	{"aggressiveness", "there is no compaction target to teach: the only question asked is whether the output is spent"},
@@ -355,7 +391,14 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	}
 	// Evidence is ON unless the operator wrote `evidence: false`.
 	evidence := cfg.Evidence == nil || *cfg.Evidence
+	v3, err := parseSweepV3(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &ExtractSweep{
+		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
+		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, premiumUSD: v3.premiumUSD,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
@@ -1275,6 +1318,27 @@ func init() {
 			Hint: "Warm path: ask only when the removable candidate mass (outputs old enough and over the floor) is at least this share of the conversation. Default 0.20. On recorded sessions one sweep paid only when (tokens removed) x (turns left) was at least 11.5 x (conversation - tokens removed), and the best single sweep fell near 40% of the session, so a sweep of under a fifth almost never covers the rewrite it forces. A value outside (0, 1] reads as the default."},
 		{Key: "warm_gate_price_model", Type: components.FieldString,
 			Hint: "DIAGNOSTIC, unset by default and in no preset. Price the warm gate's saving and rewrite with THIS model's rates (for example claude-opus-5) instead of the request's model. For a test run on a model the price table prices at $0, where the gate would see saving = rewrite = 0 and refuse everything. It is used only in the gate's decision: the dashboard and /stats keep pricing the real model. Logged once at start and shown in /stats as keepalive.sweep_warm.gate_price_model, so a run with it is never mistaken for a normal run."},
+
+		{Key: "selector", Type: components.FieldEnum, Default: selectorJudge, Options: []string{selectorJudge, selectorRule, selectorHybrid},
+			Hint: "Sweep v3, on the warm path (needs warm: true). Who picks the outputs to drop. judge (default): the model, as before. rule: rules only, no model call: a file read whose path was read or written again later, and a build, test or lint run that a later run of the same command repeats. hybrid: the rules first, then the model on the outputs the rules did not decide. rule and hybrid switch the v3 gates on."},
+		{Key: "fill_small", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths, protect_last_n or rule_unreferenced switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.70 (a general rule: 70% of the effective context). fill is linear in C between 200k and 1M."},
+		{Key: "fill_large", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 1M or more. 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.6."},
+		{Key: "min_drop_frac", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: a cut must remove at least this share of the billed prompt, or it is refused (drop_too_small). 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.15. After an accepted cut the next one waits until the billed prompt has grown by this share of C."},
+		{Key: "protect_tools", Type: components.FieldStrings,
+			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
+		{Key: "protect_paths", Type: components.FieldStrings,
+			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
+		{Key: "compaction_premium_usd", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3, an EXPERIMENT knob to measure quality, not a tuning knob. A premium in USD added to the saving side of the payback gate when a cut postpones the compaction (the turns counted from the prompt after the cut are more than those without it, which is any cut that removes something in the cut turns model). The gate then accepts when the saving to N plus this premium is more than the rewrite. 0 (default) is the cost gate: saving to N, no premium. A high value, for example 10, effectively turns the cost gate off in a $0 test, while the real cost is still logged. Every apply-stage decision logs premium_usd and passed_on_cost. Writing it switches the v3 gates on (with warm: true)."},
+		{Key: "rule_unreferenced", Type: components.FieldBool,
+			Hint: "Sweep v3 rule (c), off by default. Drop a tool output that nothing later in the conversation references: no later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). It is the recheck's referenced_later test, run over the whole later conversation, and it never drops an output that introduced no identifier. It needs selector rule or hybrid, and it obeys every protection. Its drops are counted under unreferenced. Writing it switches the v3 gates on (with warm: true)."},
+		{Key: "rule_unreferenced_min_age", Type: components.FieldInt, Default: defaultRuleUnrefMinAge, Min: 0,
+			Hint: "Sweep v3 rule (c): how many tool calls newer an output must have before it can be dropped as unreferenced. Default 30. An output with fewer has had no chance to be referenced."},
+		{Key: "protect_last_n", Type: components.FieldInt, Default: defaultProtectLastN, Min: 0,
+			Hint: "Sweep v3: the newest N tool results are never dropped. Default 10 when v3 is on; 0 protects none."},
 
 		markerModeField(),
 	})

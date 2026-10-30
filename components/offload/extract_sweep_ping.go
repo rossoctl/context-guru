@@ -67,6 +67,8 @@ const (
 	SweepReasonConcurrencyFull SweepPingReason = "concurrency_full"
 	// SweepReasonNoAsker: the route has no prefix asker.
 	SweepReasonNoAsker SweepPingReason = "no_asker"
+	// SweepReasonV3Rule: sweep v3 with selector rule makes no model call, so the ping is plain.
+	SweepReasonV3Rule SweepPingReason = "v3_rule"
 	// SweepReasonPanic: the question panicked and was recovered. The ping stays plain, and the
 	// conversation is marked asked so the next ping is plain too. A panic inside ONE batch is caught per
 	// batch (reason batch_panic): the other batches' answers are kept, and the conversation is still marked
@@ -256,6 +258,10 @@ var (
 // registerPing snapshots this request's conversation for the keeper. Deferred from Offload so it sees
 // the conversation as the component leaves it, replays included.
 func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChatRequest) {
+	// Sweep v3 with selector rule: the ping question is always refused, so keep no copy of the conversation.
+	if e.v3 && e.selector == selectorRule {
+		return
+	}
 	if c == nil || c.Session == "" || c.PrefixAsk == nil || c.Store == nil || c.Bypass ||
 		c.Mode == components.ModeObserve || req == nil || len(req.Input) == 0 {
 		return
@@ -405,6 +411,11 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 		sweepPingNoCandidate.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonNoCandidate, false
 	}
+	// SWEEP V3: with selector rule there is no model call at all, so the ping stays a plain ping.
+	if cand.e.v3 && cand.e.selector == selectorRule {
+		noteV3Refuse("ping_refused_rule")
+		return nil, SweepPingInfo{}, SweepReasonV3Rule, false
+	}
 	if cand.asked.Load() {
 		sweepPingAlreadyAsked.Add(1)
 		return nil, SweepPingInfo{}, SweepReasonAlreadyAsked, false
@@ -492,6 +503,11 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	if cand.warm {
 		fe = newFileEvidence(req)
 	}
+	// Sweep v3: the judge is not asked about a protected output, nor (hybrid) about one a rule decided.
+	var v3p v3Plan
+	if e.v3 {
+		v3p = e.v3Plan(c, req)
+	}
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
@@ -501,6 +517,14 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 		content := schema.MessageText(*msg)
 		if content == "" || carriesRealMarker(c, content) {
 			rep.Gate("empty_or_marker_present")
+			continue
+		}
+		if v3p.protected[i] {
+			rep.Gate("sweep_v3_protected")
+			continue
+		}
+		if e.selector == selectorHybrid && v3p.ruleIdx[i] {
+			rep.Gate("sweep_v3_rule_decided")
 			continue
 		}
 		id := extract.ContentKey(content)

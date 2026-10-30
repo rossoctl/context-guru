@@ -724,6 +724,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// /compact did not reflect production, and offline replay/eval measured a different
 	// component than the one that ships.
 	window, windowExact := h.resolveWindow(r.Context(), body)
+	cpoint := h.resolveCompactionPoint(r.Context(), body, window)
 	// Use the SAME boundary tracker as the chat path. /compact used to fall through to
 	// apply's legacy store-backed prevLen, which the chat path had already moved off, so this
 	// endpoint kept two properties the chat path had shed: concurrent turns of one session
@@ -752,8 +753,8 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 		WindowExact: windowExact,
 		// C, resolved beside the window because the fill fraction belongs over it rather than over
 		// the window — see internal/compactionpoint.
-		CompactionPoint:       compactionpoint.For(gjson.GetBytes(body, "model").String()).Tokens(window),
-		CompactionPointSource: string(compactionpoint.For(gjson.GetBytes(body, "model").String()).Source),
+		CompactionPoint:       cpoint.Tokens(window),
+		CompactionPointSource: string(cpoint.Source),
 		CacheMode:             cacheMode,
 		Tracker:               h.tracker,
 	})
@@ -1139,7 +1140,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// triggers scale with the model; 0 when unknown (absolutes apply).
 		window, windowExact := h.resolveWindow(r.Context(), body)
 		// C beside the window, resolved once for both the enforced and the observed path.
-		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
+		cpoint := h.resolveCompactionPoint(r.Context(), body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.
@@ -2137,6 +2138,22 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
+// table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
+// and /compact) go through it, as they do for the window.
+func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
+	model := gjson.GetBytes(body, "model").String()
+	stated := 0
+	if cp, ok := h.opts.Windows.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	}); ok {
+		if n, found := cp.CompactionPoint(ctx, model); found {
+			stated = n
+		}
+	}
+	return compactionpoint.Resolve(model, stated, window)
 }
 
 // resolveWindow resolves this request's model context window and whether that figure is
