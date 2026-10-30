@@ -292,3 +292,42 @@ func TestSpendExplainLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
 			"must not credit it either (0.08 is the unbounded look-back)", got)
 	}
 }
+
+// #781: an empty window sends every list as [], never null. A client that reads a list with
+// .get(key, []) gets None for a null (the key is present), and cg.py insights details crashed on it.
+func TestSpendExplainSendsEmptyListsNotNull(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	_, body := get(t, a, "/api/spend/explain", "127.0.0.1:1")
+	for _, k := range []string{"idle_gaps", "top_rewrites", "models", "sessions", "daily", "session_days", "live"} {
+		v, ok := body[k]
+		if !ok {
+			t.Errorf("%s: missing", k)
+			continue
+		}
+		if _, isList := v.([]any); !isList {
+			t.Errorf("%s = %v (%T), want an empty list", k, v, v)
+		}
+	}
+}
+
+// #781: /api/tools and /api/tools/last-used also send an empty list as [], never null.
+func TestToolsEndpointsSendEmptyListsNotNull(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	_, body := get(t, a, "/api/tools", "127.0.0.1:1")
+	for _, k := range []string{"tools", "servers", "aside", "models"} {
+		if _, isList := body[k].([]any); !isList {
+			t.Errorf("/api/tools %s = %v (%T), want an empty list", k, body[k], body[k])
+		}
+	}
+	if sk, _ := body["skills"].(map[string]any); sk == nil {
+		t.Errorf("/api/tools skills = %v, want an object", body["skills"])
+	} else if _, isList := sk["skills"].([]any); !isList {
+		t.Errorf("/api/tools skills.skills = %v (%T), want an empty list", sk["skills"], sk["skills"])
+	}
+	_, last := get(t, a, "/api/tools/last-used", "127.0.0.1:1")
+	if _, isList := last["tools"].([]any); !isList {
+		t.Errorf("/api/tools/last-used tools = %v (%T), want an empty list", last["tools"], last["tools"])
+	}
+}

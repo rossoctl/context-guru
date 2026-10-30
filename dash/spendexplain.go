@@ -481,6 +481,30 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		return nil, err
 	}
 	out.Live = live
+	// A list with no entries goes out as [], never null. Go encodes a nil slice as null, and a
+	// client that reads one of these with .get(key, []) gets None, not its default, because the key
+	// is present (#781: cg.py insights details crashed on a dashboard with no expiry yet).
+	if out.IdleGaps == nil {
+		out.IdleGaps = []GapBand{}
+	}
+	if out.TopRewrites == nil {
+		out.TopRewrites = []RewriteEvent{}
+	}
+	if out.Models == nil {
+		out.Models = []*SpendModel{}
+	}
+	if out.Sessions == nil {
+		out.Sessions = []*SpendSession{}
+	}
+	if out.Daily == nil {
+		out.Daily = []*SpendDay{}
+	}
+	if out.SessionDays == nil {
+		out.SessionDays = []SessionDay{}
+	}
+	if out.Live == nil {
+		out.Live = []LiveSession{}
+	}
 	return out, nil
 }
 
@@ -611,6 +635,9 @@ func (a *API) toolsLastUsed(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if out == nil {
+		out = []toolLastUsed{} // [] not null, for the same reason as SpendExplainFor (#781)
 	}
 	writeJSON(w, map[string]any{"tools": out})
 }

@@ -484,7 +484,32 @@ func (d *DB) RecentSessions(f Filter, n int) ([]string, error) {
 }
 
 func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool)) (*ToolReport, error) {
-	return d.toolReportFor(f, price, &declScanOnce{d: d, f: f})
+	rep, err := d.toolReportFor(f, price, &declScanOnce{d: d, f: f})
+	if rep != nil {
+		rep.emptyListsNotNull()
+	}
+	return rep, err
+}
+
+// emptyListsNotNull gives every list in the report a non-nil value, so the JSON carries [] and never
+// null. Go encodes a nil slice as null, and a client that reads a list with .get(key, []) gets None
+// for a present null key (#781: cg.py insights crashed on a window with no tool-bearing session).
+func (r *ToolReport) emptyListsNotNull() {
+	if r.Tools == nil {
+		r.Tools = []ToolStat{}
+	}
+	if r.Servers == nil {
+		r.Servers = []ServerStat{}
+	}
+	if r.Skills.Skills == nil {
+		r.Skills.Skills = []ToolStat{}
+	}
+	if r.Aside == nil {
+		r.Aside = []ToolStat{}
+	}
+	if r.Models == nil {
+		r.Models = []ModelRate{}
+	}
 }
 
 // toolReportFor is ToolReportFor with the table pass it may need supplied by the caller, so a
