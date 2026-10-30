@@ -1,6 +1,8 @@
 package offload
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -237,7 +239,7 @@ func (e *ExtractSweep) v3CutPoint(c *components.Ctx) (cut int, source string) {
 // ---------------------------------------------------------------------------------------------------
 // The rules and the protection. Tool names, paths and commands are read from the request in flight.
 
-type v3Call struct{ name, path, cmd string }
+type v3Call struct{ name, path, cmd, args string }
 
 // v3PlanBuilds counts plans built, so a test can show that a request which needs none builds none.
 var v3PlanBuilds atomic.Int64
@@ -295,7 +297,7 @@ func v3Calls(req *bschemas.BifrostChatRequest) map[string]v3Call {
 			if tc.Function.Name != nil {
 				name = *tc.Function.Name
 			}
-			out[*tc.ID] = v3Call{name: name, path: callPath(tc.Function.Arguments), cmd: callCommand(tc.Function.Arguments)}
+			out[*tc.ID] = v3Call{name: name, path: callPath(tc.Function.Arguments), cmd: callCommand(tc.Function.Arguments), args: tc.Function.Arguments}
 		}
 	}
 	return out
@@ -903,10 +905,23 @@ type V3Stats struct {
 	// Expands counts the first expands of v3 drops by what chose them: a rule name, or judge. With rule_drops and
 	// judge_drops it gives the expand rate per rule and for the judge.
 	Expands map[string]int64 `json:"expands,omitempty"`
+	// DroppedByKind counts applied v3 drops by the class of the tool whose output was dropped (read, edit, command,
+	// other). Reread counts the later tool calls that went back to what a drop removed (the same file read or
+	// edited again, or the same command run again), by what chose the drop and by the same class. With the drop
+	// counts it gives the re-read rate. It matches path HASHES: no path is stored.
+	DroppedByKind map[string]int64 `json:"dropped_by_kind,omitempty"`
+	Reread        V3Reread         `json:"reread_after_drop"`
 	// RecentRefusals lists the last cut attempts refused before the gate (not_in_sweet_spot, and in rule mode
 	// drop_too_small and no_rule_drops), with D, D/P, C, where C came from, and D by rule. The gate's own refusals
 	// (drop_too_small, does_not_pay) are in the decision log, not here.
 	RecentRefusals []V3Refusal `json:"recent_refusals,omitempty"`
+}
+
+// V3Reread counts re-reads of dropped targets.
+type V3Reread struct {
+	Total    int64            `json:"total"`
+	BySource map[string]int64 `json:"by_source,omitempty"`
+	ByKind   map[string]int64 `json:"by_kind,omitempty"`
 }
 
 // V3Refusal is one cut attempt refused before the gate, in numbers. The thread is a hash label.
@@ -948,7 +963,7 @@ func noteV3Expand(rule string) {
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.CutsOnCost > 0 || s.CutsOnPremium > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return s.Reread.Total > 0 || len(s.DroppedByKind) > 0 || len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.CutsOnCost > 0 || s.CutsOnPremium > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -1046,6 +1061,22 @@ func v3Counters() V3Stats {
 		}
 	}
 	out.RecentRefusals = append([]V3Refusal(nil), v3Ledger.RecentRefusals...)
+	if len(v3Ledger.DroppedByKind) > 0 {
+		out.DroppedByKind = map[string]int64{}
+		for k, n := range v3Ledger.DroppedByKind {
+			out.DroppedByKind[k] = n
+		}
+	}
+	out.Reread.Total = v3Ledger.Reread.Total
+	if v3Ledger.Reread.Total > 0 {
+		out.Reread.BySource, out.Reread.ByKind = map[string]int64{}, map[string]int64{}
+		for k, n := range v3Ledger.Reread.BySource {
+			out.Reread.BySource[k] = n
+		}
+		for k, n := range v3Ledger.Reread.ByKind {
+			out.Reread.ByKind[k] = n
+		}
+	}
 	if len(v3Ledger.Expands) > 0 {
 		out.Expands = map[string]int64{}
 		for k, n := range v3Ledger.Expands {
@@ -1162,4 +1193,151 @@ func v3MarkedIDs(c *components.Ctx, req *bschemas.BifrostChatRequest) map[string
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Which file or command each drop came from, as a hash, and whether the agent went back to it.
+
+// targetHash is THE hash of a file path or a command. Both sides use it: the drop record at the drop, and the
+// scan of the later tool calls. A prefix keeps a path and a command apart. 8 bytes, so two files rarely collide.
+func targetHash(domain, s string) string {
+	h := sha256.Sum256([]byte("cg-swt|" + domain + "|" + s))
+	return hex.EncodeToString(h[:8])
+}
+
+// callTarget is the class of a tool call (read, edit, command or other) and the hash of its file path or
+// command, or "" when it has neither. The path is cleaned by callPath, the command by callCommand.
+func callTarget(name, args string) (target, tkind string) {
+	rd, ed := toolKind(name)
+	switch {
+	case rd:
+		tkind = "read"
+	case ed:
+		tkind = "edit"
+	case shellTool(name):
+		tkind = "command"
+	default:
+		tkind = "other"
+	}
+	if rd || ed {
+		if p := callPath(args); p != "" {
+			return targetHash("p", p), tkind
+		}
+	} else if tkind == "command" {
+		if cmd := callCommand(args); cmd != "" {
+			return targetHash("c", cmd), tkind
+		}
+	}
+	return "", tkind
+}
+
+// lname, tkind and target are the drop record's view of a call. The zero v3Call (no such call) gives empty strings.
+func (c v3Call) lname() string { return strings.ToLower(c.name) }
+func (c v3Call) tkind() string {
+	if c.name == "" {
+		return ""
+	}
+	_, k := callTarget(c.name, c.args)
+	return k
+}
+func (c v3Call) target() string {
+	if c.name == "" {
+		return ""
+	}
+	t, _ := callTarget(c.name, c.args)
+	return t
+}
+
+// rereadStart is where the re-read scan of a new drop begins: after the messages the drop was made on. 0 off v3.
+func rereadStart(v3 bool, n int) int {
+	if !v3 {
+		return 0
+	}
+	return n
+}
+
+// scanRereads looks, once per new message, for a tool call that goes back to what a drop removed: a read or an
+// edit of the same file, or a run of the same command. It matches HASHES, never a path. Each drop is counted once.
+func (e *ExtractSweep) scanRereads(req *bschemas.BifrostChatRequest, c *components.Ctx, tkey string) {
+	defer func() { _ = recover() }() // a signal, never a reason to fail the request
+	ix := getDropIndex(c.Store, tkey)
+	if len(ix.Cks) == 0 {
+		return
+	}
+	raw := req.Input
+	if c.RawInput != nil {
+		raw = c.RawInput
+	}
+	for _, ck := range ix.Cks {
+		rec, ok := getDrop(c.Store, tkey, ck)
+		if !ok || rec.Target == "" || rec.Reread || rec.RereadAt >= len(raw) {
+			continue
+		}
+		hit := false
+		for j := rec.RereadAt; j < len(raw) && !hit; j++ {
+			a := raw[j].ChatAssistantMessage
+			if a == nil {
+				continue
+			}
+			for _, tc := range a.ToolCalls {
+				name := ""
+				if tc.Function.Name != nil {
+					name = *tc.Function.Name
+				}
+				if t, _ := callTarget(name, tc.Function.Arguments); t != "" && t == rec.Target {
+					hit = true
+					break
+				}
+			}
+		}
+		seen := len(raw)
+		func() {
+			dropMu.Lock()
+			defer dropMu.Unlock()
+			cur, ok := getDrop(c.Store, tkey, ck)
+			if !ok {
+				return
+			}
+			if seen > cur.RereadAt {
+				cur.RereadAt = seen
+			}
+			if hit && !cur.Reread {
+				cur.Reread = true
+				noteV3Reread(cur.Rule, cur.TKind)
+			}
+			putDrop(c.Store, cur)
+		}()
+	}
+}
+
+// noteV3Dropped counts an applied v3 drop by the class of its tool: the denominator of a re-read rate.
+func noteV3Dropped(tkind string) {
+	if tkind == "" {
+		tkind = "unknown"
+	}
+	v3Mu.Lock()
+	if v3Ledger.DroppedByKind == nil {
+		v3Ledger.DroppedByKind = map[string]int64{}
+	}
+	v3Ledger.DroppedByKind[tkind]++
+	v3Mu.Unlock()
+}
+
+// noteV3Reread counts a re-read of a dropped target by what chose the drop and by the class of its tool.
+func noteV3Reread(source, tkind string) {
+	if source == "" {
+		source = "unknown"
+	}
+	if tkind == "" {
+		tkind = "unknown"
+	}
+	v3Mu.Lock()
+	r := &v3Ledger.Reread
+	r.Total++
+	if r.BySource == nil {
+		r.BySource, r.ByKind = map[string]int64{}, map[string]int64{}
+	}
+	r.BySource[source]++
+	r.ByKind[tkind]++
+	v3Mu.Unlock()
 }

@@ -1,6 +1,7 @@
 package offload
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -78,6 +79,7 @@ type v3Rig struct {
 	cSource string
 	cutFrac float64
 	window  int
+	after   []v3T // calls appended after the filler
 	noKA    bool
 }
 
@@ -95,6 +97,10 @@ func newV3Rig(t *testing.T, session, cfg string) *v3Rig {
 func (r *v3Rig) request(p int) (*bschemas.BifrostChatRequest, *components.Report) {
 	r.t.Helper()
 	req := v3Conv(r.calls, r.step)
+	// Calls the agent makes AFTER the cut go at the end, as in a real conversation.
+	for _, a := range r.after {
+		req.Input = append(req.Input, tCallMsg(a.id, a.name, a.args), toolResultMsgWithID(a.id, a.out))
+	}
 	r.step++
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
@@ -1440,5 +1446,163 @@ func TestV3PremiumIsOffWithoutV3(t *testing.T) {
 	// A premium alone switches v3 on, like every v3 setting.
 	if e := shippedSweep(t, warmCfg+"compaction_premium_usd: 3\n"); !e.v3 || e.premiumUSD != 3 {
 		t.Fatalf("compaction_premium_usd must switch v3 on: %+v", e)
+	}
+}
+
+// ---- which file or command each drop came from (a hash), and a re-read after the drop ----
+
+func targetOf(t *testing.T, st store.Store, session string, id string) sweepDropRec {
+	t.Helper()
+	key := thread.Key(session, "")
+	for _, ck := range getDropIndex(st, key).Cks {
+		if rec, ok := getDrop(st, key, ck); ok && rec.ToolUseID == id {
+			return rec
+		}
+	}
+	t.Fatalf("no drop record for %s", id)
+	return sweepDropRec{}
+}
+
+// A cut whose drops are two reads (a.txt, b.txt) and one build: a, a again, b and the build repeated.
+func rereadCalls() []v3T {
+	return []v3T{
+		{"t_a1", "Read", tReadArgs("/w/a.txt"), v3Out("a1")},
+		{"t_b", "Read", tReadArgs("/w/b.txt"), v3Out("b")},
+		{"t_go1", "Bash", tCmdArgs("go test ./..."), v3Out("go1")},
+		{"t_a2", "Read", tReadArgs("/w/a.txt"), v3Out("a2")},
+		{"t_go2", "Bash", tCmdArgs("go test ./..."), v3Out("go2")},
+	}
+}
+
+func TestV3DropRecordCarriesAToolNameAndAHashButNeverThePath(t *testing.T) {
+	r := newV3Rig(t, "v3-target", v3Rule)
+	r.calls = rereadCalls()
+	r.request(0)
+	r.request(175_000)
+	rec := targetOf(t, r.st, "v3-target", "t_a1")
+	if rec.Tool != "read" || rec.TKind != "read" || rec.Rule != ruleFileReread {
+		t.Fatalf("record = %+v", rec)
+	}
+	if want := targetHash("p", "/w/a.txt"); rec.Target != want || len(rec.Target) != 16 {
+		t.Fatalf("target = %q, want the hash %q", rec.Target, want)
+	}
+	if cmd := targetOf(t, r.st, "v3-target", "t_go1"); cmd.TKind != "command" || cmd.Target != targetHash("c", "go test ./...") {
+		t.Fatalf("command record = %+v", cmd)
+	}
+	// The stored bytes hold no path and no command.
+	b, _ := json.Marshal(rec)
+	if strings.Contains(string(b), "a.txt") || strings.Contains(string(b), "/w/") {
+		t.Fatalf("the record holds a path: %s", b)
+	}
+	if h := targetHash("c", "/w/a.txt"); h == rec.Target {
+		t.Fatal("a command and a path must not hash alike")
+	}
+}
+
+func TestV3AReadOfADroppedFileIsCountedOnceAndADifferentFileIsNot(t *testing.T) {
+	r := newV3Rig(t, "v3-reread", v3Rule)
+	r.calls = rereadCalls()
+	r.request(0)
+	r.request(175_000) // the cut: t_a1 and t_go1 go
+	if v := v3Counters(); v.Cuts != 1 || v.Reread.Total != 0 {
+		t.Fatalf("fixture: %+v", v)
+	}
+	// Later: the agent reads c.txt (a different file) and runs `ls`: nothing to count.
+	r.after = append(r.after, v3T{"t_c", "Read", tReadArgs("/w/c.txt"), "x"}, v3T{"t_ls2", "Bash", tCmdArgs("ls"), "x"})
+	r.request(176_000)
+	if got := v3Counters().Reread.Total; got != 0 {
+		t.Fatalf("a different file or command was counted as a re-read: %+v", v3Counters().Reread)
+	}
+	// Then it reads a.txt again, and edits it: the drop of a.txt is counted once, by its rule and its kind.
+	r.after = append(r.after, v3T{"t_a3", "Read", tReadArgs("/w/a.txt"), "x"}, v3T{"t_e", "Edit", tReadArgs("/w/a.txt"), "ok"})
+	r.request(177_000)
+	r.request(178_000)
+	got := v3Counters().Reread
+	if got.Total != 1 || got.BySource[ruleFileReread] != 1 || got.ByKind["read"] != 1 {
+		t.Fatalf("reread = %+v, want one re-read of a.txt: source %s, kind read", got, ruleFileReread)
+	}
+	// Running the build again counts the build drop, by its own rule.
+	r.after = append(r.after, v3T{"t_go3", "Bash", tCmdArgs("go   test ./..."), "x"})
+	r.request(179_000)
+	got = v3Counters().Reread
+	if got.Total != 2 || got.BySource[ruleBuildRerun] != 1 || got.ByKind["command"] != 1 {
+		t.Fatalf("reread = %+v, want the build re-run counted too", got)
+	}
+}
+
+func TestV3DropsAreCountedByKindAsTheDenominator(t *testing.T) {
+	r := newV3Rig(t, "v3-bykind", v3Rule)
+	r.calls = rereadCalls()
+	r.request(0)
+	r.request(175_000)
+	if got := v3Counters().DroppedByKind; got["read"] != 1 || got["command"] != 1 {
+		t.Fatalf("dropped_by_kind = %v, want one read and one command", got)
+	}
+}
+
+func TestV3AJudgeDropIsCountedUnderJudge(t *testing.T) {
+	r := newV3Rig(t, "v3-reread-judge", v3Hybrid)
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(175_000)
+	}
+	r.forward()
+	r.request(175_000) // the cut: the judge drops t_rb (b.txt) among others
+	r.after = append(r.after, v3T{"t_b2", "Read", tReadArgs("/w/b.txt"), "x"})
+	r.request(176_000)
+	got := v3Counters().Reread
+	if got.BySource[sourceJudge] < 1 || got.ByKind["read"] < 1 {
+		t.Fatalf("reread = %+v, want b.txt counted under %s", got, sourceJudge)
+	}
+}
+
+func TestV3RereadNeedsV3AndNeverFiresOnItsOwnCall(t *testing.T) {
+	// With v3 off nothing is scanned or recorded.
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-reread-off", v3Conv(rereadCalls(), 0))
+	e := shippedSweep(t, "")
+	req := v3Conv(rereadCalls(), 0) // real assistant tool calls, so a recording would have something to record
+	if _, err := e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, coldCtx("v3-reread-off", st)); err != nil {
+		t.Fatal(err)
+	}
+	rec := targetOf(t, st, "v3-reread-off", "t_a1")
+	if rec.Tool != "" || rec.Target != "" || rec.RereadAt != 0 || v3Counters().Any() {
+		t.Fatalf("v3 off recorded or counted something: %+v %+v", rec, v3Counters())
+	}
+	// The drop's own call is before the drop: the scan starts after the messages the drop was made on.
+	r := newV3Rig(t, "v3-reread-own", v3Rule)
+	r.calls = rereadCalls()
+	r.request(0)
+	r.request(175_000)
+	r.request(175_500)
+	if got := v3Counters().Reread.Total; got != 0 {
+		t.Fatalf("the dropped call itself counted as a re-read: %+v", v3Counters().Reread)
+	}
+}
+
+// A drop is counted once, however many times the agent goes back to the file. The scan window moves on, but the
+// flag on the record is what stops a second count, so a request that rescans from the start must not double it.
+func TestV3ARereadIsCountedOncePerDropEvenWhenTheScanSeesItAgain(t *testing.T) {
+	r := newV3Rig(t, "v3-reread-once", v3Rule)
+	r.calls = rereadCalls()
+	r.request(0)
+	r.request(175_000)
+	r.after = append(r.after, v3T{"t_a3", "Read", tReadArgs("/w/a.txt"), "x"})
+	r.request(176_000)
+	if got := v3Counters().Reread.Total; got != 1 {
+		t.Fatalf("fixture: want the first re-read counted, got %d", got)
+	}
+	// Rewind the scan point, as a record written by an older process would have it, and read the file twice more.
+	key := thread.Key("v3-reread-once", "")
+	for _, ck := range getDropIndex(r.st, key).Cks {
+		if rec, ok := getDrop(r.st, key, ck); ok && rec.Target == targetHash("p", "/w/a.txt") {
+			rec.RereadAt = 0
+			putDrop(r.st, rec)
+		}
+	}
+	r.after = append(r.after, v3T{"t_a4", "Read", tReadArgs("/w/a.txt"), "x"}, v3T{"t_a5", "Edit", tReadArgs("/w/a.txt"), "ok"})
+	r.request(177_000)
+	r.request(178_000)
+	if got := v3Counters().Reread; got.Total != 1 || got.BySource[ruleFileReread] != 1 {
+		t.Fatalf("reread = %+v, want the one dropped read of a.txt counted once", got)
 	}
 }
