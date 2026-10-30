@@ -168,7 +168,7 @@ def short_model(m: str) -> str:
 def merged_models(spend: dict) -> list[dict]:
     """Per-model rows with the gateway prefix dropped, so aws/claude-x and claude-x are one row."""
     out: dict[str, dict] = {}
-    for m in spend["models"]:
+    for m in (spend.get("models") or []):
         k = short_model(m["model"])
         r = out.setdefault(k, {"model": k, "ids": [], "usd": {"total": 0.0}})
         r["usd"]["total"] += m["usd"]["total"]
@@ -248,7 +248,7 @@ def cmd_today(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
     L += ["", S.b("Costliest sessions")]
     L += table([[s["session"].split(":")[-1][:8], proj.name(s["session"]), short_model(s["model"]), f"{s['turns']} turns",
                  usd(s["usd"]["total"]), f"rewrites {usd(s['rewrite_usd'])}" if s["rewrites"] else ""]
-                for s in spend["sessions"][:5]], "llllrl")
+                for s in (spend.get("sessions") or [])[:5]], "llllrl")
     L += [""] + ledger_lines(spend, S) + coverage_line(spend, S)
     return L
 
@@ -278,7 +278,7 @@ def cmd_cold(spend: dict, o: dict, S: Style, proj: Projects) -> list[str]:
         L.append(S.dim(f"  Estimate: {usd(reach)} followed pauses of 5-60 min, the range a 1-hour cache lifetime would cover; "
                        "a longer lifetime or pings cost money too - see /context-guru:insights cache for the net."))
     L += ["", S.b("Costliest rewrites")]
-    L += table([[dt.datetime.fromtimestamp(e["ts"] / 1000, tz=o["tz"]).strftime("%a %H:%M"), proj.name(e["session"]),
+    L += table([[dt.datetime.fromtimestamp(e["ts"] / 1000, tz=o.get("tz") or dt.timezone(dt.timedelta(minutes=o.get("tz_min", 0)))).strftime("%a %H:%M"), proj.name(e["session"]),
                  short_model(e["model"]), ktok(e["context"]) + " ctx", ("after " + fmt_dur(e["gap_s"])) if e["gap_s"] >= 0 else "first message",
                  e["cause"], usd(e["usd"])] for e in (spend.get("top_rewrites") or [])[:5]], "llllllr")
     avoid = sum(rw[k]["usd"] for k in AVOIDABLE if k in rw)
@@ -345,7 +345,7 @@ def unused_items(tools: dict, last: dict | None) -> list[dict]:
     """Never-called, removable, priced capabilities ranked by dollars carried. Context Guru's own
     components and Claude Code's built-ins are excluded here, once, for every caller."""
     lastmap: dict[str, tuple[int, int]] = {}
-    for t in (last or {}).get("tools", []):
+    for t in ((last or {}).get("tools") or []):
         for key in {t["name"], t.get("skill") or ""} - {""}:
             c, ts = lastmap.get(key, (0, 0))
             lastmap[key] = (c + t["calls"], max(ts, t["last_ts"]))
@@ -355,18 +355,18 @@ def unused_items(tools: dict, last: dict | None) -> list[dict]:
         if m:
             srv_last[m.group(1)] = max(srv_last.get(m.group(1), 0), ts)
     items = []
-    for s in tools.get("servers", []):
+    for s in (tools.get("servers") or []):
         if s["calls"] or OWN.search(s["server"]) or not s.get("priced"):
             continue
         items.append({"kind": "MCP server", "name": s["server"], "tokens": s["tokens"], "usd": s["unused_usd"],
                       "cmd": f"claude mcp remove {s['server']}", "last": srv_last.get(s["server"], 0)})
-    for sk in (tools.get("skills") or {}).get("skills", []):
+    for sk in ((tools.get("skills") or {}).get("skills") or []):
         if sk["calls"] or OWN.search(sk["name"]) or not sk.get("priced"):
             continue
         items.append({"kind": "skill", "name": sk["name"], "tokens": sk["tokens"], "usd": sk["unused_usd"],
                       "cmd": f'set "skillOverrides": {{"{sk["name"]}": "off"}} in ~/.claude/settings.json',
                       "last": lastmap.get(sk["name"], (0, 0))[1]})
-    for t in tools.get("tools", []):
+    for t in (tools.get("tools") or []):
         if t["calls"] or t.get("builtin") or t["kind"] != "tool" or OWN.search(t["name"]) or not t.get("priced"):
             continue
         items.append({"kind": "client tool", "name": t["name"], "tokens": t["tokens"], "usd": t["unused_usd"],
@@ -398,7 +398,7 @@ def cmd_unused(tools: dict | None, last: dict | None, o: dict, S: Style, days: f
     if len(items) > 10:
         rest = items[10:]
         L.append(S.dim(f"  ... and {len(rest)} more, {usd(sum(i['usd'] for i in rest))} together"))
-    asd = sum(t["unused_usd"] for t in tools.get("aside", []))
+    asd = sum(t["unused_usd"] for t in (tools.get("aside") or []))
     L += ["", S.dim("Never listed: Context Guru's own components and Claude Code's built-in tools"
                     + (f" (carrying the unused built-ins costs {usd(asd)}; you cannot remove them)." if asd else ".")),
           S.dim("'client tool' = a tool declared by the agent that is neither MCP nor a skill (usually one of Claude Code's own newer tools); "

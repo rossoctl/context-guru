@@ -636,5 +636,8 @@ func (a *API) toolsLastUsed(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if out == nil {
+		out = []toolLastUsed{} // [] not null, for the same reason as SpendExplainFor (#781)
+	}
 	writeJSON(w, map[string]any{"tools": out})
 }

@@ -310,3 +310,24 @@ func TestSpendExplainSendsEmptyListsNotNull(t *testing.T) {
 		}
 	}
 }
+
+// #781: /api/tools and /api/tools/last-used also send an empty list as [], never null.
+func TestToolsEndpointsSendEmptyListsNotNull(t *testing.T) {
+	a, _ := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	_, body := get(t, a, "/api/tools", "127.0.0.1:1")
+	for _, k := range []string{"tools", "servers", "aside", "models"} {
+		if _, isList := body[k].([]any); !isList {
+			t.Errorf("/api/tools %s = %v (%T), want an empty list", k, body[k], body[k])
+		}
+	}
+	if sk, _ := body["skills"].(map[string]any); sk == nil {
+		t.Errorf("/api/tools skills = %v, want an object", body["skills"])
+	} else if _, isList := sk["skills"].([]any); !isList {
+		t.Errorf("/api/tools skills.skills = %v (%T), want an empty list", sk["skills"], sk["skills"])
+	}
+	_, last := get(t, a, "/api/tools/last-used", "127.0.0.1:1")
+	if _, isList := last["tools"].([]any); !isList {
+		t.Errorf("/api/tools/last-used tools = %v (%T), want an empty list", last["tools"], last["tools"])
+	}
+}

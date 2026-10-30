@@ -161,7 +161,7 @@ def levers(st: dict) -> list[tuple[str, float]]:
     purpose: the waterfall keeps it OUTSIDE total_saved (it is the account's own doing, not ours),
     so with it the rows could not add up to the headline.
     """
-    w = {x["key"]: x["delta_usd"] for x in st.get("waterfall", [])}
+    w = {x["key"]: x["delta_usd"] for x in (st.get("waterfall") or [])}
     rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
             ("Keep-alive pings", -w.get("keepalive_saved", 0.0) - w.get("keepalive_ping", 0.0)),
             ("Tool filtering", -w.get("decl_filter_saved", 0.0)),
@@ -170,7 +170,7 @@ def levers(st: dict) -> list[tuple[str, float]]:
 
 
 def daily(api: Api, since: int, until: int, key: str) -> list[float]:
-    b = (api.get("/api/series", {"bucket": DAY_MS, "since": since, "until": until}) or {}).get("buckets", [])
+    b = (api.get("/api/series", {"bucket": DAY_MS, "since": since, "until": until}) or {}).get("buckets") or []
     days: dict[int, float] = {}
     for x in b:
         d = x["ts"] // DAY_MS
@@ -709,7 +709,7 @@ def tools_carried(tools: dict, details: bool) -> list[str]:
         if t.get("kind") == "mcp_tool" and keep(t) and m:
             by_server.setdefault(t.get("server") or m.group(1), []).append(t)
     servers = sorted((s for s in tools.get("servers") or [] if keep({**s, "name": s["server"]})), key=lambda s: -_cost(s)[0])
-    skills = sorted((k for k in (tools.get("skills") or {}).get("skills", []) if keep(k)), key=lambda k: -_cost(k)[0])
+    skills = sorted((k for k in ((tools.get("skills") or {}).get("skills") or []) if keep(k)), key=lambda k: -_cost(k)[0])
     if not servers and not skills:
         return []
     whole = all(_cost(r)[1] for r in [*servers, *skills])
