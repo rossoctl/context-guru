@@ -1,0 +1,411 @@
+{
+ "id": "rewrite+spend/cache-aware-summarizer/prefix-read/5m",
+ "description": "cache_aware_summarizer in pre_expiry mode makes its call in place of the keep-alive ping, on the agent's own model, reading the 21,000-token cached prefix: 300 input, 21,000 read, 500 output = -$0.01470. Summarize (the case summary/break-then-payback) pays 10,000 tokens of fresh input at a cheaper model's rates, -$0.01250. The summary is held until the cache is cold: 25 minutes later it replaces messages 0 to 2 and the 9,500 tokens are writes, +$0.03563. The ask and the removal share one ChangeID. Total +$0.02093.",
+ "source": "more_examples.md#D6",
+ "dims": {
+  "kind": "rewrite+spend",
+  "position": "beforeBStar",
+  "cache": "hit-ask-miss",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true",
+  "summarizer": "cache-aware"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-d6",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 21000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 21000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "cas-1",
+    "session": "s-d6",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:04:40Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "context-guru.cache_aware_summarizer",
+      "changeId": "cg:cache_aware_summarizer:3e55",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 300,
+        "cacheRead": 21000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 500
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "cg:cache_aware_summarizer:3e55",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 300,
+        "cacheRead": 21000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 500
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-d6",
+     "model": "agent-model",
+     "at": "2026-03-02T09:30:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      },
+      {
+       "hash": 4704284311892720578,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op2",
+     "kind": "rewrite",
+     "operator": "context-guru.cache_aware_summarizer",
+     "at": {
+      "section": "messages",
+      "index": 0
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 2000
+     },
+     "changeId": "cg:cache_aware_summarizer:3e55",
+     "messageSplice": {
+      "at": 0,
+      "removed": 3,
+      "inserted": 1
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 17928510466813520849,
+       "bytes": 2000
+      },
+      {
+       "hash": 13418269498659704927,
+       "bytes": 6000
+      },
+      {
+       "hash": 9119921373193062674,
+       "bytes": 6000
+      },
+      {
+       "hash": 3602111879603914276,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 12000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "cold",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 21500,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:cache_aware_summarizer:3e55",
+      "saved": {
+       "cacheWrite5m": 9500
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
+     }
+    ]
+   }
+  }
+ ]
+}

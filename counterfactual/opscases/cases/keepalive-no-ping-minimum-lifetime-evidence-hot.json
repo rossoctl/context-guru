@@ -1,0 +1,330 @@
+{
+ "id": "keepalive/no-ping/minimum-lifetime/evidence-hot",
+ "description": "OpenAI GPT-5.6, 40 minutes after the last request, past the 30-minute minimum. The gap proves nothing, so the phase starts unknown. The provider read 11,060 tokens, which is evidence the entry was alive, so the phase becomes hot and mask's replayed 5,940 tokens are priced as a read (+$0.00178), not a write (+$0.02228). No ping was sent, so there is no rescue either way.",
+ "source": "more_examples.md#A4",
+ "dims": {
+  "kind": "rewrite",
+  "position": "beforeBStar",
+  "cache": "evidence",
+  "ttl": "5m",
+  "lifetime": "minimum",
+  "keepalive": "false"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-oa",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.mask",
+     "at": {
+      "section": "messages",
+      "index": 1
+     },
+     "sizeBefore": {
+      "bytes": 24000
+     },
+     "sizeAfter": {
+      "bytes": 240
+     },
+     "changeId": "cg:mask:4a90"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 9215220295725055461,
+       "bytes": 240
+      },
+      {
+       "hash": 8099914972667036346,
+       "bytes": 12000
+      },
+      {
+       "hash": 9829950327744007510,
+       "bytes": 12000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 11060,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 17000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:mask:4a90",
+      "saved": {
+       "cacheWrite5m": 5940
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-oa",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:40:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 9215220295725055461,
+       "bytes": 240
+      },
+      {
+       "hash": 8099914972667036346,
+       "bytes": 12000
+      },
+      {
+       "hash": 9829950327744007510,
+       "bytes": 12000
+      },
+      {
+       "hash": 14673721351171212477,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 11060,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 17000,
+     "cacheWrite": 500,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:mask:4a90",
+      "saved": {
+       "cacheRead": 5940
+      },
+      "caused": {},
+      "estimated": true,
+      "note": "the read proves the entry, so the saving is a read"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}

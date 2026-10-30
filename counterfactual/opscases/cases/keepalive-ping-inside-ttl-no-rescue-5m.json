@@ -1,0 +1,384 @@
+{
+ "id": "keepalive/ping-inside-ttl/no-rescue/5m",
+ "description": "Turn 1 caches 10,000 tokens. The keeper pings at 280 seconds, and the next request arrives 10 seconds later, 290 seconds after turn 1: inside the 5m TTL. Without the ping the entry would have been alive, so no rescue is credited (\u00a74.4 condition 2). The window holds only the ping, 10,000 x $0.30 + 10 x $3.00 + 1 x $15.00 per million = -$0.00305: a ping that was not needed.",
+ "source": "more_examples.md#B1",
+ "dims": {
+  "kind": "rescue",
+  "position": "beforeBStar",
+  "cache": "no-rescue",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-b1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 10000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 10000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "ping-280",
+    "session": "s-b1",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:04:40Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "keeper",
+      "changeId": "ka:main:w-b1",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 10000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "ka:main:w-b1",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 10000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-b1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:04:50Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      },
+      {
+       "hash": 12943432748918056218,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 4000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 4000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 4000
+      },
+      {
+       "hash": 2640458564630993209,
+       "bytes": 4000
+      },
+      {
+       "hash": 12943432748918056218,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 6
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact",
+     "lastPing": "2026-03-02T09:04:40Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 5
+     },
+     "pingWindow": "ka:main:w-b1"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 10000,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 10000,
+     "cacheWrite": 500,
+     "cacheWrite1h": 0
+    },
+    "ops": []
+   }
+  }
+ ]
+}

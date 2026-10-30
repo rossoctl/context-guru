@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1110 860" width="1110" height="860" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Context operations: thread level state and request level Compute</title>
+<desc id="d">An agent sends a request, a black line. It passes through the plugins tool-prune, cpex, the context-guru plugin and possibly other plugins, then goes out to the upstream LLM. The response, a dashed black line, comes back to the agent below the plugins. Inside Cortex, the Tracker is a frame for one thread, at thread level. It holds the ThreadState: the active context operations, the previous fingerprint and the cache state, kept between requests. For each request there is a request record, at request level, that starts from a copy of the ThreadState. It holds the context operations reported now, the sizes, the breakpoints and the facts, and it has the Compute call. Eight numbered steps. 1: BeginRequest with the client body opens the record. 2: each plugin reports with Add. 3: EndRequest with the thread and the forwarded body ends the pass, and the record takes a copy of that thread's ThreadState. 4: the request goes upstream. 5: the response returns with the billed usage. 6: Compute(usage) runs on the record, returns the Result, and replaces the ThreadState in the Tracker with the new one as its last step. 7: Cortex prices the tokens per tier. 8: the savings go to Central metrics, an external Prometheus and Grafana system.</desc>
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ahk" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="aho" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path class="aho" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ahg" d="M0,0 L10,5 L0,10 z"/></marker>
+</defs>
+<style>
+svg{--surface:#fcfcfb;--panel:#f3f2ee;--ink:#0b0b0b;--ink2:#52514e;--grid:#c9c8c2;--lib:#2a78d6;--libbg:#e6eefa;--op:#eb6834}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--panel:#242422;--ink:#f0efec;--ink2:#c3c2b7;--grid:#4a4a46;--lib:#3987e5;--libbg:#1d2a3d;--op:#d95926}}
+.bg{fill:var(--surface)}
+.host{fill:var(--panel);stroke:var(--grid);stroke-width:1.5}
+.box{fill:var(--surface);stroke:var(--grid);stroke-width:1.5}
+.boxd{fill:var(--surface);stroke:var(--ink2);stroke-width:1.5;stroke-dasharray:5 3}
+.lib{fill:var(--libbg);stroke:var(--lib);stroke-width:2}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}.tl{fill:var(--lib)}
+.req{stroke:var(--ink);stroke-width:3;fill:none}
+.actor{stroke:var(--ink);stroke-width:2.2;fill:none;stroke-linecap:round}
+.op{fill:var(--lib);stroke:var(--surface);stroke-width:2}
+.opd{fill:var(--surface);stroke:var(--lib);stroke-width:1.8;stroke-dasharray:3 2}
+.rep{stroke:var(--lib);stroke-width:1.5;stroke-dasharray:4 3;fill:none}
+.res{stroke:var(--lib);stroke-width:2;fill:none}
+.resp{stroke:var(--ink);stroke-width:3;fill:none;stroke-dasharray:10 5}
+.gap{stroke:var(--panel);stroke-width:8;fill:none}
+.call{stroke:var(--lib);stroke-width:2;fill:none}
+.rec{fill:var(--surface);stroke:var(--lib);stroke-width:1.8}
+.badge{fill:var(--ink)}
+.bn{fill:var(--surface);font-weight:700}
+.ahk{fill:var(--ink)}.aho{fill:var(--lib)}.ahg{fill:var(--lib)}
+</style>
+<rect class="bg" width="1110" height="860"/>
+<text class="t" x="24" y="32" font-size="18" font-weight="600">Context operations: thread level state, request level Compute</text>
+<line class="req" x1="24" y1="56" x2="60" y2="56" marker-end="url(#ah)"/>
+<text class="t2" x="68" y="60" font-size="12">the request</text>
+<line class="resp" x1="160" y1="56" x2="196" y2="56" marker-end="url(#ah)"/>
+<text class="t2" x="204" y="60" font-size="12">the response</text>
+<circle class="op" cx="318" cy="56" r="8"/>
+<text class="t2" x="332" y="60" font-size="12">a context operation</text>
+<line class="call" x1="480" y1="56" x2="516" y2="56" marker-end="url(#ahg)"/>
+<text class="t2" x="524" y="60" font-size="12">a call on the Tracker</text>
+<rect class="boxd" x="700" y="47" width="30" height="18" rx="3"/>
+<text class="t2" x="738" y="60" font-size="12">a potential plugin</text>
+<circle class="badge" cx="900" cy="56" r="10"/>
+<text class="bn" x="900" y="60" font-size="12" text-anchor="middle">n</text>
+<text class="t2" x="918" y="60" font-size="12">step</text>
+
+<rect class="host" x="140" y="84" width="760" height="560" rx="10"/>
+<text class="t" x="160" y="110" font-size="15" font-weight="600">Cortex</text>
+<rect class="box" x="170" y="134" width="150" height="96" rx="6"/>
+<text class="t" x="245" y="156" font-size="14" font-weight="600" text-anchor="middle">tool-prune</text>
+<rect class="box" x="340" y="134" width="150" height="96" rx="6"/>
+<text class="t" x="415" y="156" font-size="14" font-weight="600" text-anchor="middle">cpex</text>
+<rect class="box" x="510" y="134" width="150" height="96" rx="6"/>
+<text class="t" x="585" y="156" font-size="14" font-weight="600" text-anchor="middle">context-guru plugin</text>
+<rect class="boxd" x="680" y="134" width="150" height="96" rx="6"/>
+<text class="t2" x="755" y="156" font-size="14" font-weight="600" text-anchor="middle">other plugins …</text>
+
+<circle class="actor" cx="70" cy="150" r="11"/>
+<line class="actor" x1="70" y1="161" x2="70" y2="196"/>
+<line class="actor" x1="52" y1="174" x2="88" y2="174"/>
+<line class="actor" x1="70" y1="196" x2="56" y2="220"/>
+<line class="actor" x1="70" y1="196" x2="84" y2="220"/>
+<text class="t" x="70" y="242" font-size="13" font-weight="600" text-anchor="middle">Agent</text>
+
+<rect class="box" x="940" y="144" width="146" height="146" rx="6"/>
+<text class="t" x="1013" y="208" font-size="14" font-weight="600" text-anchor="middle">Upstream</text>
+<text class="t2" x="1013" y="226" font-size="12" text-anchor="middle">LLM</text>
+
+<line class="req" x1="94" y1="176" x2="936" y2="176" marker-end="url(#ah)"/>
+<circle class="badge" cx="108" cy="162" r="10"/>
+<text class="bn" x="108" y="166" font-size="12" text-anchor="middle">0</text>
+<text class="t" x="124" y="166" font-size="11" font-weight="600">new request</text>
+<path class="resp" d="M940,258 H124 V206 H98" marker-end="url(#ah)"/>
+<text class="t" x="300" y="252" font-size="11" font-weight="600">response</text>
+
+<!-- Tracker: one for each thread -->
+<rect class="lib" x="176" y="296" width="540" height="330" rx="8"/>
+<text class="tl" x="190" y="318" font-size="13" font-weight="700">Tracker</text>
+<text class="t2" x="248" y="318" font-size="11">thread level · one for each thread</text>
+<rect class="box" x="190" y="340" width="156" height="270" rx="6"/>
+<text class="t" x="202" y="360" font-size="12" font-weight="600">ThreadState</text>
+<text class="t2" x="202" y="374" font-size="10">thread level</text>
+<text class="t" x="202" y="396" font-size="11">active operations</text>
+<circle class="op" cx="208" cy="416" r="10"/>
+<circle class="op" cx="236" cy="416" r="10"/>
+<circle class="op" cx="264" cy="416" r="10"/>
+<circle class="op" cx="292" cy="416" r="10"/>
+<circle class="opd" cx="320" cy="416" r="10"/>
+<text class="t" x="202" y="448" font-size="11">previous fingerprint</text>
+<text class="t2" x="202" y="462" font-size="10">hashes and sizes</text>
+<text class="t" x="202" y="492" font-size="11">cache state</text>
+<text class="t2" x="202" y="506" font-size="10">phase, extent, TTL</text>
+<text class="t2" x="202" y="598" font-size="10">version, kept between requests</text>
+
+<!-- Request record: one for each request -->
+<rect class="rec" x="432" y="340" width="270" height="270" rx="6"/>
+<text class="tl" x="446" y="360" font-size="12" font-weight="700">Request record</text>
+<text class="t2" x="446" y="374" font-size="10">request level · one for each request</text>
+<text class="t" x="446" y="396" font-size="11">reported now</text>
+<circle class="op" cx="456" cy="416" r="10"/>
+<circle class="op" cx="486" cy="416" r="10"/>
+<text class="t" x="446" y="448" font-size="11">client and forwarded sizes, fingerprint</text>
+<text class="t" x="446" y="466" font-size="11">breakpoints, facts</text>
+<rect class="lib" x="446" y="484" width="244" height="112" rx="8"/>
+<text class="tl" x="568" y="508" font-size="15" font-weight="700" text-anchor="middle">Compute</text>
+<text class="t" x="568" y="530" font-size="11" text-anchor="middle" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">Compute(usage) Result</text>
+<text class="t2" x="568" y="552" font-size="10" text-anchor="middle">reads the record and its copy of the ThreadState</text>
+<text class="t2" x="568" y="566" font-size="10" text-anchor="middle">returns the Result, then replaces the ThreadState</text>
+
+<rect class="box" x="760" y="544" width="130" height="80" rx="6"/>
+<text class="t" x="825" y="578" font-size="14" font-weight="600" text-anchor="middle">Savings</text>
+<text class="t2" x="825" y="598" font-size="10" text-anchor="middle">tokens × tier rates</text>
+<rect class="box" x="940" y="538" width="146" height="92" rx="6"/>
+<text class="t" x="1013" y="568" font-size="14" font-weight="600" text-anchor="middle">Central metrics</text>
+<text class="t2" x="1013" y="588" font-size="12" text-anchor="middle">Prometheus</text>
+<text class="t2" x="1013" y="604" font-size="12" text-anchor="middle">+ Grafana</text>
+<text class="t2" x="1013" y="621" font-size="11" text-anchor="middle">external</text>
+
+<path class="res" d="M740,258 V530 H692" marker-end="url(#ahg)"/>
+<line class="gap" x1="152" y1="252" x2="152" y2="264"/>
+<line class="gap" x1="884" y1="252" x2="884" y2="264"/>
+<line class="gap" x1="740" y1="374" x2="740" y2="386"/>
+<path class="call" d="M152,176 V318 H176" marker-end="url(#ahg)"/>
+<path class="call" d="M884,176 V380 H704" marker-end="url(#ahg)"/>
+<line class="rep" x1="245" y1="242" x2="450" y2="338" marker-end="url(#aho)"/>
+<line class="rep" x1="415" y1="242" x2="485" y2="338" marker-end="url(#aho)"/>
+<line class="rep" x1="572" y1="242" x2="520" y2="338" marker-end="url(#aho)"/>
+<line class="rep" x1="598" y1="242" x2="555" y2="338" marker-end="url(#aho)"/>
+<line class="rep" x1="755" y1="242" x2="595" y2="338" marker-end="url(#aho)"/>
+<circle class="op" cx="245" cy="230" r="11"/>
+<circle class="op" cx="415" cy="230" r="11"/>
+<circle class="op" cx="572" cy="230" r="11"/>
+<circle class="op" cx="598" cy="230" r="11"/>
+<circle class="opd" cx="755" cy="230" r="11"/>
+<line class="call" x1="346" y1="420" x2="430" y2="420" marker-end="url(#ahg)"/>
+<line class="call" x1="446" y1="560" x2="348" y2="560" marker-end="url(#ahg)"/>
+<line class="res" x1="692" y1="584" x2="758" y2="584" marker-end="url(#ahg)"/>
+<line class="res" x1="890" y1="584" x2="936" y2="584" marker-end="url(#ahg)"/>
+<circle class="badge" cx="1013" cy="172" r="10"/>
+<text class="bn" x="1013" y="176" font-size="12" text-anchor="middle">4</text>
+<circle class="badge" cx="918" cy="258" r="10"/>
+<text class="bn" x="918" y="262" font-size="12" text-anchor="middle">5</text>
+<circle class="badge" cx="152" cy="300" r="10"/>
+<text class="bn" x="152" y="304" font-size="12" text-anchor="middle">1</text>
+<text class="tl" x="134" y="296" font-size="11" text-anchor="end" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">BeginRequest</text>
+<text class="t2" x="134" y="309" font-size="10" text-anchor="end" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">(client body)</text>
+<circle class="badge" cx="650" cy="322" r="10"/>
+<text class="bn" x="650" y="326" font-size="12" text-anchor="middle">2</text>
+<text class="tl" x="664" y="326" font-size="11" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">Add(op)</text>
+<circle class="badge" cx="884" cy="226" r="10"/>
+<text class="bn" x="884" y="230" font-size="12" text-anchor="middle">3</text>
+<text class="tl" x="876" y="372" font-size="11" text-anchor="end" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">EndRequest</text>
+<text class="t2" x="876" y="396" font-size="10" text-anchor="end" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">(forwarded body)</text>
+<text class="t2" x="389" y="398" font-size="10" text-anchor="middle">starts from</text>
+<text class="t2" x="389" y="410" font-size="10" text-anchor="middle">a copy</text>
+<circle class="badge" cx="389" cy="438" r="12"/>
+<text class="bn" x="389" y="442" font-size="10" text-anchor="middle">1.1</text>
+<circle class="badge" cx="740" cy="450" r="10"/>
+<text class="bn" x="740" y="454" font-size="12" text-anchor="middle">6</text>
+<text class="tl" x="756" y="454" font-size="11" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">usage</text>
+<circle class="badge" cx="389" cy="542" r="12"/>
+<text class="bn" x="389" y="546" font-size="10" text-anchor="middle">6.1</text>
+<text class="tl" x="389" y="574" font-size="11" text-anchor="middle" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">replaces</text>
+<text class="t2" x="389" y="587" font-size="10" text-anchor="middle">(the ThreadState)</text>
+<text class="tl" x="725" y="612" font-size="10" text-anchor="middle">tokens</text>
+<text class="tl" x="725" y="623" font-size="10" text-anchor="middle">per tier</text>
+<circle class="badge" cx="725" cy="584" r="10"/>
+<text class="bn" x="725" y="588" font-size="12" text-anchor="middle">7</text>
+<text class="tl" x="913" y="568" font-size="10" text-anchor="middle">savings</text>
+<circle class="badge" cx="913" cy="584" r="10"/>
+<text class="bn" x="913" y="588" font-size="12" text-anchor="middle">8</text>
+
+<text class="t" x="24" y="676" font-size="13" font-weight="600">The sequence</text>
+<circle class="badge" cx="34" cy="696" r="10"/>
+<text class="bn" x="34" y="700" font-size="12" text-anchor="middle">0</text>
+<text class="t" x="52" y="700" font-size="12">A new request arrives from the agent.</text>
+<circle class="badge" cx="34" cy="720" r="10"/>
+<text class="bn" x="34" y="724" font-size="12" text-anchor="middle">1</text>
+<text class="t" x="52" y="724" font-size="12">BeginRequest(client body) opens the record. EndRequest names the thread and copies its ThreadState (1.1).</text>
+<circle class="badge" cx="34" cy="744" r="10"/>
+<text class="bn" x="34" y="748" font-size="12" text-anchor="middle">2</text>
+<text class="t" x="52" y="748" font-size="12">Add(op): each plugin reports its context operations into the record.</text>
+<circle class="badge" cx="34" cy="768" r="10"/>
+<text class="bn" x="34" y="772" font-size="12" text-anchor="middle">3</text>
+<text class="t" x="52" y="772" font-size="12">EndRequest(forwarded body, breakpoints, facts): the host ends the pass.</text>
+<circle class="badge" cx="34" cy="792" r="10"/>
+<text class="bn" x="34" y="796" font-size="12" text-anchor="middle">4</text>
+<text class="t" x="52" y="796" font-size="12">The request goes upstream.</text>
+<circle class="badge" cx="34" cy="816" r="10"/>
+<text class="bn" x="34" y="820" font-size="12" text-anchor="middle">5</text>
+<text class="t" x="52" y="820" font-size="12">The response returns, with the billed usage.</text>
+<circle class="badge" cx="600" cy="696" r="10"/>
+<text class="bn" x="600" y="700" font-size="12" text-anchor="middle">6</text>
+<text class="t" x="618" y="700" font-size="12">Compute(usage), on the record: prices this request, then replaces the ThreadState (6.1).</text>
+<circle class="badge" cx="600" cy="720" r="10"/>
+<text class="bn" x="600" y="724" font-size="12" text-anchor="middle">7</text>
+<text class="t" x="618" y="724" font-size="12">Cortex prices the tokens per tier that Compute returns.</text>
+<circle class="badge" cx="600" cy="744" r="10"/>
+<text class="bn" x="600" y="748" font-size="12" text-anchor="middle">8</text>
+<text class="t" x="618" y="748" font-size="12">The savings are sent to Central metrics.</text>
+</svg>

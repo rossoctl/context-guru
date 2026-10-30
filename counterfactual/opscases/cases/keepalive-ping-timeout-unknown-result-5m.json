@@ -1,0 +1,332 @@
+{
+ "id": "keepalive/ping-timeout-unknown-result/5m",
+ "description": "The proxy gave up on a ping after 60 seconds, so the host has no usage for it. The next turn comes 8 minutes 46 seconds after the last one and reads 199,103 of 199,490 tokens. The ping is reported as a spend with empty usage and the library marks it unpriced (ping_result_unknown). The rescue is credited from the read on the request, which proves the entry was alive. The window shows a rescue and an unpriced ping, never a rescue with a silent zero cost.",
+ "source": "issue_cases.md#532",
+ "dims": {
+  "kind": "rescue",
+  "position": "beforeBStar",
+  "cache": "rescue",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "keepalive": "true",
+  "ping": "timed-out"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "new: the design has no form for a ping whose usage is unknown. This case assumes the host reports an empty-usage spend and the library answers Unpriced ping_result_unknown (option c of issue_cases.md case 2)",
+  "design \u00a74.4 rule 4 credits the smaller of what the last ping read and what the request read. The ping's read is unknown here, so the credit of 199,103 tokens rests on the request's read alone"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-slow",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 788412
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 788412
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 199103,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 199103,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "ping-271",
+    "session": "s-slow",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:04:31Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "keeper",
+      "changeId": "ka:main:w3",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 0
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "ka:main:w3",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 0
+       }
+      }
+     }
+    ],
+    "unpriced": [
+     {
+      "opId": "op1",
+      "reason": "ping_result_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-slow",
+     "model": "agent-model",
+     "at": "2026-03-02T09:08:46Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 788412
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 1548
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 788412
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 1548
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact",
+     "lastPing": "2026-03-02T09:04:31Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 0
+     },
+     "pingWindow": "ka:main:w3"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 199103,
+    "cacheWrite": 387,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 199490,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "rescue",
+      "changeId": "ka:main:w3",
+      "saved": {
+       "cacheWrite5m": 199103
+      },
+      "caused": {
+       "cacheRead": 199103
+      },
+      "to": {
+       "section": "messages",
+       "index": 0
+      },
+      "note": "proved by the read on this request"
+     }
+    ]
+   }
+  }
+ ]
+}

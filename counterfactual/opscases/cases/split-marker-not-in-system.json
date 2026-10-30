@@ -1,0 +1,321 @@
+{
+ "id": "split/marker-not-in-system",
+ "description": "On Claude Code 2.1.299 the git snapshot sits in the first user message, after both system breakpoints, and does not change during the session. cachesplit finds no marker and reports no operation. The thread reads the whole prefix on a hot turn: no operation, no effect, a zero total.",
+ "source": "issue_cases.md#567",
+ "dims": {
+  "kind": "none",
+  "position": "none",
+  "cache": "hit",
+  "ttl": "5m",
+  "lifetime": "exact"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 1
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 1
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 9500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 9500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:40Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      },
+      {
+       "hash": 11204389758586981271,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 1
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      },
+      {
+       "hash": 11204389758586981271,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 1
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 9500,
+    "cacheWrite": 1000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 9500,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "boundary": {
+     "section": "messages",
+     "index": 1
+    }
+   }
+  }
+ ]
+}

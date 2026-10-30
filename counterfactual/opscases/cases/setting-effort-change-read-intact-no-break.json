@@ -1,0 +1,331 @@
+{
+ "id": "setting/effort-change/read-intact-no-break",
+ "description": "A router lowers the effort of an OpenAI request. The setting names tools[0] as the point where a break could start, but the provider kept the entry: it read all 40,000 tokens. At is where a break would start, not a statement that one happened (\u00a74.2 rule 2), and row 3 of \u00a75.2 needs a read below the prediction. No effect, no cost, a zero total.",
+ "source": "more_examples.md#F4",
+ "dims": {
+  "kind": "setting",
+  "position": "tools",
+  "cache": "hit",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "setting": "effort",
+  "break": "none"
+ },
+ "rates": "fixture-v1",
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-set",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "high"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 40000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 40000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-set",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     },
+     "params": {
+      "effort": "low"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "setting",
+     "operator": "inference-router",
+     "changeId": "rt:effort-4c1a",
+     "settings": {
+      "effort": {
+       "from": "high",
+       "to": "low",
+       "at": {
+        "section": "tools",
+        "index": 0
+       }
+      }
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9352454424176189265,
+       "bytes": 20000
+      },
+      {
+       "hash": 9487613613724779015,
+       "bytes": 12000
+      },
+      {
+       "hash": 50138012340599646,
+       "bytes": 32000
+      },
+      {
+       "hash": 10944269723022528344,
+       "bytes": 32000
+      },
+      {
+       "hash": 7195163193319002053,
+       "bytes": 32000
+      },
+      {
+       "hash": 2499406769880086275,
+       "bytes": 32000
+      },
+      {
+       "hash": 17967468631920018574,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 40000,
+    "cacheWrite": 1000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 40000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}

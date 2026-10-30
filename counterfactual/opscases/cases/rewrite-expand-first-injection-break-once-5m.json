@@ -1,0 +1,505 @@
+{
+ "id": "rewrite/expand-first-injection/break-once/5m",
+ "description": "On turn 2 the engine appends the expand tool (300 tokens) to tools for the first time. tools come first in the prompt and the body has no breakpoint on them, so the provider reads nothing: the 19,300 tokens move from read to write, 19,300 x ($3.75 - $0.30) = -$0.06659, and the declaration itself is a cost of 300 x $0.30 = -$0.00009. The tool is sticky, so turn 3 carries it again with no break and costs -$0.00009. The total is -$0.06677.",
+ "source": "more_examples.md#D2",
+ "dims": {
+  "kind": "rewrite",
+  "position": "tools",
+  "cache": "break",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "break": "plugin",
+  "sticky": "true"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "the expand tool is reported here as a rewrite with SizeAfter above SizeBefore (\u00a74.2 rule 3, cortex-wiring.md). Whether the engine reports it at all is not checked; if it does not, the break on turn 2 has no ChangeID",
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 7907963751800426527,
+       "bytes": 8000
+      },
+      {
+       "hash": 16004743963272396918,
+       "bytes": 16000
+      },
+      {
+       "hash": 12505707555266627152,
+       "bytes": 16000
+      },
+      {
+       "hash": 18217874928625891293,
+       "bytes": 16000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 7907963751800426527,
+       "bytes": 8000
+      },
+      {
+       "hash": 16004743963272396918,
+       "bytes": 16000
+      },
+      {
+       "hash": 12505707555266627152,
+       "bytes": 16000
+      },
+      {
+       "hash": 18217874928625891293,
+       "bytes": 16000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 19000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 19000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 7907963751800426527,
+       "bytes": 8000
+      },
+      {
+       "hash": 16004743963272396918,
+       "bytes": 16000
+      },
+      {
+       "hash": 12505707555266627152,
+       "bytes": 16000
+      },
+      {
+       "hash": 18217874928625891293,
+       "bytes": 16000
+      },
+      {
+       "hash": 15316845166124412571,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.expand",
+     "at": {
+      "section": "tools",
+      "index": 1
+     },
+     "sizeBefore": {
+      "bytes": 0
+     },
+     "sizeAfter": {
+      "bytes": 1200
+     },
+     "changeId": "cg:expand:d2f1"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      2,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 11006520184095352316,
+       "bytes": 1200
+      },
+      {
+       "hash": 4916772159610413591,
+       "bytes": 8000
+      },
+      {
+       "hash": 14183531469010758446,
+       "bytes": 16000
+      },
+      {
+       "hash": 6563394835243396904,
+       "bytes": 16000
+      },
+      {
+       "hash": 1950509038301670165,
+       "bytes": 16000
+      },
+      {
+       "hash": 10641008502091862035,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 20300,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 19000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:expand:d2f1",
+      "saved": {},
+      "caused": {
+       "cacheRead": 300
+      },
+      "estimated": true
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "cg:expand:d2f1",
+      "saved": {
+       "cacheRead": 19300
+      },
+      "caused": {
+       "cacheWrite5m": 19300
+      },
+      "to": {
+       "section": "messages",
+       "index": 2
+      },
+      "note": "the declaration is appended to tools: the provider reads nothing"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 2
+    }
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r2",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:02:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 7907963751800426527,
+       "bytes": 8000
+      },
+      {
+       "hash": 16004743963272396918,
+       "bytes": 16000
+      },
+      {
+       "hash": 12505707555266627152,
+       "bytes": 16000
+      },
+      {
+       "hash": 18217874928625891293,
+       "bytes": 16000
+      },
+      {
+       "hash": 15316845166124412571,
+       "bytes": 4000
+      },
+      {
+       "hash": 8905937841552529062,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      2,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 5842258112181754580,
+       "bytes": 20000
+      },
+      {
+       "hash": 11006520184095352316,
+       "bytes": 1200
+      },
+      {
+       "hash": 4916772159610413591,
+       "bytes": 8000
+      },
+      {
+       "hash": 14183531469010758446,
+       "bytes": 16000
+      },
+      {
+       "hash": 6563394835243396904,
+       "bytes": 16000
+      },
+      {
+       "hash": 1950509038301670165,
+       "bytes": 16000
+      },
+      {
+       "hash": 10641008502091862035,
+       "bytes": 4000
+      },
+      {
+       "hash": 1999119367213418334,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 20300,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 20000,
+     "cacheWrite": 500,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:expand:d2f1",
+      "saved": {},
+      "caused": {
+       "cacheRead": 300
+      },
+      "estimated": true
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}

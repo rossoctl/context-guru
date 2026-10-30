@@ -1,0 +1,286 @@
+{
+ "id": "spend/without-rewrite/refused",
+ "description": "extract_llm paid for one model call (6,000 input, 400 output: $0.00800 at summarizer rates) but the reserve was full, so the pipeline refused the removal. No rewrite is reported. The spend is priced, nothing is saved and nothing breaks: the request's net is exactly minus the call.",
+ "source": "issue_cases.md#214",
+ "dims": {
+  "kind": "spend",
+  "position": "none",
+  "cache": "hit",
+  "ttl": "5m",
+  "lifetime": "exact"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a74.1 says a spend's ChangeID names the change its call created, and R47 gives a spend that creates no saving an empty ChangeID. The removal was refused, so the empty form may be the right one. This case keeps a ChangeID; the numbers do not depend on it"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 6000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 6000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:40Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "spend",
+     "operator": "context-guru.extract_llm",
+     "changeId": "cg:extract_llm:77e0",
+     "call": {
+      "model": "summarizer-model",
+      "params": {
+       "effort": "low"
+      },
+      "usage": {
+       "input": 6000,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "cacheWrite1h": 0,
+       "output": 400,
+       "costUSD": 0.008
+      }
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 6000,
+    "cacheWrite": 1000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 6000,
+     "cacheWrite": 1000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:extract_llm:77e0",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "model": "summarizer-model",
+       "params": {
+        "effort": "low"
+       },
+       "usage": {
+        "input": 6000,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 400,
+        "costUSD": 0.008
+       }
+      }
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 0
+    }
+   }
+  }
+ ]
+}

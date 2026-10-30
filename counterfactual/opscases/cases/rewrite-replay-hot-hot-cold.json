@@ -1,0 +1,807 @@
+{
+ "id": "rewrite/replay/hot-hot-cold/5m",
+ "description": "One rewrite, reported once on request 1 and applied again by Compute on requests 2 and 3. The same 7,000 tokens are priced three ways: write (hot, new content), read (hot, cached by request 1 without the change), write (cold, after a 20-minute gap). Total $0.05460.",
+ "source": "examples.md#2",
+ "dims": {
+  "kind": "rewrite",
+  "position": "afterBStarToL",
+  "cache": "hit-hit-miss",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "replay": "true"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 8
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 8
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 30000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 30000,
+     "cacheWrite1h": 0
+    },
+    "ops": []
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:10Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 10840872981498827576,
+       "bytes": 32000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 9
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.cmdfilter",
+     "at": {
+      "section": "messages",
+      "index": 9
+     },
+     "sizeBefore": {
+      "bytes": 32000
+     },
+     "sizeAfter": {
+      "bytes": 4000
+     },
+     "changeId": "cg:cmdfilter:c40e"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 105995758646774718,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 9
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 30000,
+    "cacheWrite": 1000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 30000,
+     "cacheWrite": 8000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:cmdfilter:c40e",
+      "saved": {
+       "cacheWrite5m": 7000
+      },
+      "caused": {},
+      "estimated": true,
+      "note": "new content, would have been written"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 8
+    }
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r2",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:10Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 10840872981498827576,
+       "bytes": 32000
+      },
+      {
+       "hash": 15659084773683486234,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 10
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 105995758646774718,
+       "bytes": 4000
+      },
+      {
+       "hash": 6804201602739664216,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 10
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 31000,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 38000,
+     "cacheWrite": 500,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:cmdfilter:c40e",
+      "saved": {
+       "cacheRead": 7000
+      },
+      "caused": {},
+      "estimated": true,
+      "note": "applied again; the client's prefix would be cached"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 9
+    }
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r3",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:21:10Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 10840872981498827576,
+       "bytes": 32000
+      },
+      {
+       "hash": 15659084773683486234,
+       "bytes": 2000
+      },
+      {
+       "hash": 1183429128118280581,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 11
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 11074467856982677247,
+       "bytes": 8000
+      },
+      {
+       "hash": 16616267534773330454,
+       "bytes": 16000
+      },
+      {
+       "hash": 2966253261979961008,
+       "bytes": 12000
+      },
+      {
+       "hash": 2081818211719572733,
+       "bytes": 12000
+      },
+      {
+       "hash": 7285214446445393403,
+       "bytes": 12000
+      },
+      {
+       "hash": 8639518196644133190,
+       "bytes": 12000
+      },
+      {
+       "hash": 100555197456561604,
+       "bytes": 12000
+      },
+      {
+       "hash": 15814600468007131557,
+       "bytes": 12000
+      },
+      {
+       "hash": 272910142480290119,
+       "bytes": 12000
+      },
+      {
+       "hash": 2079522210389081174,
+       "bytes": 12000
+      },
+      {
+       "hash": 105995758646774718,
+       "bytes": 4000
+      },
+      {
+       "hash": 6804201602739664216,
+       "bytes": 2000
+      },
+      {
+       "hash": 18353991163982095907,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 11
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 32000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "cold",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 39000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:cmdfilter:c40e",
+      "saved": {
+       "cacheWrite5m": 7000
+      },
+      "caused": {},
+      "estimated": true,
+      "note": "the entry expired; written again"
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
+     }
+    ]
+   }
+  }
+ ]
+}

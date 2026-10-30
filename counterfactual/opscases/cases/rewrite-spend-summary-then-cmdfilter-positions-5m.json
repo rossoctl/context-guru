@@ -1,0 +1,418 @@
+{
+ "id": "rewrite+spend/summary-then-cmdfilter/positions/5m",
+ "description": "On a cold request the summary replaces messages 0 to 2 with one (a splice of 3 removed, 1 inserted), and cmdfilter, which runs after it, reports its 6,000-token output at index 3 of the summary's output: client message 5. The order check maps that index back through the splice. Both removals are writes: 9,500 and 5,400 tokens, +$0.05588, against the summarizer's call -$0.01250. Total +$0.04338.",
+ "source": "more_examples.md#H2",
+ "dims": {
+  "kind": "rewrite+spend",
+  "position": "mixed",
+  "cache": "miss",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "operations": "2",
+  "splice": "true"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 21000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 21000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:25:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      },
+      {
+       "hash": 4704284311892720578,
+       "bytes": 24000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "spend",
+     "operator": "context-guru.summarize",
+     "changeId": "cg:summarize:h2c3",
+     "call": {
+      "model": "summarizer-model",
+      "params": {
+       "effort": "low"
+      },
+      "usage": {
+       "input": 10000,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "cacheWrite1h": 0,
+       "output": 500,
+       "costUSD": 0.0125
+      }
+     }
+    },
+    {
+     "id": "op2",
+     "kind": "rewrite",
+     "operator": "context-guru.summarize",
+     "at": {
+      "section": "messages",
+      "index": 0
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 2000
+     },
+     "changeId": "cg:summarize:h2c3",
+     "messageSplice": {
+      "at": 0,
+      "removed": 3,
+      "inserted": 1
+     }
+    },
+    {
+     "id": "op3",
+     "kind": "rewrite",
+     "operator": "context-guru.cmdfilter",
+     "at": {
+      "section": "messages",
+      "index": 3
+     },
+     "sizeBefore": {
+      "bytes": 24000
+     },
+     "sizeAfter": {
+      "bytes": 2400
+     },
+     "changeId": "cg:cmdfilter:h2d6"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 17928510466813520849,
+       "bytes": 2000
+      },
+      {
+       "hash": 13418269498659704927,
+       "bytes": 6000
+      },
+      {
+       "hash": 9119921373193062674,
+       "bytes": 6000
+      },
+      {
+       "hash": 17469456705480082362,
+       "bytes": 2400
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 12100,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "cold",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 27000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:summarize:h2c3",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "model": "summarizer-model",
+       "params": {
+        "effort": "low"
+       },
+       "usage": {
+        "input": 10000,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 500,
+        "costUSD": 0.0125
+       }
+      }
+     },
+     {
+      "changeId": "cg:summarize:h2c3",
+      "saved": {
+       "cacheWrite5m": 9500
+      },
+      "caused": {},
+      "estimated": true
+     },
+     {
+      "changeId": "cg:cmdfilter:h2d6",
+      "saved": {
+       "cacheWrite5m": 5400
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "note": "the entry expired; B* is 0, so the read extent to B* is empty"
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,336 @@
+{
+ "id": "split/volatile-in-first-message",
+ "description": "The variant issue 567 could not measure: the volatile snapshot changes inside message 0, which a messages[0] breakpoint hashes. The provider reads through system (2,500 tokens) and writes the other 8,000. The client made the change, so the break has an empty ChangeID and, with B* at the system breakpoint, no priced tokens. The 8,000 written tokens are the room an operator that moved that breakpoint could win back, but they are not a cost of any operation.",
+ "source": "issue_cases.md#567",
+ "dims": {
+  "kind": "none",
+  "position": "messages",
+  "cache": "break",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "break": "client"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 864354888630698860,
+       "bytes": 20000
+      },
+      {
+       "hash": 16448627188341146834,
+       "bytes": 8000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 1
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 9500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 9500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:40Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 1530191841548035958,
+       "bytes": 20000
+      },
+      {
+       "hash": 10609546518418166608,
+       "bytes": 8000
+      },
+      {
+       "hash": 7776357575460546269,
+       "bytes": 4000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      3
+     ],
+     "pos": [
+      {
+       "hash": 9333495931880389602,
+       "bytes": 800
+      },
+      {
+       "hash": 9792592575190077986,
+       "bytes": 3200
+      },
+      {
+       "hash": 2404930602808811833,
+       "bytes": 6000
+      },
+      {
+       "hash": 1530191841548035958,
+       "bytes": 20000
+      },
+      {
+       "hash": 10609546518418166608,
+       "bytes": 8000
+      },
+      {
+       "hash": 7776357575460546269,
+       "bytes": 4000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 2
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 2
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 2500,
+    "cacheWrite": 8000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 2500,
+     "cacheWrite": 8000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "break",
+      "changeId": "",
+      "saved": {},
+      "caused": {},
+      "inBaseline": true,
+      "to": {
+       "section": "system",
+       "index": 2
+      },
+      "note": "a volatile block inside the span a messages[0] breakpoint hashes: B* is the system breakpoint before it, so the break moves no tokens"
+     }
+    ],
+    "boundary": {
+     "section": "system",
+     "index": 2
+    }
+   }
+  }
+ ]
+}

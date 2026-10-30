@@ -1,0 +1,376 @@
+{
+ "id": "keepalive/ping/minimum-lifetime/rescue",
+ "description": "OpenAI GPT-5.6: the entry lifetime is a 30-minute minimum, and the owner decision is that 30 minutes is 30 minutes (R45). Turn 1 caches 17,000 tokens. A ping at minute 30 reads them and renews the entry. The next request arrives at minute 35, 35 minutes after turn 1 and so past the lifetime, but 5 minutes after the ping and so inside it. The rescue is credited: 17,000 x ($3.75 - $0.30) = +$0.05865. The ping costs 17,000 x $0.30 + 10 x $3.00 + $15.00 per million = -$0.00513. Total +$0.05352.",
+ "source": "more_examples.md#B3",
+ "dims": {
+  "kind": "rescue",
+  "position": "beforeBStar",
+  "cache": "evidence",
+  "ttl": "5m",
+  "lifetime": "minimum",
+  "keepalive": "true"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.1 snaps B* to the last client breakpoint at or before the previous body's end, and the client's breakpoints are the current request's own: system and the new last message. Read literally that gives the end of system, not the end of the previous body. The examples, and this case, take the end of the previous body."
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-oa-ping",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 17000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 17000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "standalone": {
+    "version": 1,
+    "requestId": "ping-1800",
+    "session": "s-oa-ping",
+    "thread": {
+     "id": "main"
+    },
+    "at": "2026-03-02T09:30:00Z",
+    "billing": {
+     "mode": "api"
+    },
+    "ops": [
+     {
+      "id": "op1",
+      "kind": "spend",
+      "operator": "keeper",
+      "changeId": "ka:main:w-oa",
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 17000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "ops": [
+     {
+      "changeId": "ka:main:w-oa",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "host": "api.anthropic.com",
+       "model": "agent-model",
+       "usage": {
+        "input": 10,
+        "cacheRead": 17000,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 1
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r1",
+     "session": "s-oa-ping",
+     "model": "gpt-5.6",
+     "at": "2026-03-02T09:35:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 12000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 12000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 12000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "30m",
+     "lifetime": "minimum",
+     "lastPing": "2026-03-02T09:30:00Z",
+     "pingRead": {
+      "section": "messages",
+      "index": 3
+     },
+     "pingWindow": "ka:main:w-oa"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 17000,
+    "cacheWrite": 500,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 17500,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "effects": [
+     {
+      "kind": "rescue",
+      "changeId": "ka:main:w-oa",
+      "saved": {
+       "cacheWrite5m": 17000
+      },
+      "caused": {
+       "cacheRead": 17000
+      },
+      "to": {
+       "section": "messages",
+       "index": 3
+      },
+      "note": "without the ping the 30-minute entry would have expired; write becomes read"
+     }
+    ],
+    "boundary": {
+     "section": "messages",
+     "index": 3
+    }
+   }
+  }
+ ]
+}

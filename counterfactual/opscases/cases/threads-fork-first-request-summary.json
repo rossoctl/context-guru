@@ -1,0 +1,394 @@
+{
+ "id": "threads/fork-first-request/summary",
+ "description": "A thread forked from main sends main's conversation with a summary on its first request. Main cached 21,000 tokens; the provider caches by content, so the fork reads main's tools and system (8,000) and writes the rest. The library keeps no history for the fork (Thread.Parent is carried and not read), so the phase is unknown and the read in the usage makes it hot up to the end of system: the 9,500 removed tokens come after B* and are a write, +$0.03563, less the summarizer call $0.0125. cg prices a summarizer's first removal as a read whenever the request hit the cache (uniqueRate), +$0.00285. Main's entry held the whole conversation and the provider caches by content, so without the summary the fork would have read those tokens: cg's tier is nearer the truth here, and the library cannot see it because it keeps no history for the fork.",
+ "source": "issue_cases.md#423",
+ "dims": {
+  "kind": "rewrite+spend",
+  "position": "afterBStar",
+  "cache": "fork",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "threads": "2"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "whether the library should read the parent's state for a forked thread (Thread.Parent). Today it does not, and prices the fork as a thread with no history"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "main-0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 0,
+    "cacheWrite": 21000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "unknown",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 0,
+     "cacheWrite": 21000,
+     "cacheWrite1h": 0
+    },
+    "ops": [],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  },
+  {
+   "begin": {
+    "meta": {
+     "requestId": "fork-0",
+     "session": "s1",
+     "model": "agent-model",
+     "at": "2026-03-02T09:01:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 14255008529519690752,
+       "bytes": 16000
+      },
+      {
+       "hash": 5504200863599845366,
+       "bytes": 12000
+      },
+      {
+       "hash": 5203501599497665099,
+       "bytes": 12000
+      },
+      {
+       "hash": 14169015266895321801,
+       "bytes": 6000
+      },
+      {
+       "hash": 4090681140989264984,
+       "bytes": 6000
+      },
+      {
+       "hash": 4704284311892720578,
+       "bytes": 2000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 5
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "op1",
+     "kind": "spend",
+     "operator": "context-guru.summarize",
+     "changeId": "cg:summarize:f0a1",
+     "call": {
+      "model": "summarizer-model",
+      "params": {
+       "effort": "low"
+      },
+      "usage": {
+       "input": 10000,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "cacheWrite1h": 0,
+       "output": 500,
+       "costUSD": 0.0125
+      }
+     }
+    },
+    {
+     "id": "op2",
+     "kind": "rewrite",
+     "operator": "context-guru.summarize",
+     "at": {
+      "section": "messages",
+      "index": 0
+     },
+     "sizeBefore": {
+      "bytes": 40000
+     },
+     "sizeAfter": {
+      "bytes": 2000
+     },
+     "changeId": "cg:summarize:f0a1",
+     "messageSplice": {
+      "at": 0,
+      "removed": 3,
+      "inserted": 1
+     }
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "p:fork",
+     "parent": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      1,
+      2
+     ],
+     "pos": [
+      {
+       "hash": 9351497849059834920,
+       "bytes": 16000
+      },
+      {
+       "hash": 7619311080157336445,
+       "bytes": 16000
+      },
+      {
+       "hash": 17928510466813520849,
+       "bytes": 2000
+      },
+      {
+       "hash": 13418269498659704927,
+       "bytes": 6000
+      },
+      {
+       "hash": 9119921373193062674,
+       "bytes": 6000
+      },
+      {
+       "hash": 3602111879603914276,
+       "bytes": 2000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 8000,
+    "cacheWrite": 4000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 8000,
+     "cacheWrite": 13500,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:summarize:f0a1",
+      "saved": {},
+      "caused": {},
+      "call": {
+       "model": "summarizer-model",
+       "params": {
+        "effort": "low"
+       },
+       "usage": {
+        "input": 10000,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "output": 500,
+        "costUSD": 0.0125
+       }
+      }
+     },
+     {
+      "changeId": "cg:summarize:f0a1",
+      "saved": {
+       "cacheWrite5m": 9500
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "boundary": {
+     "section": "system",
+     "index": 0
+    },
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  }
+ ]
+}

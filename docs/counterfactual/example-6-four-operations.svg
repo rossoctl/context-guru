@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1490 470" width="1490" height="470" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="t">Turn 5: one new operation, three applied again</title>
+<desc id="d">One row shows the forwarded prompt of turn 5, left to right: tools 20,000 tokens, system 3,000, then messages. The cache is hot and reaches the end of message 8, so everything up to there is read at 0.30 dollars per million tokens, and message 9 is written at 3.75. The client body was 71,000 tokens and the forwarded body is 52,260 tokens. Hatched blocks are what the context operators removed. Two columns on the right, with the past operations first. Operations: three operations are reported earlier and applied again by Compute: tool-prune (turn 1), expand (turn 1) and mask (turn 3); one operation is reported on this request: cmdfilter. Compute: tokens per tier. tool-prune saved 8,000 read tokens, expand caused 300 read tokens, mask saved 3,940 read tokens, cmdfilter saved 7,100 written tokens. The total line prices them: 11,640 read tokens at 0.30 dollars per million is 0.00349 dollars, plus 7,100 written tokens at 3.75 is 0.02663 dollars, a saving of 0.03012 dollars on turn 5.</desc>
+<style>
+svg{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#d9d8d3;--read:#2a78d6;--write:#eb6834}
+@media (prefers-color-scheme: dark){svg{--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--grid:#3a3a37;--read:#3987e5;--write:#d95926}}
+.bg{fill:var(--surface)}
+.read{fill:var(--read);stroke:var(--surface);stroke-width:2}
+.write{fill:var(--write);stroke:var(--surface);stroke-width:2}
+.ghost-read{fill:url(#hr);stroke:var(--read);stroke-width:1.5;stroke-dasharray:5 3}
+.ghost-write{fill:url(#hw);stroke:var(--write);stroke-width:1.5;stroke-dasharray:5 3}
+.hr{stroke:var(--read);stroke-width:1.5}.hw{stroke:var(--write);stroke-width:1.5}
+.t{fill:var(--ink)}.t2{fill:var(--ink2)}
+.guide{stroke:var(--ink2);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
+.axis{stroke:var(--grid);stroke-width:1}
+.add{fill:var(--read);stroke:var(--ink);stroke-width:2}
+.sep{stroke:var(--surface);stroke-width:2}
+</style>
+<defs>
+<pattern id="hr" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hr" x1="0" y1="0" x2="0" y2="8"/></pattern>
+<pattern id="hw" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hw" x1="0" y1="0" x2="0" y2="8"/></pattern>
+</defs>
+<rect class="bg" width="1490" height="470"/>
+<text class="t" x="24" y="30" font-size="17" font-weight="600">Turn 5: one new operation, three applied again</text>
+<text class="t2" x="24" y="50" font-size="12">The row is the prompt that was forwarded, left to right, message by message; widths are in tokens (the client body is 71,000). The hatched blocks are what the context operators removed.</text>
+<g transform="translate(-30,0)">
+<text class="t" x="292.0" y="80" font-size="11" text-anchor="middle" font-weight="600">tools</text>
+<text class="t2" x="292.0" y="93" font-size="10" text-anchor="middle">30 declarations · 20,000</text>
+<text class="t" x="432.3" y="80" font-size="11" text-anchor="middle" font-weight="600">system</text>
+<text class="t2" x="432.3" y="93" font-size="10" text-anchor="middle">3,000</text>
+<text class="t" x="511.6" y="80" font-size="11" text-anchor="middle" font-weight="600">messages 0 to 2</text>
+<text class="t2" x="511.6" y="93" font-size="10" text-anchor="middle">10,000</text>
+<text class="t" x="597.0" y="80" font-size="11" text-anchor="middle" font-weight="600">3</text>
+<text class="t2" x="597.0" y="93" font-size="10" text-anchor="middle">4,000</text>
+<text class="t" x="627.5" y="80" font-size="10" text-anchor="middle" font-weight="600">4</text>
+<text class="t" x="755.6" y="80" font-size="11" text-anchor="middle" font-weight="600">5</text>
+<text class="t2" x="755.6" y="93" font-size="10" text-anchor="middle">grep over the repo · 20,000</text>
+<text class="t" x="908.1" y="80" font-size="11" text-anchor="middle" font-weight="600">6 to 8</text>
+<text class="t2" x="908.1" y="93" font-size="10" text-anchor="middle">5,000</text>
+<text class="t" x="987.4" y="80" font-size="11" text-anchor="middle" font-weight="600">9 (new)</text>
+<text class="t2" x="987.4" y="93" font-size="10" text-anchor="middle">pytest output · 8,000</text>
+<path d="M170 102 H1036.2" stroke="var(--grid)" stroke-width="1"/>
+<line class="guide" x1="450.6" y1="108" x2="450.6" y2="236"/>
+<line class="guide" x1="938.6" y1="108" x2="938.6" y2="236"/>
+<line class="guide" x1="1036.2" y1="108" x2="1036.2" y2="236"/>
+<text class="t2" x="450.6" y="120" font-size="10" text-anchor="middle">breakpoint 1 (end of system)</text>
+<text class="t2" x="932.6" y="120" font-size="10" text-anchor="end">B* = end of message 8</text>
+<text class="t2" x="1042.2" y="120" font-size="10">breakpoint 2 (L)</text>
+<text class="t" x="54" y="148" font-size="14" font-weight="600">Forwarded body</text>
+<text class="t2" x="54" y="162" font-size="11">with the operations</text>
+<text class="t2" x="54" y="175" font-size="11">52,260 tokens</text>
+<rect class="read" x="170.0" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="175.4" y="132" width="5.4" height="40" rx="3"/>
+<rect class="ghost-read" x="180.8" y="132" width="42.7" height="40" rx="3"/>
+<rect class="read" x="223.5" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="229.0" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="234.4" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="239.8" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="245.2" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="250.7" y="132" width="5.4" height="40" rx="3"/>
+<rect class="ghost-read" x="256.1" y="132" width="24.4" height="40" rx="3"/>
+<rect class="read" x="280.5" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="285.9" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="291.3" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="296.7" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="302.2" y="132" width="5.4" height="40" rx="3"/>
+<rect class="ghost-read" x="307.6" y="132" width="30.5" height="40" rx="3"/>
+<rect class="read" x="338.1" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="343.5" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="348.9" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="354.4" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="359.8" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="365.2" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="370.6" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="376.0" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="381.5" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="386.9" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="392.3" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="397.7" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="403.2" y="132" width="5.4" height="40" rx="3"/>
+<rect class="read" x="408.6" y="132" width="5.4" height="40" rx="3"/>
+<rect class="add" x="411.3" y="128" width="9.0" height="48" rx="2"/>
+<rect class="read" x="417.7" y="132" width="159.3" height="40" rx="3"/>
+<rect class="read" x="576.3" y="132" width="1.0" height="40" rx="3"/>
+<rect class="ghost-read" x="577.0" y="132" width="48.1" height="40" rx="3"/>
+<rect class="read" x="625.1" y="132" width="317.2" height="40" rx="3"/>
+<rect class="write" x="942.3" y="132" width="11.0" height="40" rx="3"/>
+<rect class="ghost-write" x="953.2" y="132" width="86.6" height="40" rx="3"/>
+<line class="sep" x1="417.7" y1="132" x2="417.7" y2="172"/>
+<line class="sep" x1="454.3" y1="132" x2="454.3" y2="172"/>
+<line class="sep" x1="576.3" y1="132" x2="576.3" y2="172"/>
+<line class="sep" x1="625.1" y1="132" x2="625.1" y2="172"/>
+<line class="sep" x1="637.3" y1="132" x2="637.3" y2="172"/>
+<line class="sep" x1="881.3" y1="132" x2="881.3" y2="172"/>
+<line class="sep" x1="942.3" y1="132" x2="942.3" y2="172"/>
+<text class="t" x="279.8" y="186" font-size="11" text-anchor="middle" font-weight="600">tool-prune</text>
+<text class="t2" x="279.8" y="199" font-size="10" text-anchor="middle">tools 2, 9 and 15, −8,000</text>
+<text class="t" x="600.7" y="186" font-size="11" text-anchor="middle" font-weight="600">mask</text>
+<text class="t2" x="600.7" y="199" font-size="10" text-anchor="middle">−3,940</text>
+<text class="t" x="997.2" y="186" font-size="11" text-anchor="middle" font-weight="600">cmdfilter</text>
+<text class="t2" x="997.2" y="199" font-size="10" text-anchor="middle">−7,100</text>
+<polygon class="t" points="410.8,182 420.8,182 415.8,175"/>
+<text class="t" x="415.8" y="186" font-size="11" text-anchor="middle" font-weight="600">expand</text>
+<text class="t2" x="415.8" y="199" font-size="10" text-anchor="middle">new tool, +300</text>
+<line class="axis" x1="170" y1="236" x2="1036.2" y2="236"/>
+<line class="axis" x1="170.0" y1="236" x2="170.0" y2="242"/>
+<text class="t2" x="170.0" y="256" font-size="11" text-anchor="middle">0</text>
+<line class="axis" x1="414.0" y1="236" x2="414.0" y2="242"/>
+<text class="t2" x="414.0" y="256" font-size="11" text-anchor="middle">20k</text>
+<line class="axis" x1="658.0" y1="236" x2="658.0" y2="242"/>
+<text class="t2" x="658.0" y="256" font-size="11" text-anchor="middle">40k</text>
+<line class="axis" x1="902.0" y1="236" x2="902.0" y2="242"/>
+<text class="t2" x="902.0" y="256" font-size="11" text-anchor="middle">60k</text>
+<line class="axis" x1="1036.2" y1="236" x2="1036.2" y2="242"/>
+<text class="t2" x="1036.2" y="256" font-size="11" text-anchor="middle">71k</text>
+<text class="t2" x="603.1" y="276" font-size="11" text-anchor="middle">position in the client body, in tokens (k = 1,000)</text>
+<rect class="read" x="170" y="298" width="22" height="12" rx="2"/><text class="t" x="202" y="308" font-size="12">cache read: $0.30 per million tokens (up to B*)</text>
+<rect class="write" x="560" y="298" width="22" height="12" rx="2"/><text class="t" x="592" y="308" font-size="12">cache write: $3.75 per million tokens (after B*, up to L)</text>
+<rect class="ghost-write" x="170" y="324" width="22" height="12" rx="2"/><rect class="ghost-read" x="196" y="324" width="22" height="12" rx="2"/><text class="t" x="228" y="334" font-size="12">tokens a context operator removed, at the rate they would have been billed at</text>
+<text class="t2" x="170" y="360" font-size="11">The 3 removed tool declarations are not next to each other. Each is its own span of the tool-prune operation.</text>
+</g>
+<text class="t" x="1075" y="84" font-size="12" font-weight="600">operations</text>
+<text class="t2" x="1075" y="98" font-size="11">reported</text>
+<text class="t" x="1300" y="84" font-size="12" font-weight="600">Compute</text>
+<text class="t2" x="1300" y="98" font-size="11">tokens per tier</text>
+<rect x="1065" y="134" width="410" height="114" rx="8" fill="none" stroke="var(--ink2)" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text class="t2" x="1075" y="152" font-size="11">past: reported earlier, applied again by Compute</text>
+<rect x="1075" y="162" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text class="t" x="1108.2" y="176" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1149" y="176" font-size="11" font-weight="600">tool-prune<tspan class="t2" font-weight="400"> · turn 1</tspan></text>
+<text class="t" x="1300" y="176" font-size="13" font-weight="600">saved: read 8,000</text>
+<rect x="1075" y="192" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text class="t" x="1108.2" y="206" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1149" y="206" font-size="11" font-weight="600">expand<tspan class="t2" font-weight="400"> · turn 1</tspan></text>
+<text class="t" x="1300" y="206" font-size="13" font-weight="600">caused: read 300</text>
+<rect x="1075" y="222" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text class="t" x="1108.2" y="236" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1149" y="236" font-size="11" font-weight="600">mask<tspan class="t2" font-weight="400"> · turn 3</tspan></text>
+<text class="t" x="1300" y="236" font-size="13" font-weight="600">saved: read 3,940</text>
+<rect x="1065" y="262" width="410" height="56" rx="8" fill="none" stroke="var(--ink2)" stroke-width="1.5"/>
+<text class="t2" x="1075" y="280" font-size="11">this request: reported now</text>
+<rect x="1075" y="288" width="66.4" height="20" rx="10" fill="none" stroke="var(--ink)" stroke-width="1.5"/>
+<text class="t" x="1108.2" y="302" font-size="12" text-anchor="middle" font-weight="600">rewrite</text>
+<text class="t" x="1149" y="302" font-size="11" font-weight="600">cmdfilter<tspan class="t2" font-weight="400"> · turn 5</tspan></text>
+<text class="t" x="1300" y="302" font-size="13" font-weight="600">saved: write 7,100</text>
+<line class="axis" x1="1075" y1="338" x2="1465" y2="338"/>
+<text class="t2" x="1075" y="354" font-size="11">total</text>
+<text class="t" x="1075" y="372" font-size="12">read 11,640 × $0.30 = +$0.00349</text>
+<text class="t" x="1075" y="388" font-size="12">write 7,100 × $3.75 = +$0.02663</text>
+<text class="t" x="1075" y="412" font-size="16" font-weight="600">= +$0.03012 saved</text>
+<text class="t2" x="1075" y="432" font-size="11">client body: 63,000 × $0.30 + 8,000 × $3.75 = $0.04890</text>
+<text class="t2" x="1075" y="446" font-size="11">forwarded: 51,360 × $0.30 + 900 × $3.75 = $0.01878</text>
+</svg>

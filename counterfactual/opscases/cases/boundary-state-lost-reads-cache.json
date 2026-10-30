@@ -1,0 +1,201 @@
+{
+ "id": "boundary/state-lost-reads-cache",
+ "description": "The proxy restarted: the Tracker has no history for the thread. The replacement of message 1 (6,000 to 500 tokens) is replayed from the store at depth, and the provider reads 18,500 tokens, so it holds the compacted form. The usage proves the entry (\u00a75.2), so the phase is hot and the saved tokens are priced as a read (5,500 x $0.30 = +$0.00165), never as a write. No break can be charged without a previous fingerprint, so penalty_unknown is reported: the net is not a measured figure.",
+ "source": "issue_cases.md#47",
+ "dims": {
+  "kind": "rewrite",
+  "position": "beforeBStar",
+  "cache": "unknown-read-by-evidence",
+  "ttl": "5m",
+  "lifetime": "exact",
+  "boundary": "unknown"
+ },
+ "rates": "fixture-v1",
+ "open": [
+  "design \u00a75.2 row 6 says the boundary is unknown, and the evidence rule says to use the extent the read covers, which would make it known and \u00a76.4 would not apply. This case takes row 6 and \u00a76.4"
+ ],
+ "steps": [
+  {
+   "begin": {
+    "meta": {
+     "requestId": "r0",
+     "session": "s-restart",
+     "model": "agent-model",
+     "at": "2026-03-02T09:00:00Z",
+     "billing": {
+      "mode": "api"
+     }
+    },
+    "client": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 11608045664679988289,
+       "bytes": 24000
+      },
+      {
+       "hash": 17195989329813874534,
+       "bytes": 24000
+      },
+      {
+       "hash": 17438703347596249554,
+       "bytes": 24000
+      },
+      {
+       "hash": 8453938350694027169,
+       "bytes": 8000
+      }
+     ]
+    },
+    "clientBreakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ]
+   },
+   "add": [
+    {
+     "id": "o1",
+     "kind": "rewrite",
+     "operator": "context-guru.extract",
+     "at": {
+      "section": "messages",
+      "index": 1
+     },
+     "sizeBefore": {
+      "bytes": 24000
+     },
+     "sizeAfter": {
+      "bytes": 2000
+     },
+     "changeId": "cg:extract:1a40"
+    }
+   ],
+   "end": {
+    "thread": {
+     "id": "main"
+    },
+    "forwarded": {
+     "start": [
+      0,
+      0,
+      1
+     ],
+     "pos": [
+      {
+       "hash": 15745513492897880738,
+       "bytes": 8000
+      },
+      {
+       "hash": 5508475225053360789,
+       "bytes": 16000
+      },
+      {
+       "hash": 9215220295725055461,
+       "bytes": 2000
+      },
+      {
+       "hash": 8099914972667036346,
+       "bytes": 24000
+      },
+      {
+       "hash": 9829950327744007510,
+       "bytes": 24000
+      },
+      {
+       "hash": 14673721351171212477,
+       "bytes": 8000
+      }
+     ]
+    },
+    "breakpoints": [
+     {
+      "pos": {
+       "section": "system",
+       "index": 0
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 3
+      },
+      "ttl": "5m"
+     },
+     {
+      "pos": {
+       "section": "messages",
+       "index": 4
+      },
+      "ttl": "5m"
+     }
+    ],
+    "facts": {
+     "ttl": "5m",
+     "lifetime": "exact"
+    }
+   },
+   "usage": {
+    "input": 0,
+    "cacheRead": 18500,
+    "cacheWrite": 2000,
+    "cacheWrite1h": 0
+   },
+   "expected": {
+    "phase": "hot",
+    "baselineUsage": {
+     "input": 0,
+     "cacheRead": 24000,
+     "cacheWrite": 2000,
+     "cacheWrite1h": 0
+    },
+    "ops": [
+     {
+      "changeId": "cg:extract:1a40",
+      "saved": {
+       "cacheRead": 5500
+      },
+      "caused": {},
+      "estimated": true
+     }
+    ],
+    "unpriced": [
+     {
+      "reason": "penalty_unknown"
+     }
+    ]
+   }
+  }
+ ]
+}
