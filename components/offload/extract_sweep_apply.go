@@ -92,6 +92,15 @@ type sweepDropRec struct {
 	// Rule says what chose the drop when sweep v3 was on: a rule name, or "judge". Empty otherwise. A name
 	// only, so an expand can be counted per rule. No content.
 	Rule string `json:"rule,omitempty"`
+	// Sweep v3 only. Tool is the name of the tool whose output this was, TKind its class (read, edit, command or
+	// other), and Target a HASH of the file path or command of that call (callTarget). The path itself is never
+	// stored. A later tool call whose target hashes the same is a re-read of what the drop removed. RereadAt is how
+	// many messages have been scanned for one; Reread is set once one was seen.
+	Tool     string `json:"tool,omitempty"`
+	TKind    string `json:"tkind,omitempty"`
+	Target   string `json:"target,omitempty"`
+	RereadAt int    `json:"reread_at,omitempty"`
+	Reread   bool   `json:"reread,omitempty"`
 	// Idents are short hashes of the identifiers the output introduced. A later turn that uses one,
 	// without expanding, is the referenced_later signal.
 	Idents []string `json:"idents,omitempty"`
@@ -613,6 +622,9 @@ func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *component
 
 	// 2. References to earlier drops.
 	e.scanReferences(req, rep, c, tkey)
+	if e.v3 {
+		e.scanRereads(req, c, tkey)
+	}
 
 	// 3. A held answer.
 	ak, ac := e.applyHeld(req, rep, c, tkey)
@@ -987,6 +999,11 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			later = append(later, o)
 		}
 	}
+	// Sweep v3 records which tool and which target (a hash) each drop came from, to see a re-read later.
+	var v3calls map[string]v3Call
+	if e.v3 {
+		v3calls = v3Calls(req)
+	}
 	for _, o := range now {
 		idx, ok := rawToolMessage(req.Input, o.ToolUseID)
 		if !ok {
@@ -1015,6 +1032,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			Thread: tkey, ToolUseID: o.ToolUseID, CK: extract.ContentKey(content), Marker: key,
 			Tokens: saved, AtMs: time.Now().UnixMilli(), Kind: kind,
 			Idents: res.identsOf(o.ToolUseID), Seen: len(raw), Rule: ruleOfSource(src, o.ToolUseID),
+			Tool: v3calls[o.ToolUseID].lname(), TKind: v3calls[o.ToolUseID].tkind(), Target: v3calls[o.ToolUseID].target(), RereadAt: rereadStart(e.v3, len(raw)),
 		}})
 		changed++
 		if key != "" {
@@ -1065,6 +1083,11 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			ev = eventAppliedChangedPrefix
 		}
 		rep.EventN(ev, n)
+		if e.v3 {
+			for _, p := range pending {
+				noteV3Dropped(p.rec.TKind)
+			}
+		}
 		if warmGated {
 			noteWarmSweep(tkey, WarmSweep{Drops: n, RemovedLocal: removedNow(pending), RemovedBilled: warm.removedBilled,
 				RewriteBilled: warm.rewriteBilled, ConvBefore: convBefore, ConvAfter: localTokens(req.Input),

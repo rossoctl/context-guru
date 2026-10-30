@@ -718,10 +718,12 @@ expanded in this session.
 
 `not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
 
+**Did the agent go back?** With v3 on, the drop record also stores the tool name and a **hash** of the file path or command of the call that produced the output. The path is never stored. On each later request the sweep hashes the path or command of the later tool calls and matches them against those hashes. Each drop is counted once, as `reread_after_drop`, by source and by kind. With `dropped_by_kind` it gives a re-read rate.
+
 The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.
 
 Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
-`expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
+`dropped_by_kind` (applied v3 drops by the class of the tool: `read`, `edit`, `command`, `other`) and `reread_after_drop` (later tool calls that went back to what a drop removed: the same file read or edited again, or the same command run again; `total`, `by_source` (a rule name or `judge`) and `by_kind`), `expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
 expand rate per rule), `recent_refusals` (the last refusals made before the gate, with D, D/P, P/C, C, `c_source` and D by rule; the gate's own refusals are in the decision log),
 `c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
 `no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
