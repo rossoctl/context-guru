@@ -83,6 +83,19 @@ func HasSweepPingCandidate(threadKey string) bool {
 	return ok
 }
 
+// KeepAliveCandidateState reports the cache_state and pre_expiry_seconds of the summarizer's keep-alive
+// candidate for threadKey, and whether one is registered. It reads the registration only: no
+// checkpoint, no content. The keeper uses it to place the summary's extra request (#776).
+func KeepAliveCandidateState(threadKey string) (cacheState string, preExpirySeconds int, ok bool) {
+	keepAliveCandMu.Lock()
+	defer keepAliveCandMu.Unlock()
+	cand, ok := keepAliveCand[threadKey]
+	if !ok {
+		return "", 0, false
+	}
+	return cand.cacheState, cand.preExpirySeconds, true
+}
+
 // ClaimPing decides, for threadKey (thread.Key(session, thread)), what takes this ping, and holds the
 // thread until Release. A plain claim holds nothing.
 func ClaimPing(threadKey string) PingClaim {

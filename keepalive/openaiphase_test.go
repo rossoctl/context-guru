@@ -85,7 +85,7 @@ func TestAPreExpirySubstituteStillTakesAnAnthropicPingWithTheDefaultWindow(t *te
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &fakeSummaryModel{out: "<summary>fires inside the Anthropic window</summary>"}
 	kaCandidateWithCacheState(t, "sess-1", st, model, "pre_expiry", 0)
-	recordOne(t, k, kaPolicy(), kaBody, clock.now())
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {

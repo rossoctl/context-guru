@@ -27,7 +27,9 @@ resolvable `<<cg:HASH>>` marker. It never rewrites anything.
 > it cannot renew the entry, so it never takes a planned ping. Every ping the strategy plans goes out
 > plain, and the question goes out once as an extra request at the slot after the last planned ping,
 > 30 seconds before the hold ends. No ping follows it. A user back inside the strategy's warm period is
-> covered exactly as without the sweep. `/stats` counts it as `keepalive_sweep_extra_asked`.
+> covered exactly as without the sweep. `/stats` counts it as `keepalive_sweep_extra_asked`. The
+> summarizer's keep-alive substitute follows the same rule; see docs/design.md, "Keep-alive: the cache
+> strategy comes first".
 
 ### Why it is separate from `extract_llm`
 

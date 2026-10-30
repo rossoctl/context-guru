@@ -179,23 +179,37 @@ func TestNoExtraQuestionOnAStoppedSpan(t *testing.T) {
 }
 
 // GUARD for docs/design.md "Keep-alive: the cache strategy comes first". After a text turn, no planned
-// ping of any plan length is replaced by the sweep's question: the strategy's pings all go out plain,
-// and the question (if any) comes after the last one. A change that breaks this fails here.
+// ping of any plan length is replaced by ANY keep-alive substitute (the sweep question, the summarizer
+// with cache_state pre_expiry or any): the strategy's pings all go out plain, and a substitute (if any)
+// comes after the last one. A change that breaks this, or a new substitute kind that skips the rule,
+// fails here. Add every new substitute kind to the table.
 func TestGuardNoPlannedPingIsReplacedAfterATextTurn(t *testing.T) {
-	for _, maxPings := range []int{1, 2, 3} {
-		k, fs, clock := testKeeper(t)
-		st := store.NewMemory(store.Options{MaxEntries: 400})
-		asker := &sweepAsker{cacheRead: 48576}
-		registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
-		pol := kaPolicy()
-		pol.MaxPings = maxPings
-		recordOne(t, k, pol, kaBody, clock.now())
-		for i := 1; i <= maxPings; i++ {
-			k.Sweep(clock.advance(281 * time.Second))
-			waitPings(t, k, int64(i))
-			if fs.n() != i || asker.calls.Load() != 0 || k.sweepSubstituted.Load() != 0 {
-				t.Fatalf("plan of %d, ping %d: plain %d, asks %d; a planned ping was replaced after a text turn "+
-					"(see docs/design.md, Keep-alive: the cache strategy comes first)", maxPings, i, fs.n(), asker.calls.Load())
+	for _, kind := range []string{"sweep", "summary pre_expiry", "summary any"} {
+		for _, maxPings := range []int{1, 2, 3} {
+			k, fs, clock := testKeeper(t)
+			st := store.NewMemory(store.Options{MaxEntries: 400})
+			asker := &sweepAsker{cacheRead: 48576}
+			model := &fakeSummaryModel{out: "<summary>guard</summary>"}
+			switch kind {
+			case "sweep":
+				registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+			case "summary pre_expiry":
+				kaCandidateWithCacheState(t, "sess-1", st, model, "pre_expiry", 0)
+			case "summary any":
+				kaCandidateWithCacheState(t, "sess-1", st, model, "any", 0)
+			}
+			pol := kaPolicy()
+			pol.MaxPings = maxPings
+			recordOne(t, k, pol, kaBody, clock.now())
+			for i := 1; i <= maxPings; i++ {
+				k.Sweep(clock.advance(281 * time.Second))
+				waitPings(t, k, int64(i))
+				subs := k.sweepSubstituted.Load() + k.summarySubstituted.Load()
+				if fs.n() != i || subs != 0 {
+					t.Fatalf("%s, plan of %d, ping %d: plain %d, substituted %d; a planned ping was replaced "+
+						"after a text turn (see docs/design.md, Keep-alive: the cache strategy comes first)",
+						kind, maxPings, i, fs.n(), subs)
+				}
 			}
 		}
 	}

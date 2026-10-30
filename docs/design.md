@@ -261,14 +261,26 @@ sends may shorten that.**
   after the last planned ping, and nothing goes out after it. A user who comes back inside the
   strategy's warm period is covered exactly as without it. A user who comes back later pays the
   re-write the strategy would have paid anyway.
+- **Which request takes that slot.** One request only. The claim decides, as for any ping: the
+  summarizer's substitute first, then the sweep question.
+  - The sweep question and a `cache_state: any` summary go out 30 s before the normal hold deadline.
+  - A `cache_state: pre_expiry` summary (the `medium` preset) may run only inside its pre-expiry
+    window, the last 64 s of the cache's life. Its slot is the middle of that window: 268 s after
+    the last ping at the 5-minute defaults, 32 s before expiry. The sweep never asks after it.
+- **The one exception to the hold limit.** The keeper holds the caller's credential and conversation
+  for at most (K+1) x X, about 12 minutes at the 5-minute defaults. A pre_expiry summary's slot
+  falls 28 s past that. So, **only for a span that ended at a text turn and still has a pre_expiry
+  summary waiting**, the hard-deadline timer re-arms **once**, to 15 s past the slot: **43 s longer**
+  at the defaults, never past the cache's own expiry. The copy stays in memory only. Every other
+  span keeps the limit exactly. The owner chose this on 2026-10-30 ("a1 it is"). `/stats` counts it
+  as `keepalive_hold_extensions`.
 - "Text turn" is read from metadata only: the role and block type of the held request's last
-  non-system message (`keepalive.endsAtTextTurn`).
+  non-system message (`keepalive.endsAtTextTurn`). It never applies on OpenAI, whose cache has no
+  breakpoints and no text-turn rule.
 
-History: #716 measured the miss, #776 / #777 / #779 fixed it for the sweep, #778 measures it before
-each release. `keepalive/sweeptextturn_test.go` guards the rule for the sweep.
-
-**Known gap (owner to decide).** The summarizer's keep-alive substitute still takes a planned ping
-after a text turn. See #779.
+History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it before each release.
+`keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
+substitute kind.
 
 ## Session keying
 
