@@ -35,8 +35,13 @@ func (s *reportSink) all() []components.KeepAliveReport {
 
 // recordWithSink records the two turns a pingable thread needs, reporting through sink.
 func recordWithSink(k *Keeper, sink *reportSink, key Key, at time.Time) {
+	recordBodyWithSink(k, sink, key, at, kaBody)
+}
+
+// recordBodyWithSink is recordWithSink for a given body.
+func recordBodyWithSink(k *Keeper, sink *reportSink, key Key, at time.Time, body string) {
 	for _, d := range []time.Duration{-time.Second, 0} {
-		k.Record(Record{Key: key, StartedAt: at.Add(d), Body: []byte(kaBody), Provider: "anthropic",
+		k.Record(Record{Key: key, StartedAt: at.Add(d), Body: []byte(body), Provider: "anthropic",
 			Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
 			UsageOK: true, Policy: kaPolicy(), Header: kaHeader(), Emitter: sink, Hold: fakeOf(k).hold(key)})
 	}

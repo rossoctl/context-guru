@@ -74,6 +74,15 @@ func (c *PingClaim) Release() {
 	pingGuardMu.Unlock()
 }
 
+// HasSweepPingCandidate reports whether the sweep holds a registration for threadKey. The keeper reads
+// it before an extra sweep question (#776), which goes out only when there is something to ask.
+func HasSweepPingCandidate(threadKey string) bool {
+	sweepPingMu.Lock()
+	defer sweepPingMu.Unlock()
+	_, ok := sweepPingCand[threadKey]
+	return ok
+}
+
 // ClaimPing decides, for threadKey (thread.Key(session, thread)), what takes this ping, and holds the
 // thread until Release. A plain claim holds nothing.
 func ClaimPing(threadKey string) PingClaim {
