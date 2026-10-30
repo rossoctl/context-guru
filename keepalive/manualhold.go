@@ -202,9 +202,6 @@ func (k *Keeper) expireAuto(key string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if e, ok := k.live[key]; ok {
-		if k.extendHoldLocked(key, e) {
-			return // a pre_expiry summary's extra slot is still to come (#776); one extension only
-		}
 		k.setReasonLocked(e.key, e.autoReleaseReason())
 	}
 	k.retireLocked(key)

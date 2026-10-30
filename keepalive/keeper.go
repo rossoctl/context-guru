@@ -138,10 +138,6 @@ type kaEntry struct {
 	endsAtText bool
 	// extraAsked latches that span's one extra request (extraDue), sent or attempted.
 	extraAsked bool
-	// holdExtended latches the one hold extension a pre_expiry summary's extra slot may get
-	// (extendHoldLocked, #776), and holdUntil is when that extended hold ends.
-	holdExtended bool
-	holdUntil    time.Time
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -209,10 +205,6 @@ func (e *kaEntry) due(now time.Time) bool {
 // request ahead of it, and the cache the last plain ping renewed is still warm then.
 const extraSlotMargin = 30 * time.Second
 
-// extraHoldMargin is how long the extended hold runs past a pre_expiry summary's slot: 7 sweep ticks,
-// so the release timer cannot beat the sweep that sends it.
-const extraHoldMargin = 15 * time.Second
-
 // extraWaiting reports whether e's span ended at a text turn, spent its planned pings, and has not yet
 // sent its one extra request. Called with k.mu held.
 func (e *kaEntry) extraWaiting() bool {
@@ -220,20 +212,11 @@ func (e *kaEntry) extraWaiting() bool {
 		e.pings >= e.pol.MaxPings && e.pings > 0
 }
 
-// extraSlot is when e's one extra request goes out (#776), measured from the last planned ping.
-//
-//   - A summarizer candidate with cache_state pre_expiry (the medium preset) runs only inside its
-//     pre-expiry window, the last substituteWindow of the lifetime the last plain ping gave. Its slot
-//     is the middle of that window: ttl - window/2 after the last ping. At the 5-minute defaults that
-//     is 268 s, 28 s after the normal hold deadline and 32 s before expiry, 16 sweep ticks from both
-//     ends of the window. extendHoldLocked moves the deadline past it.
-//   - Everything else (the sweep question, a cache_state any summary) has no window: extraSlotMargin
-//     before the normal hold deadline, so the hold limit is unchanged.
-func (e *kaEntry) extraSlot(preExpiry bool, preExpirySeconds int) time.Time {
-	if preExpiry {
-		ttl := cacheLifetime(e.provider, e.ttl1h || e.pol.HeadTTL1h)
-		return e.startedAt.Add(ttl - substituteWindow(preExpirySeconds, ttl, e.pol.Idle)/2)
-	}
+// extraSlot is when e's one extra request goes out (#776): extraSlotMargin before the normal hold
+// deadline, 210 s after the last planned ping at the 5-minute defaults. The same slot for the sweep
+// question and for either kind of summary, so the hold limit never changes. A pre_expiry summary
+// accepts it through extraSummaryWindow.
+func (e *kaEntry) extraSlot() time.Time {
 	return e.startedAt.Add(e.pol.Idle - extraSlotMargin)
 }
 
@@ -241,56 +224,10 @@ func (e *kaEntry) extraSlot(preExpiry bool, preExpirySeconds int) time.Time {
 // every planned ping is plain, as the strategy plans; the summary or the sweep question then goes out
 // once, at extraSlot. It sends no ping and moves no clock, so the strategy's cover is exactly what it
 // is without it, and nothing follows it. Called with k.mu held.
-func (e *kaEntry) extraDue(now time.Time, preExpiry bool, preExpirySeconds int) bool {
-	if !e.extraWaiting() || now.Before(e.extraSlot(preExpiry, preExpirySeconds)) {
-		return false
-	}
+func (e *kaEntry) extraDue(now time.Time) bool {
 	// A slot missed (a real request in flight, a slow tick) is never sent late: not past the normal
-	// hold deadline, and for a pre_expiry summary not past the cache's own expiry.
-	last := e.startedAt.Add(e.pol.Idle)
-	if preExpiry {
-		last = e.startedAt.Add(cacheLifetime(e.provider, e.ttl1h || e.pol.HeadTTL1h))
-	}
-	return now.Before(last)
-}
-
-// preExpiryExtraWaitingLocked reports whether e's extra request is a pre_expiry summary still to be
-// sent, inside a hold that is or may yet be extended for it. Called with k.mu held.
-func (k *Keeper) preExpiryExtraWaitingLocked(e *kaEntry) bool {
-	if !e.extraWaiting() || e.timer == nil {
-		return false
-	}
-	state, _, ok := offload.KeepAliveCandidateState(thread.Key(e.session, e.thread))
-	return ok && state == components.CacheStatePreExpiry
-}
-
-// extendHoldLocked is the ONE exception to the hold limit (#776, the owner's choice a1, 2026-10-30).
-// When the hard-deadline timer fires on a span that ended at a text turn, spent its planned pings, has
-// not sent its extra request, and has a cache_state pre_expiry summary waiting, the timer is re-armed
-// ONCE, to extraHoldMargin past the summary's slot. That is about 43 s at the 5-minute defaults
-// (12 min becomes 12 min 43 s), and never past the cache's own expiry. Every other span is released
-// at (K+1) x X exactly as before. Reports whether it extended. Called with k.mu held.
-func (k *Keeper) extendHoldLocked(key string, e *kaEntry) bool {
-	if e.holdExtended || !e.extraWaiting() {
-		return false
-	}
-	state, secs, ok := offload.KeepAliveCandidateState(thread.Key(e.session, e.thread))
-	if !ok || state != components.CacheStatePreExpiry {
-		return false
-	}
-	ttl := cacheLifetime(e.provider, e.ttl1h || e.pol.HeadTTL1h)
-	until := e.extraSlot(true, secs).Add(extraHoldMargin)
-	if expiry := e.startedAt.Add(ttl); until.After(expiry) {
-		until = expiry
-	}
-	d := until.Sub(k.now())
-	if d <= 0 {
-		return false
-	}
-	e.holdExtended, e.holdUntil = true, until
-	e.timer = time.AfterFunc(d, func() { k.expireAuto(key) })
-	k.holdExtensions.Add(1)
-	return true
+	// hold deadline.
+	return e.extraWaiting() && !now.Before(e.extraSlot()) && now.Before(e.startedAt.Add(e.pol.Idle))
 }
 
 // hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
@@ -562,9 +499,8 @@ type Keeper struct {
 	// sweepExtraAsked counts extra sweep questions sent after the last planned ping (#776), and
 	// sweepExtraSkipped the extra slots where the claim gave the sweep no question to send.
 	sweepExtraAsked, sweepExtraSkipped atomic.Int64
-	// summaryExtraSent counts summaries sent as that extra request, and holdExtensions the holds
-	// extended for a pre_expiry summary's slot (extendHoldLocked).
-	summaryExtraSent, holdExtensions atomic.Int64
+	// summaryExtraSent counts summaries sent as that extra request.
+	summaryExtraSent atomic.Int64
 }
 
 // New builds a Keeper. o.Dispatcher is required. o.Now defaults to time.Now; o.Go defaults to
@@ -1298,9 +1234,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			continue
 		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
-			// A span whose pre_expiry summary still waits for its extra slot is left to the deadline timer,
-			// which owns the one extension (extendHoldLocked). Every other span goes here as before.
-			if !now.Before(e.startedAt.Add(e.pol.Idle)) && !k.preExpiryExtraWaitingLocked(e) {
+			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
 				k.setReasonLocked(e.key, e.autoReleaseReason())
 				k.bytes -= int64(len(e.body))
 				k.releaseLocked(e)
@@ -1817,7 +1751,6 @@ type Stats struct {
 	SweepExtraAsked    int64 `json:"keepalive_sweep_extra_asked"`
 	SweepExtraSkipped  int64 `json:"keepalive_sweep_extra_skipped"`
 	SummaryExtraSent   int64 `json:"keepalive_summary_extra_sent"`
-	HoldExtensions     int64 `json:"keepalive_hold_extensions"`
 	SweepAsked         int64 `json:"sweep_asked"`
 	SweepHeld          int64 `json:"sweep_held"`
 	SweepModelDeclined int64 `json:"sweep_model_declined"`
@@ -1951,7 +1884,6 @@ func (k *Keeper) Stats() Stats {
 		SweepExtraAsked:                    k.sweepExtraAsked.Load(),
 		SweepExtraSkipped:                  k.sweepExtraSkipped.Load(),
 		SummaryExtraSent:                   k.summaryExtraSent.Load(),
-		HoldExtensions:                     k.holdExtensions.Load(),
 		SweepAsked:                         sw.Asked,
 		SweepHeld:                          sw.Held,
 		SweepModelDeclined:                 sw.ModelDeclined,
@@ -2095,21 +2027,21 @@ func predictorFor(id string) (func(stopReason string) float64, bool) {
 func PredictorFor(id string) (func(stopReason string) float64, bool) { return predictorFor(id) }
 
 // extraReadyLocked reports whether e's extra request is due now, and that there is one to send: a
-// summarizer candidate (at its own slot, by cache_state) or a sweep candidate. Called with k.mu held.
+// summarizer candidate or a sweep candidate. Called with k.mu held.
 func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
-	tk := thread.Key(e.session, e.thread)
-	if state, secs, ok := offload.KeepAliveCandidateState(tk); ok {
-		return e.extraDue(now, state == components.CacheStatePreExpiry, secs)
+	if !e.extraDue(now) {
+		return false
 	}
-	return offload.HasSweepPingCandidate(tk) && e.extraDue(now, false, 0)
+	tk := thread.Key(e.session, e.thread)
+	_, _, hasSummary := offload.KeepAliveCandidateState(tk)
+	return hasSummary || offload.HasSweepPingCandidate(tk)
 }
 
 // fireExtra sends the one extra request (kaEntry.extraDue) under the same claim, ceilings and latches
 // as a substitute that takes a ping. ONE request: the claim names who owns the slot, the summary
-// before the sweep (as for any ping), and a pre_expiry summary's slot is later than the sweep's, so a
-// sweep question is never sent after it. Only a cache_state any summary that declines leaves the
-// same slot to the sweep, as main does for a ping. Any other "no" sends nothing: the strategy's pings
-// are already spent.
+// before the sweep (as for any ping); the sweep question goes only if the summary declines, in the
+// same slot, as main does for a ping. Any other "no" sends nothing: the strategy's pings are already
+// spent, and nothing goes out after this slot.
 func (k *Keeper) fireExtra(j pingJob) {
 	claim := offload.ClaimPing(thread.Key(j.session, j.thread))
 	defer claim.Release()
@@ -2119,9 +2051,7 @@ func (k *Keeper) fireExtra(j pingJob) {
 			k.summaryExtraSent.Add(1)
 			return
 		}
-		state, _, _ := offload.KeepAliveCandidateState(thread.Key(j.session, j.thread))
-		if state != components.CacheStatePreExpiry && offload.HasSweepPingCandidate(thread.Key(j.session, j.thread)) &&
-			k.fireSweepSubstitute(j) {
+		if offload.HasSweepPingCandidate(thread.Key(j.session, j.thread)) && k.fireSweepSubstitute(j) {
 			k.sweepExtraAsked.Add(1)
 			return
 		}

@@ -78,6 +78,19 @@ func substituteWindow(seconds int, ttl, idle time.Duration) time.Duration {
 	return w
 }
 
+// extraSummaryWindow is the pre-expiry window for the summary's EXTRA request only (#776): after a text
+// turn the summary goes out after the last planned ping, at the extra slot, extraSlotMargin before the
+// normal hold deadline (210 s after the last ping at the 5-minute defaults). The cache then has
+// ttl - (idle - extraSlotMargin) left (90 s), so the window widens to that plus two sweep ticks (94 s),
+// and never narrows. A planned ping and every other summary path keep substituteWindow. The owner's
+// choice, 2026-10-30: "give it more time, it can run on the 210 sec mark".
+func extraSummaryWindow(w, ttl, idle time.Duration) time.Duration {
+	if extra := ttl - (idle - extraSlotMargin) + 2*tick; extra > w {
+		return extra
+	}
+	return w
+}
+
 // maxSubstituteWindow bounds the widened default window: twice the component's 60 s default plus
 // two 2 s sweep ticks, 124 s. That still covers every schedule this repo ships, the widest being
 // OpenAI's 120 s slack (modelinfo.OpenAIMinimumCacheTTL - OpenAIDefaultKeepAliveIdle) plus the
@@ -122,7 +135,11 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
 	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, ttl1h), e.pol.Idle
 	k.mu.Unlock()
-	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl, substituteWindow(info.PreExpirySeconds, ttl, idle))
+	window := substituteWindow(info.PreExpirySeconds, ttl, idle)
+	if j.extra {
+		window = extraSummaryWindow(window, ttl, idle)
+	}
+	phase := cachePhaseAt(j.prevStartedAt, k.now(), ttl, window)
 	// A `pre_expiry` candidate asked to spend only when ITS OWN notion of the pre-expiry window
 	// is live, not merely whenever the keeper happens to be sending a ping — the two can diverge
 	// (a manager strategy's K>1 schedule, a short idle override, or a component configured with a

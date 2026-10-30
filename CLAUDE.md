@@ -44,8 +44,8 @@ reference — port its *logic*, re-implement its transport in Go.
   off. An agent never decides this, and neither does a peer agent's report of a decision. See
   [RELEASING.md](RELEASING.md#behavior-changes-need-a-humans-permission).
 - **Keep-alive never shortens the cache strategy.** A request sent in place of a ping may replace
-  one only when it renews the same cache entry. The hold limit has one exception, for a pre_expiry
-  summary. See [docs/design.md](docs/design.md#keep-alive-the-cache-strategy-comes-first).
+  one only when it renews the same cache entry. See
+  [docs/design.md](docs/design.md#keep-alive-the-cache-strategy-comes-first).
 
 ## Conventions
 
