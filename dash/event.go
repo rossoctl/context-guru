@@ -2,7 +2,6 @@ package dash
 
 import (
 	"strings"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
@@ -1086,25 +1085,9 @@ func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
 		if !modelinfo.GPT56OrLater(model) {
 			return 1<<63 - 1 // no known lifetime means no defensible credit
 		}
-		return apply.OpenAIMinimumCacheTTL.Milliseconds()
 	}
-	if cacheTTL == apply.TTLEphemeral1h {
-		return providerCacheTTL1hMs
-	}
-	return providerCacheTTLMs
+	return modelinfo.CacheLifetime(provider, model, cacheTTL == apply.TTLEphemeral1h).Milliseconds()
 }
-
-// providerCacheTTLMs is the Anthropic default used by the Anthropic-only
-// keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
-// be used as proof that an entry has expired.
-//
-// The one-hour tier has its own constant, providerCacheTTL1hMs: a thread whose requests ask the 1h
-// tier is pinged at 59 minutes, so both the write-side floor above and kaSaved's reachability window
-// in keepalive.go use it for rows whose cache_ttl is ephemeral_1h.
-const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
-
-// providerCacheTTL1hMs is the one-hour tier's lifetime.
-const providerCacheTTL1hMs int64 = int64(time.Hour / time.Millisecond)
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a

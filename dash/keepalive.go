@@ -44,7 +44,7 @@ import (
 // addressability test and it gates every count, every dollar and every percentile on this tab.
 
 // ttlTTL is the provider's default prompt-cache lifetime. The coverage arithmetic rests on it.
-const ttlTTL = 300 * time.Second
+const ttlTTL = modelinfo.AnthropicCacheTTL5m
 
 // addressableCTE is the shared read used by the behaviour panels, the calculator's own history
 // and the recommendation. ONE definition, so the panels cannot disagree with each other about
@@ -60,7 +60,7 @@ const ttlTTL = 300 * time.Second
 // the size of the entry that lapsed. Not `tokens_before`, which is message text only and runs
 // a median 3.38x low.
 const addressableCTE = `WITH s AS (
-	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.cache_miss_reason, r.cache_write,
+	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.provider, r.cache_miss_reason, r.cache_write,
 	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
 	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
@@ -177,6 +177,18 @@ func kaSavedGate(alias, pingFloor string) string {
 		panic("dash: kaSaved needs a table alias; an un-aliased one resolves to the subquery")
 	}
 	col := alias + "keepalive_saved_usd"
+	// The mix below stays on purpose. The lifetime that matters is the one of the entry the
+	// RESCUED request r read. Its TIER is r.cache_ttl, what r asked for: kp.cache_ttl would give
+	// the tier of the ping, which can differ from r's. Its PROVIDER is read from the ping row kp,
+	// because the ping is what refreshed the entry, and a ping and the request it rescued share
+	// a session and so a provider (r.provider would give the same value). The model gate is not
+	// repeated, as the next paragraph says.
+	//
+	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
+	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
+	// never credits one (keepaliveSavedUSD gates on GPT56OrLater). The provider-only CASE sees
+	// only rows that already passed the model gate.
+	//
 	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
@@ -190,11 +202,8 @@ func kaSavedGate(alias, pingFloor string) string {
 			WHERE kp.keepalive = 1 AND kp.cache_read > 0
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
-			  AND kp.ts + (CASE WHEN kp.provider = 'openai' THEN ` +
-		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) +
-		` WHEN ` + alias + `cache_ttl = '` + apply.TTLEphemeral1h + `' THEN ` +
-		strconv.FormatInt(providerCacheTTL1hMs, 10) + ` ELSE ` +
-		strconv.FormatInt(providerCacheTTLMs, 10) + ` END) >= ` + alias + `ts)
+			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
+		alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)
 		THEN ` + col + ` ELSE 0 END)`
 }
 
@@ -593,6 +602,9 @@ func bandOf(edges []float64, v float64) int {
 // the shipped default's 840 s.
 func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBehaviour, error) {
 	if coverageSeconds <= 0 {
+		// An account-wide default has no row, so no provider or model to ask: it is the Anthropic
+		// 5-minute policy figure the page marks its gap bands against. A per-row figure is
+		// CoverageSecondsFor.
 		coverageSeconds = 2*recIdleSeconds + ttlTTL.Seconds()
 	}
 	out := &KeepAliveBehaviour{CoverageSeconds: coverageSeconds,
@@ -955,7 +967,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 
 // ttlTTL1h is the provider's extended prompt-cache lifetime, for sessions whose last write
 // landed in the one-hour tier.
-const ttlTTL1h = time.Hour
+const ttlTTL1h = modelinfo.AnthropicCacheTTL1h
 
 // write1hMultiple is the provider's published price for a ONE-HOUR cache write: 2.0x base
 // input, against 1.25x for the five-minute tier and 0.1x for a read.
@@ -986,8 +998,8 @@ type KeepAliveLiveRow struct {
 	// at risk, in the provider's own units. Never tokens_before, which is message text only and
 	// runs a median 3.38x low.
 	Prefix int64 `json:"prefix_tokens"`
-	// TTLSeconds is the lifetime IN FORCE: 3600 when this session's most recent write landed in
-	// the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
+	// TTLSeconds is the lifetime IN FORCE: 1800 on OpenAI GPT-5.6+, else 3600 when this session's
+	// most recent write landed in the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
 	// because a `ttl: "1h"` request that the model does not support is granted as a 5-minute
 	// entry with a perfectly normal 200 — the tier billed is the only honest source.
 	TTLSeconds int64 `json:"ttl_seconds"`
@@ -1077,7 +1089,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
 	// tell is whether this session's most recent write was a one-hour write.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH t AS (
-		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model,
+		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model, r.provider AS provider,
 		       r.cache_read + r.cache_write AS prefix,
 		       ROW_NUMBER() OVER w AS rn,
 		       COUNT(*) OVER w2 AS turns,
@@ -1088,7 +1100,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
 		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
-		SELECT session_id, tenant_id, model, turns, ts, prefix,
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider,
 		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
@@ -1105,14 +1117,12 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	for rows.Next() {
 		var r KeepAliveLiveRow
 		var oneHour int
+		var provider string
 		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
-			&r.Prefix, &oneHour); err != nil {
+			&r.Prefix, &provider, &oneHour); err != nil {
 			return nil, err
 		}
-		ttl := ttlTTL
-		if oneHour == 1 {
-			ttl = ttlTTL1h
-		}
+		ttl := modelinfo.CacheLifetime(provider, r.Model, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
 		r.RemainingSeconds = float64(r.LastTS+ttl.Milliseconds()-now) / 1000
 		if r.RemainingSeconds <= 0 {
@@ -1130,7 +1140,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
 				if r.PingUSDEach > 0 {
 					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
-					r.BreakevenMinutes = CoverageSeconds(idleSeconds, int(r.BreakevenPings)) / 60
+					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
 					miss1h := float64(r.Prefix) * (p.Input*write1hMultiple - p.CacheRead)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
@@ -1209,11 +1219,31 @@ func (d *DB) countBySession(cond string, args []any, extra string) (map[string]i
 // read refreshes the entry for the provider's full lifetime. Writing K*X instead is the single
 // error that made an earlier analysis of this mechanism wrong by a factor of 4.4, so
 // TestCoverageIncludesTheFinalPingsTTL exists to fail if anyone reintroduces it.
+//
+// CoverageSeconds is the ACCOUNT-WIDE policy figure and has no row, so it uses the Anthropic
+// default ttlTTL. A figure for one row, whose provider and model are known, is CoverageSecondsFor.
 func CoverageSeconds(idleSeconds float64, maxPings int) float64 {
+	return CoverageSecondsFor(idleSeconds, maxPings, ttlTTL)
+}
+
+// missLifetime is the cache lifetime an addressable expiry is judged against: the fixed lifetime
+// of a GPT-5.6+ OpenAI row, else the Anthropic 5-minute policy default. A ttl_expiry row records
+// no tier, and the calculator asks "what would the 5-minute policy have reached?", so the tier
+// stays at the default. Only the provider's fixed lifetime changes the answer.
+func missLifetime(provider, model string) time.Duration {
+	if d, ok := modelinfo.FixedCacheLifetime(provider, model); ok {
+		return d
+	}
+	return ttlTTL
+}
+
+// CoverageSecondsFor is K*X + ttl for a given cache lifetime. Pass modelinfo.CacheLifetime of the
+// row's provider and model, so a GPT-5.6+ entry is credited its 30 minutes and not 5.
+func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) float64 {
 	if idleSeconds <= 0 || maxPings <= 0 {
 		return 0
 	}
-	return float64(maxPings)*idleSeconds + ttlTTL.Seconds()
+	return float64(maxPings)*idleSeconds + ttl.Seconds()
 }
 
 // PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
@@ -1379,22 +1409,25 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	aCond, aArgs := addressable(f)
 	var gaps []float64
 	var usd []float64
+	var lifetimes []time.Duration // per expiry, parallel to gaps
 	var spans []pingSpan
 	var cov *KeepAliveCoverage
 	var g errgroup.Group
 	g.Go(func() error {
-		rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd, provider, model FROM addressable`, aArgs...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var g, u float64
-			if err := rows.Scan(&g, &u); err != nil {
+			var prov, mod string
+			if err := rows.Scan(&g, &u, &prov, &mod); err != nil {
 				return err
 			}
 			gaps = append(gaps, g)
 			usd = append(usd, u)
+			lifetimes = append(lifetimes, missLifetime(prov, mod))
 		}
 		return rows.Err()
 	})
@@ -1424,10 +1457,12 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
 	}
 	for k := 1; k <= 4; k++ {
+		// Coverage is the account-wide policy figure (the 5-minute default, no row). The test
+		// below uses each expiry's OWN lifetime, so a GPT-5.6 gap is judged against its 30 min.
 		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k),
 			Current: k == currentPings}
 		for i, g := range gaps {
-			if g > idleSeconds && g <= row.Coverage {
+			if g > idleSeconds && g <= CoverageSecondsFor(idleSeconds, k, lifetimes[i]) {
 				row.Convertible++
 				row.ConvertibleUSD += usd[i]
 			}
@@ -1591,6 +1626,7 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	// rather than between them.
 	type miss struct {
 		gap, usd float64
+		ttl      time.Duration // the expiry's own cache lifetime (missLifetime)
 	}
 	var (
 		cov       *KeepAliveCoverage
@@ -1608,7 +1644,7 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	// The account's own addressable expiries, grouped by session — the resampling unit.
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
+		SELECT session_id, gap_s, cost_usd, provider, model FROM addressable`, aArgs...)
 		if err != nil {
 			return err
 		}
@@ -1616,9 +1652,11 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 		for rows.Next() {
 			var s string
 			var m miss
-			if err := rows.Scan(&s, &m.gap, &m.usd); err != nil {
+			var prov, mod string
+			if err := rows.Scan(&s, &m.gap, &m.usd, &prov, &mod); err != nil {
 				return err
 			}
+			m.ttl = missLifetime(prov, mod)
 			bySession[s] = append(bySession[s], m)
 		}
 		return rows.Err()
@@ -1684,10 +1722,9 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
 	net := func(s string, k int) float64 {
-		cover := CoverageSeconds(recIdleSeconds, k)
 		var v float64
 		for _, m := range bySession[s] {
-			if m.gap > recIdleSeconds && m.gap <= cover {
+			if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
 				v += m.usd * recRecoverableShare
 			}
 		}

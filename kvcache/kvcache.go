@@ -38,6 +38,8 @@ package kvcache
 import (
 	"sort"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // TTL is a prompt-cache lifetime tier, spelled the way the provider's usage block spells
@@ -54,13 +56,15 @@ const (
 	TTL1h   TTL = "ephemeral_1h"
 )
 
-// Lifetime is how long an entry at this tier survives without being touched.
+// Lifetime is how long an entry at this tier survives without being touched. It is a function
+// of the TIER only: the simulator replays Anthropic-style tiers, and an OpenAI thread has no tier
+// (see modelinfo.CacheLifetime for the provider-aware rule).
 func (t TTL) Lifetime() time.Duration {
 	switch t {
 	case TTL5m:
-		return 5 * time.Minute
+		return Horizon5m
 	case TTL1h:
-		return time.Hour
+		return Horizon1h
 	}
 	return 0
 }
@@ -85,8 +89,8 @@ func (t TTL) Valid() bool { return t == TTLNone || t == TTL5m || t == TTL1h }
 // tier. Named constants because they appear in a histogram edge, a summary card, a
 // strategy threshold and a cost formula, and four literals would eventually disagree.
 const (
-	Horizon5m = 5 * time.Minute
-	Horizon1h = time.Hour
+	Horizon5m = modelinfo.AnthropicCacheTTL5m
+	Horizon1h = modelinfo.AnthropicCacheTTL1h
 )
 
 // Bucket is a coarse time-of-day label, in UTC.

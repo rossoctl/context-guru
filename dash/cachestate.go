@@ -24,7 +24,7 @@ type CacheState struct {
 	// than LastTS+TTL says. Equal to LastTS when the duration is unknown.
 	EndTS      int64 `json:"end_ts"`
 	NowMS      int64 `json:"now_ms"` // server clock, so a client with skew can still count down
-	TTLSeconds int64 `json:"ttl_s"`  // 3600 if the last cache write was billed at the 1h tier, else 300
+	TTLSeconds int64 `json:"ttl_s"`  // 1800 on OpenAI GPT-5.6+, 3600 if the last cache write was billed at the 1h tier, else 300
 	// PrefixTokens is what the last request sent: fresh + cache_read + cache_write. If the cache
 	// is cold, this is what the next send rewrites.
 	PrefixTokens int64 `json:"prefix_tokens"`
@@ -225,8 +225,8 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 // maxCacheThreads bounds the cache entries one /api/cachestate lists.
 const maxCacheThreads = 16
 
-// threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 3600
-// for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
+// threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 1800
+// on OpenAI GPT-5.6+, 3600 for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
 func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	q, args := cacheTTLQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
@@ -237,16 +237,27 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	out := map[string]int64{}
 	for rows.Next() {
 		var (
-			id   string
-			last int64
-			ttl  int64
+			id, provider, model string
+			last, oneHour       int64
 		)
-		if err := rows.Scan(&id, &last, &ttl); err != nil {
+		if err := rows.Scan(&id, &last, &oneHour, &provider, &model); err != nil {
 			return nil, err
 		}
-		out[id] = ttl
+		out[id] = billedTTL(provider, model, oneHour)
 	}
 	return out, rows.Err()
+}
+
+// billedTierSQL is 1 when the write on row alias was billed at the 1h tier, else 0. SQL cannot
+// parse a model name, so it gives only the BILLED tier; the Go side finishes the lifetime with
+// modelinfo.CacheLifetime from the row's provider and model (billedTTL).
+func billedTierSQL(alias string) string {
+	return "CASE WHEN " + alias + "cache_write_1h > 0 THEN 1 ELSE 0 END"
+}
+
+// billedTTL is the lifetime in seconds of an entry written at the billed tier.
+func billedTTL(provider, model string, oneHour int64) int64 {
+	return int64(modelinfo.CacheLifetime(provider, model, oneHour == 1) / time.Second)
 }
 
 // cacheTTLQuery is threadTTLs' one statement: GROUP BY thread over the session's cache writes
@@ -257,7 +268,7 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 // window, a model) do not change which tier the provider's cache entry is on.
 func cacheTTLQuery(f Filter) (string, []any) {
 	cond, args := withKeepAlive(Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Session: f.Session}).where()
-	return `SELECT r.thread_id, MAX(r.ts), CASE WHEN r.cache_write_1h > 0 THEN 3600 ELSE 300 END
+	return `SELECT r.thread_id, MAX(r.ts), ` + billedTierSQL("r.") + `, r.provider, r.model
 		FROM requests r WHERE ` + cond + ` AND r.cache_write > 0 GROUP BY r.thread_id`, args
 }
 
@@ -318,24 +329,38 @@ type ThreadMoney struct {
 func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 	cond, args := withKeepAlive(f).where()
 	var (
-		s     CacheState
-		fresh int64
-		kaI   int
-		upMS  float64
+		s         CacheState
+		fresh     int64
+		kaI       int
+		upMS      float64
+		oneHour   int64
+		provider  string
+		lifeModel string
 	)
+	// ONE row decides the lifetime: the session's latest write w gives the billed tier, the
+	// provider and the model alike (as threadTTLs does). A session that changed model mid-way
+	// must not take the tier from one row and the model gate from another. With no write yet,
+	// the latest request r supplies provider and model, and the tier is 0.
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.ts, r.upstream_ms, r.model, r.fresh_input, r.cache_read, r.cache_write, r.keepalive,
-		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
+		COALESCE((SELECT `+billedTierSQL("w.")+` FROM requests w
 			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
-			ORDER BY w.ts DESC LIMIT 1), 300)
+			ORDER BY w.ts DESC LIMIT 1), 0),
+		COALESCE((SELECT w.provider FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
+			ORDER BY w.ts DESC LIMIT 1), r.provider),
+		COALESCE((SELECT w.model FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
+			ORDER BY w.ts DESC LIMIT 1), r.model)
 		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299
 		AND r.cache_read + r.cache_write > 0 ORDER BY r.ts DESC LIMIT 1`, args...).Scan(
-		&s.LastTS, &upMS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &s.TTLSeconds)
+		&s.LastTS, &upMS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &oneHour, &provider, &lifeModel)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	s.TTLSeconds = billedTTL(provider, lifeModel, oneHour)
 	s.Session, s.KeepAlive, s.EndTS = f.Session, kaI == 1, endTS(s.LastTS, upMS)
 	s.PrefixTokens = fresh + s.CacheRead + s.CacheWrite
 	return &s, nil

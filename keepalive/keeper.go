@@ -1552,21 +1552,14 @@ func (k *Keeper) notePingRead(e *kaEntry) {
 // cacheTTL is how long the provider keeps this entry's cache after a read: 30 minutes on an
 // OpenAI Responses thread (the GPT-5.6+ minimum; ttl1h is never set there), else 1 hour or
 // 5 minutes by the tier the provider billed.
-func (e *kaEntry) cacheTTL() time.Duration { return cacheLifetime(e.provider, e.ttl1h) }
+func (e *kaEntry) cacheTTL() time.Duration { return cacheLifetime(e.provider, e.model, e.ttl1h) }
 
 // cacheLifetime is THE rule for how long a provider keeps a thread's cache after a read, so the
 // retry guard (cacheTTL) and the substitute's phase check (cachePhaseAt) cannot disagree (#715):
 // 30 minutes on OpenAI (the GPT-5.6+ minimum; the one-hour tier is never set there), else 1 hour
 // on the one-hour tier, else 5 minutes.
-func cacheLifetime(provider bschemas.ModelProvider, ttl1h bool) time.Duration {
-	switch {
-	case provider == bschemas.OpenAI:
-		return modelinfo.OpenAIMinimumCacheTTL
-	case ttl1h:
-		return time.Hour
-	default:
-		return 5 * time.Minute
-	}
+func cacheLifetime(provider bschemas.ModelProvider, model string, ttl1h bool) time.Duration {
+	return modelinfo.CacheLifetime(string(provider), model, ttl1h)
 }
 
 // giveBackFailedPing undoes Sweep's stamp for a ping that failed in transport, so the next sweep
