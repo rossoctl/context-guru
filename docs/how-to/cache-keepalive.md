@@ -309,8 +309,9 @@ turns.
   in `messages`, the proxy adds one breakpoint on the last block. It copies the client's TTL. It
   never adds a 5th breakpoint. A client with no breakpoint in `messages` gets none.
 - **Measured.** Claude Code 2.1.316, Sonnet 5.5, 3 runs each way: $0.0574 a run without, $0.0424
-  with (-26%). With default settings the proxy added nothing.
-- **Turn it off** with `tail_breakpoint: false`. The `off` preset never adds it.
+  with (-26%). With default Claude Code settings the proxy added nothing.
+- **Turn it off** with `tail_breakpoint: false`. The `off` preset never adds it. The switch is
+  there mainly to debug a cache-cost problem. We know no reason today to turn it off as a rule.
 - **Counters** on `/stats`: `cache_tail_bp_added`, `_no_slot`, `_not_needed`, `_no_mark`,
   `_not_found`.
 

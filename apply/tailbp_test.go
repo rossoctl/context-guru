@@ -72,6 +72,9 @@ func TestTheTailBreakpointIsNotAddedWhenItIsNotWanted(t *testing.T) {
 		`{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 5000) + `"},"bare"]}]}`
 	thinking := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
 		`{"role":"assistant","content":[{"type":"text","text":"` + strings.Repeat("x", 5000) + `"},{"type":"thinking","thinking":"t","signature":"s"}]}]}`
+	// A last block that already holds a mark in a spelling lastMessageMark does not read.
+	markedLast := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 5000) + `","cachePoint":{"type":"default"}}]}]}`
 	for _, c := range []struct {
 		name                                string
 		body                                string
@@ -83,6 +86,7 @@ func TestTheTailBreakpointIsNotAddedWhenItIsNotWanted(t *testing.T) {
 		{"4 marks used", fourMarks, 1, 0, 0, 0},
 		{"non-object last block", nonObject, 0, 0, 0, 1},
 		{"thinking last block", thinking, 0, 0, 0, 1},
+		{"last block already marked", markedLast, 0, 1, 0, 0},
 		{"no messages", `{"messages":[]}`, 0, 0, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {

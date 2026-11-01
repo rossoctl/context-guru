@@ -207,7 +207,9 @@ type CacheConfig struct {
 	// apply.markTail.
 	//
 	// On by default (nil = on), because a live test showed a gain: $0.0574 to $0.0424 a run, 3
-	// runs each way, and no change with default settings. `tail_breakpoint: false` turns it off.
+	// runs each way, and no change with default Claude Code settings. `tail_breakpoint: false`
+	// turns it off. The switch is there mainly to debug a cache-cost problem; we know no reason
+	// today to turn it off as a rule.
 	// A pipeline with no components (`preset: off`) never runs it, so the A/B control arm stays a
 	// passthrough.
 	TailBreakpoint *bool `yaml:"tail_breakpoint"`

@@ -22,7 +22,8 @@ type placerStats struct {
 	noMark   atomic.Int64 // a move was skipped: the client put no breakpoint in messages
 	notFound atomic.Int64 // no block to put the mark on
 	tooFar   atomic.Int64 // a move was skipped: the target is past the provider's lookback
-	// notNeeded: the client's last mark already covers all but a little of the request
+	// notNeeded: the client's last mark already covers all but a little of the request, or the
+	// target already holds a mark. Only the tail step reports it
 	notNeeded atomic.Int64
 }
 
@@ -89,6 +90,7 @@ func placeBreakpoint(body []byte, target, mark, from string, st *placerStats) (o
 		return body, false
 	}
 	if elemMarks(tb) > 0 {
+		st.notNeeded.Add(1)
 		return body, false // already a breakpoint there; nothing to add
 	}
 	out = body
