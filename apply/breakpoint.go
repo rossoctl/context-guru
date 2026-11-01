@@ -22,6 +22,9 @@ type placerStats struct {
 	noMark   atomic.Int64 // a move was skipped: the client put no breakpoint in messages
 	notFound atomic.Int64 // no block to put the mark on
 	tooFar   atomic.Int64 // a move was skipped: the target is past the provider's lookback
+	// notNeeded: the client's last mark already covers all but a little of the request, or the
+	// target already holds a mark. Only the tail step reports it
+	notNeeded atomic.Int64
 }
 
 // Cache-anchor counters (#723): anchors written, anchors skipped for want of a free breakpoint slot,
@@ -43,6 +46,18 @@ func CacheAnchorStats() (written, noSlot, notFound int64) {
 func InBandBreakpointStats() (moved, noMark, notFound, tooFar int64) {
 	return inBandBreakpoint.written.Load(), inBandBreakpoint.noMark.Load(), inBandBreakpoint.notFound.Load(),
 		inBandBreakpoint.tooFar.Load()
+}
+
+// Tail-breakpoint counters (#795): breakpoints added at the end of a client request, requests
+// with no free slot, requests whose last mark already sits near the end, requests whose client
+// put no mark in messages, and requests whose last block cannot take a mark.
+var tailBreakpoint placerStats
+
+// TailBreakpointStats reports the tail-breakpoint counters: added, no free slot, not needed, no
+// client mark, no target.
+func TailBreakpointStats() (added, noSlot, notNeeded, noMark, notFound int64) {
+	return tailBreakpoint.written.Load(), tailBreakpoint.noSlot.Load(), tailBreakpoint.notNeeded.Load(),
+		tailBreakpoint.noMark.Load(), tailBreakpoint.notFound.Load()
 }
 
 // lookbackBlocks is how far back from a breakpoint the provider looks for an earlier cache entry,
@@ -75,6 +90,7 @@ func placeBreakpoint(body []byte, target, mark, from string, st *placerStats) (o
 		return body, false
 	}
 	if elemMarks(tb) > 0 {
+		st.notNeeded.Add(1)
 		return body, false // already a breakpoint there; nothing to add
 	}
 	out = body
@@ -183,36 +199,10 @@ func MarkInBandFollowUp(wire string, body []byte) []byte {
 		inBandBreakpoint.noMark.Add(1)
 		return body
 	}
-	last := len(msgs) - 1
-	work := body
-	content := msgs[last].Get("content")
-	if content.Type == gjson.String && content.Str != "" {
-		// A string body has no block to carry the mark. It becomes the one text block it means;
-		// only this request carries the change, the client never sees it.
-		blk, err := sjson.Set(`{"type":"text"}`, "text", content.Str)
-		if err != nil {
-			return body
-		}
-		if work, err = sjson.SetRawBytes(body, "messages."+strconv.Itoa(last)+".content", []byte("["+blk+"]")); err != nil {
-			return body
-		}
-		content = gjson.GetBytes(work, "messages."+strconv.Itoa(last)+".content")
-	}
-	blocks := content.Array()
-	if !content.IsArray() || len(blocks) == 0 {
-		inBandBreakpoint.notFound.Add(1)
+	work, target, ok := lastBlockTarget(body, len(msgs)-1, &inBandBreakpoint)
+	if !ok {
 		return body
 	}
-	bi := len(blocks) - 1
-	if !blocks[bi].IsObject() {
-		inBandBreakpoint.notFound.Add(1) // a bare string, number or null takes no mark
-		return body
-	}
-	if t := blocks[bi].Get("type").String(); t == "thinking" || t == "redacted_thinking" {
-		inBandBreakpoint.notFound.Add(1) // the provider takes no cache_control on a thinking block
-		return body
-	}
-	target := blockPath(last, bi)
 	if from == target+".cache_control" {
 		return body // already at the end
 	}
@@ -224,6 +214,122 @@ func MarkInBandFollowUp(wire string, body []byte) []byte {
 		return out
 	}
 	return body // nothing placed: send the follow-up exactly as built
+}
+
+// lastBlockTarget returns the path of the last content block of message last, the block a mark
+// at the end of the request goes on, and the body to write it into. A string content has no block
+// to carry the mark, so it becomes the one text block it means; only this request carries the
+// change, the client never sees it, and the provider renders the two the same way (schema/canon.go).
+// A last block that is not an object (a bare string, number or null) or is a thinking block takes
+// no mark: counted on st as not found, ok false.
+func lastBlockTarget(body []byte, last int, st *placerStats) (work []byte, target string, ok bool) {
+	work = body
+	mp := "messages." + strconv.Itoa(last) + ".content"
+	content := gjson.GetBytes(body, mp)
+	if content.Type == gjson.String && content.Str != "" {
+		blk, err := sjson.Set(`{"type":"text"}`, "text", content.Str)
+		if err != nil {
+			return body, "", false
+		}
+		if work, err = sjson.SetRawBytes(body, mp, []byte("["+blk+"]")); err != nil {
+			return body, "", false
+		}
+		content = gjson.GetBytes(work, mp)
+	}
+	blocks := content.Array()
+	if !content.IsArray() || len(blocks) == 0 {
+		st.notFound.Add(1)
+		return body, "", false
+	}
+	bi := len(blocks) - 1
+	if !blocks[bi].IsObject() {
+		st.notFound.Add(1) // a bare string, number or null takes no mark
+		return body, "", false
+	}
+	if t := blocks[bi].Get("type").String(); t == "thinking" || t == "redacted_thinking" {
+		st.notFound.Add(1) // the provider takes no cache_control on a thinking block
+		return body, "", false
+	}
+	return work, blockPath(last, bi), true
+}
+
+// tailMinBytes is how much request content must follow the client's last breakpoint before
+// markTail adds one at the end: 4 KiB of JSON, about 1k tokens. The write premium is 0.25x, so one
+// later read of the entry (0.9x saved) pays for it. The floor keeps the step off the requests where
+// the client's mark already sits at the end. With the betas setting, Claude Code's later requests
+// end in a short `system` message after the mark: 350 bytes measured, under the floor. The first
+// request of a session ends in the 8.7 KB environment message: over it.
+const tailMinBytes = 4096
+
+// markTail adds a breakpoint on the last block of the last message when the client's last
+// breakpoint is followed by more than tailMinBytes of content (#795).
+//
+// WHY. The provider caches only up to a breakpoint. With CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1,
+// Claude Code puts its last mark on the user's text and appends a `role: "system"` message after
+// it, about 3k tokens on a session's first request. Nothing caches that message, so the provider
+// bills it as plain input, and it bills it again on the next request, which writes it to the cache
+// at last. With the mark at the end, the first request writes it and the next one reads it: live,
+// $0.0574 to $0.0424 a run (3 runs each way, Sonnet 5.5).
+//
+// WHAT IT KEEPS. It ADDS, never moves: the client's marks stay where they are, so every read the
+// client planned still happens. It copies the client's last mark value, so the TTL stays the
+// client's ("1h" stays "1h"), and the mark after it has the same TTL, which the provider's order
+// rule (longer TTLs first) allows. It needs a free slot under the provider's cap of 4
+// (placeBreakpoint); with none it does nothing. A client that put no mark in `messages` asked for
+// no cache strategy there, and none is invented.
+//
+// THE LOOKBACK. The provider looks back lookbackBlocks blocks from a breakpoint for an earlier
+// entry. The new mark is added even when the client's mark is further back than that: the client's
+// mark is still on the request and still reads its own entry, so the new one costs only its write.
+// The next request reads the new entry when its own mark is within the lookback of this request's
+// end, which it is when that turn adds fewer than 20 blocks.
+//
+// Call it on the final body, after every other edit, so the cap check counts every breakpoint.
+// Fails open: any unexpected shape or error returns body unchanged, ok false.
+func markTail(body []byte) (out []byte, ok bool) {
+	msgs := gjson.GetBytes(body, "messages").Array()
+	if len(msgs) == 0 {
+		return body, false
+	}
+	from, mark := lastMessageMark(msgs)
+	if from == "" {
+		tailBreakpoint.noMark.Add(1)
+		return body, false
+	}
+	if bytesAfter(msgs, from) <= tailMinBytes {
+		tailBreakpoint.notNeeded.Add(1)
+		return body, false
+	}
+	work, target, ok := lastBlockTarget(body, len(msgs)-1, &tailBreakpoint)
+	if !ok {
+		return body, false
+	}
+	if tb := gjson.GetBytes(work, target); tb.Get("type").String() == "text" && tb.Get("text").String() == "" {
+		tailBreakpoint.notFound.Add(1) // the provider rejects cache_control on an empty text block
+		return body, false
+	}
+	if out, ok = placeBreakpoint(work, target, mark, "", &tailBreakpoint); !ok {
+		return body, false // nothing placed: not even the string-to-block rewrite goes out
+	}
+	return out, true
+}
+
+// bytesAfter is the size in JSON bytes of the content after the mark at path from (a
+// lastMessageMark path): the later blocks of its message and every later message.
+func bytesAfter(msgs []gjson.Result, from string) int {
+	parts := strings.Split(from, ".")
+	mi, _ := strconv.Atoi(parts[1])
+	n := 0
+	if len(parts) == 5 { // messages.M.content.B.cache_control
+		bi, _ := strconv.Atoi(parts[3])
+		for _, b := range msgs[mi].Get("content").Array()[bi+1:] {
+			n += len(b.Raw)
+		}
+	}
+	for _, m := range msgs[mi+1:] {
+		n += len(m.Raw)
+	}
+	return n
 }
 
 // blocksAfter counts the content blocks after the mark at path from (a lastMessageMark path) up to

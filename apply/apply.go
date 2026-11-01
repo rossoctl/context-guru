@@ -410,6 +410,21 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// prevent, reproduced in the logs. cg.cache_boundary used to pass mode as an attr of
 	// its own; it does not any more, because that would now render the key twice.
 	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
+	// The tail breakpoint (#795), on the FINAL body of every return below: it must count every
+	// breakpoint the other edits placed (cacheinject, the splice anchor) against the cap of 4.
+	// Deferred after the recover above, so it runs first and the recover still catches a panic in it.
+	// Not in observe mode, whose body is never sent, and not on a bypassed request, which promises
+	// a byte-identical forward.
+	if mode != components.ModeObserve && !bypass && pipe.TailBreakpoint() && explicitBreakpointProvider(provider) {
+		defer func() {
+			if res.Body == nil {
+				return
+			}
+			if out, ok := markTail(res.Body); ok {
+				res.Body, res.Changed = out, true
+			}
+		}()
+	}
 	models := o.Models
 	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
 	// operates on `messages`). Done FIRST, before any byte offset into the body is

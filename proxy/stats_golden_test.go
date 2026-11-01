@@ -61,6 +61,11 @@ var statsGoldenTopLevel = []string{
 	"cache_inband_bp_no_mark",
 	"cache_inband_bp_not_found",
 	"cache_inband_bp_too_far",
+	"cache_tail_bp_added",
+	"cache_tail_bp_no_slot",
+	"cache_tail_bp_not_needed",
+	"cache_tail_bp_no_mark",
+	"cache_tail_bp_not_found",
 	"cache_aware_summarizer_stale_prefix",
 	// The count-changing sibling of stale_prefix (#452): an earlier component changed the
 	// message count, so the stashed span could not be located at all. Split from
