@@ -448,6 +448,7 @@ func main() {
 	// BEGINS, before in-flight requests drain, so a flush there would miss the last turns of
 	// every live session. This defer runs after the server has returned -- the same reason
 	// the dashboard recorder's Close is deferred here rather than registered.
+	warnIfRecorderMissing(proxy.RecorderBuiltIn, *recordDir, *recordOTLP, flag.CommandLine)
 	traceRec, err := proxy.NewSessionRecorder(*recordDir, *recordOTLP, *recordBodyCap, *recordTeeCap,
 		*recordQueue, slog.Default())
 	if err != nil {

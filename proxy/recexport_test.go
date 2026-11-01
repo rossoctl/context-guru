@@ -1,3 +1,5 @@
+//go:build cg_record
+
 package proxy
 
 import (

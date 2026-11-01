@@ -1,3 +1,5 @@
+//go:build cg_record
+
 package proxy
 
 // The OTLP side of --record: one SDK span per recorded turn, sent once by a batch exporter.

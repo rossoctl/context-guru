@@ -136,6 +136,34 @@ jobs:
       - name: Test the packages whose behaviour depends on which components compile in
         run: go test -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
 
+  # The session recorder (--record, --record-otlp) is only in a build with -tags cg_record.
+  # The default build must stay free of OpenTelemetry, gRPC and protobuf (they add 11.5 MB).
+  # Both variants are built and tested here. The guard test runs in the untagged `go test`.
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Default build links no OpenTelemetry, gRPC or protobuf
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build ./...
+          go vet ./...
+          go test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf ./cmd/context-guru-proxy/
+      - name: Build and vet with the recorder
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -tags cg_record ./...
+          go vet -tags cg_record ./...
+      - name: Test with the recorder (race)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./cmd/context-guru-proxy/...
+
   trivy:
     runs-on: ubuntu-latest
     steps:
