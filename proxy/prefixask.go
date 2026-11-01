@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // PREFIX ASKS — putting a question to the request's own model with the previous turn's SENT body as
@@ -359,7 +360,7 @@ func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models compone
 // Responses differs only in the request/response wire shape: the sweep's
 // selection, read-verification and fallback decisions remain in the component.
 func (h *Handler) prefixAskerForAPI(provider bschemas.ModelProvider, api string, models components.ModelSpec) components.PrefixAsker {
-	if api != "responses" {
+	if !schema.IsResponses(schema.WireFor(string(provider), api)) {
 		return h.prefixAskerFor(provider, models)
 	}
 	cli, ok := models.Incoming.(cheapmodel.OpenAI)

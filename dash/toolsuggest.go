@@ -334,7 +334,8 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 	}
 	q := `SELECT d.kind, d.name, COUNT(DISTINCT d.session_id), MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
-		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
+		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)
+		  AND NOT EXISTS (` + staleServerTool + `)`
 	a := append([]any{}, args...)
 	if !f.TenantAll {
 		q += ` AND d.tenant_id = ?`

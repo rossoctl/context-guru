@@ -217,6 +217,9 @@ func ScanInventory(wire string, body []byte) *Inventory {
 	deferred := hashDeferred(&h, body)
 	digest := h.Sum64()
 
+	// Digest is wire-independent on purpose: it is the stored identity, and stored digests must
+	// keep matching. A session that switches wire mid-session keeps the rows of the first wire
+	// it was stored under (the writer dedupes by digest).
 	// The memo key also names the wire: the same tools array reads differently on another one.
 	// The stored Digest does not, so digests already on disk keep matching.
 	key := digest
@@ -232,7 +235,14 @@ func ScanInventory(wire string, body []byte) *Inventory {
 			decls = mergeDeferred(decls, deferredDecls(body))
 		}
 		if region != "" {
-			decls = append(decls, skillDecls(skillsText(body))...)
+			if schema.IsResponses(wire) {
+				// skillsText walks `messages`, which a Responses body does not have: the listing is
+				// in `input`. Say "not read" rather than let the page read "no listing". The real
+				// reading of `input` is a follow-up, after skillsText moves to internal/skills.
+				decls = append(decls, Decl{Kind: KindSkillListing, Server: SkillsUnknown})
+			} else {
+				decls = append(decls, skillDecls(skillsText(body))...)
+			}
 		}
 		declMu.Lock()
 		if len(declCache) >= declCacheCap || declBytes >= declCacheBytes {
@@ -243,7 +253,7 @@ func ScanInventory(wire string, body []byte) *Inventory {
 		declMu.Unlock()
 	}
 	inv := &Inventory{Digest: strconv.FormatUint(digest, 16), Decls: decls}
-	inv.System = scanSystem(body)
+	inv.System = scanSystem(wire, body)
 	inv.Used, inv.UseFingerprint = usedFrom(wire, body)
 	return inv
 }
@@ -615,12 +625,19 @@ func usedFrom(wire string, body []byte) ([]Used, uint64) {
 // array, and a tool call is its own `function_call` item (name, and arguments as a JSON string).
 // The last tool-using turn is the last run of consecutive function_call items.
 func usedFromResponses(body []byte) ([]Used, uint64) {
+	// A turn is a run of consecutive call items, as the Chat path takes the calls of one message.
+	// Only an input item ends a run: a tool output, or a user message. `reasoning` items and
+	// assistant messages sit between the calls of one turn and do not split it.
+	// Not read: `mcp_call` and `local_shell_call` items. The repo has no fixture for them.
 	var last, run []gjson.Result
 	gjson.GetBytes(body, expand.MessagesField(schema.WireResponses)).ForEach(func(_, it gjson.Result) bool {
-		if it.IsObject() && it.Get("type").String() == "function_call" {
+		typ := it.Get("type").String()
+		switch {
+		case !it.IsObject():
+		case typ == "function_call" || typ == "custom_tool_call":
 			run = append(run, it)
 			last = run
-		} else {
+		case strings.HasSuffix(typ, "_output") || it.Get("role").String() == "user":
 			run = nil
 		}
 		return true
@@ -639,7 +656,13 @@ func usedFromResponses(body []byte) ([]Used, uint64) {
 		if name == "" {
 			continue
 		}
-		u := Used{Name: identName(name), Skill: skillArg(name, gjson.Parse(it.Get("arguments").String()))}
+		// A function_call carries its arguments as a JSON string. A custom_tool_call carries
+		// free text in `input`, which has no skill argument to read.
+		skill := ""
+		if it.Get("type").String() == "function_call" {
+			skill = skillArg(name, gjson.Parse(it.Get("arguments").String()))
+		}
+		u := Used{Name: identName(name), Skill: skill}
 		if server, _, ok := SplitMCPName(name); ok {
 			u.Server = identName(server)
 		}
@@ -1065,8 +1088,12 @@ var (
 // Anthropic's blocks or bare string.
 // OpenAI has no top-level system prompt at all (it is a role=system message), so an OpenAI
 // request simply has none, and the UI says so rather than inventing one.
-func scanSystem(body []byte) *SystemPrompt {
-	raw := gjson.GetBytes(body, "system")
+func scanSystem(wire string, body []byte) *SystemPrompt {
+	field := "system"
+	if schema.IsResponses(wire) {
+		field = "instructions" // a Responses body keeps its system prompt here
+	}
+	raw := gjson.GetBytes(body, field)
 	if !raw.Exists() || len(raw.Raw) == 0 || len(raw.Raw) > maxSystemPrompt {
 		return nil
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -799,7 +800,7 @@ func TestScanSystemMemoizesTheEmptyCase(t *testing.T) {
 	sysMu.Lock()
 	sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
 	sysMu.Unlock()
-	if sp := scanSystem(body); sp != nil {
+	if sp := scanSystem("anthropic", body); sp != nil {
 		t.Fatalf("an empty system array scanned as a prompt: %+v", sp)
 	}
 	sysMu.Lock()
@@ -810,7 +811,7 @@ func TestScanSystemMemoizesTheEmptyCase(t *testing.T) {
 			"is repeated on every request", n)
 	}
 	// And the stored nil reads back as a hit, not as a fresh miss returning nil by accident.
-	if sp := scanSystem(body); sp != nil {
+	if sp := scanSystem("anthropic", body); sp != nil {
 		t.Errorf("the memoized negative came back as %+v", sp)
 	}
 }
@@ -1004,5 +1005,105 @@ func TestScanInventoryMemoIsPerWire(t *testing.T) {
 	}
 	if resp.Digest != chat.Digest {
 		t.Errorf("stored digest must not depend on the wire: %s vs %s", resp.Digest, chat.Digest)
+	}
+}
+
+// The trace from review: a custom_tool_call between two function_calls of one turn must not split
+// it, and must count itself. An output item or a user message ends the turn.
+func TestUsedFromResponsesCountsCustomCallsAndKeepsTheRun(t *testing.T) {
+	body := []byte(`{"input":[
+	  {"type":"function_call","call_id":"o","name":"old","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"o","output":"x"},
+	  {"type":"function_call","call_id":"a","name":"A","arguments":"{}"},
+	  {"type":"reasoning","id":"r"},
+	  {"type":"custom_tool_call","call_id":"b","name":"B","input":"patch"},
+	  {"type":"message","role":"assistant","content":[]},
+	  {"type":"function_call","call_id":"c","name":"C","arguments":"{}"}]}`)
+	used, fp := usedFromResponses(body)
+	var names []string
+	for _, u := range used {
+		names = append(names, u.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "A,B,C" || fp == 0 {
+		t.Errorf("used = %v fp = %d, want A,B,C", names, fp)
+	}
+}
+
+// Skills, deferred tools and the system prompt are read off Chat and Anthropic bodies. The
+// Responses reading is a follow-up; until then the page must say "unknown", never "none".
+func TestScanInventoryResponsesMarksTheSkillsListingUnknown(t *testing.T) {
+	body := []byte(`{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"message","role":"developer","content":"` + skillsHeader + `\n- dataviz: charts\n"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var marker *Decl
+	for i, d := range inv.Decls {
+		if d.Kind == KindSkillListing {
+			marker = &inv.Decls[i]
+		}
+		if d.Kind == KindSkill {
+			t.Errorf("a skill row %q from a body that was not read", d.Name)
+		}
+	}
+	if marker == nil || marker.Server != SkillsUnknown {
+		t.Errorf("listing marker = %+v, want state %q", marker, SkillsUnknown)
+	}
+	if inv.System == nil || inv.System.Text != "be brief" {
+		t.Errorf("system = %+v, want the instructions", inv.System)
+	}
+}
+
+// Rows an older proxy stored as server_tool for OpenAI tools must not be counted next to the
+// rows the same tools get now (#817). The newest kind wins; nothing is deleted.
+func TestToolReportHidesTheStaleServerToolRows(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 4; i++ {
+		e := mkEvent(int64(1000+i), "s1", "gpt", 100, 90)
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "d1"
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	// Before the upgrade: a Chat tool as server_tool, and the Responses phantom named "function".
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: &Inventory{Digest: "d1",
+		Decls: []Decl{
+			{Kind: KindServerTool, Name: "Fetch", Tokens: 100},
+			{Kind: KindServerTool, Name: "function", Tokens: 100},
+			{Kind: KindServerTool, Name: "web_search", Tokens: 50},
+		}}}}); err != nil {
+		t.Fatal(err)
+	}
+	// After: same digest, same tools, new kinds. A fresh writer, as after a restart.
+	w = &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 2000, inv: &Inventory{Digest: "d1",
+		Decls: []Decl{
+			{Kind: KindTool, Name: "Fetch", Tokens: 100},
+			{Kind: KindTool, Name: "Other", Tokens: 100},
+			{Kind: KindServerTool, Name: "web_search", Tokens: 50},
+		}}}}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+		count[s.Name]++
+	}
+	if count["Fetch"] != 1 {
+		t.Errorf("Fetch shown %d times, want once", count["Fetch"])
+	}
+	if count["function"] != 0 {
+		t.Errorf("the old Responses phantom row is still shown")
+	}
+	if count["web_search"] != 1 {
+		t.Errorf("a real server tool (web_search) shown %d times, want once", count["web_search"])
 	}
 }

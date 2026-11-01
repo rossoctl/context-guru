@@ -262,10 +262,10 @@ func BenchmarkScanInventory(b *testing.B) {
 	// file's whole discipline is that the per-request cost is a measured figure rather than an
 	// assumption. Reported separately so a change to it is visible without reading the total.
 	b.Run("system_warm", func(b *testing.B) {
-		scanSystem(body)
+		scanSystem("anthropic", body)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			scanSystem(body)
+			scanSystem("anthropic", body)
 		}
 	})
 	b.Run("system_cold", func(b *testing.B) {
@@ -273,7 +273,7 @@ func BenchmarkScanInventory(b *testing.B) {
 			sysMu.Lock()
 			sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
 			sysMu.Unlock()
-			scanSystem(body)
+			scanSystem("anthropic", body)
 		}
 	})
 	b.Run("cold", func(b *testing.B) {
