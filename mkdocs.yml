@@ -148,6 +148,7 @@ nav:
   - Modes:
       - Sync & observe: how-to/operating-modes.md
       - Config & routes reference: reference/reference.md
+      - Session recorder (cg_record build): reference/session-recorder.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
   - "The dashboard, tab by tab": how-to/dashboard-guide.md
