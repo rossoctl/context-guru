@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/internal/providerusage"
 )
 
 // Reading Claude Code's own session transcripts (~/.claude/projects/<encoded-cwd>/<session>.jsonl).
@@ -31,7 +35,9 @@ type TranscriptTurn struct {
 	FreshInput int64
 	CacheRead  int64
 	CacheWrite int64
-	Output     int64
+	// CacheWrite1h is the part of CacheWrite billed at the one-hour tier. A subset of CacheWrite.
+	CacheWrite1h int64
+	Output       int64
 	// Called is every capability this turn invoked: tool names as sent, and SKILLS BY THEIR OWN
 	// NAME rather than by the tool that ran them. See transcriptCalled.
 	Called []string
@@ -57,12 +63,9 @@ type transcriptEntry struct {
 	Message   *struct {
 		ID    string `json:"id"`
 		Model string `json:"model"`
-		Usage *struct {
-			InputTokens         int64 `json:"input_tokens"`
-			CacheReadInputToks  int64 `json:"cache_read_input_tokens"`
-			CacheCreationInToks int64 `json:"cache_creation_input_tokens"`
-			OutputTokens        int64 `json:"output_tokens"`
-		} `json:"usage"`
+		// Kept raw and read by providerusage, the one parser of a usage block. It reads the
+		// one-hour write split (cache_creation.ephemeral_1h_input_tokens) too.
+		Usage   json.RawMessage `json:"usage"`
 		Content []struct {
 			Type  string `json:"type"`
 			Name  string `json:"name"`
@@ -130,11 +133,11 @@ func ReadTranscriptChecked(path string) (turns []TranscriptTurn, truncated bool,
 			continue
 		}
 		called, skills := transcriptCalled(&e)
-		u := e.Message.Usage
-		var total int64
-		if u != nil {
-			total = u.InputTokens + u.CacheReadInputToks + u.CacheCreationInToks + u.OutputTokens
+		var u providerusage.Tiers
+		if len(e.Message.Usage) > 0 {
+			u, _ = providerusage.Parse(gjson.ParseBytes(e.Message.Usage))
 		}
+		total := u.FreshInput + u.CacheRead + u.CacheWrite + u.Output
 		// A line of a known id may carry only tool_use blocks (no usage yet): its calls still
 		// belong to that turn.
 		if i, ok := byID[e.Message.ID]; ok && e.Message.ID != "" {
@@ -148,8 +151,8 @@ func ReadTranscriptChecked(path string) (turns []TranscriptTurn, truncated bool,
 				t.Skills[n] = true
 			}
 			if total > 0 {
-				t.FreshInput, t.CacheRead = u.InputTokens, u.CacheReadInputToks
-				t.CacheWrite, t.Output = u.CacheCreationInToks, u.OutputTokens
+				t.FreshInput, t.CacheRead = u.FreshInput, u.CacheRead
+				t.CacheWrite, t.CacheWrite1h, t.Output = u.CacheWrite, u.CacheWrite1h, u.Output
 			}
 			continue
 		}
@@ -175,13 +178,14 @@ func ReadTranscriptChecked(path string) (turns []TranscriptTurn, truncated bool,
 			// Through the same gate a live request's directory goes through: it is a
 			// client-chosen string either way, and a folder named after a token must not reach
 			// the database from this path either.
-			Project:    ProjectPath(e.Cwd),
-			FreshInput: u.InputTokens,
-			CacheRead:  u.CacheReadInputToks,
-			CacheWrite: u.CacheCreationInToks,
-			Output:     u.OutputTokens,
-			Called:     called,
-			Skills:     skills,
+			Project:      ProjectPath(e.Cwd),
+			FreshInput:   u.FreshInput,
+			CacheRead:    u.CacheRead,
+			CacheWrite:   u.CacheWrite,
+			CacheWrite1h: u.CacheWrite1h,
+			Output:       u.Output,
+			Called:       called,
+			Skills:       skills,
 		})
 	}
 	return out, sc.Err() != nil, nil

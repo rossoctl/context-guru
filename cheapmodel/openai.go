@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/schema"
 )
@@ -267,22 +269,14 @@ func (o OpenAI) post(ctx context.Context, msgs []any) (string, error) {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", err
 	}
-	// OpenAI reports automatic prefix caching as cached_tokens, and counts them INSIDE
-	// prompt_tokens (unlike Anthropic, which reports the tiers disjointly). Subtract so
-	// the "fresh input" figure means the same thing on both backends.
-	cached := out.Usage.PromptTokensDetails.CachedTokens
-	recordUsageCache(ctx, o.Model, out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
+	// providerusage subtracts cached tokens from prompt_tokens, so "fresh input" means the same
+	// thing on both backends.
+	tiers, _ := providerusage.Parse(gjson.GetBytes(respBody, "usage"))
+	recordUsageCache(ctx, o.Model, int(tiers.FreshInput), int(tiers.Output), 0, int(tiers.CacheRead))
 	if len(out.Choices) == 0 {
 		return "", nil
 	}

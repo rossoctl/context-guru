@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/providerusage"
 )
 
 // Anthropic calls a small Anthropic model with a single user prompt and returns the text of the
@@ -110,23 +111,18 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
-		Usage struct {
-			InputTokens      int `json:"input_tokens"`
-			OutputTokens     int `json:"output_tokens"`
-			CacheCreationTok int `json:"cache_creation_input_tokens"`
-			CacheReadTok     int `json:"cache_read_input_tokens"`
-		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", err
 	}
+	tiers, _ := providerusage.Parse(gjson.GetBytes(respBody, "usage"))
 	// track CG component LLM cost, split by cache tier so /stats can show whether the
 	// preamble breakpoint actually caches (read>0) or is silently ignored (read==0).
-	recordUsageCache(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
-		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
+	recordUsageCacheWithTTL(ctx, a.Model, int(tiers.FreshInput), int(tiers.Output),
+		int(tiers.CacheWrite), int(tiers.CacheRead), int(tiers.CacheWrite1h))
 	// Tell the prefix bookkeeping what actually happened, so the next call knows whether a
 	// breakpoint would be a read (worth it) or another write (not).
-	releasePrefix(out.Usage.CacheCreationTok > 0, out.Usage.CacheReadTok > 0)
+	releasePrefix(tiers.CacheWrite > 0, tiers.CacheRead > 0)
 	// Return the first content block that carries text. A leading non-text block
 	// (e.g. "thinking") has an empty Text, so we skip it rather than returning "".
 	for _, c := range out.Content {
@@ -267,28 +263,15 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
-		Usage struct {
-			InputTokens      int `json:"input_tokens"`
-			OutputTokens     int `json:"output_tokens"`
-			CacheCreationTok int `json:"cache_creation_input_tokens"`
-			CacheReadTok     int `json:"cache_read_input_tokens"`
-			// CacheCreation's own ephemeral_1h_input_tokens is the SUBSET of CacheCreationTok
-			// billed at the one-hour premium — same field proxy/usage.go's own usage parser reads
-			// off the agent's response (cache_creation.ephemeral_1h_input_tokens), read here off
-			// this component's OWN call so its cost can be priced at the same per-tier rate.
-			CacheCreation struct {
-				Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
-			} `json:"cache_creation"`
-		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", u, err
 	}
-	u = PrefixUsage{CacheRead: out.Usage.CacheReadTok, CacheWrite: out.Usage.CacheCreationTok,
-		CacheWrite1h: out.Usage.CacheCreation.Ephemeral1h,
-		Fresh:        out.Usage.InputTokens, Output: out.Usage.OutputTokens}
-	recordUsageCacheWithTTL(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
-		out.Usage.CacheCreationTok, out.Usage.CacheReadTok, out.Usage.CacheCreation.Ephemeral1h)
+	tiers, _ := providerusage.Parse(gjson.GetBytes(respBody, "usage"))
+	u = PrefixUsage{CacheRead: int(tiers.CacheRead), CacheWrite: int(tiers.CacheWrite),
+		CacheWrite1h: int(tiers.CacheWrite1h),
+		Fresh:        int(tiers.FreshInput), Output: int(tiers.Output)}
+	recordUsageCacheWithTTL(ctx, a.Model, u.Fresh, u.Output, u.CacheWrite, u.CacheRead, u.CacheWrite1h)
 	// A cut-off reply (stop_reason: "max_tokens") is returned as text, not as an error. The sweep
 	// detects it and declines at no cost (sweep_reply_truncated); an error here would start a
 	// full-price fallback.

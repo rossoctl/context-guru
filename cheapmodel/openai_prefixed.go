@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/providerusage"
 )
 
 // CompletePrefixedResponses asks the incoming Responses model one question over
@@ -51,22 +52,13 @@ func (o OpenAI) CompletePrefixedResponses(ctx context.Context, prefixBody []byte
 				Text string `json:"text"`
 			} `json:"content"`
 		} `json:"output"`
-		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			Details      struct {
-				CachedTokens     int `json:"cached_tokens"`
-				CacheWriteTokens int `json:"cache_write_tokens"`
-			} `json:"input_tokens_details"`
-		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", usage, err
 	}
-	usage.CacheRead = out.Usage.Details.CachedTokens
-	usage.CacheWrite = out.Usage.Details.CacheWriteTokens
-	usage.Fresh = max(0, out.Usage.InputTokens-usage.CacheRead-usage.CacheWrite)
-	usage.Output = out.Usage.OutputTokens
+	tiers, _ := providerusage.Parse(gjson.GetBytes(respBody, "usage"))
+	usage.CacheRead, usage.CacheWrite = int(tiers.CacheRead), int(tiers.CacheWrite)
+	usage.Fresh, usage.Output = int(tiers.FreshInput), int(tiers.Output)
 	recordUsageCache(ctx, o.Model, usage.Fresh, usage.Output, usage.CacheWrite, usage.CacheRead)
 	var text strings.Builder
 	for _, item := range out.Output {
