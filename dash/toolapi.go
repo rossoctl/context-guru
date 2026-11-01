@@ -619,18 +619,6 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	return rep, nil
 }
 
-// staleServerTool is a correlated subquery over `d`, used as `AND NOT EXISTS (...)`. It hides a
-// `server_tool` row that an older proxy wrote for an OpenAI tool (#817). That proxy filed every
-// OpenAI function tool as a server tool. The same tool is now a `tool` or `mcp_tool` row under the
-// same digest and name, and the primary key includes the kind, so both rows are stored. The
-// newest kind wins: the old row hides when a newer row of the other kinds names the same tool in
-// the same session. The old Responses rows (all tools under one name, "function", which only that
-// fallback produced) hide when the session has any newer row for a real tool. Nothing is deleted.
-const staleServerTool = `SELECT 1 FROM tool_declarations n WHERE d.kind = 'server_tool'
-		  AND n.tenant_id = d.tenant_id AND n.session_id = d.session_id AND n.ts > d.ts
-		  AND n.kind IN ('tool', 'mcp_tool')
-		  AND (n.name = d.name OR d.name = 'function')`
-
 // newerPlainRow is a correlated subquery over `d`: a `tools` row for the same tenant and name that is
 // newer than this deferred one. The flag follows the client the tenant uses NOW: a tool deferred
 // earlier and since sent as a real `tools` element is filterable again. A loaded deferred tool writes
@@ -756,6 +744,15 @@ type declRow struct {
 	// this one", and one stored copy is enough to answer yes.
 	hasText bool
 }
+
+// dropStaleDecls applies the stale-kind rule (stalekind.go) to declaration rows. A row carries no
+// tenant, so the rule runs per session here, as the grouping of these readers does.
+func dropStaleDecls(rows []declRow) []declRow {
+	return dropStale(rows, func(r *declRow) (string, string, string, string, int64) {
+		return "", r.session, r.kind, r.name, r.ts
+	})
+}
+
 type useRow struct {
 	session, name, skill string
 	calls                int
@@ -771,8 +768,7 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 	q := `SELECT d.session_id, d.kind, d.name, d.server, MAX(d.tokens),
 		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
-		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)
-		  AND NOT EXISTS (` + staleServerTool + `)`
+		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
 	if !f.TenantAll {
 		q += ` AND d.tenant_id = ?`
@@ -795,7 +791,10 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 		r.hasText = hasText == 1
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return dropStaleDecls(out), nil
 }
 
 // scopedUses reads the invocations of the sessions the filter selects.
@@ -901,14 +900,15 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if sc == nil {
 			continue // not in scope (defensive: the query joined on scope)
 		}
+		if dr.kind == KindDeferredListing {
+			// Not a declaration and not a region: a note that a deferred list was present and not
+			// read. Not counted in the prompt coverage.
+			deferredUnknown++
+			continue
+		}
 		rep.Prompt.Rows++
 		if dr.hasText {
 			rep.Prompt.TextRows++
-		}
-		if dr.kind == KindDeferredListing {
-			// Not a declaration either: a note that a deferred list was present and not read.
-			deferredUnknown++
-			continue
 		}
 		if dr.kind == KindSystemPrompt {
 			// NOT a declaration: it is the prompt the declarations sit in front of. Counting
@@ -924,8 +924,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		}
 		if dr.kind == KindSkillListing {
 			skillsSeen = true
-			listingTok += dr.tokens
-			listingSessions++
+			// A listing that was not read at all (a Responses body, 0 tokens) has no size to
+			// average in; it still counts as seen and as unknown below.
+			if dr.tokens > 0 {
+				listingTok += dr.tokens
+				listingSessions++
+			}
 			if dr.server == SkillsUnknown {
 				unknownListings++
 			}
@@ -1511,14 +1515,16 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 	// `started` is deliberately NOT in this SELECT: it comes from the requests-side sessByKey
 	// lookup below, not from this table. Adding MAX(started) here without also adding it to the
 	// GROUP BY would silently change the grouping -- the same trap in the other direction.
-	dq := `SELECT d.tenant_id, d.session_id, d.kind, d.name, d.server, MAX(d.tokens) FROM tool_declarations d
-		WHERE NOT EXISTS (` + staleServerTool + `)`
+	dq := `SELECT tenant_id, session_id, kind, name, server, MAX(tokens) FROM tool_declarations`
 	var dargs []any
 	if !f.TenantAll {
-		dq += ` AND d.tenant_id = ?`
+		dq += ` WHERE tenant_id = ?`
 		dargs = append(dargs, f.Tenant)
 	}
-	dq += ` GROUP BY d.tenant_id, d.session_id, d.kind, d.name, d.server`
+	dq += ` GROUP BY tenant_id, session_id, kind, name, server`
+	// No stale-kind rule here (stalekind.go): only `mcp_tool` and `skill` facts become candidates
+	// below, and a stale `server_tool` fact sets no cohort flag. Adding ts to this SELECT would
+	// also take the query off its covering index (see the invariant below).
 	drows, err := d.sql.QueryContext(d.readCtx(), dq, dargs...)
 	if err != nil {
 		return nil, err
