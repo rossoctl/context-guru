@@ -373,7 +373,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res = Result{Body: body}
 		}
 	}()
-	if o.API == "responses" {
+	if schema.IsResponses(schema.WireFor(string(o.Provider), o.API)) {
 		return bodyResponsesOpts(ctx, pipe, st, o)
 	}
 	mode := o.Mode
@@ -1421,7 +1421,7 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 // repair, #175) calls this, so the two cannot disagree. It costs a transform and a re-parse, so
 // call it only when there is state to write.
 func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
-	if api == "responses" {
+	if schema.IsResponses(schema.WireFor(string(provider), api)) {
 		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
 		return SessionIDFor(tenant, explicitSess, provider, out)
 	}

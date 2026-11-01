@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // The fixtures below are hand-built to the shape MEASURED on real captured Claude Code
@@ -197,7 +198,7 @@ func TestScanInventoryOpenAIDialect(t *testing.T) {
 	for _, d := range inv.Decls {
 		names = append(names, d.Kind+":"+d.Name+"/"+d.Server)
 	}
-	want := []string{KindServerTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx"}
+	want := []string{KindTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx"}
 	if strings.Join(names, " ") != strings.Join(want, " ") {
 		t.Errorf("declarations = %v, want %v", names, want)
 	}
@@ -950,5 +951,58 @@ func TestToolReportCarriesTheCostOfUsedDeclarationsToo(t *testing.T) {
 		if sv.Server == "pw" && (sv.CarryReads != 4000 || sv.CarryUSD <= 0) {
 			t.Errorf("pw server = %+v, want carry_reads 4000 and a price", sv)
 		}
+	}
+}
+
+// A Responses body declares tools flat and calls them with function_call items in `input`.
+// Read as plain OpenAI Chat, the names came out empty and the calls were missed.
+func TestScanInventoryResponses(t *testing.T) {
+	body := []byte(`{"model":"gpt","tools":[
+	  {"type":"function","name":"Skill","description":"d","parameters":{}},
+	  {"type":"function","name":"mcp__ctx__query-docs","description":"d","parameters":{}},
+	  {"type":"function","description":"no name"},
+	  {"type":"web_search"}],
+	  "input":[
+	    {"type":"function_call","call_id":"c0","name":"old","arguments":"{}"},
+	    {"type":"message","role":"user","content":"x"},
+	    {"type":"function_call","call_id":"c1","name":"Skill","arguments":"{\"skill\":\"dataviz\"}"},
+	    {"type":"function_call","call_id":"c2","name":"mcp__ctx__query-docs","arguments":"{}"}]}`)
+	inv := ScanInventory(schema.WireFor("openai", "responses"), body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var names []string
+	for _, d := range inv.Decls {
+		names = append(names, d.Kind+":"+d.Name+"/"+d.Server)
+	}
+	want := []string{KindTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx", KindServerTool + ":web_search/"}
+	if strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("declarations = %v, want %v", names, want)
+	}
+	var used []string
+	for _, u := range inv.Used {
+		used = append(used, u.Name+"/"+u.Skill)
+	}
+	if len(used) != 2 || !contains(used, "Skill/dataviz") || !contains(used, "mcp__ctx__query-docs/") {
+		t.Errorf("used = %v (the earlier turn's call must not count)", used)
+	}
+	if inv.UseFingerprint == 0 {
+		t.Error("no fingerprint")
+	}
+}
+
+// The memo of a declaration set is per wire: one tools array must not serve both dialects.
+func TestScanInventoryMemoIsPerWire(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Flat","parameters":{}}]}`)
+	resp := ScanInventory(schema.WireResponses, body)
+	chat := ScanInventory(schema.WireOpenAI, body)
+	if resp == nil || len(resp.Decls) != 1 || resp.Decls[0].Name != "Flat" {
+		t.Fatalf("responses read = %+v", resp)
+	}
+	if chat != nil && len(chat.Decls) != 0 {
+		t.Errorf("chat read a flat tool from the responses memo: %+v", chat.Decls)
+	}
+	if resp.Digest != chat.Digest {
+		t.Errorf("stored digest must not depend on the wire: %s vs %s", resp.Digest, chat.Digest)
 	}
 }

@@ -52,7 +52,7 @@ func anchorKey(session string) string { return store.RestorePrefix + session }
 // MessagesField is the body field where a dialect keeps its transcript: Responses `input`,
 // every other dialect `messages`. The one definition the anchor code and apply share.
 func MessagesField(wire string) string {
-	if wire == "responses" {
+	if schema.IsResponses(wire) {
 		return "input"
 	}
 	return "messages"
