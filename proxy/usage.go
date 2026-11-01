@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/tidwall/gjson"
 )
 
@@ -224,43 +225,8 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		}
 		return Usage{}, usageMissAbsent
 	}
-	var out Usage
-	switch {
-	case u.Get("input_tokens").Exists(): // Anthropic or OpenAI Responses
-		input := u.Get("input_tokens").Int()
-		out.Output = u.Get("output_tokens").Int()
-		if u.Get("input_tokens_details.cached_tokens").Exists() || u.Get("input_tokens_details.cache_write_tokens").Exists() {
-			// Responses includes both cache tiers in input_tokens.
-			out.CacheRead = u.Get("input_tokens_details.cached_tokens").Int()
-			out.CacheWrite = u.Get("input_tokens_details.cache_write_tokens").Int()
-			out.FreshInput = input - out.CacheRead - out.CacheWrite
-			if out.FreshInput < 0 {
-				out.FreshInput = 0
-			}
-		} else {
-			// Anthropic reports fresh and cache-read input as separate tiers.
-			out.CacheRead = u.Get("cache_read_input_tokens").Int()
-			out.FreshInput = input
-			out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
-		}
-		// The per-TTL split, when the provider reports one. `cache_creation_input_tokens`
-		// is the total across both tiers, so this is a SUBSET of CacheWrite and never an
-		// addition to it.
-		out.CacheWrite1h = u.Get("cache_creation.ephemeral_1h_input_tokens").Int()
-	case u.Get("prompt_tokens").Exists(): // OpenAI
-		prompt := u.Get("prompt_tokens").Int()
-		out.Output = u.Get("completion_tokens").Int()
-		out.CacheRead = u.Get("prompt_tokens_details.cached_tokens").Int()
-		out.FreshInput = prompt - out.CacheRead
-		if out.FreshInput < 0 {
-			out.FreshInput = 0
-		}
-	case u.Get("output_tokens").Exists():
-		// An OUTPUT-ONLY block. Anthropic's streaming message_delta carries exactly
-		// this, and it holds the FINAL completion count — treating it as "no usage"
-		// under-reports every streamed response's output tokens.
-		out.Output = u.Get("output_tokens").Int()
-	default:
+	tiers, known := providerusage.Parse(u)
+	if !known {
 		// A usage block IS here and this parser read nothing out of it — the Bedrock Converse
 		// camelCase shape (`usage.inputTokens`) is the known instance. The DIALECT is deliberately
 		// not added here: getting the field names wrong (`cacheWriteInputTokens` vs
@@ -268,6 +234,8 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		// closes that gap is the shape record in responseUsage, which needs no guess.
 		return Usage{}, usageMissUnparsed
 	}
+	out := Usage{FreshInput: tiers.FreshInput, CacheRead: tiers.CacheRead, CacheWrite: tiers.CacheWrite,
+		CacheWrite1h: tiers.CacheWrite1h, Output: tiers.Output}
 	if out.FreshInput|out.CacheRead|out.CacheWrite|out.Output == 0 {
 		// Recognised and genuinely zero, which is legitimate on some responses. Kept out of the
 		// unparsed counter, or every such response would inflate the one number that means a
