@@ -168,6 +168,14 @@ func TestKeepAliveLiveUsesTheProviderLifetime(t *testing.T) {
 	if r, ok := rows["oa"]; !ok || r.TTLSeconds != 1800 || math.Abs(r.RemainingSeconds-1400) > 0.001 || r.Model != "gpt-5.6" || r.Prefix != 100_000 {
 		t.Errorf("oa row = %+v (ok %v), want ttl 1800, 1400 s left, model gpt-5.6, prefix 100000", r, ok)
 	}
+	// 11 break-even pings, so the reach is 11*280 + the row's own lifetime.
+	if r := rows["oa"]; r.BreakevenPings != 11 || math.Abs(r.BreakevenMinutes-(11*280+1800)/60.0) > 0.001 {
+		t.Errorf("oa break-even = %d pings, %.3f min, want 11 and %.3f (1800 s lifetime)",
+			r.BreakevenPings, r.BreakevenMinutes, (11*280+1800)/60.0)
+	}
+	if r := rows["an"]; math.Abs(r.BreakevenMinutes-(11*280+300)/60.0) > 0.001 {
+		t.Errorf("an break-even = %.3f min, want %.3f", r.BreakevenMinutes, (11*280+300)/60.0)
+	}
 	if _, ok := rows["oldoa"]; ok {
 		t.Error("a gpt-4o entry 400 s old is on the live list; its lifetime is 5 min")
 	}
@@ -201,5 +209,17 @@ func TestLiveSessionsTTLFollowsTheProvider(t *testing.T) {
 		if got[s] != want {
 			t.Errorf("%s ttl_ms = %d, want %d", s, got[s], want)
 		}
+	}
+}
+
+func TestCoverageSecondsForUsesTheRowLifetime(t *testing.T) {
+	if got := CoverageSecondsFor(280, 2, modelinfo.CacheLifetime("openai", "gpt-5.6", false)); got != 2360 {
+		t.Errorf("GPT-5.6 coverage = %v, want 2*280+1800", got)
+	}
+	if got := CoverageSecondsFor(280, 2, modelinfo.CacheLifetime("openai", "gpt-4o", false)); got != 860 {
+		t.Errorf("gpt-4o coverage = %v, want 860", got)
+	}
+	if CoverageSeconds(280, 2) != 860 {
+		t.Error("the account-wide CoverageSeconds must keep the 5-minute default")
 	}
 }

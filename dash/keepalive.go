@@ -177,6 +177,12 @@ func kaSavedGate(alias, pingFloor string) string {
 		panic("dash: kaSaved needs a table alias; an un-aliased one resolves to the subquery")
 	}
 	col := alias + "keepalive_saved_usd"
+	// The mix below stays on purpose. The lifetime that matters is the one of the entry the
+	// RESCUED request r read, and r.cache_ttl records what r asked for; the ping row kp is
+	// the only row that carries a provider here, and it shares r's session, so its provider is r's.
+	// Using kp.cache_ttl would give the tier of the ping, which can differ from r's. The model gate
+	// is not repeated, as the next paragraph says.
+	//
 	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
@@ -1125,7 +1131,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
 				if r.PingUSDEach > 0 {
 					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
-					r.BreakevenMinutes = CoverageSeconds(idleSeconds, int(r.BreakevenPings)) / 60
+					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
 					miss1h := float64(r.Prefix) * (p.Input*write1hMultiple - p.CacheRead)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
@@ -1204,11 +1210,20 @@ func (d *DB) countBySession(cond string, args []any, extra string) (map[string]i
 // read refreshes the entry for the provider's full lifetime. Writing K*X instead is the single
 // error that made an earlier analysis of this mechanism wrong by a factor of 4.4, so
 // TestCoverageIncludesTheFinalPingsTTL exists to fail if anyone reintroduces it.
+//
+// CoverageSeconds is the ACCOUNT-WIDE policy figure and has no row, so it uses the Anthropic
+// default ttlTTL. A figure for one row, whose provider and model are known, is CoverageSecondsFor.
 func CoverageSeconds(idleSeconds float64, maxPings int) float64 {
+	return CoverageSecondsFor(idleSeconds, maxPings, ttlTTL)
+}
+
+// CoverageSecondsFor is K*X + ttl for a given cache lifetime. Pass modelinfo.CacheLifetime of the
+// row's provider and model, so a GPT-5.6+ entry is credited its 30 minutes and not 5.
+func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) float64 {
 	if idleSeconds <= 0 || maxPings <= 0 {
 		return 0
 	}
-	return float64(maxPings)*idleSeconds + ttlTTL.Seconds()
+	return float64(maxPings)*idleSeconds + ttl.Seconds()
 }
 
 // PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
