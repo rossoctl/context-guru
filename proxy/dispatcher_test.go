@@ -52,13 +52,17 @@ func TestShutdownReleasesEveryHeldRef(t *testing.T) {
 
 // The keeper parses a ping's usage itself (keepalive.PingUsage). It must read a ping response
 // exactly as the proxy's own parser reads it, or a ping's cost and its write-vs-read guard would
-// change with the host.
+// change with the host. Both now call providerusage.Parse, so this is no longer the only guard
+// against drift. It stays as an end-to-end pin: it catches a field one side stops passing on to
+// the other (for example a Tiers field that PingUsage forgets to copy).
 func TestPingUsageMatchesResponseUsage(t *testing.T) {
 	for name, body := range map[string]string{
 		"anthropic read": `{"stop_reason":"max_tokens","usage":{"input_tokens":3,"cache_read_input_tokens":48576,` +
 			`"cache_creation_input_tokens":0,"output_tokens":1}}`,
 		"anthropic write 1h": `{"stop_reason":"max_tokens","usage":{"input_tokens":3,"cache_read_input_tokens":0,` +
 			`"cache_creation_input_tokens":900,"cache_creation":{"ephemeral_1h_input_tokens":900},"output_tokens":1}}`,
+		"chat": `{"usage":{"prompt_tokens":48003,"prompt_tokens_details":{"cached_tokens":48000},` +
+			`"completion_tokens":16}}`,
 		"responses": `{"usage":{"input_tokens":48003,"input_tokens_details":{"cached_tokens":48000},` +
 			`"output_tokens":16}}`,
 		"responses write": `{"usage":{"input_tokens":48003,` +

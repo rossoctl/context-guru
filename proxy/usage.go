@@ -165,12 +165,8 @@ func usagePresent(v gjson.Result) bool {
 // this workload — the request is ~99.95% cached and a cache write bills ~11.5x a
 // read, so content-token savings alone cannot express the economics.
 //
-// Dialects handled:
-//
-//	Anthropic  usage.{input_tokens, output_tokens,
-//	           cache_read_input_tokens, cache_creation_input_tokens}
-//	OpenAI     usage.{prompt_tokens, completion_tokens,
-//	           prompt_tokens_details.cached_tokens}
+// Dialects handled (Anthropic, OpenAI Responses, OpenAI chat, output-only): see
+// providerusage.Parse, which holds the field names.
 //
 // Anthropic's `input_tokens` already EXCLUDES the cached tiers, so it is the fresh
 // figure directly. OpenAI's `prompt_tokens` INCLUDES its cached_tokens, so fresh is
@@ -236,7 +232,7 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 	}
 	out := Usage{FreshInput: tiers.FreshInput, CacheRead: tiers.CacheRead, CacheWrite: tiers.CacheWrite,
 		CacheWrite1h: tiers.CacheWrite1h, Output: tiers.Output}
-	if out.FreshInput|out.CacheRead|out.CacheWrite|out.Output == 0 {
+	if tiers.Zero() {
 		// Recognised and genuinely zero, which is legitimate on some responses. Kept out of the
 		// unparsed counter, or every such response would inflate the one number that means a
 		// dialect is missing.

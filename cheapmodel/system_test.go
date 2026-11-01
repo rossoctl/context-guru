@@ -443,3 +443,26 @@ func grow(t *testing.T, want int) string {
 		n += n/8 + 1
 	}
 }
+
+// CompleteBlocks must record the one-hour write split, so the totals price it at the 1h rate.
+func TestCompleteBlocksRecordsTheOneHourWrite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":3,`+
+			`"cache_creation_input_tokens":900,"cache_creation":{"ephemeral_1h_input_tokens":600},`+
+			`"cache_read_input_tokens":7,"output_tokens":5}}`)
+	}))
+	defer srv.Close()
+	d, ref := dispatchtest.HTTP(srv.URL, nil)
+	ctx, sink := WithCallSink(context.Background())
+	if _, err := (Anthropic{D: d, Ref: ref, Model: "aws/claude-sonnet-5"}).
+		CompleteBlocks(ctx, []string{"block"}, "VARIABLE"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.CacheWrite1h(); got != 600 {
+		t.Fatalf("CacheWrite1h = %d, want 600", got)
+	}
+	if w, r := sink.CacheTotals(); w != 900 || r != 7 {
+		t.Fatalf("cache totals = %d/%d, want 900/7", w, r)
+	}
+}
