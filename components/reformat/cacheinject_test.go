@@ -189,6 +189,21 @@ func TestAnchorsAreTurnStable(t *testing.T) {
 
 // Non-cache-aware providers must be untouched: cache_control is meaningless (and
 // on Gemini/OpenAI-shaped wires, not even expressible).
+// Bedrock Mantle serves Claude on the native Anthropic surface, so cacheinject must place
+// breakpoints there as it does on Bedrock (#809). Before the fix it skipped the request.
+func TestPlacesBreakpointsOnEveryCacheControlProvider(t *testing.T) {
+	for _, p := range []schemas.ModelProvider{schemas.Anthropic, schemas.Bedrock, schemas.BedrockMantle, schemas.Vertex} {
+		req := &schemas.BifrostChatRequest{Provider: p, Input: convo(30)}
+		rep := &components.Report{}
+		if err := (Cacheinject{}).Reformat(req, rep, ctx()); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if rep.Skipped || len(marked(req.Input)) == 0 {
+			t.Errorf("%s: want breakpoints, got skipped=%v marked=%v", p, rep.Skipped, marked(req.Input))
+		}
+	}
+}
+
 func TestSkipsNonCacheAwareProviders(t *testing.T) {
 	for _, p := range []schemas.ModelProvider{schemas.OpenAI, schemas.Gemini} {
 		req := &schemas.BifrostChatRequest{Provider: p, Input: convo(10)}

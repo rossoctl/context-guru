@@ -1054,8 +1054,8 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	if bodyAsksExtendedTTL(body) {
 		return TTLEphemeral1h
 	}
-	switch provider {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(string(provider)):
 		return TTLEphemeral5m
 	default:
 		// Every other backend's cache, where it has one, is not on Anthropic's 5-minute

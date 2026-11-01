@@ -67,6 +67,7 @@ func TestCacheTTLPerProvider(t *testing.T) {
 		{"anthropic, 1h on a system block", bschemas.Anthropic, "claude-sonnet-5", sysHour, extendedTTL, CacheLifetimeExact},
 		{"bedrock follows the anthropic shape", bschemas.Bedrock, "aws/claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
 		{"vertex follows the anthropic shape", bschemas.Vertex, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
+		{"bedrock mantle follows the anthropic shape", bschemas.BedrockMantle, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
 		{"gpt-5.6 default is a minimum", bschemas.OpenAI, "azure/gpt-5.6-luna", bare, OpenAIMinimumCacheTTL, CacheLifetimeMinimum},
 		{"older OpenAI retention is unknown", bschemas.OpenAI, "gpt-5.5", bare, 0, CacheLifetimeUnknown},
 	} {

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -208,9 +209,5 @@ func hashString(s string) uint64 {
 // Gemini-shaped wires cache an implicit longest prefix and stop at the divergence on
 // their own, so there is nothing for a block boundary to add there.
 func explicitBreakpointProvider(p bschemas.ModelProvider) bool {
-	switch p {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
-		return true
-	}
-	return false
+	return modelinfo.HonoursCacheControl(string(p))
 }

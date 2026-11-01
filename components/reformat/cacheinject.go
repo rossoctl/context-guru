@@ -11,6 +11,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -289,12 +290,7 @@ func sortedDesc(m map[int]struct{}) []int {
 
 // cacheAware reports whether the provider honours Anthropic-style cache_control.
 func cacheAware(p schemas.ModelProvider) bool {
-	switch p {
-	case schemas.Anthropic, schemas.Bedrock, schemas.Vertex:
-		return true
-	default:
-		return false
-	}
+	return modelinfo.HonoursCacheControl(string(p))
 }
 
 // --------------------------------------------------------------------------- //

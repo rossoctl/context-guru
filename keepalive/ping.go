@@ -104,10 +104,10 @@ const reserveFrac = 0.25
 // we know. OpenAI Responses uses implicit caching on GPT-5.6+; earlier models
 // have model/retention-dependent lifetimes and are not safe to schedule here.
 func eligible(p bschemas.ModelProvider, model, route string) bool {
-	switch p {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(string(p)):
 		return true
-	case bschemas.OpenAI:
+	case p == bschemas.OpenAI:
 		return route == "/v1/responses" && modelinfo.OpenAI30MinuteCache(string(p), model)
 	}
 	return false
