@@ -3,6 +3,8 @@ package expand
 import (
 	"strconv"
 
+	"github.com/rossoctl/context-guru/schema"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -356,6 +358,11 @@ func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
 				return true
 			})
 			if hit {
+				return true
+			}
+			// The joined text of the blocks counts too, as CallSites reads it: a client may split
+			// the original over several text blocks.
+			if schema.ContentText(v) == orig {
 				return true
 			}
 		}
