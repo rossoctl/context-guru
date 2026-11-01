@@ -24,7 +24,8 @@ import (
 // the set until the session ends.
 const Header = "The following deferred tools are now available via ToolSearch."
 
-// MaxNameLen is the API's own documented limit for a tool name.
+// MaxNameLen is the API's own documented limit for a tool name. dash's maxDeclName is this
+// constant.
 const MaxNameLen = 128
 
 // tagEnds are the escaped-body spellings of a newline then `</system-reminder>`.
@@ -37,7 +38,7 @@ var tagEnds = [][]byte{[]byte(`\n` + skills.ReminderEnd), []byte(`\n\u003c/syste
 // A region runs from the header to a blank line (`\n\n` in the escaped body), a closing
 // `</system-reminder>` line, or the end of its JSON string, whichever is first. Both JSON
 // spellings of the tag count: Claude Code writes it literally, an encoder that escapes HTML
-// (Go's does) writes `</system-reminder>`. Text after a closing tag (a date, another
+// (Go's does) writes `\u003c/system-reminder\u003e`. Text after a closing tag (a date, another
 // reminder) must not reach a caller's digest. budget bounds the bytes returned in total.
 func Regions(body []byte, budget int) [][]byte {
 	var out [][]byte

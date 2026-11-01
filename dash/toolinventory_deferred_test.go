@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 )
@@ -370,7 +371,7 @@ func TestDeferredDigestStopsAtALiteralClosingTag(t *testing.T) {
 }
 
 // A client that sends CRLF line endings must not lose the whole list: every name line would end in
-// \r, fail isToolName, and void the list with no signal ("0 MCP servers" again).
+// \r, fail deferred.ValidName, and void the list with no signal ("0 MCP servers" again).
 func TestDeferredListWithCRLFLineEndings(t *testing.T) {
 	crlf := strings.ReplaceAll(deferredFixture(t, "deferred-reminder-delta1-2mcp.txt"), "\n", "\r\n")
 
@@ -419,16 +420,69 @@ func TestDeferredListInAnAssistantMessageIsIgnored(t *testing.T) {
 // Claude Code moves cache_control between messages. The same turn must keep one fingerprint, or
 // the writer counts its tool calls again.
 func TestUseFingerprintIgnoresCacheControl(t *testing.T) {
-	turn := func(cc string) []byte {
-		return []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}` + cc + `]}]}`)
+	turn := func(id, cc string) []byte {
+		return []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"` + id +
+			`","name":"Bash","input":{}` + cc + `}]}]}`)
 	}
-	_, a := usedFrom("anthropic", turn(``))
-	_, b := usedFrom("anthropic", []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{},"cache_control":{"type":"ephemeral"}}]}]}`))
+	_, a := usedFrom("anthropic", turn("t1", ``))
+	_, b := usedFrom("anthropic", turn("t1", `,"cache_control":{"type":"ephemeral"}`))
 	if a == 0 || a != b {
 		t.Errorf("fingerprints differ for one turn: %d vs %d", a, b)
 	}
-	_, c := usedFrom("anthropic", []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}]}`))
-	if c == a {
+	if _, c := usedFrom("anthropic", turn("t2", ``)); c == a {
 		t.Error("a different turn kept the fingerprint")
+	}
+}
+
+// Above maxCanonFingerprint the raw hash is used, so a big turn costs one hash. It still gives a
+// stable, nonzero fingerprint that tells two turns apart.
+func TestUseFingerprintOfALargeTurn(t *testing.T) {
+	big := func(id string) []byte {
+		return []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"` + id +
+			`","name":"Write","input":{"content":"` + strings.Repeat("x", maxCanonFingerprint) + `"}}]}]}`)
+	}
+	_, a := usedFrom("anthropic", big("t1"))
+	_, a2 := usedFrom("anthropic", big("t1"))
+	_, b := usedFrom("anthropic", big("t2"))
+	if a == 0 || a != a2 || a == b {
+		t.Errorf("large turn fingerprints: %d %d %d", a, a2, b)
+	}
+}
+
+// BenchmarkUsedFrom times the fingerprint on a small turn, a turn at the bound, and a turn far
+// above it (an Edit that carries a whole file).
+func BenchmarkUsedFrom(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		size int
+	}{{"small_1KB", 1 << 10}, {"at_bound", maxCanonFingerprint - 512}, {"large_512KB", 512 << 10}} {
+		body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"content":"` +
+			strings.Repeat("x", c.size) + `"},"cache_control":{"type":"ephemeral"}}]}]}`)
+		b.Run(c.name, func(b *testing.B) {
+			b.SetBytes(int64(len(body)))
+			for i := 0; i < b.N; i++ {
+				usedFrom("anthropic", body)
+			}
+		})
+	}
+}
+
+// The dash page reads the FIRST block that holds the skills header, the rule the filter uses, not
+// every block of the message joined.
+func TestSkillListingIsTheFirstBlockOnly(t *testing.T) {
+	msg, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "system", "content": []any{
+		map[string]any{"type": "text", "text": "agents:\n- notaskill: from another block"},
+		map[string]any{"type": "text", "text": "<system-reminder>\n" + skills.Header + "\n\n- alpha: first.\n</system-reminder>"},
+		map[string]any{"type": "text", "text": "- trailing: in a later block"},
+	}}}})
+	body := []byte(`{"tools":[` + tool("Bash", "b") + `],` + string(msg)[1:])
+	var names []string
+	for _, d := range ScanInventory("anthropic", body).Decls {
+		if d.Kind == KindSkill {
+			names = append(names, d.Name)
+		}
+	}
+	if strings.Join(names, ",") != "alpha" {
+		t.Errorf("skills = %v, want only alpha", names)
 	}
 }

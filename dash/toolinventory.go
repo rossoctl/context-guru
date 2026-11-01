@@ -314,8 +314,9 @@ func identName(s string) string {
 	return RedactContent(s, 0)
 }
 
-// maxDeclName is the API's own documented limit for a tool name, so nothing real is lost.
-const maxDeclName = 128
+// maxDeclName is the API's own documented limit for a tool name, so nothing real is lost. It is
+// the same limit as deferred.MaxNameLen (what a deferred-list line may be), so it is that constant.
+const maxDeclName = deferred.MaxNameLen
 
 // SplitMCPName splits an MCP tool name into its server and tool halves.
 // `mcp__<server>__<tool>`, non-greedy on the server: real tool names contain `__`
@@ -506,6 +507,10 @@ func mergeDeferred(decls, deferred []Decl) []Decl {
 // itself is internal/skills's, shared with the filter that acts on it.
 func skillEntryName(line string) (string, bool) { return skills.EntryName(line) }
 
+// maxCanonFingerprint bounds the message usedFrom canonicalizes. A turn this size decodes in
+// about 85 us; a 512 KB one took 5.7 ms and 4 MB of garbage. See BenchmarkUsedFrom.
+const maxCanonFingerprint = 8 << 10
+
 // usedFrom collects the tool calls of the LAST tool-using turn, plus a fingerprint of
 // that turn. Not the whole transcript: the agent resends it every request, so counting
 // all of it would multiply every session's call counts by its request count. The
@@ -530,11 +535,21 @@ func usedFrom(provider string, body []byte) ([]Used, uint64) {
 	// Hash the canonical form, not the raw bytes. Claude Code moves cache_control between
 	// messages from one request to the next, so the same assistant turn can carry it on one
 	// request and not on the next. Raw bytes would then give two fingerprints for one turn,
-	// and the writer (which skips a turn it saw) would count its calls twice. Bytes that are
-	// not JSON fall back to the raw text.
+	// and the writer (which skips a turn it saw) would count its calls twice.
+	//
+	// The canonical form costs a full JSON decode and re-marshal, so it runs only up to
+	// maxCanonFingerprint bytes. Above that bound (an Edit or Write turn that carries a whole file)
+	// the raw hash is used: the worst case is one double count, never a lost one, and the
+	// request goroutine stays at one hash. The size is the same with or without cache_control
+	// to within ~40 bytes, so one turn takes one path except at the bound itself. Bytes that
+	// are not JSON also fall back to the raw text.
 	var h maphash.Hash
 	h.SetSeed(declSeed)
-	if canon, ok := schema.CanonicalWireMessage(last); ok {
+	canon, ok := []byte(nil), false
+	if len(last) <= maxCanonFingerprint {
+		canon, ok = schema.CanonicalWireMessage(last)
+	}
+	if ok {
 		h.Write(canon)
 	} else {
 		h.WriteString(last)
