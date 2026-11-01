@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -1034,7 +1036,7 @@ func TestUsedFromResponsesCountsCustomCallsAndKeepsTheRun(t *testing.T) {
 // Responses reading is a follow-up; until then the page must say "unknown", never "none".
 func TestScanInventoryResponsesMarksTheSkillsListingUnknown(t *testing.T) {
 	body := []byte(`{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],
-	  "input":[{"type":"message","role":"developer","content":"` + skillsHeader + `\n- dataviz: charts\n"}]}`)
+	  "input":[{"type":"message","role":"developer","content":"` + skills.Header + `\n- dataviz: charts\n"}]}`)
 	inv := ScanInventory(schema.WireResponses, body)
 	if inv == nil {
 		t.Fatal("no inventory")
@@ -1054,4 +1056,57 @@ func TestScanInventoryResponsesMarksTheSkillsListingUnknown(t *testing.T) {
 	if inv.System == nil || inv.System.Text != "be brief" {
 		t.Errorf("system = %+v, want the instructions", inv.System)
 	}
+}
+
+// A Responses body whose deferred list sits in `input` is not read. The page must say "unknown",
+// never show an empty set of deferred tools (#817, until #822 reads `input`).
+func TestScanInventoryResponsesMarksDeferredToolsUnknown(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"message","role":"user","content":"` + deferred.Header + `\nmcp__ctx__query-docs\n\nnext"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var marker *Decl
+	for i, d := range inv.Decls {
+		if d.Kind == KindDeferredListing {
+			marker = &inv.Decls[i]
+		}
+		if d.Kind == KindMCPTool {
+			t.Errorf("an MCP row %q from a list that was not read", d.Name)
+		}
+	}
+	if marker == nil || marker.Server != SkillsUnknown {
+		t.Errorf("deferred marker = %+v, want state %q", marker, SkillsUnknown)
+	}
+}
+
+// The marker reaches the report as a state, and is not counted as a tool.
+func TestToolReportShowsDeferredUnknown(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(1000, "s1", "gpt", 100, 90)
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: &Inventory{Digest: "d1",
+		Decls: []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10},
+			{Kind: KindDeferredListing, Server: SkillsUnknown}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	bothPaths(t, func(t *testing.T, path string) {
+		rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.DeferredState != SkillsUnknown || rep.DeferredUnknownSessions != 1 {
+			t.Errorf("%s: deferred state = %q (%d sessions), want unknown (1)", path, rep.DeferredState, rep.DeferredUnknownSessions)
+		}
+		for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+			if s.Kind == KindDeferredListing {
+				t.Errorf("%s: the marker is listed as a tool: %+v", path, s)
+			}
+		}
+	})
 }

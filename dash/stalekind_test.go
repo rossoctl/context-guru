@@ -78,10 +78,10 @@ func TestToolReportHidesTheStaleServerToolRows(t *testing.T) {
 			got[s.Kind+":"+s.Name] = s.SessionsDeclared
 		}
 		want := map[string]int{
-			"tool:Fetch":            2, // s1, s3
-			"tool:Other":            2,
-			"server_tool:Fetch":     1, // s2 never re-sent its tools: nothing replaces its row
-			"server_tool:function":  1, // the same, for the phantom
+			"tool:Fetch":             2, // s1, s3
+			"tool:Other":             2,
+			"server_tool:Fetch":      1, // s2 never re-sent its tools: nothing replaces its row
+			"server_tool:function":   1, // the same, for the phantom
 			"server_tool:web_search": 3, // a genuine server tool stays everywhere
 		}
 		for k, n := range want {
