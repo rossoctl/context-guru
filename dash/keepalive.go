@@ -183,6 +183,11 @@ func kaSavedGate(alias, pingFloor string) string {
 	// Using kp.cache_ttl would give the tier of the ping, which can differ from r's. The model gate
 	// is not repeated, as the next paragraph says.
 	//
+	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
+	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
+	// never credits one (keepaliveSavedUSD gates on GPT56OrLater). The provider-only CASE sees
+	// only rows that already passed the model gate.
+	//
 	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
@@ -596,6 +601,9 @@ func bandOf(edges []float64, v float64) int {
 // the shipped default's 840 s.
 func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBehaviour, error) {
 	if coverageSeconds <= 0 {
+		// An account-wide default has no row, so no provider or model to ask: it is the Anthropic
+		// 5-minute policy figure the page marks its gap bands against. A per-row figure is
+		// CoverageSecondsFor.
 		coverageSeconds = 2*recIdleSeconds + ttlTTL.Seconds()
 	}
 	out := &KeepAliveBehaviour{CoverageSeconds: coverageSeconds,
