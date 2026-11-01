@@ -11,6 +11,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // THE DEFECT: Claude Code sends max_tokens=32000 with thinking.budget_tokens=31999, and
@@ -520,16 +521,16 @@ func TestInsertAskMessageNeverExceedsTheBreakpointCap(t *testing.T) {
 			`{` + sys + `,"messages":[{"role":"assistant","content":[` + mark + `]},{"role":"user","content":[` + mark + `]}]}`, 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if n := countBreakpoints([]byte(tc.body)); n != tc.in {
+			if n := schema.CountBreakpoints([]byte(tc.body)).Total(); n != tc.in {
 				t.Fatalf("fixture has %d breakpoints, want %d", n, tc.in)
 			}
 			out, err := insertAskMessage([]byte(tc.body), "ask")
 			if err != nil {
 				t.Fatal(err)
 			}
-			n := countBreakpoints(out)
-			if n > maxBreakpoints {
-				t.Errorf("%d breakpoints, over the provider's cap of %d: %s", n, maxBreakpoints, out)
+			n := schema.CountBreakpoints(out).Total()
+			if n > schema.MaxBreakpoints {
+				t.Errorf("%d breakpoints, over the provider's cap of %d: %s", n, schema.MaxBreakpoints, out)
 			}
 			msgs := gjson.GetBytes(out, "messages").Array()
 			bridge := msgs[len(msgs)-2]
@@ -593,20 +594,5 @@ func TestInsertAskMessageBridgeOnlyWhereABreakpointIsCopied(t *testing.T) {
 	msgs := gjson.GetBytes(out, "messages").Array()
 	if len(msgs) != 3 || msgs[1].Raw != asst || strings.Contains(msgs[2].Raw, "cache_control") {
 		t.Errorf("assistant-last shape changed: %s", out)
-	}
-}
-
-// countBreakpoints counts what the provider's cap counts: both mark spellings, on tools, system,
-// messages and content blocks, the same as apply.CountBreakpoints.
-func TestCountBreakpointsMatchesTheCapRule(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"t","cache_control":{"type":"ephemeral"}}],` +
-		`"system":[{"type":"text","text":"s","cachePoint":{"type":"default"}}],` +
-		`"messages":[{"role":"user","content":"u","cache_control":{"type":"ephemeral"}},` +
-		`{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}},{"type":"text","text":"y"}]}]}`)
-	if n := countBreakpoints(body); n != 4 {
-		t.Errorf("countBreakpoints = %d, want 4", n)
-	}
-	if n := countBreakpoints([]byte(`{"messages":[{"role":"user","content":"cache_control"}]}`)); n != 0 {
-		t.Errorf("text that only names the field counted as a mark: %d", n)
 	}
 }

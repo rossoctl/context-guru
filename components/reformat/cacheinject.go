@@ -20,7 +20,7 @@ func init() { components.Register("cacheinject", newCacheinject) }
 // Cache-billing constants, from the provider docs. Identical on the Anthropic
 // API and the other providers that honour cache_control (modelinfo.HonoursCacheControl);
 // see docs/components/caching.md for the derivation these drive.
-const maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
+const maxBreakpoints = schema.MaxBreakpoints // hard provider cap on cache_control blocks per request
 
 // LookbackBlocks is kept for importers; use schema.LookbackBlocks.
 const LookbackBlocks = schema.LookbackBlocks
@@ -156,7 +156,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// of 3 free slots when 1 was free: 6 on the wire, and a 400 (issue #32).
 	visible := 0
 	for i := range req.Input {
-		if hasBreakpoint(&req.Input[i]) {
+		if schema.HasBlockBreakpoint(&req.Input[i]) {
 			visible++
 			delete(want, i)
 		}
@@ -186,7 +186,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 		// written, and the next-lowest markable block still captures nearly all of
 		// it — far better than writing nothing and billing the whole prefix at 1.0x.
 		for j := i - 1; j >= 0; j-- {
-			if hasBreakpoint(&req.Input[j]) {
+			if schema.HasBlockBreakpoint(&req.Input[j]) {
 				break // already covered at or below here
 			}
 			if mark(&req.Input[j], ci.ttl()) {
@@ -216,18 +216,6 @@ func mark(m *schemas.ChatMessage, ttl *string) bool {
 	}
 	last.CacheControl = &schemas.CacheControl{Type: schemas.CacheControlTypeEphemeral, TTL: ttl}
 	return true
-}
-
-func hasBreakpoint(m *schemas.ChatMessage) bool {
-	if m.Content == nil {
-		return false
-	}
-	for i := range m.Content.ContentBlocks {
-		if m.Content.ContentBlocks[i].CacheControl != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // digests returns a per-message content digest. Truncated to 8 bytes: this only

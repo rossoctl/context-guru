@@ -5,6 +5,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -35,7 +36,7 @@ func convo(n int) []schemas.ChatMessage {
 func marked(msgs []schemas.ChatMessage) []int {
 	var out []int
 	for i := range msgs {
-		if hasBreakpoint(&msgs[i]) {
+		if schema.HasBlockBreakpoint(&msgs[i]) {
 			out = append(out, i)
 		}
 	}

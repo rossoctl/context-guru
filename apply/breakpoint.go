@@ -93,7 +93,7 @@ func placeBreakpoint(body []byte, target, mark, from string, st *placerStats) (o
 		st.notFound.Add(1)
 		return body, false
 	}
-	if elemMarks(tb) > 0 {
+	if schema.ElemMarks(tb) > 0 {
 		st.atEnd.Add(1)
 		return body, false // already a breakpoint there; nothing to add
 	}
@@ -366,7 +366,7 @@ func blocksAfter(msgs []gjson.Result, from string) int {
 func lastMessageMark(msgs []gjson.Result) (path, raw string) {
 	for mi := len(msgs) - 1; mi >= 0; mi-- {
 		m := msgs[mi]
-		if !mayHold(m.Raw) {
+		if !schema.MayHoldBreakpoint(m.Raw) {
 			continue
 		}
 		blocks := m.Get("content").Array()

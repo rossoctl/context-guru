@@ -20,6 +20,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Anthropic calls a small Anthropic model with a single user prompt and returns the text of the
@@ -387,7 +388,7 @@ func thinkingAdjustedMaxTokens(body []byte, reply int) (want int, capped bool) {
 //	kept on the last message and on the bridge:   Sonnet 5.5 read 31,550 write 0
 //	kept on the last message only:                Sonnet 5.5 read 31,542 write 0; Opus 5.5 read 31,592 write 0
 //
-// The copy on the bridge ADDS a breakpoint, and the provider refuses more than maxBreakpoints. Claude
+// The copy on the bridge ADDS a breakpoint, and the provider refuses more than schema.MaxBreakpoints (4). Claude
 // Code already sends 4 on most turns, so the bridge gets its copy only when the request stays at or
 // under the cap. Without it the question still reads the turn's entry and keeps it alive (the last
 // row above). A ping after a turn that ends at a TEXT turn is not fixed by this: no later request
@@ -467,7 +468,7 @@ func insertAskMessage(prefixBody []byte, ask string) ([]byte, error) {
 		cc = lastBreakpoint(parts[len(parts)-1])
 	}
 	bridgeCC := cc
-	if cc.Exists() && countBreakpoints(prefixBody) >= maxBreakpoints {
+	if cc.Exists() && schema.CountBreakpoints(prefixBody).Total() >= schema.MaxBreakpoints {
 		bridgeCC = gjson.Result{}
 	}
 	if bridge := askBridgeFor(lastRole, cc.Exists()); bridge != "" {
@@ -517,37 +518,6 @@ func lastBreakpoint(msg string) gjson.Result {
 		}
 	}
 	return gjson.Result{}
-}
-
-// maxBreakpoints is the provider's cap on cache_control marks in one request.
-const maxBreakpoints = 4
-
-// countBreakpoints counts the breakpoint marks in body's tools, system and messages (on a message or
-// on its content blocks), the places the provider's cap counts. Same rule as apply.CountBreakpoints,
-// which this package cannot import.
-func countBreakpoints(body []byte) int {
-	n := 0
-	marks := func(arr gjson.Result) {
-		arr.ForEach(func(_, v gjson.Result) bool {
-			for _, k := range [...]string{"cache_control", "cachePoint"} {
-				if v.Get(k).IsObject() {
-					n++
-				}
-			}
-			return true
-		})
-	}
-	root := gjson.ParseBytes(body)
-	marks(root.Get("tools"))
-	marks(root.Get("system"))
-	root.Get("messages").ForEach(func(_, m gjson.Result) bool {
-		if m.Get("cache_control").IsObject() {
-			n++
-		}
-		marks(m.Get("content"))
-		return true
-	})
-	return n
 }
 
 // marshalAppended renders one appended message. With a breakpoint to carry, the content becomes a

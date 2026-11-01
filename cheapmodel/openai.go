@@ -101,7 +101,7 @@ func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
 		// arrives here already marked. Adding a second mark buys nothing and spends one of the
 		// provider's FOUR per-request breakpoint slots — a fifth is a 400 on the whole call, which
 		// on this path means a wasted summarization and a reverted component.
-		if hasCacheControl(m) {
+		if schema.HasBlockBreakpoint(&m) {
 			return -1
 		}
 		n += tokens.Count(schema.MessageText(m))
@@ -122,19 +122,6 @@ func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
 		}
 	}
 	return -1
-}
-
-// hasCacheControl reports whether this message already carries a breakpoint the caller placed.
-func hasCacheControl(m bschemas.ChatMessage) bool {
-	if m.Content == nil {
-		return false
-	}
-	for _, blk := range m.Content.ContentBlocks {
-		if blk.CacheControl != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // markedContent re-renders content as a block array carrying a cache_control breakpoint on its
