@@ -49,8 +49,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -91,16 +93,6 @@ const (
 	// version whose format moved. The size is still honest; the inventory is not known.
 	SkillsUnknown = "unknown"
 )
-
-// skillsHeader is the anchor. It is load-bearing rather than cosmetic: the agent-types
-// listing sitting immediately above it in the SAME message uses the identical
-// `- name: description` shape, so an unanchored scrape counts subagents as skills.
-const skillsHeader = "The following skills are available for use with the Skill tool:"
-
-// reminderEnd bounds the listing. Both this and the header appear literally in the
-// JSON-escaped body (no escapable characters), which is what lets the hot path find
-// the region without unescaping anything.
-const reminderEnd = "</system-reminder>"
 
 // Decl is one declaration: its name, its classification, and what carrying it costs
 // in tokens (the whole JSON element for a tool, the listing entry for a skill).
@@ -349,12 +341,12 @@ func SplitMCPName(name string) (server, tool string, ok bool) {
 // escaping, so this is two byte searches and no unescaping — cheap enough to run on
 // every request, and it is what feeds the digest.
 func skillRegion(body []byte) string {
-	i := bytes.Index(body, []byte(skillsHeader))
+	i := bytes.Index(body, []byte(skills.Header))
 	if i < 0 {
 		return ""
 	}
 	rest := body[i:]
-	if j := bytes.Index(rest, []byte(reminderEnd)); j > 0 {
+	if j := bytes.Index(rest, []byte(skills.ReminderEnd)); j > 0 {
 		return string(rest[:j])
 	}
 	// No terminator: bound the region rather than hashing the rest of the transcript.
@@ -368,29 +360,12 @@ func skillRegion(body []byte) string {
 // real listing is ~6 KB; 256 KB is room for a much larger skill set and still a bound.
 const maxListing = 256 << 10
 
-// skillsText returns the UNESCAPED listing text. Only called on a digest miss (once
-// per distinct declaration set), which is why it can afford to walk the messages
-// array: the listing lives in a {"role":"system"} MESSAGE, not in the system prompt.
+// skillsText returns the UNESCAPED listing text. Only called on a digest miss (once per
+// distinct declaration set). The finder is internal/skills's, the one the declaration filter
+// uses, so the page and the filter read the same string.
 func skillsText(body []byte) string {
-	var out string
-	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
-		if !strings.Contains(m.Raw, skillsHeader) {
-			return true
-		}
-		c := m.Get("content")
-		if c.Type == gjson.String {
-			out = c.String()
-			return false
-		}
-		var b strings.Builder
-		c.ForEach(func(_, blk gjson.Result) bool {
-			b.WriteString(blk.Get("text").String())
-			return true
-		})
-		out = b.String()
-		return false
-	})
-	return out
+	_, text := skills.Locate(body)
+	return text
 }
 
 // skillDecls parses the skill listing out of a {"role":"system"} message.
@@ -409,15 +384,15 @@ func skillsText(body []byte) string {
 //     inventory: "we could not read this" and "there is nothing here" are different
 //     answers, and only one of them makes it safe to remove something.
 func skillDecls(text string) []Decl {
-	i := strings.Index(text, skillsHeader)
+	i := strings.Index(text, skills.Header)
 	if i < 0 {
 		return nil
 	}
-	body := text[i+len(skillsHeader):]
-	if j := strings.Index(body, reminderEnd); j >= 0 {
+	body := text[i+len(skills.Header):]
+	if j := strings.Index(body, skills.ReminderEnd); j >= 0 {
 		body = body[:j]
 	}
-	listing := skillsHeader + body
+	listing := skills.Header + body
 	marker := Decl{Kind: KindSkillListing, Server: SkillsUnknown,
 		Tokens: tokens.Count(listing), Text: listing}
 	out := []Decl{marker}
@@ -438,79 +413,19 @@ func skillDecls(text string) []Decl {
 	return out
 }
 
-// deferredHeader starts the list of deferred tools. Claude Code defers MCP tools: the tools
-// array then carries only the built-ins and deferredPlaceholder, and the mcp__* names arrive
-// in a message as this header line, one name per line, and a blank line. Each such list is
-// a delta, so a request carries one per change and the declared set is all of them together.
-//
-// Claude Code also sends removals, in wording not yet captured, so a removed server stays in
-// the set until the session ends.
-const deferredHeader = "The following deferred tools are now available via ToolSearch."
-
-// deferredTagEnds are the escaped-body spellings of a newline then `</system-reminder>`.
-var deferredTagEnds = [][]byte{[]byte(`\n` + reminderEnd), []byte(`\n\u003c/system-reminder\u003e`)}
-
 // deferredPlaceholder is the stub tools element that keeps deferred loading on.
 const deferredPlaceholder = "DeferredToolPlaceholder"
 
 // hashDeferred writes every deferred list in the RAW body into h and reports whether there
-// was one. It runs on every request, so it is byte searches only and copies nothing. A
-// request without a list writes nothing, so it keeps the digest it had. A region runs to a
-// blank line (`\n\n` in the escaped body) or to the end of its JSON string, whichever is
-// first; maxListing bounds the bytes hashed in total.
+// was one. A request without a list writes nothing, so it keeps the digest it had. The regions
+// are internal/deferred's; maxListing bounds the bytes hashed in total.
 func hashDeferred(h *maphash.Hash, body []byte) bool {
-	found, budget := false, maxListing
-	for rest := body; budget > 0; {
-		i := bytes.Index(rest, []byte(deferredHeader))
-		if i < 0 {
-			break
-		}
-		rest = rest[i:]
-		end := len(rest)
-		for _, blank := range [][]byte{[]byte(`\n\n`), []byte(`\r\n\r\n`)} {
-			if j := bytes.Index(rest, blank); j >= 0 && j < end {
-				end = j
-			}
-		}
-		// appendDeferred also stops at a `</system-reminder>` line; end here too, or text after a
-		// closing tag that follows the last name (a date, another reminder) churns the digest. Both
-		// JSON spellings: Claude Code writes the tag literally, an encoder that escapes HTML (Go's
-		// does) writes `\u003c/system-reminder\u003e`.
-		for _, tag := range deferredTagEnds {
-			if j := bytes.Index(rest, tag); j >= 0 && j < end {
-				end = j
-			}
-		}
-		if j := stringEnd(rest); j < end {
-			end = j
-		}
-		end = min(end, budget)
+	regions := deferred.Regions(body, maxListing)
+	for _, r := range regions {
 		h.WriteByte(0)
-		h.Write(rest[:end])
-		found, budget, rest = true, budget-end, rest[end:]
+		h.Write(r)
 	}
-	return found
-}
-
-// stringEnd returns the offset of the first unescaped `"` in b (the end of the JSON string
-// b starts inside), or len(b). The header line itself holds escaped quotes.
-func stringEnd(b []byte) int {
-	for off := 0; ; {
-		j := bytes.IndexByte(b[off:], '"')
-		if j < 0 {
-			return len(b)
-		}
-		i := off + j
-		// Escaped when an odd number of backslashes runs up to it.
-		k := i
-		for k > 0 && b[k-1] == '\\' {
-			k--
-		}
-		if (i-k)%2 == 0 {
-			return i
-		}
-		off = i + 1
-	}
+	return len(regions) > 0
 }
 
 // deferredDecls parses the deferred lists. Only called on a digest miss.
@@ -530,71 +445,23 @@ func stringEnd(b []byte) int {
 func deferredDecls(body []byte) []Decl {
 	var out []Decl
 	seen := map[string]bool{}
-	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
-		if !strings.Contains(m.Raw, deferredHeader) {
-			return true
-		}
-		if r := m.Get("role").String(); r != "user" && r != "system" {
-			return true
-		}
-		c := m.Get("content")
-		if c.Type == gjson.String {
-			out = appendDeferred(out, seen, c.String())
-			return true
-		}
-		c.ForEach(func(_, blk gjson.Result) bool {
-			if blk.Get("type").String() == "text" {
-				out = appendDeferred(out, seen, blk.Get("text").String())
-			}
-			return true
-		})
-		return true
-	})
+	for _, text := range deferred.Texts(body) {
+		out = appendDeferred(out, seen, text)
+	}
 	return out
 }
 
 // appendDeferred adds the MCP tools of every valid list in text, skipping names in seen.
 func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
-	for from := 0; ; {
-		i := strings.Index(text[from:], deferredHeader)
-		if i < 0 {
-			return out
-		}
-		start := from + i
-		from = start + len(deferredHeader)
-		if start > 0 && text[start-1] != '\n' {
-			continue // quoted mid-line: not a list
-		}
-		nl := strings.IndexByte(text[start:], '\n')
-		if nl < 0 {
-			continue
-		}
-		var names []string
-		end, pos, ok := start+nl, start+nl+1, true
-		for pos < len(text) {
-			line, next := text[pos:], len(text)
-			if k := strings.IndexByte(line, '\n'); k >= 0 {
-				line, next = line[:k], pos+k+1
-			}
-			line = strings.TrimSuffix(line, "\r") // a CRLF client: the name must not fail isToolName
-			if line == "" || line == reminderEnd {
-				break
-			}
-			if !isToolName(line) {
-				ok = false
-				break
-			}
-			names = append(names, line)
-			end, pos = pos+len(line), next
-		}
-		if !ok || len(names) == 0 {
-			// Counts only, never the text: a voided list can be a user quoting the header. Logged so
-			// a format change shows up here rather than as "0 MCP servers" on the page.
-			slog.Debug("dash: ignored a deferred-tools list that did not parse",
-				"names_before_bad_line", len(names), "bad_line", !ok)
-			continue
-		}
-		total := tokens.Count(text[start:end])
+	lists, voided := deferred.Lists(text)
+	if voided > 0 {
+		// Counts only, never the text: a voided list can be a user quoting the header. Logged so
+		// a format change shows up here rather than as "0 MCP servers" on the page.
+		slog.Debug("dash: ignored a deferred-tools list that did not parse", "lists", voided)
+	}
+	for _, l := range lists {
+		names := l.Names
+		total := tokens.Count(text[l.Start:l.End])
 		share, extra := total/len(names), total%len(names)
 		for k, name := range names {
 			n := share
@@ -610,19 +477,7 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 				Server: identName(server), Tokens: n, Text: name, Deferred: true})
 		}
 	}
-}
-
-// isToolName reports whether s is a bare tool name: the API's own charset and length.
-func isToolName(s string) bool {
-	if s == "" || len(s) > maxDeclName {
-		return false
-	}
-	for _, r := range s {
-		if !(r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
-			return false
-		}
-	}
-	return true
+	return out
 }
 
 // mergeDeferred adds the deferred MCP tools to the tools-array declarations. A tool loaded
@@ -672,9 +527,18 @@ func usedFrom(provider string, body []byte) ([]Used, uint64) {
 	if last == "" {
 		return nil, 0
 	}
+	// Hash the canonical form, not the raw bytes. Claude Code moves cache_control between
+	// messages from one request to the next, so the same assistant turn can carry it on one
+	// request and not on the next. Raw bytes would then give two fingerprints for one turn,
+	// and the writer (which skips a turn it saw) would count its calls twice. Bytes that are
+	// not JSON fall back to the raw text.
 	var h maphash.Hash
 	h.SetSeed(declSeed)
-	h.WriteString(last)
+	if canon, ok := schema.CanonicalWireMessage(last); ok {
+		h.Write(canon)
+	} else {
+		h.WriteString(last)
+	}
 	fp := h.Sum64()
 
 	byKey := map[Used]int{}

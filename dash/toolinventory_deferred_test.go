@@ -415,3 +415,20 @@ func TestDeferredListInAnAssistantMessageIsIgnored(t *testing.T) {
 		t.Errorf("an assistant message declared MCP rows %v", got)
 	}
 }
+
+// Claude Code moves cache_control between messages. The same turn must keep one fingerprint, or
+// the writer counts its tool calls again.
+func TestUseFingerprintIgnoresCacheControl(t *testing.T) {
+	turn := func(cc string) []byte {
+		return []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}` + cc + `]}]}`)
+	}
+	_, a := usedFrom("anthropic", turn(``))
+	_, b := usedFrom("anthropic", []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{},"cache_control":{"type":"ephemeral"}}]}]}`))
+	if a == 0 || a != b {
+		t.Errorf("fingerprints differ for one turn: %d vs %d", a, b)
+	}
+	_, c := usedFrom("anthropic", []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}]}`))
+	if c == a {
+		t.Error("a different turn kept the fingerprint")
+	}
+}

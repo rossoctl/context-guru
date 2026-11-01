@@ -235,3 +235,24 @@ func TestParseKeepsNameOnlyEntriesWhateverFollowsThem(t *testing.T) {
 		}
 	}
 }
+
+func TestLocateFindsTheFirstStringHoldingTheHeader(t *testing.T) {
+	str := `{"messages":[{"role":"user","content":"hi"},{"role":"system","content":"x ` + Header + `\n\n- a: b"}]}`
+	if p, txt := Locate([]byte(str)); p != "messages.1.content" || !strings.Contains(txt, "- a: b") {
+		t.Errorf("string content: path=%q text=%q", p, txt)
+	}
+	// The header sits in the SECOND block. The text is that block's alone, not both joined.
+	arr := `{"messages":[{"role":"system","content":[{"type":"text","text":"agents"},{"type":"text","text":"` + Header + `\n\n- a: b"},{"type":"text","text":"tail"}]}]}`
+	p, txt := Locate([]byte(arr))
+	if p != "messages.0.content.1.text" || strings.Contains(txt, "agents") || strings.Contains(txt, "tail") {
+		t.Errorf("array content: path=%q text=%q", p, txt)
+	}
+	// A block with no text field, and a message that quotes the header only in a non-text field.
+	odd := `{"messages":[{"role":"user","content":[{"type":"image","note":"` + Header + `"}]}]}`
+	if p, _ := Locate([]byte(odd)); p != "" {
+		t.Errorf("a non-text block matched: %q", p)
+	}
+	if p, _ := Locate([]byte(`{"messages":[]}`)); p != "" {
+		t.Errorf("no header matched: %q", p)
+	}
+}

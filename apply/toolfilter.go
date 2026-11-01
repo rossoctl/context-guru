@@ -105,7 +105,6 @@ package apply
 // tool back.
 
 import (
-	"bytes"
 	"strings"
 
 	"github.com/rossoctl/context-guru/internal/skills"
@@ -479,8 +478,8 @@ func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAd
 		return body, 0, 0
 	}
 	// Which message holds the listing, and — when its content is an array — which block. The
-	// FIRST match, the same choice dash's reader makes, so the page and the filter describe the
-	// same listing on a body that somehow carries two.
+	// FIRST match. skills.Locate is the one finder, and dash's reader calls it too, so the page and
+	// the filter describe the same listing on a body that somehow carries two.
 	path, text := wire.skillListingPath(body)
 	if path == "" {
 		return body, 0, 0
@@ -533,35 +532,5 @@ func skillListingPath(body []byte) (string, string) {
 }
 
 func (chatEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
-	// bytes.Contains, not strings.Contains(string(body), ...): the body runs to megabytes and the
-	// conversion would copy all of it on the request goroutine, on every request, to answer a
-	// question that is usually "no".
-	if !bytes.Contains(body, []byte(skills.Header)) {
-		return "", ""
-	}
-	path, text := "", ""
-	gjson.GetBytes(body, "messages").ForEach(func(idx, m gjson.Result) bool {
-		if !strings.Contains(m.Raw, skills.Header) {
-			return true
-		}
-		c := m.Get("content")
-		if c.Type == gjson.String {
-			if strings.Contains(c.String(), skills.Header) {
-				path, text = "messages."+idx.String()+".content", c.String()
-				return false
-			}
-			return true
-		}
-		c.ForEach(func(bidx, blk gjson.Result) bool {
-			t := blk.Get("text")
-			if t.Exists() && strings.Contains(t.String(), skills.Header) {
-				path = "messages." + idx.String() + ".content." + bidx.String() + ".text"
-				text = t.String()
-				return false
-			}
-			return true
-		})
-		return path == ""
-	})
-	return path, text
+	return skills.Locate(body) // the one rule, shared with dash's reader
 }

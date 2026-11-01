@@ -15,7 +15,12 @@
 // closed: a line that does not clearly parse as an entry is not one.
 package skills
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+
+	"github.com/tidwall/gjson"
+)
 
 // Header anchors the listing, and the anchor is load-bearing rather than cosmetic: the
 // agent-types listing sitting immediately above it in the SAME message uses the identical
@@ -198,4 +203,53 @@ func ValidName(s string) bool {
 		}
 	}
 	return true
+}
+
+// Locate finds the listing in a chat-form body: the sjson path of the string that holds it, and
+// that string. "" when no message carries one.
+//
+// It takes the FIRST string that holds the header: a message whose content is a string, or the
+// first `text` block of an array content that holds it. The dashboard and the declaration filter
+// both call this, so they read the same listing even on a body that somehow carries two. (The
+// dashboard once joined every block of the message instead. On a listing in one block the two
+// rules give the same text.)
+//
+// A byte search over the raw body first, because the header survives JSON escaping and the
+// overwhelming majority of requests have no listing. A body with none must not pay a walk of a
+// multi-megabyte messages array.
+func Locate(body []byte) (path, text string) {
+	// bytes.Contains, not strings.Contains(string(body), ...): the body runs to megabytes and the
+	// conversion would copy all of it on the request goroutine.
+	if !bytes.Contains(body, []byte(Header)) {
+		return "", ""
+	}
+	gjson.GetBytes(body, "messages").ForEach(func(idx, m gjson.Result) bool {
+		if !strings.Contains(m.Raw, Header) {
+			return true
+		}
+		path, text = LocateIn(m.Get("content"), "messages."+idx.String()+".content")
+		return path == ""
+	})
+	return path, text
+}
+
+// LocateIn finds the header in one `content` value (a string, or an array of blocks with a
+// `text` field) at path, and returns the path of the string that holds it and that string.
+func LocateIn(content gjson.Result, path string) (string, string) {
+	if content.Type == gjson.String {
+		if strings.Contains(content.String(), Header) {
+			return path, content.String()
+		}
+		return "", ""
+	}
+	rp, rt := "", ""
+	content.ForEach(func(bidx, blk gjson.Result) bool {
+		t := blk.Get("text")
+		if t.Type == gjson.String && strings.Contains(t.String(), Header) {
+			rp, rt = path+"."+bidx.String()+".text", t.String()
+			return false
+		}
+		return true
+	})
+	return rp, rt
 }
