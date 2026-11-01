@@ -16,8 +16,8 @@ import (
 )
 
 // SessionContextKey is the BifrostContext value key the transport sets from the
-// x-context-guru-session header (or Anthropic metadata.user_id). Absent -> the
-// plugin falls back to a content hash.
+// x-context-guru-session header. Absent -> the plugin reads the agent's own id from the
+// request metadata (session.ExplicitStrict), then falls back to a content hash.
 const SessionContextKey bschemas.BifrostContextKey = "context-guru-session"
 
 // Plugin runs the context-guru pipeline in PreRequestHook. It implements
@@ -85,13 +85,13 @@ func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.Bif
 	sys, firstUser := schema.SessionHead(chat.Input)
 	var meta func(string) (string, bool)
 	if chat.Params != nil && chat.Params.Metadata != nil {
-		md := *chat.Params.Metadata
+		md := *chat.Params.Metadata // a map header: no copy
 		meta = func(k string) (string, bool) {
 			s, ok := md[k].(string)
 			return s, ok
 		}
 	}
-	return session.Resolve(session.Explicit(explicit, meta), sys, firstUser)
+	return session.Resolve(session.ExplicitStrict(explicit, meta), sys, firstUser)
 }
 
 // BypassContextKey lets a caller disable the pipeline for one request

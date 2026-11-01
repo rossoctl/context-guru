@@ -18,6 +18,11 @@ func toolMsg(text string) bschemas.ChatMessage {
 	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool, Content: &bschemas.ChatMessageContent{ContentStr: &t}}
 }
 
+func userMsg(text string) bschemas.ChatMessage {
+	t := text
+	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &t}}
+}
+
 func newPlugin(t *testing.T, yaml string) *Plugin {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(yaml))
@@ -84,7 +89,7 @@ func TestSessionResolutionReadsMetadataAcrossCompaction(t *testing.T) {
 	p := newPlugin(t, "pipeline: [dedup]\n")
 	ctx := bschemas.NewBifrostContext(context.Background(), time.Time{})
 	mk := func(head string, md map[string]any) *bschemas.BifrostChatRequest {
-		r := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{toolMsg(head)}}
+		r := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{userMsg(head)}}
 		if md != nil {
 			r.Params = &bschemas.ChatParameters{Metadata: &md}
 		}
@@ -111,5 +116,23 @@ func TestSessionResolutionReadsMetadataAcrossCompaction(t *testing.T) {
 	ctx2 := bschemas.NewBifrostContext(context.Background(), time.Time{})
 	if got := p.resolveSession(ctx2, mk("x", map[string]any{"user_id": 5})); len(got) != 16 {
 		t.Fatalf("non-string metadata should fall back to the hash, got %q", got)
+	}
+}
+
+// A plain per-user user_id names a user, not a conversation. Two conversations of one user
+// must stay two sessions.
+func TestSessionPlainUserIDDoesNotMergeConversations(t *testing.T) {
+	p := newPlugin(t, "pipeline: [dedup]\n")
+	ctx := bschemas.NewBifrostContext(context.Background(), time.Time{})
+	mk := func(head string) *bschemas.BifrostChatRequest {
+		md := map[string]any{"user_id": "user_42"}
+		return &bschemas.BifrostChatRequest{
+			Input:  []bschemas.ChatMessage{userMsg(head)},
+			Params: &bschemas.ChatParameters{Metadata: &md},
+		}
+	}
+	a, b := p.resolveSession(ctx, mk("conversation one")), p.resolveSession(ctx, mk("conversation two"))
+	if a == b || a == "user_42" || len(a) != 16 {
+		t.Fatalf("plain user_id must fall back to the head hash: %q %q", a, b)
 	}
 }

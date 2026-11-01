@@ -327,7 +327,7 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 }
 
 // explicitSession resolves the explicit session id for one request: the header wins,
-// then the metadata fields (session.MetadataKeys), then "" (Scoped's derived-hash fallback).
+// then the metadata fields (session.Explicit), then "" (Scoped's derived-hash fallback).
 // The rule lives in session.Explicit; this only reads the fields off the raw body.
 //
 // gjson scans, so this costs no second unmarshal of the body on the request path. A
@@ -606,7 +606,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Under both rather than under the alias alone, because neither id is reliable by
 			// itself: the alias splits when the header comes and goes, and it ALSO changes when
-			// the agent compacts its own context (session.MetadataKeys survives that, the derived
+			// the agent compacts its own context (session.Explicit survives that, the derived
 			// sha256(system+firstUser) does not — see explicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
 			if lifetimeKind == CacheLifetimeExact {
