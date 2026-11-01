@@ -262,7 +262,7 @@ func checkpointRefreshOpportunity(cp sumCheckpoint, candSpan []bschemas.ChatMess
 	if cp.CoveredCount <= 0 || cp.CoveredCount > len(candSpan) {
 		return 0, true // nothing recognizable to compare against — treat as an opportunity, as before
 	}
-	if spanHash(candSpan[:cp.CoveredCount]) != cp.CoveredHash {
+	if !spanHashMatches(candSpan[:cp.CoveredCount], cp.CoveredHash) {
 		return 0, true // prefix diverged — not the same conversation this checkpoint covers
 	}
 	tail := candSpan[cp.CoveredCount:]

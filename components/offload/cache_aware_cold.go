@@ -261,7 +261,7 @@ func (s *CacheAwareSummarizer) resolveWarmFallback(conv string) {
 // Report is left to file it on.
 func dispatchDeferred(d *coldDeferral, refused *int64) {
 	if cp, ok := loadCheckpoint(d.ctx); ok && cp.CoveredCount >= d.coveredCount &&
-		cp.CoveredHash == spanHash(d.span) {
+		spanHashMatches(d.span, cp.CoveredHash) {
 		atomic.AddInt64(&cacheAwareWarmDeferredSkippedDup, 1)
 		return
 	}
