@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"net/url"
 	"os"
 	"strings"
@@ -49,8 +50,11 @@ func relayHost(base string) string {
 // Bedrock ARNs naming a Claude model) by substring. CONTEXT_GURU_KEEPALIVE_MODELS adds more,
 // comma-separated, for a deployment alias whose name says nothing (an application inference profile).
 func claudeModel(model string) bool {
+	if modelinfo.IsClaude(model) || modelinfo.Family(model) != "" {
+		return true
+	}
 	m := strings.ToLower(model)
-	words := []string{"claude", "opus", "sonnet", "haiku"}
+	var words []string
 	for _, w := range strings.Split(os.Getenv("CONTEXT_GURU_KEEPALIVE_MODELS"), ",") {
 		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
 			words = append(words, w)
