@@ -30,7 +30,8 @@ import (
 //
 //	off     loaded but inert
 //	shadow  decides on live traffic, logs and scores what it WOULD have done, changes nothing
-//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings) and the kvcache.DefaultPingIdle spacing
+//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings). The spacing stays the tenant's own interval, or campaignKeepAlive5mIdle when none is set;
+//	        kvcache.DefaultPingIdle is only the spacing the decision is scored at
 //
 // The decision costs microseconds and needs only what the proxy sees when a response ends, so it runs inline in keeper.record.
 // An active campaign acts only where the tenant's OWN policy has the keep-alive on: it can lower or shape the ping count, it never turns the mechanism on for a tenant that opted out
