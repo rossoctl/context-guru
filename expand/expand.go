@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -176,9 +177,9 @@ type responsesToolDef struct {
 // JSON bytes (stable key order). Inject appends these to the request's tools array.
 func ToolDefRaw(provider string) json.RawMessage {
 	var v any
-	if provider == "anthropic" {
+	if provider == schema.WireAnthropic {
 		v = anthropicToolDef{Name: ToolName, Description: toolDesc, InputSchema: schemaLiteral()}
-	} else if provider == "responses" {
+	} else if schema.IsResponses(provider) {
 		v = responsesToolDef{Type: "function", Name: ToolName, Description: toolDesc, Parameters: schemaLiteral()}
 	} else {
 		v = openAIToolDef{Type: "function", Function: openAIFn{Name: ToolName, Description: toolDesc, Parameters: schemaLiteral()}}
