@@ -19,13 +19,7 @@ func init() { components.Register("cacheinject", newCacheinject) }
 // Cache-billing constants, from the provider docs. Identical on the Anthropic
 // API, Bedrock and Vertex; see docs/components/cacheinject.md for the derivation
 // these drive.
-const (
-	maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
-	// LookbackBlocks is how far the provider's backward read-walk reaches, in content blocks.
-	// Exported for the host's in-band breakpoint step (apply.MarkInBandFollowUp), so both
-	// read one figure.
-	LookbackBlocks = 20
-)
+const maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
 
 // Cacheinject places Anthropic-family `cache_control` breakpoints so the
 // provider's KV cache is read rather than re-processed. It is a Reformat: it adds
@@ -143,7 +137,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// consecutive pair always stays within the provider's backward-walk window.
 	// Counting UP from the start keeps the indices fixed as the conversation
 	// grows, which is what makes them pre-warmed and therefore readable.
-	for i := LookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += LookbackBlocks - 1 {
+	for i := schema.LookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += schema.LookbackBlocks - 1 {
 		want[i] = struct{}{}
 	}
 

@@ -315,3 +315,19 @@ func TestThePlacerSkipsANonObjectTarget(t *testing.T) {
 		t.Fatalf("ok=%v notFound=%d body=%s", ok, st.notFound.Load(), out)
 	}
 }
+
+// Review #796: the provider rejects cache_control on an empty text block. A follow-up that ends in
+// one keeps its bytes, the client's mark stays where it was, and not_found counts the skip.
+func TestAnEmptyTextLastBlockTakesNoMark(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"keep"},{"type":"text","text":""}]}]}`
+	_, _, nf, _ := InBandBreakpointStats()
+	out := MarkInBandFollowUp("anthropic", []byte(body))
+	_, _, nf2, _ := InBandBreakpointStats()
+	if string(out) != body {
+		t.Errorf("body changed:\n%s", out)
+	}
+	if nf2 != nf+1 {
+		t.Errorf("not_found rose by %d, want 1", nf2-nf)
+	}
+}

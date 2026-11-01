@@ -23,11 +23,11 @@ func tailBody(msgMark string, envBytes int) []byte {
 }
 
 // tailDelta is the change in each tail counter across f.
-func tailDelta(f func()) (added, noSlot, notNeeded, noMark, notFound int64) {
-	a0, s0, n0, m0, f0 := TailBreakpointStats()
+func tailDelta(f func()) (added, noSlot, atEnd, shortTail, noMark, notFound int64) {
+	a0, s0, e0, t0, m0, f0 := TailBreakpointStats()
 	f()
-	a1, s1, n1, m1, f1 := TailBreakpointStats()
-	return a1 - a0, s1 - s0, n1 - n0, m1 - m0, f1 - f0
+	a1, s1, e1, t1, m1, f1 := TailBreakpointStats()
+	return a1 - a0, s1 - s0, e1 - e0, t1 - t0, m1 - m0, f1 - f0
 }
 
 // #795. The client's last mark sits on messages[0] and ~8.7 KB follow it: one mark is added on the
@@ -37,7 +37,7 @@ func TestTheTailBreakpointIsAddedWhenTheClientsMarkIsFarFromTheEnd(t *testing.T)
 		body := tailBody(mark, 8667)
 		var out []byte
 		var ok bool
-		added, _, _, _, _ := tailDelta(func() { out, ok = markTail(body) })
+		added, _, _, _, _, _ := tailDelta(func() { out, ok = markTail(body) })
 		if !ok || added != 1 {
 			t.Fatalf("%s: ok=%v added=%d, want a breakpoint added", mark, ok, added)
 		}
@@ -75,30 +75,33 @@ func TestTheTailBreakpointIsNotAddedWhenItIsNotWanted(t *testing.T) {
 	// A last block that already holds a mark in a spelling lastMessageMark does not read.
 	markedLast := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
 		`{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 5000) + `","cachePoint":{"type":"default"}}]}]}`
+	emptyText := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 5000) + `"},{"type":"text","text":""}]}]}`
 	for _, c := range []struct {
-		name                                string
-		body                                string
-		noSlot, notNeeded, noMark, notFound int64
+		name                                       string
+		body                                       string
+		noSlot, atEnd, shortTail, noMark, notFound int64
 	}{
-		{"0 client marks", string(tailBody("", 8667)), 0, 0, 1, 0},
-		{"mark at the end", ccEnd, 0, 1, 0, 0},
-		{"short tail after the mark", shortTail, 0, 1, 0, 0},
-		{"4 marks used", fourMarks, 1, 0, 0, 0},
-		{"non-object last block", nonObject, 0, 0, 0, 1},
-		{"thinking last block", thinking, 0, 0, 0, 1},
-		{"last block already marked", markedLast, 0, 1, 0, 0},
-		{"no messages", `{"messages":[]}`, 0, 0, 0, 0},
+		{"0 client marks", string(tailBody("", 8667)), 0, 0, 0, 1, 0},
+		{"mark at the end", ccEnd, 0, 1, 0, 0, 0},
+		{"short tail after the mark", shortTail, 0, 0, 1, 0, 0},
+		{"4 marks used", fourMarks, 1, 0, 0, 0, 0},
+		{"non-object last block", nonObject, 0, 0, 0, 0, 1},
+		{"thinking last block", thinking, 0, 0, 0, 0, 1},
+		{"empty text last block", emptyText, 0, 0, 0, 0, 1},
+		{"last block already marked", markedLast, 0, 1, 0, 0, 0},
+		{"no messages", `{"messages":[]}`, 0, 0, 0, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var out []byte
 			var ok bool
-			added, noSlot, notNeeded, noMark, notFound := tailDelta(func() { out, ok = markTail([]byte(c.body)) })
+			added, noSlot, atEnd, shortTail, noMark, notFound := tailDelta(func() { out, ok = markTail([]byte(c.body)) })
 			if ok || added != 0 || string(out) != c.body {
 				t.Fatalf("ok=%v added=%d, want the body untouched:\n%s", ok, added, out)
 			}
-			if noSlot != c.noSlot || notNeeded != c.notNeeded || noMark != c.noMark || notFound != c.notFound {
-				t.Fatalf("counters no_slot=%d not_needed=%d no_mark=%d not_found=%d, want %d %d %d %d",
-					noSlot, notNeeded, noMark, notFound, c.noSlot, c.notNeeded, c.noMark, c.notFound)
+			if noSlot != c.noSlot || atEnd != c.atEnd || shortTail != c.shortTail || noMark != c.noMark || notFound != c.notFound {
+				t.Fatalf("counters no_slot=%d at_end=%d short_tail=%d no_mark=%d not_found=%d, want %d %d %d %d %d",
+					noSlot, atEnd, shortTail, noMark, notFound, c.noSlot, c.atEnd, c.shortTail, c.noMark, c.notFound)
 			}
 		})
 	}
