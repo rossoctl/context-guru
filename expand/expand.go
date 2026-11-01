@@ -14,8 +14,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
 

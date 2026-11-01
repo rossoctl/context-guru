@@ -84,6 +84,11 @@ const (
 	// scoped by the same tenant_id. A second table would have bought a second eviction path
 	// to forget about.
 	KindSystemPrompt = "system_prompt"
+	// KindDeferredListing is ONE marker row per declaration set whose body carried a deferred
+	// tools list that this scan did not read (today: a Responses body, whose transcript is in
+	// `input`). Its Server is SkillsUnknown. Like the skills marker, it keeps "not read" from
+	// reading as "no deferred tools". It has no name and no weight, and it is not a declaration.
+	KindDeferredListing = "deferred_listing"
 )
 
 // Skill-listing parse states, stored in the marker row's Server column.
@@ -232,7 +237,13 @@ func ScanInventory(wire string, body []byte) *Inventory {
 	if !hit {
 		decls = declsFrom(wire, tools)
 		if deferred {
-			decls = mergeDeferred(decls, deferredDecls(body))
+			if schema.IsResponses(wire) {
+				// deferredDecls walks `messages`, which a Responses body does not have. Say "not
+				// read". The real reading of `input` is a follow-up after #822.
+				decls = append(decls, Decl{Kind: KindDeferredListing, Server: SkillsUnknown})
+			} else {
+				decls = mergeDeferred(decls, deferredDecls(body))
+			}
 		}
 		if region != "" {
 			if schema.IsResponses(wire) {

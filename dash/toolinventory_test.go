@@ -1107,3 +1107,54 @@ func TestToolReportHidesTheStaleServerToolRows(t *testing.T) {
 		t.Errorf("a real server tool (web_search) shown %d times, want once", count["web_search"])
 	}
 }
+
+// A Responses body whose deferred list sits in `input` is not read. The page must say "unknown",
+// never show an empty set of deferred tools (#817, until #822 reads `input`).
+func TestScanInventoryResponsesMarksDeferredToolsUnknown(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"message","role":"user","content":"` + deferredHeader + `\nmcp__ctx__query-docs\n\nnext"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var marker *Decl
+	for i, d := range inv.Decls {
+		if d.Kind == KindDeferredListing {
+			marker = &inv.Decls[i]
+		}
+		if d.Kind == KindMCPTool {
+			t.Errorf("an MCP row %q from a list that was not read", d.Name)
+		}
+	}
+	if marker == nil || marker.Server != SkillsUnknown {
+		t.Errorf("deferred marker = %+v, want state %q", marker, SkillsUnknown)
+	}
+}
+
+// The marker reaches the report as a state, and is not counted as a tool.
+func TestToolReportShowsDeferredUnknown(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(1000, "s1", "gpt", 100, 90)
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: &Inventory{Digest: "d1",
+		Decls: []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10},
+			{Kind: KindDeferredListing, Server: SkillsUnknown}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.DeferredState != SkillsUnknown || rep.DeferredUnknownSessions != 1 {
+		t.Errorf("deferred state = %q (%d sessions), want unknown (1)", rep.DeferredState, rep.DeferredUnknownSessions)
+	}
+	for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+		if s.Kind == KindDeferredListing {
+			t.Errorf("the marker is listed as a tool: %+v", s)
+		}
+	}
+}

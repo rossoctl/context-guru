@@ -319,6 +319,11 @@ type ToolReport struct {
 	Tools   []ToolStat   `json:"tools"`
 	Servers []ServerStat `json:"servers"`
 	Skills  SkillStat    `json:"skills"`
+	// DeferredState is "unknown" when a session in scope carried a deferred tools list this scan
+	// did not read, so the MCP tools above may be missing deferred ones. Empty otherwise. A reader
+	// must not translate unknown into "no deferred tools".
+	DeferredState           string `json:"deferred_state,omitempty"`
+	DeferredUnknownSessions int    `json:"deferred_unknown_sessions,omitempty"`
 	// Aside is everything declared that is NOT the reader's to remove, in the same row shape:
 	// Claude Code's own tools (Builtin true), a third-party agent's or SDK application's client
 	// tools, and the provider's server-side tools.
@@ -580,7 +585,7 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	g.Go(func() error {
 		var err error
 		carryRes, err = d.carriedCost(f, price, func(_, kind, name, _ string) string {
-			if kind == KindSkillListing {
+			if kind == KindSkillListing || kind == KindDeferredListing {
 				return ""
 			}
 			return kind + "\x00" + name
@@ -729,6 +734,9 @@ func unusedKeyOf(usedIn map[string]map[statKey]int) func(session, kind, name, se
 				return carriedListing
 			}
 			return ""
+		}
+		if kind == KindDeferredListing {
+			return "" // a note, not a declaration
 		}
 		if usedIn[s][statKey{kind, name}] > 0 {
 			return ""
@@ -886,6 +894,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	asideTok := map[string]int{}
 	listingTok, listingSessions, unknownListings := 0, 0, 0
 	skillsSeen := false
+	deferredUnknown := 0
 	for _, dr := range decls {
 		captured[dr.session] = true
 		sc := sessions[dr.session]
@@ -895,6 +904,11 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		rep.Prompt.Rows++
 		if dr.hasText {
 			rep.Prompt.TextRows++
+		}
+		if dr.kind == KindDeferredListing {
+			// Not a declaration either: a note that a deferred list was present and not read.
+			deferredUnknown++
+			continue
 		}
 		if dr.kind == KindSystemPrompt {
 			// NOT a declaration: it is the prompt the declarations sit in front of. Counting
@@ -1117,6 +1131,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		rep.Skills.State = SkillsOK
 	}
 	rep.Skills.UnknownSessions = unknownListings
+	if deferredUnknown > 0 {
+		rep.DeferredState, rep.DeferredUnknownSessions = SkillsUnknown, deferredUnknown
+	}
 	if listingSessions > 0 {
 		rep.Skills.ListingTokens = listingTok / listingSessions
 	}

@@ -1,38 +1,58 @@
 package proxy
 
-// The inventory must be scanned on the request's WIRE, not on its provider (#817). A Responses
-// request has provider "openai" and reads as OpenAI Chat if the provider is passed. The call is
-// one line in the handler, so this is a source-level check, like the project hand-off test in
-// inventoryproject_test.go; the dialect rules are tested in dash and schema.
+// A request on the Responses route must reach the dashboard inventory on the Responses wire
+// (#817). Passed the provider ("openai") instead, the flat tools below read as OpenAI Chat tools
+// with no name and are filed as one server tool named "function".
 
 import (
-	"os"
-	"regexp"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-func TestTheInventoryIsScannedOnTheWire(t *testing.T) {
-	b, err := os.ReadFile("proxy.go")
+func TestResponsesRouteFeedsTheInventoryOnTheResponsesWire(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body := `{"model":"gpt-5.6","instructions":"stable","input":[{"role":"user","content":"task"},` +
+		`{"type":"function_call","call_id":"c1","name":"ResTool","arguments":"{}"}],` +
+		`"tools":[{"type":"function","name":"ResTool","parameters":{"type":"object"}},` +
+		`{"type":"function","name":"OtherTool","parameters":{"type":"object"}}]}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-resp")
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(b)
-	if !regexp.MustCompile(`wire := schema\.WireFor\(string\(provider\), api\)\s+cp\.noteInventory\(wire, body\)`).MatchString(src) {
-		t.Error("chat() must compute the wire with schema.WireFor and pass it to noteInventory")
-	}
-	if regexp.MustCompile(`noteInventory\(string\(provider\)`).MatchString(src) {
-		t.Error("noteInventory is given the provider; a Responses body would read as OpenAI Chat")
-	}
-}
+	resp.Body.Close()
+	waitForRows(t, rec, 1)
 
-// The routes pass api "" or "responses"; the wire for the Responses route is Responses.
-func TestTheResponsesRouteIsTheResponsesWire(t *testing.T) {
-	if got := schema.WireFor("openai", "responses"); got != schema.WireResponses {
-		t.Errorf("wire = %q", got)
+	price := func(string) (modelinfo.Price, bool) { return modelinfo.Price{Input: 1e-6}, true }
+	var names map[string]bool
+	for i := 0; i < 400; i++ { // the inventory is written by its own goroutine
+		rep, err := rec.DB().ToolReportFor(dash.Filter{TenantAll: true}, price)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = map[string]bool{}
+		for _, s := range append(append([]dash.ToolStat{}, rep.Tools...), rep.Aside...) {
+			names[s.Name] = true
+		}
+		if len(names) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if got := schema.WireFor("openai", ""); got != schema.WireOpenAI {
-		t.Errorf("wire = %q", got)
+	if !names["ResTool"] || !names["OtherTool"] || names["function"] {
+		t.Errorf("inventory names = %v, want ResTool and OtherTool read off the flat Responses tools", names)
 	}
 }

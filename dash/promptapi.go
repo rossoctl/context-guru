@@ -262,6 +262,9 @@ func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int
 		if err := rs.Scan(&reg.Kind, &reg.Name, &reg.Server, &reg.Tokens, &gz); err != nil {
 			return nil, err
 		}
+		if reg.Kind == KindDeferredListing {
+			continue // a note, not a region of the prompt: no name, no weight
+		}
 		if gz != nil {
 			reg.Text, reg.HasText = gunzipText(gz), true
 		}

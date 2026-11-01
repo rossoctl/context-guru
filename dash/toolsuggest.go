@@ -514,7 +514,7 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	// by a `type` the provider resolves, not by a schema we can drop from the array without
 	// changing what the request IS. Never offered. Nor is the skills LISTING: it is one
 	// indivisible block of prose, and it shrinks by removing the skills inside it.
-	if st.Kind == KindServerTool || st.Kind == KindSkillListing {
+	if st.Kind == KindServerTool || st.Kind == KindSkillListing || st.Kind == KindDeferredListing {
 		return Suggestion{}, false
 	}
 	// A built-in is never offered either, and this is the second gate on that rather than the

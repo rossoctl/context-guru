@@ -616,7 +616,7 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 				if ts < st.first {
 					st.first = ts
 				}
-				if kind != KindSkill && kind != KindSkillListing {
+				if kind != KindSkill && kind != KindSkillListing && kind != KindDeferredListing {
 					st.ntools++
 				}
 				if key := keyOf(s, kind, name, server); key != "" {
