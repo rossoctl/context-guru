@@ -121,3 +121,21 @@ func TestScopedEmptyTenantMatchesResolve(t *testing.T) {
 		t.Errorf("blank tenant added a namespace: %q", got)
 	}
 }
+
+func TestExplicitOrder(t *testing.T) {
+	m := map[string]string{"user_id": "u", "taskId": "t"}
+	get := func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	if got := Explicit("h", get); got != "h" {
+		t.Fatalf("header first, got %q", got)
+	}
+	if got := Explicit("", get); got != "u" {
+		t.Fatalf("user_id before taskId, got %q", got)
+	}
+	delete(m, "user_id")
+	if got := Explicit("", get); got != "t" {
+		t.Fatalf("taskId, got %q", got)
+	}
+	if got := Explicit("", nil); got != "" {
+		t.Fatalf("nil metadata, got %q", got)
+	}
+}

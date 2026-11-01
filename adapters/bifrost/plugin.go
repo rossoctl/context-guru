@@ -73,7 +73,8 @@ func (p *Plugin) PostLLMHook(_ *bschemas.BifrostContext, resp *bschemas.BifrostR
 }
 
 // resolveSession prefers an explicit id set on the context (from a header),
-// falling back to a hash of the system prompt + first user message.
+// then the agent's own id in the request metadata (session.Explicit, the same rule the proxy
+// uses), falling back to a hash of the system prompt + first user message.
 func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.BifrostChatRequest) string {
 	explicit := ""
 	if v := ctx.Value(SessionContextKey); v != nil {
@@ -82,7 +83,15 @@ func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.Bif
 		}
 	}
 	sys, firstUser := schema.SessionHead(chat.Input)
-	return session.Resolve(explicit, sys, firstUser)
+	var meta func(string) (string, bool)
+	if chat.Params != nil && chat.Params.Metadata != nil {
+		md := *chat.Params.Metadata
+		meta = func(k string) (string, bool) {
+			s, ok := md[k].(string)
+			return s, ok
+		}
+	}
+	return session.Resolve(session.Explicit(explicit, meta), sys, firstUser)
 }
 
 // BypassContextKey lets a caller disable the pipeline for one request

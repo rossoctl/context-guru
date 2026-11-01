@@ -109,6 +109,32 @@ func ExplicitID(cands ...string) string {
 	return ""
 }
 
+// MetadataKeys are the request `metadata` fields carrying the agent's OWN session id, in
+// precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON object
+// string, unwrapped by ExplicitID) and `metadata.taskId` is Bob Shell's (a bare randomUUID,
+// re-rolled only by /clear). Both survive the agent's context compaction, which the derived
+// hash does not. A request carrying both resolves to user_id, by this order.
+var MetadataKeys = [...]string{"user_id", "taskId"}
+
+// Explicit is the ONE rule for which explicit id a request carries: the header first, then
+// each MetadataKeys field in order, then "" (Scoped's derived-hash fallback).
+//
+// metaString reads one metadata field. It returns ok=false when the field is absent or is not
+// a string, so a number, object or array falls back to the derived hash and never becomes a
+// key like `map[]`. A nil metaString means the host has no metadata.
+func Explicit(header string, metaString func(key string) (string, bool)) string {
+	cands := make([]string, 0, 1+len(MetadataKeys))
+	cands = append(cands, header)
+	if metaString != nil {
+		for _, k := range MetadataKeys {
+			if v, ok := metaString(k); ok {
+				cands = append(cands, v)
+			}
+		}
+	}
+	return ExplicitID(cands...)
+}
+
 // metaSessionID unwraps Claude Code's JSON-object user_id, or returns v unchanged.
 // Every malformed shape (truncated JSON, an object without session_id, a nested
 // non-string session_id) yields "", which ExplicitID treats as "no candidate".

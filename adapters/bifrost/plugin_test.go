@@ -77,3 +77,39 @@ func TestBypassSkips(t *testing.T) {
 		t.Fatal("bypass should have left the request unchanged")
 	}
 }
+
+// The agent's own id in the request metadata survives compaction, which changes the head
+// messages. Bifrost must read it, like the proxy does.
+func TestSessionResolutionReadsMetadataAcrossCompaction(t *testing.T) {
+	p := newPlugin(t, "pipeline: [dedup]\n")
+	ctx := bschemas.NewBifrostContext(context.Background(), time.Time{})
+	mk := func(head string, md map[string]any) *bschemas.BifrostChatRequest {
+		r := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{toolMsg(head)}}
+		if md != nil {
+			r.Params = &bschemas.ChatParameters{Metadata: &md}
+		}
+		return r
+	}
+	cc := func(id string) map[string]any {
+		return map[string]any{"user_id": `{"device_id":"d","account_uuid":"","session_id":"` + id + `"}`}
+	}
+	before := p.resolveSession(ctx, mk("original head", cc("sess-1")))
+	after := p.resolveSession(ctx, mk("This session is being continued", cc("sess-1")))
+	if before != after || before != "sess-1" {
+		t.Fatalf("metadata id must survive a changed head: before %q after %q", before, after)
+	}
+	bob := map[string]any{"taskId": "task-9"}
+	if got := p.resolveSession(ctx, mk("x", bob)); got != "task-9" {
+		t.Fatalf("taskId should resolve, got %q", got)
+	}
+	// header wins over metadata
+	ctx.SetValue(SessionContextKey, "hdr")
+	if got := p.resolveSession(ctx, mk("x", cc("sess-1"))); got != "hdr" {
+		t.Fatalf("header should win, got %q", got)
+	}
+	// non-string metadata falls back to the derived hash (16 hex)
+	ctx2 := bschemas.NewBifrostContext(context.Background(), time.Time{})
+	if got := p.resolveSession(ctx2, mk("x", map[string]any{"user_id": 5})); len(got) != 16 {
+		t.Fatalf("non-string metadata should fall back to the hash, got %q", got)
+	}
+}

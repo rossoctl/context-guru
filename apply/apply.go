@@ -326,44 +326,23 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
-// metaSessionKeys are the `metadata` fields carrying the agent's OWN session id,
-// in precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON
-// object string, unwrapped by session.ExplicitID) and `metadata.taskId` is Bob
-// Shell's (a bare randomUUID, re-rolled only by /clear). Both survive the agent's
-// context compaction, which the derived sha256(system+firstUser) does not — see
-// session.ExplicitID for what breaks without them. A request carrying both resolves
-// to user_id, by this order.
-var metaSessionKeys = [...]string{"user_id", "taskId"}
-
 // explicitSession resolves the explicit session id for one request: the header wins,
-// then each metaSessionKeys field in order, then "" (Scoped's derived-hash fallback).
+// then the metadata fields (session.MetadataKeys), then "" (Scoped's derived-hash fallback).
+// The rule lives in session.Explicit; this only reads the fields off the raw body.
+//
+// gjson scans, so this costs no second unmarshal of the body on the request path. A
+// `metadata` that is absent, null, a scalar or an array yields a non-existent result, and a
+// value that is not gjson.String is skipped, so both fall back to the derived hash.
+//
+// `metadata` is fetched ONCE and the fields read off it, rather than a full-body query per
+// field: on a real 600 KB request `metadata` sits behind `messages`, so each query walked
+// the whole transcript to reach it.
 func explicitSession(header string, body []byte) string {
-	cands := make([]string, 0, 1+len(metaSessionKeys))
-	cands = append(cands, header)
-	return session.ExplicitID(append(cands, metaSessionIDs(body)...)...)
-}
-
-// metaSessionIDs reads those fields off the raw body.
-//
-// gjson scans, so this costs no second unmarshal of the body on the request path — the
-// same reason every other body-level read here (messages, wireBreakpoints) uses it. The
-// type check is the whole robustness story: a `metadata` that is absent, null, a scalar
-// or an array yields a non-existent result, and a value that is a number, object or
-// array is not gjson.String — all of which yield "" and fall back to the derived hash
-// rather than stringifying into a key like `map[]`.
-//
-// `metadata` is fetched ONCE and both fields read off it, rather than a full-body query
-// per field: a gjson scan is cheap but not free, and on a real 600 KB request `metadata`
-// sits behind `messages`, so each query walked the whole transcript to reach it.
-func metaSessionIDs(body []byte) []string {
 	md := gjson.GetBytes(body, "metadata")
-	out := make([]string, 0, len(metaSessionKeys))
-	for _, k := range metaSessionKeys {
-		if r := md.Get(k); r.Type == gjson.String {
-			out = append(out, r.Str)
-		}
-	}
-	return out
+	return session.Explicit(header, func(k string) (string, bool) {
+		r := md.Get(k)
+		return r.Str, r.Type == gjson.String
+	})
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -627,7 +606,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Under both rather than under the alias alone, because neither id is reliable by
 			// itself: the alias splits when the header comes and goes, and it ALSO changes when
-			// the agent compacts its own context (metaSessionKeys survives that, the derived
+			// the agent compacts its own context (session.MetadataKeys survives that, the derived
 			// sha256(system+firstUser) does not — see explicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
 			if lifetimeKind == CacheLifetimeExact {
