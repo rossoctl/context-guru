@@ -55,6 +55,10 @@ func (a *API) keepAliveBehaviour(w http.ResponseWriter, r *http.Request) {
 	// the page knows it. Defaulted in the DB layer, never guessed here.
 	x, _ := strconv.ParseFloat(r.URL.Query().Get("x"), 64)
 	k, _ := strconv.Atoi(r.URL.Query().Get("k"))
+	// CoverageSeconds is a POLICY figure: the reach of the caller's (X, K) against the 5-minute
+	// default. The gap bands are drawn for the whole account, with no session, so there is no
+	// provider or model to ask. The calculator and the recommendation, which see each expiry,
+	// judge it against that expiry's own lifetime (missLifetime).
 	b, err := a.db(r).KeepAliveBehaviour(f, CoverageSeconds(x, k))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())

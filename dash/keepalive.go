@@ -60,7 +60,7 @@ const ttlTTL = modelinfo.AnthropicCacheTTL5m
 // the size of the entry that lapsed. Not `tokens_before`, which is message text only and runs
 // a median 3.38x low.
 const addressableCTE = `WITH s AS (
-	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.cache_miss_reason, r.cache_write,
+	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.provider, r.cache_miss_reason, r.cache_write,
 	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
 	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
@@ -178,10 +178,11 @@ func kaSavedGate(alias, pingFloor string) string {
 	}
 	col := alias + "keepalive_saved_usd"
 	// The mix below stays on purpose. The lifetime that matters is the one of the entry the
-	// RESCUED request r read, and r.cache_ttl records what r asked for; the ping row kp is
-	// the only row that carries a provider here, and it shares r's session, so its provider is r's.
-	// Using kp.cache_ttl would give the tier of the ping, which can differ from r's. The model gate
-	// is not repeated, as the next paragraph says.
+	// RESCUED request r read. Its TIER is r.cache_ttl, what r asked for: kp.cache_ttl would give
+	// the tier of the ping, which can differ from r's. Its PROVIDER is read from the ping row kp,
+	// because the ping is what refreshed the entry, and a ping and the request it rescued share
+	// a session and so a provider (r.provider would give the same value). The model gate is not
+	// repeated, as the next paragraph says.
 	//
 	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
 	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
@@ -1225,6 +1226,17 @@ func CoverageSeconds(idleSeconds float64, maxPings int) float64 {
 	return CoverageSecondsFor(idleSeconds, maxPings, ttlTTL)
 }
 
+// missLifetime is the cache lifetime an addressable expiry is judged against: the fixed lifetime
+// of a GPT-5.6+ OpenAI row, else the Anthropic 5-minute policy default. A ttl_expiry row records
+// no tier, and the calculator asks "what would the 5-minute policy have reached?", so the tier
+// stays at the default. Only the provider's fixed lifetime changes the answer.
+func missLifetime(provider, model string) time.Duration {
+	if d, ok := modelinfo.FixedCacheLifetime(provider, model); ok {
+		return d
+	}
+	return ttlTTL
+}
+
 // CoverageSecondsFor is K*X + ttl for a given cache lifetime. Pass modelinfo.CacheLifetime of the
 // row's provider and model, so a GPT-5.6+ entry is credited its 30 minutes and not 5.
 func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) float64 {
@@ -1397,22 +1409,25 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	aCond, aArgs := addressable(f)
 	var gaps []float64
 	var usd []float64
+	var lifetimes []time.Duration // per expiry, parallel to gaps
 	var spans []pingSpan
 	var cov *KeepAliveCoverage
 	var g errgroup.Group
 	g.Go(func() error {
-		rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
+		rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd, provider, model FROM addressable`, aArgs...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var g, u float64
-			if err := rows.Scan(&g, &u); err != nil {
+			var prov, mod string
+			if err := rows.Scan(&g, &u, &prov, &mod); err != nil {
 				return err
 			}
 			gaps = append(gaps, g)
 			usd = append(usd, u)
+			lifetimes = append(lifetimes, missLifetime(prov, mod))
 		}
 		return rows.Err()
 	})
@@ -1442,10 +1457,12 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
 	}
 	for k := 1; k <= 4; k++ {
+		// Coverage is the account-wide policy figure (the 5-minute default, no row). The test
+		// below uses each expiry's OWN lifetime, so a GPT-5.6 gap is judged against its 30 min.
 		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k),
 			Current: k == currentPings}
 		for i, g := range gaps {
-			if g > idleSeconds && g <= row.Coverage {
+			if g > idleSeconds && g <= CoverageSecondsFor(idleSeconds, k, lifetimes[i]) {
 				row.Convertible++
 				row.ConvertibleUSD += usd[i]
 			}
@@ -1609,6 +1626,7 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	// rather than between them.
 	type miss struct {
 		gap, usd float64
+		ttl      time.Duration // the expiry's own cache lifetime (missLifetime)
 	}
 	var (
 		cov       *KeepAliveCoverage
@@ -1626,7 +1644,7 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	// The account's own addressable expiries, grouped by session — the resampling unit.
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
+		SELECT session_id, gap_s, cost_usd, provider, model FROM addressable`, aArgs...)
 		if err != nil {
 			return err
 		}
@@ -1634,9 +1652,11 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 		for rows.Next() {
 			var s string
 			var m miss
-			if err := rows.Scan(&s, &m.gap, &m.usd); err != nil {
+			var prov, mod string
+			if err := rows.Scan(&s, &m.gap, &m.usd, &prov, &mod); err != nil {
 				return err
 			}
+			m.ttl = missLifetime(prov, mod)
 			bySession[s] = append(bySession[s], m)
 		}
 		return rows.Err()
@@ -1702,10 +1722,9 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
 	net := func(s string, k int) float64 {
-		cover := CoverageSeconds(recIdleSeconds, k)
 		var v float64
 		for _, m := range bySession[s] {
-			if m.gap > recIdleSeconds && m.gap <= cover {
+			if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
 				v += m.usd * recRecoverableShare
 			}
 		}

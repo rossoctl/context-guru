@@ -986,6 +986,12 @@ func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
 			t.Errorf("%s = %.9f, want %.9f: %s", c.name, c.got, c.want, c.why)
 		}
 	}
+	// The one-hour row: the entry lives 3600 s, so the same 11 pings reach 11 x 280 s + 3600 s
+	// (it was 11 x 280 + 300 before the row's own lifetime was used).
+	if h := rows["hour"]; math.Abs(h.BreakevenMinutes-(11*280+3600)/60.0) > 1e-9 {
+		t.Errorf("hour: breakeven_minutes = %.6f, want %.6f: reach is K x X + the lifetime in force",
+			h.BreakevenMinutes, (11*280+3600)/60.0)
+	}
 	if r.BreakevenPings != 11 {
 		t.Errorf("breakeven_pings = %d, want 11: one lapse costs $%.6f and one ping $%.6f, so "+
 			"11.49 pings are what a lapse buys and eleven of them are cheaper than it",

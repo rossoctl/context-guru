@@ -329,27 +329,38 @@ type ThreadMoney struct {
 func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 	cond, args := withKeepAlive(f).where()
 	var (
-		s        CacheState
-		fresh    int64
-		kaI      int
-		upMS     float64
-		oneHour  int64
-		provider string
+		s         CacheState
+		fresh     int64
+		kaI       int
+		upMS      float64
+		oneHour   int64
+		provider  string
+		lifeModel string
 	)
+	// ONE row decides the lifetime: the session's latest write w gives the billed tier, the
+	// provider and the model alike (as threadTTLs does). A session that changed model mid-way
+	// must not take the tier from one row and the model gate from another. With no write yet,
+	// the latest request r supplies provider and model, and the tier is 0.
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.ts, r.upstream_ms, r.model, r.fresh_input, r.cache_read, r.cache_write, r.keepalive,
 		COALESCE((SELECT `+billedTierSQL("w.")+` FROM requests w
 			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
-			ORDER BY w.ts DESC LIMIT 1), 0), r.provider
+			ORDER BY w.ts DESC LIMIT 1), 0),
+		COALESCE((SELECT w.provider FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
+			ORDER BY w.ts DESC LIMIT 1), r.provider),
+		COALESCE((SELECT w.model FROM requests w
+			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
+			ORDER BY w.ts DESC LIMIT 1), r.model)
 		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299
 		AND r.cache_read + r.cache_write > 0 ORDER BY r.ts DESC LIMIT 1`, args...).Scan(
-		&s.LastTS, &upMS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &oneHour, &provider)
+		&s.LastTS, &upMS, &s.Model, &fresh, &s.CacheRead, &s.CacheWrite, &kaI, &oneHour, &provider, &lifeModel)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.TTLSeconds = billedTTL(provider, s.Model, oneHour)
+	s.TTLSeconds = billedTTL(provider, lifeModel, oneHour)
 	s.Session, s.KeepAlive, s.EndTS = f.Session, kaI == 1, endTS(s.LastTS, upMS)
 	s.PrefixTokens = fresh + s.CacheRead + s.CacheWrite
 	return &s, nil

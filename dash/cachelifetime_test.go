@@ -223,3 +223,36 @@ func TestCoverageSecondsForUsesTheRowLifetime(t *testing.T) {
 		t.Error("the account-wide CoverageSeconds must keep the 5-minute default")
 	}
 }
+
+// An expiry after a 20 minute gap is out of the 5-minute policy's reach on Anthropic and gpt-4o,
+// and inside a GPT-5.6 entry's 30-minute life, so only the GPT-5.6 one is convertible.
+func TestKeepAliveCalcJudgesAnExpiryAgainstItsOwnLifetime(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	exp := func(session, provider, model string) []*Event {
+		evs := kaExpiry(now, session, 20*60, 0.50, 100_000)
+		for _, e := range evs {
+			e.Provider, e.Model = provider, model
+		}
+		return evs
+	}
+	price := func(string) (modelinfo.Price, bool) {
+		return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
+	}
+	for _, c := range []struct {
+		provider, model string
+		want            int64
+	}{
+		{"openai", "gpt-5.6", 1},
+		{"openai", "gpt-4o", 0},
+		{"anthropic", "aws/claude-sonnet-5", 0},
+	} {
+		fx := newKAFixture(t, exp("s", c.provider, c.model)...)
+		out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, c.model, price, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Rows[1].Convertible != c.want { // K=2: 560 s + the lifetime
+			t.Errorf("%s/%s: convertible = %d, want %d", c.provider, c.model, out.Rows[1].Convertible, c.want)
+		}
+	}
+}
