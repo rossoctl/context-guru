@@ -215,6 +215,9 @@ func responsesContentPresent(body []byte, orig string, exceptIndex int) bool {
 					return true
 				}
 			}
+			if value.IsArray() && schema.ContentText(value) == orig {
+				return true
+			}
 		}
 	}
 	return false
@@ -300,6 +303,12 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 				found = true
 			}
 			return !found
+		}
+		// A message whose content is an array holding the original split over several text blocks
+		// (an OpenAI role=tool message, say) counts as present, as CallSites reads it.
+		if c := m.Get("content"); c.IsArray() && base+".content" != exceptPath && schema.ContentText(c) == orig {
+			found = true
+			return false
 		}
 		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
 			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)

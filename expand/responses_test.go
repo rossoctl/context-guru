@@ -164,3 +164,16 @@ func TestResponsesSummaryWithBlockArrayContentIsRestoredInPlace(t *testing.T) {
 		t.Fatalf("a block-array summary item was not restored in place: %s", next)
 	}
 }
+
+// A Responses item may carry the original split over several text blocks. CallSites joins them, so
+// responsesContentPresent must too.
+func TestResponsesRepairSeesAnOriginalSplitOverSeveralBlocks(t *testing.T) {
+	resolve := func(id string) (string, bool) { return "first half and second half", id == "HASH" }
+	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"first half"},{"type":"input_text","text":" and second half"}]},` +
+		`{"type":"function_call","call_id":"c1","name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"No such tool"}]}`)
+	out, restored := RepairToolResults("responses", body, resolve)
+	if len(restored) != 1 || gjson.GetBytes(out, "input.2.output").String() != RestoredInPlace("HASH") {
+		t.Fatalf("repair wrote a second copy of a split original: %s", out)
+	}
+}

@@ -316,3 +316,22 @@ func TestRepairSeesAnOriginalSplitOverSeveralBlocks(t *testing.T) {
 		t.Fatalf("the repair wrote a second copy of a split original: %q", answer)
 	}
 }
+
+// An OpenAI role=tool message may carry the original split over several text parts. CallSites joins
+// them, so contentPresent must too.
+func TestRepairSeesAnOriginalSplitOverThePartsOfAToolMessage(t *testing.T) {
+	const orig = "first half and second half"
+	body := `{"model":"gpt","messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"tool","tool_call_id":"t0","content":[{"type":"text","text":"first half"},{"type":"text","text":" and second half"}]},` +
+		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"Error: No such tool"}]}`
+	out, restored := expand.RepairToolResults("openai", []byte(body),
+		func(string) (string, bool) { return orig, true })
+	if len(restored) != 1 {
+		t.Fatalf("restored %d originals, want 1", len(restored))
+	}
+	if answer := gjson.GetBytes(out, "messages.3.content").String(); !strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the repair wrote a second copy of a split original: %q", answer)
+	}
+}
