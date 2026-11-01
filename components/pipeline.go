@@ -23,6 +23,8 @@ type Pipeline struct {
 	// because the pipeline is the per-config-document value every host already holds per
 	// tenant, and the decision spans all of its offloaders at once rather than any one of them.
 	fixedRestore bool
+	// inBandBreakpoint is the config's `expand.inband_breakpoint` (#784).
+	inBandBreakpoint bool
 }
 
 // NewPipeline builds a pipeline from already-constructed components in order.
@@ -442,6 +444,14 @@ func (p *Pipeline) SetFixedRestore(on bool) { p.fixedRestore = on }
 // FixedRestore reports whether expanded content is restored as a separate message at a fixed
 // anchor rather than by un-compacting the original in place (#407). Nil-safe: false.
 func (p *Pipeline) FixedRestore() bool { return p != nil && p.fixedRestore }
+
+// SetInBandBreakpoint records the config's `expand.inband_breakpoint` switch. Set once by the
+// builder, before the pipeline serves a request.
+func (p *Pipeline) SetInBandBreakpoint(on bool) { p.inBandBreakpoint = on }
+
+// InBandBreakpoint reports whether the host moves the last cache_control in messages to the end
+// of an in-band follow-up request (#784). Nil-safe: false, the default.
+func (p *Pipeline) InBandBreakpoint() bool { return p != nil && p.inBandBreakpoint }
 
 // Has reports whether a component with this name is configured in the pipeline.
 // Hosts use it to gate body-level work that belongs to a component's concern but

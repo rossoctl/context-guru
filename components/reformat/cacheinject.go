@@ -20,8 +20,11 @@ func init() { components.Register("cacheinject", newCacheinject) }
 // API, Bedrock and Vertex; see docs/components/cacheinject.md for the derivation
 // these drive.
 const (
-	maxBreakpoints = 4  // hard provider cap on cache_control blocks per request
-	lookbackBlocks = 20 // how far the provider's backward read-walk reaches
+	maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
+	// LookbackBlocks is how far the provider's backward read-walk reaches, in content blocks.
+	// Exported for the host's in-band breakpoint step (apply.MarkInBandFollowUp), so both
+	// read one figure.
+	LookbackBlocks = 20
 )
 
 // Cacheinject places Anthropic-family `cache_control` breakpoints so the
@@ -140,7 +143,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// consecutive pair always stays within the provider's backward-walk window.
 	// Counting UP from the start keeps the indices fixed as the conversation
 	// grows, which is what makes them pre-warmed and therefore readable.
-	for i := lookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += lookbackBlocks - 1 {
+	for i := LookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += LookbackBlocks - 1 {
 		want[i] = struct{}{}
 	}
 
