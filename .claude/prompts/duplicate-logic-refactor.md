@@ -4,7 +4,8 @@ Paste the prompt below into a new Claude Code session at the repo root. It runs 
 phase 1 the session reports and changes nothing. Phase 2 starts only when you say which findings to
 fix.
 
-This file comes from the 2026-11-01 run: 12 findings, 11 PRs, 2 issues. The lessons below come from
+This file comes from the 2026-11-01 run: 12 numbered findings and 1 smaller one, 11 PRs, and 2
+issues for discussion. The lessons below come from
 that run's reviews. Update this file when a later run teaches something new.
 
 ---
@@ -83,7 +84,8 @@ Past examples. Read the PRs to see the shape of a good fix:
 - Fix every reviewer finding and every non-blocking note in the same PR. Do not open follow-up
   issues for them.
 
-Follow the lessons in .claude/prompts/duplicate-logic-refactor.md, "Lessons from review".
+Follow the lessons in .claude/prompts/duplicate-logic-refactor.md, "Lessons from review". Read
+the file from origin/main.
 ```
 
 ---
@@ -114,8 +116,9 @@ The reviewers of the 2026-11-01 run found these. Put them in every fix agent's b
 
 ### Cost
 
-- **The hot path must not get slower.** PR #813's prefilter passed every body with `\u`. Go writes
-  `<` as `<`, so most tool outputs paid the full parse, on a count that was 22% of CPU. PR #822
+- **The hot path must not get slower.** PR #813's prefilter passed every body with `\u`. Go's
+  `encoding/json` escapes `<`, `>` and `&` (backslash, `u`, then 4 hex digits), so most tool
+  outputs held a `\u` and paid the full parse, on a count that was 22% of CPU. PR #822
   decoded and re-encoded a message of up to several hundred KB on every request. Add a benchmark,
   and give the before and after figures in the PR.
 
@@ -154,6 +157,10 @@ The reviewers of the 2026-11-01 run found these. Put them in every fix agent's b
 ---
 
 ## Already done (2026-11-01 run)
+
+Rows are findings that were reported and got an issue or a PR. A row is not proof that the fix
+merged. If a PR in this table closes without a merge, delete its row, so the next run reports that
+duplicate again.
 
 | # | Concern | Result |
 |---|---|---|
