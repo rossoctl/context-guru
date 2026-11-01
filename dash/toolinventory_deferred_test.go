@@ -468,12 +468,13 @@ func BenchmarkUsedFrom(b *testing.B) {
 }
 
 // The dash page reads the FIRST block that holds the skills header, the rule the filter uses, not
-// every block of the message joined.
+// every block of the message joined. The listing block has no closing tag and the later block
+// starts a new line, so a joined read would parse the later entry too.
 func TestSkillListingIsTheFirstBlockOnly(t *testing.T) {
 	msg, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "system", "content": []any{
 		map[string]any{"type": "text", "text": "agents:\n- notaskill: from another block"},
-		map[string]any{"type": "text", "text": "<system-reminder>\n" + skills.Header + "\n\n- alpha: first.\n</system-reminder>"},
-		map[string]any{"type": "text", "text": "- trailing: in a later block"},
+		map[string]any{"type": "text", "text": "<system-reminder>\n" + skills.Header + "\n\n- alpha: first."},
+		map[string]any{"type": "text", "text": "\n- trailing: in a later block"},
 	}}}})
 	body := []byte(`{"tools":[` + tool("Bash", "b") + `],` + string(msg)[1:])
 	var names []string

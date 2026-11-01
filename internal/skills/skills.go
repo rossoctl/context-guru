@@ -190,6 +190,10 @@ func EntryName(line string) (string, bool) {
 // ValidName reports whether s is drawn from the charset a skill name uses. Anything else is not
 // a name this package recognises, and is skipped rather than guessed at — the listing is the
 // authority for what may be removed from a real request.
+//
+// This gates SKILL names (`plugin:skill`, `apps/web:deploy`: ':' and '/' are allowed). It is not
+// internal/deferred's tool-name rule (`[A-Za-z0-9_-]`, the API's limit). The 128 here is its
+// own length limit, so the two stay apart on purpose.
 func ValidName(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false

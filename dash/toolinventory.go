@@ -508,7 +508,7 @@ func mergeDeferred(decls, deferred []Decl) []Decl {
 func skillEntryName(line string) (string, bool) { return skills.EntryName(line) }
 
 // maxCanonFingerprint bounds the message usedFrom canonicalizes. A turn this size decodes in
-// about 85 us; a 512 KB one took 5.7 ms and 4 MB of garbage. See BenchmarkUsedFrom.
+// about 91 us; a 512 KB one took 5.7 ms and 4 MB of garbage. See BenchmarkUsedFrom.
 const maxCanonFingerprint = 8 << 10
 
 // usedFrom collects the tool calls of the LAST tool-using turn, plus a fingerprint of
