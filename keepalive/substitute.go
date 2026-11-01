@@ -133,7 +133,7 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	e := j.e
 	k.mu.Lock()
 	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
-	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, ttl1h), e.pol.Idle
+	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, model, ttl1h), e.pol.Idle
 	k.mu.Unlock()
 	window := substituteWindow(info.PreExpirySeconds, ttl, idle)
 	if j.extra {

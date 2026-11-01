@@ -1,8 +1,11 @@
 package dash
 
 import (
+	"math"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // An OpenAI thread keeps its cache 30 minutes (the GPT-5.6+ minimum). Each dash page used to
@@ -64,7 +67,7 @@ func TestSpendExplainOpenAIGapUnderThirtyMinutesIsNotIdleExpiry(t *testing.T) {
 	t0 := int64(1_700_000_000_000)
 	mk := func(ts int64, sess string, msgs int, read, write int64) *Event {
 		e := spendEv(ts, sess, msgs, 5, read, write, 0)
-		e.Provider = "openai"
+		e.Provider, e.Model = "openai", "gpt-5.6"
 		return e
 	}
 	seed(t, rec,
@@ -78,5 +81,125 @@ func TestSpendExplainOpenAIGapUnderThirtyMinutesIsNotIdleExpiry(t *testing.T) {
 	c, ok := rw["idle_expiry"].(map[string]any)
 	if !ok || c["n"].(float64) != 1 {
 		t.Errorf("idle_expiry = %v, want exactly the Anthropic row (all: %v)", rw["idle_expiry"], rw)
+	}
+}
+
+// A pre-GPT-5.6 OpenAI model has no documented retention. Every page keeps the 5-minute reading.
+
+func TestCacheStateOldOpenAIModelKeepsFiveMinutes(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	e := openaiWrite(now-60_000, "old")
+	e.Model = "gpt-4o"
+	seed(t, rec, e)
+	_, body := get(t, a, "/api/cachestate?session=old", "")
+	if body["ttl_s"].(float64) != 300 {
+		t.Errorf("ttl_s = %v, want 300 for gpt-4o", body["ttl_s"])
+	}
+	ths, _, err := a.rec.DB().ThreadsFor(Filter{Session: "old"}, 0)
+	if err != nil || len(ths) == 0 {
+		t.Fatalf("ThreadsFor: %v %v", ths, err)
+	}
+	if ths[0].TTLSeconds != 300 {
+		t.Errorf("thread ttl_s = %d, want 300 for gpt-4o", ths[0].TTLSeconds)
+	}
+}
+
+func TestSessionsInFlightOldOpenAIModelKeepsFiveMinutes(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	old := mkEvent(now-10*60*1000, "old", "gpt-4o", 10_000, 9_000)
+	old.Provider = "openai"
+	if err := db.insertBatch([]*Event{old}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := db.Sessions(Filter{}, 10, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("Sessions: %v %v", rows, err)
+	}
+	if rows[0].InFlight {
+		t.Error("a gpt-4o session idle 10 min is in flight; only GPT-5.6+ has a 30 min lifetime")
+	}
+}
+
+func TestSpendExplainOldOpenAIModelGapIsIdleExpiry(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	a.SetPricer(fixedPricer{})
+	const m = int64(60000)
+	t0 := int64(1_700_000_000_000)
+	mk := func(ts int64, msgs int, write int64) *Event {
+		e := spendEv(ts, "old", msgs, 5, 0, write, 0)
+		e.Provider, e.Model = "openai", "gpt-4o"
+		return e
+	}
+	seed(t, rec, mk(t0, 3, 10000), mk(t0+10*m, 5, 10300))
+	_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+16*m), "127.0.0.1:1")
+	c, ok := body["rewrites"].(map[string]any)["idle_expiry"].(map[string]any)
+	if !ok || c["n"].(float64) != 1 {
+		t.Errorf("idle_expiry = %v, want 1 for a 10 min gap on gpt-4o", body["rewrites"])
+	}
+}
+
+func TestKeepAliveLiveUsesTheProviderLifetime(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	ago := func(sec int64) int64 { return now - sec*1000 }
+	live := func(session, provider, model string, sec int64) *Event {
+		e := kaAgent(ago(sec), session, 0.10)
+		e.Provider, e.Model = provider, model
+		e.CacheRead, e.CacheWrite, e.CacheWrite1h = 0, 100_000, 0
+		return e
+	}
+	fx := newKAFixture(t,
+		live("oa", "openai", "gpt-5.6", 400),   // 30 min lifetime: 1400 s left
+		live("oldoa", "openai", "gpt-4o", 400), // 5 min lifetime: gone, not a row
+		live("an", "anthropic", "aws/claude-sonnet-5", 100),
+	)
+	price := func(string) (modelinfo.Price, bool) {
+		return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
+	}
+	got, err := fx.db.KeepAliveLive(Filter{TenantAll: true}, now, 280, 2, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]KeepAliveLiveRow{}
+	for _, r := range got.Rows {
+		rows[r.SessionID] = r
+	}
+	if r, ok := rows["oa"]; !ok || r.TTLSeconds != 1800 || math.Abs(r.RemainingSeconds-1400) > 0.001 || r.Model != "gpt-5.6" || r.Prefix != 100_000 {
+		t.Errorf("oa row = %+v (ok %v), want ttl 1800, 1400 s left, model gpt-5.6, prefix 100000", r, ok)
+	}
+	if _, ok := rows["oldoa"]; ok {
+		t.Error("a gpt-4o entry 400 s old is on the live list; its lifetime is 5 min")
+	}
+	if r := rows["an"]; r.TTLSeconds != 300 || math.Abs(r.RemainingSeconds-200) > 0.001 {
+		t.Errorf("an row = %+v, want ttl 300, 200 s left", r)
+	}
+}
+
+func TestLiveSessionsTTLFollowsTheProvider(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	mk := func(session, provider, model string) *Event {
+		e := spendEv(now-60_000, session, 3, 5, 0, 10000, 0)
+		e.Provider, e.Model = provider, model
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk("oa", "openai", "gpt-5.6"), mk("old", "openai", "gpt-4o"), mk("an", "anthropic", "m"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := db.liveSessions(Filter{TenantAll: true}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, s := range live {
+		got[s.Session] = s.TTLMs
+	}
+	for s, want := range map[string]int64{"oa": 1_800_000, "old": 300_000, "an": 300_000} {
+		if got[s] != want {
+			t.Errorf("%s ttl_ms = %d, want %d", s, got[s], want)
+		}
 	}
 }

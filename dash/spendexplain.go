@@ -196,9 +196,9 @@ type threadState struct {
 // ttlFor is the lifetime in ms of the entry a row wrote or read: the shared rule
 // (modelinfo.CacheLifetime) from the BILLED tier. A row that billed no 1h write keeps prev, the
 // tier the entry was written at, unless the provider has one fixed lifetime (OpenAI).
-func ttlFor(provider string, write1h int64, prev int64) int64 {
-	if _, fixed := modelinfo.FixedCacheLifetime(provider); fixed || write1h > 0 {
-		return modelinfo.CacheLifetime(provider, write1h > 0).Milliseconds()
+func ttlFor(provider, model string, write1h int64, prev int64) int64 {
+	if _, fixed := modelinfo.FixedCacheLifetime(provider, model); fixed || write1h > 0 {
+		return modelinfo.CacheLifetime(provider, model, write1h > 0).Milliseconds()
 	}
 	return prev
 }
@@ -323,7 +323,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			st = &threadState{ttl: ttl5m}
 			threads[tk] = st
 		}
-		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.provider, r.write1h, ttl5m)
+		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.provider, r.model, r.write1h, ttl5m)
 		if r.write1h == 0 && r.write == 0 && prev != nil {
 			st.ttl = prev.ttl // a pure read keeps the tier the entry was written at
 		}
@@ -557,7 +557,7 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	}
 	var out []LiveSession
 	for _, a := range by {
-		a.TTLMs = modelinfo.CacheLifetime(a.provider, a.TTL1h).Milliseconds()
+		a.TTLMs = modelinfo.CacheLifetime(a.provider, a.Model, a.TTL1h).Milliseconds()
 		a.LastTS = a.touch
 		out = append(out, a.LiveSession)
 	}

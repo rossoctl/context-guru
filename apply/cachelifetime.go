@@ -34,7 +34,7 @@ const (
 func CacheLifetime(provider bschemas.ModelProvider, model string, body []byte) (time.Duration, CacheLifetimeKind) {
 	if explicitBreakpointProvider(provider) {
 		// The tier is the one the body REQUESTED; the shared rule maps it to a lifetime.
-		return modelinfo.CacheLifetime(string(provider), bodyAsksExtendedTTL(body)), CacheLifetimeExact
+		return modelinfo.CacheLifetime(string(provider), model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
 	}
 	if modelinfo.OpenAI30MinuteCache(string(provider), model) {
 		return OpenAIMinimumCacheTTL, CacheLifetimeMinimum

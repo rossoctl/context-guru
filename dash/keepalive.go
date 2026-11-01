@@ -983,8 +983,8 @@ type KeepAliveLiveRow struct {
 	// at risk, in the provider's own units. Never tokens_before, which is message text only and
 	// runs a median 3.38x low.
 	Prefix int64 `json:"prefix_tokens"`
-	// TTLSeconds is the lifetime IN FORCE: 3600 when this session's most recent write landed in
-	// the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
+	// TTLSeconds is the lifetime IN FORCE: 1800 on OpenAI GPT-5.6+, else 3600 when this session's
+	// most recent write landed in the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
 	// because a `ttl: "1h"` request that the model does not support is granted as a 5-minute
 	// entry with a perfectly normal 200 — the tier billed is the only honest source.
 	TTLSeconds int64 `json:"ttl_seconds"`
@@ -1107,7 +1107,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 			&r.Prefix, &provider, &oneHour); err != nil {
 			return nil, err
 		}
-		ttl := modelinfo.CacheLifetime(provider, oneHour == 1)
+		ttl := modelinfo.CacheLifetime(provider, r.Model, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
 		r.RemainingSeconds = float64(r.LastTS+ttl.Milliseconds()-now) / 1000
 		if r.RemainingSeconds <= 0 {

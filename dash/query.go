@@ -597,13 +597,18 @@ type SessionRow struct {
 const cacheTTLMs int64 = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
 
 // inFlightMs is cacheTTLMs for one session: the OpenAI minimum when every provider the session
-// used is OpenAI, else the Anthropic default. A mixed session keeps the shorter horizon, the safe
-// direction named above.
-func inFlightMs(providers string) int64 {
-	if providers == "openai" {
-		return modelinfo.CacheLifetime(providers, false).Milliseconds()
+// used is OpenAI and every model is GPT-5.6+, else the Anthropic default. A mixed session keeps
+// the shorter horizon, the safe direction named above.
+func inFlightMs(providers, models string) int64 {
+	if providers != "openai" || models == "" {
+		return cacheTTLMs
 	}
-	return cacheTTLMs
+	for _, m := range strings.Split(models, ",") {
+		if _, ok := modelinfo.FixedCacheLifetime(providers, m); !ok {
+			return cacheTTLMs
+		}
+	}
+	return modelinfo.OpenAIMinimumCacheTTL.Milliseconds()
 }
 
 // Sessions returns the session list, most-recently-active first, filtered and
@@ -671,7 +676,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		s.PrimaryModel = primaryModel.String
 		s.Saved = s.TokensBefore - s.TokensAfter
 		s.SavedUSD = s.BaselineCostUSD - s.CostUSD - s.CGLLMCostUSD
-		s.InFlight = now-s.End < inFlightMs(s.Providers)
+		s.InFlight = now-s.End < inFlightMs(s.Providers, s.Models)
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {

@@ -1086,7 +1086,7 @@ func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
 			return 1<<63 - 1 // no known lifetime means no defensible credit
 		}
 	}
-	return modelinfo.CacheLifetime(provider, cacheTTL == apply.TTLEphemeral1h).Milliseconds()
+	return modelinfo.CacheLifetime(provider, model, cacheTTL == apply.TTLEphemeral1h).Milliseconds()
 }
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:

@@ -18,14 +18,14 @@ import (
 func TestAnOpenAIThreadAtTwentyEightMinutesIsNotCold(t *testing.T) {
 	prev := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	at := prev.Add(modelinfo.OpenAIDefaultKeepAliveIdle)
-	got := cachePhaseAt(prev, at, cacheLifetime(bschemas.OpenAI, false), 3*time.Minute)
+	got := cachePhaseAt(prev, at, cacheLifetime(bschemas.OpenAI, "gpt-5.6", false), 3*time.Minute)
 	if got != components.CachePhasePreExpiry {
 		t.Fatalf("an OpenAI cache 28 min into its 30-min life reads %v, want PreExpiry", got)
 	}
 	// The retry guard and the phase check use one rule (#715). cacheTTL calls cacheLifetime today, so
 	// this cannot fail now; it pins the two against drifting apart again.
-	e := &kaEntry{provider: bschemas.OpenAI}
-	if e.cacheTTL() != cacheLifetime(bschemas.OpenAI, false) {
+	e := &kaEntry{provider: bschemas.OpenAI, model: "gpt-5.6"}
+	if e.cacheTTL() != cacheLifetime(bschemas.OpenAI, "gpt-5.6", false) {
 		t.Fatal("cacheTTL and cacheLifetime disagree on OpenAI")
 	}
 }
@@ -66,15 +66,15 @@ func TestAPreExpirySubstituteTakesAnOpenAIPing(t *testing.T) {
 // The default window follows the keeper's own slack; an operator's value is kept as set. On
 // Anthropic with a 270 s idle (as below) the slack is 300 s - 270 s = 30 s, inside the 60 s default.
 func TestTheSubstituteWindowCoversTheKeepersOwnSlack(t *testing.T) {
-	anthropic := substituteWindow(0, cacheLifetime(bschemas.Anthropic, false), 270*time.Second)
+	anthropic := substituteWindow(0, cacheLifetime(bschemas.Anthropic, "", false), 270*time.Second)
 	if anthropic != components.DefaultPreExpiry {
 		t.Errorf("Anthropic default window = %v, want the unchanged %v", anthropic, components.DefaultPreExpiry)
 	}
-	openai := substituteWindow(0, cacheLifetime(bschemas.OpenAI, false), modelinfo.OpenAIDefaultKeepAliveIdle)
+	openai := substituteWindow(0, cacheLifetime(bschemas.OpenAI, "gpt-5.6", false), modelinfo.OpenAIDefaultKeepAliveIdle)
 	if openai < 2*time.Minute {
 		t.Errorf("OpenAI default window = %v, want at least the keeper's 2-minute slack", openai)
 	}
-	if got := substituteWindow(30, cacheLifetime(bschemas.OpenAI, false), modelinfo.OpenAIDefaultKeepAliveIdle); got != 30*time.Second {
+	if got := substituteWindow(30, cacheLifetime(bschemas.OpenAI, "gpt-5.6", false), modelinfo.OpenAIDefaultKeepAliveIdle); got != 30*time.Second {
 		t.Errorf("an operator's pre_expiry_seconds 30 became %v, want it kept as set", got)
 	}
 }
@@ -101,7 +101,7 @@ func TestAPreExpirySubstituteStillTakesAnAnthropicPingWithTheDefaultWindow(t *te
 // 5-minute cache — has 240 s of slack, and an uncapped window would make its very first ping read
 // PreExpiry, minutes before the cache expires. That first ping must stay Warm.
 func TestAShortIdleLeavesTheFirstPingWarm(t *testing.T) {
-	ttl, idle := cacheLifetime(bschemas.Anthropic, false), 60*time.Second
+	ttl, idle := cacheLifetime(bschemas.Anthropic, "", false), 60*time.Second
 	if w := substituteWindow(0, ttl, idle); w > maxSubstituteWindow {
 		t.Fatalf("default window for a 60 s idle = %v, want at most %v", w, maxSubstituteWindow)
 	}
@@ -114,7 +114,14 @@ func TestAShortIdleLeavesTheFirstPingWarm(t *testing.T) {
 		t.Fatalf("default window for an ungranted 1-hour ask = %v, want at most %v", w, maxSubstituteWindow)
 	}
 	// The cap still covers OpenAI's 120 s slack.
-	if w := substituteWindow(0, cacheLifetime(bschemas.OpenAI, false), modelinfo.OpenAIDefaultKeepAliveIdle); w < 2*time.Minute {
+	if w := substituteWindow(0, cacheLifetime(bschemas.OpenAI, "gpt-5.6", false), modelinfo.OpenAIDefaultKeepAliveIdle); w < 2*time.Minute {
 		t.Fatalf("the cap cut the OpenAI window to %v, below its 2-minute slack", w)
+	}
+}
+
+// An older OpenAI model has no documented retention: the shared rule gives it the 5-minute reading.
+func TestAnOldOpenAIModelIsNotGivenThirtyMinutes(t *testing.T) {
+	if got := cacheLifetime(bschemas.OpenAI, "gpt-4o", false); got != 5*time.Minute {
+		t.Fatalf("gpt-4o lifetime = %v, want 5m", got)
 	}
 }
