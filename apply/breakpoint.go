@@ -23,8 +23,8 @@ type placerStats struct {
 	notFound atomic.Int64 // no block to put the mark on
 	tooFar   atomic.Int64 // a move was skipped: the target is past the provider's lookback
 	// atEnd: the client's last mark already sits at the very end, or the target already holds a
-	// mark. shortTail: the client's last mark is followed by tailMinBytes or less. Only the tail
-	// step reports them
+	// mark. shortTail: the client's last mark is followed by more than 0 and at most tailMinBytes
+	// bytes. Only the tail step reports them
 	atEnd     atomic.Int64
 	shortTail atomic.Int64
 }

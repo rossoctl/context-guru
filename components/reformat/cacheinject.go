@@ -17,9 +17,12 @@ import (
 func init() { components.Register("cacheinject", newCacheinject) }
 
 // Cache-billing constants, from the provider docs. Identical on the Anthropic
-// API, Bedrock and Vertex; see docs/components/cacheinject.md for the derivation
+// API, Bedrock and Vertex; see docs/components/caching.md for the derivation
 // these drive.
 const maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
+
+// LookbackBlocks is kept for importers; use schema.LookbackBlocks.
+const LookbackBlocks = schema.LookbackBlocks
 
 // Cacheinject places Anthropic-family `cache_control` breakpoints so the
 // provider's KV cache is read rather than re-processed. It is a Reformat: it adds

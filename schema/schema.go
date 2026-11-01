@@ -27,7 +27,7 @@ type Provider = schemas.ModelProvider
 
 // LookbackBlocks is how far the provider's backward read-walk reaches from a cache_control
 // breakpoint, in content blocks. Here so cacheinject and the host's breakpoint steps
-// (apply.MarkInBandFollowUp) read one figure; see docs/components/cacheinject.md.
+// (apply.MarkInBandFollowUp) read one figure; see docs/components/caching.md.
 const LookbackBlocks = 20
 
 // MessagesTokens estimates the token cost of a request's messages by counting
