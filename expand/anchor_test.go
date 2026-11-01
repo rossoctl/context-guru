@@ -135,3 +135,59 @@ func TestTheFingerprintKeepsLargeIntegersExact(t *testing.T) {
 		t.Fatal("two messages that differ only in an integer above 2^53 got the same fingerprint")
 	}
 }
+
+// Stored anchors (#783). An anchor stores the fingerprint of the message before it. A message
+// with no content of exactly one plain text block must fingerprint byte for byte as before, so
+// an anchor recorded before the upgrade is still used.
+func TestTheFingerprintIsUnchangedWithoutAOneTextBlockContent(t *testing.T) {
+	for _, raw := range []string{
+		`{"role":"user","content":"fix the bug"}`,
+		`{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b","cache_control":{"type":"ephemeral"}}]}`,
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x","cache_control":{"type":"ephemeral"}}]}`,
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{"n":9007199254740993}}]}`,
+		`{"type":"function_call_output","call_id":"c1","output":"o"}`,
+		`{"role":"user","content":[{"type":"input_text","text":"responses"}]}`,
+	} {
+		old, ok := legacyCanonical(raw)
+		if !ok {
+			t.Fatalf("legacy canonical failed for %s", raw)
+		}
+		if got := Fingerprint(gjson.Parse(raw)); got != fingerprintOf(old) {
+			t.Errorf("fingerprint changed for %s", raw)
+		}
+	}
+}
+
+// An anchor recorded before the upgrade over a one-text-block message is still used: on the
+// same block, and on the string the client sends for it on a later turn (the case the old rule
+// missed). A different text is still refused.
+func TestAnAnchorRecordedByTheOldRuleStillMatches(t *testing.T) {
+	block := `{"role":"user","content":[{"type":"text","text":"go","cache_control":{"type":"ephemeral"}}]}`
+	old, _ := legacyCanonical(block)
+	stored := fingerprintOf(old)
+	if stored == Fingerprint(gjson.Parse(block)) {
+		t.Fatal("precondition: the old and the new fingerprint of a one-text-block message must differ")
+	}
+	for _, now := range []string{
+		block,
+		`{"role":"user","content":[{"type":"text","text":"go"}]}`,
+		`{"role":"user","content":"go"}`,
+	} {
+		if !fingerprintMatches(gjson.Parse(now), stored) {
+			t.Errorf("an anchor recorded by the old rule was skipped for %s", now)
+		}
+	}
+	for _, other := range []string{
+		`{"role":"user","content":"stop"}`,
+		`{"role":"assistant","content":"go"}`,
+		`{"role":"user","content":[{"type":"text","text":"g"},{"type":"text","text":"o"}]}`,
+	} {
+		if fingerprintMatches(gjson.Parse(other), stored) {
+			t.Errorf("an old anchor matched a different message %s", other)
+		}
+	}
+	msgs := gjson.Parse(`[{"role":"user","content":"go"},{"role":"assistant","content":"ok"}]`).Array()
+	if !(Anchor{ID: "a", At: 1, Fp: stored}).Usable("anthropic", msgs) {
+		t.Error("Usable refused an anchor the old rule recorded over the block form")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -56,27 +57,82 @@ func MessagesField(wire string) string {
 	return "messages"
 }
 
-// Fingerprint identifies one wire message independently of prompt-cache metadata.
+// Fingerprint identifies one wire message independently of what a client changes on an old
+// message without changing what the model reads: the hash of its canonical form
+// (schema.CanonicalWireMessage, #783).
 //
-// `cache_control` is excluded because it is the one thing a client legitimately changes on an
-// old message: it marks the LAST message of each request, so the message an anchor points at
-// carries it on the turn the anchor is recorded and not afterwards. Everything else must match.
-// Keys are re-serialized in sorted order, so the fingerprint does not depend on the client's
-// key order either. Numbers are kept as their literal text (UseNumber): decoded as float64, two
-// integers above 2^53 that differ would read as one, and so would the two messages.
+// `cache_control` is excluded because it marks the LAST message of each request, so the message
+// an anchor points at carries it on the turn the anchor is recorded and not afterwards. A content
+// of one plain text block reads as its string because Claude Code sends that same message as a
+// string once a later turn follows it (seen on 2.1.312 in the #485 probes). Everything else must
+// match. Keys are sorted, so the client's key order does not count. Numbers are kept as their
+// literal text: decoded as float64, two integers above 2^53 that differ would read as one, and so
+// would the two messages.
+//
+// A stored fingerprint is compared with fingerprintMatches, not with ==.
 func Fingerprint(msg gjson.Result) string {
-	dec := json.NewDecoder(strings.NewReader(msg.Raw))
+	b, ok := schema.CanonicalWireMessage(msg.Raw)
+	if !ok {
+		return ""
+	}
+	return fingerprintOf(b)
+}
+
+func fingerprintOf(canonical []byte) string {
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:12])
+}
+
+// fingerprintMatches reports whether msg is the message a stored fingerprint fp names. Besides
+// Fingerprint it accepts the two values the rule before #783 (cache_control removed, nothing else)
+// gives the same message: msg as it is, and msg with a string content written as one text block.
+// The first keeps every anchor recorded before the upgrade over a block that is still a block.
+// The second matches an anchor recorded over the block form of a message the client now sends as
+// a string, the case the old rule missed. Neither accepts a message Fingerprint would tell apart:
+// all three forms are the same message under the canonical rule.
+func fingerprintMatches(msg gjson.Result, fp string) bool {
+	if fp == "" {
+		return false
+	}
+	if Fingerprint(msg) == fp {
+		return true
+	}
+	for _, raw := range [...]string{msg.Raw, asTextBlock(msg)} {
+		if raw == "" {
+			continue
+		}
+		if b, ok := legacyCanonical(raw); ok && fingerprintOf(b) == fp {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyCanonical is the canonical form before #783: cache_control removed at every depth, keys
+// sorted, numbers as their literal text.
+func legacyCanonical(raw string) ([]byte, bool) {
+	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return ""
+		return nil, false
 	}
 	b, err := json.Marshal(stripCacheControl(v))
+	return b, err == nil
+}
+
+// asTextBlock returns msg with a string `content` written as one text block, or "" when its
+// content is not a string.
+func asTextBlock(msg gjson.Result) string {
+	c := msg.Get("content")
+	if c.Type != gjson.String {
+		return ""
+	}
+	out, err := sjson.SetRaw(msg.Raw, "content", `[{"type":"text","text":`+c.Raw+`}]`)
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:12])
+	return out
 }
 
 func stripCacheControl(v any) any {
@@ -149,7 +205,7 @@ func (a Anchor) Usable(wire string, msgs []gjson.Result) bool {
 	if a.At < 1 || a.At > len(msgs) {
 		return false
 	}
-	if !mayPrecede(wire, msgs[a.At-1]) || Fingerprint(msgs[a.At-1]) != a.Fp {
+	if !mayPrecede(wire, msgs[a.At-1]) || !fingerprintMatches(msgs[a.At-1], a.Fp) {
 		return false
 	}
 	return a.At == len(msgs) || mayFollow(wire, msgs[a.At])

@@ -1103,7 +1103,7 @@ func (s *CacheAwareSummarizer) tryReuse(c *components.Ctx, msgs []bschemas.ChatM
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
-	if spanHash(covered) != cp.CoveredHash {
+	if !spanHashMatches(covered, cp.CoveredHash) {
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}
 	// RESERVE GATING. Only ever true for a checkpoint commissioned under THIS component's

@@ -122,7 +122,7 @@ func recheckHeld(c *components.Ctx, req *bschemas.BifrostChatRequest, h heldAnsw
 			res.Dropped = append(res.Dropped, recheckDropped{o.ToolUseID, RecheckOutputGone, o.Saves})
 			continue
 		}
-		if outputHash(raw[idx]) != o.Hash {
+		if !components.SpanHashMatches([]bschemas.ChatMessage{raw[idx]}, o.Hash) {
 			res.Dropped = append(res.Dropped, recheckDropped{o.ToolUseID, RecheckContentChanged, o.Saves})
 			continue
 		}
