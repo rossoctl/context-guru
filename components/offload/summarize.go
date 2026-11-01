@@ -358,15 +358,23 @@ func summaryCoveredHashMatches(c *components.Ctx, start, end int, span []bschema
 	if summaryCoveredHash(c, start, end, span) == want {
 		return true
 	}
-	legacy := components.LegacySpanHash(span)
+	prefix := ""
 	if c.SummaryStashPayload != nil {
 		b, err := c.SummaryStashPayload(start, end, span)
 		if err != nil {
 			return false
 		}
-		legacy = hashKey(string(b) + ":" + legacy)
+		prefix = string(b) + ":"
 	}
-	return legacy == want
+	for _, legacy := range components.LegacySpanHashes(span) {
+		if prefix != "" {
+			legacy = hashKey(prefix + legacy)
+		}
+		if legacy == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {

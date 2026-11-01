@@ -191,3 +191,38 @@ func TestAnAnchorRecordedByTheOldRuleStillMatches(t *testing.T) {
 		t.Error("Usable refused an anchor the old rule recorded over the block form")
 	}
 }
+
+// Round 1, finding 2: an anchor recorded by the old rule over a tool_result whose content was one
+// text block is still used once the client sends that content as a string. The fallback never
+// accepts a message the canonical rule rejects.
+func TestAnOldAnchorOverAToolResultBlockMatchesItsStringForm(t *testing.T) {
+	block := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"first"},` +
+		`{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"out","cache_control":{"type":"ephemeral"}}]}]}`
+	allBlocks := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":[{"type":"text","text":"first"}]},` +
+		`{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"out"}]}]}`
+	now := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"first"},` +
+		`{"type":"tool_result","tool_use_id":"t1","content":"out"}]}`
+	msgs := gjson.Parse(`[` + now + `,{"role":"assistant","content":"ok"}]`).Array()
+	for name, recorded := range map[string]string{"last block": block, "every block": allBlocks} {
+		old, _ := legacyCanonical(recorded)
+		stored := fingerprintOf(old)
+		if stored == Fingerprint(gjson.Parse(now)) {
+			t.Fatalf("%s: precondition: the old and the new fingerprint must differ", name)
+		}
+		if !(Anchor{ID: "a", At: 1, Fp: stored}).Usable("anthropic", msgs) {
+			t.Errorf("%s: an old anchor over a tool_result block was skipped on its string form", name)
+		}
+		for _, other := range []string{
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"first"},{"type":"tool_result","tool_use_id":"t1","content":"OUT"}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"first"},{"type":"tool_result","tool_use_id":"t2","content":"out"}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"first"},{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"o"},{"type":"text","text":"ut"}]}]}`,
+		} {
+			if Fingerprint(gjson.Parse(other)) == Fingerprint(gjson.Parse(now)) {
+				t.Fatalf("precondition: the canonical rule must reject %s", other)
+			}
+			if fingerprintMatches(gjson.Parse(other), stored) {
+				t.Errorf("%s: the fallback accepted a message the canonical rule rejects: %s", name, other)
+			}
+		}
+	}
+}

@@ -199,13 +199,65 @@ func LegacySpanHash(msgs []schemas.ChatMessage) string {
 	return spanHash(msgs, legacyStripCacheControl)
 }
 
-// SpanHashMatches reports whether msgs hash to want, under SpanHash or under LegacySpanHash.
-// Every hash a caller compares against a STORED value goes through here: a checkpoint written
-// before #783 over a span with a one-text-block message must not read as a different
-// conversation once after the upgrade. The fallback never accepts a span SpanHash would reject:
-// two spans equal under the legacy rule are equal under the canonical rule too.
+// LegacySpanHashes returns the hashes the rule before #783 may have stored for a span that is
+// msgs under the canonical rule. The old rule told a string from a one-text-block list, so one
+// canonical span has several old hashes. Three are tried:
+//
+//   - msgs as they are: a message stored as a block is still a block, or was always a string.
+//   - msgs with the LAST message's string content written as one text block: a checkpoint
+//     whose span held the then-newest message (keep_last_turns: 0). Claude Code sends that
+//     message as a block with cache_control on that turn, and as a string on every later one.
+//   - msgs with every string content written as one text block.
+//
+// Each one is the same span under the canonical rule, so none accepts a span SpanHash rejects.
+func LegacySpanHashes(msgs []schemas.ChatMessage) []string {
+	out := []string{LegacySpanHash(msgs)}
+	if n := len(msgs); n > 0 && isStringContent(msgs[n-1]) {
+		last := append(append([]schemas.ChatMessage(nil), msgs[:n-1]...), asTextBlock(msgs[n-1]))
+		out = append(out, LegacySpanHash(last))
+	}
+	all := make([]schemas.ChatMessage, len(msgs))
+	flipped := 0
+	for i := range msgs {
+		all[i] = msgs[i]
+		if isStringContent(msgs[i]) {
+			all[i] = asTextBlock(msgs[i])
+			flipped++
+		}
+	}
+	if flipped > 1 || (flipped == 1 && !isStringContent(msgs[len(msgs)-1])) {
+		out = append(out, LegacySpanHash(all))
+	}
+	return out
+}
+
+func isStringContent(m schemas.ChatMessage) bool {
+	return m.Content != nil && m.Content.ContentStr != nil
+}
+
+// asTextBlock returns a copy of m with its string content written as one text block.
+func asTextBlock(m schemas.ChatMessage) schemas.ChatMessage {
+	text := *m.Content.ContentStr
+	m.Content = &schemas.ChatMessageContent{ContentBlocks: []schemas.ChatContentBlock{
+		{Type: schemas.ChatContentBlockTypeText, Text: &text}}}
+	return m
+}
+
+// SpanHashMatches reports whether msgs hash to want, under SpanHash or under one of
+// LegacySpanHashes. Every hash a caller compares against a STORED value goes through here: a
+// checkpoint written before #783 over a span with a one-text-block message must not read as a
+// different conversation once after the upgrade. The fallback never accepts a span SpanHash
+// would reject: every form it tries is the same span under the canonical rule.
 func SpanHashMatches(msgs []schemas.ChatMessage, want string) bool {
-	return SpanHash(msgs) == want || LegacySpanHash(msgs) == want
+	if SpanHash(msgs) == want {
+		return true
+	}
+	for _, h := range LegacySpanHashes(msgs) {
+		if h == want {
+			return true
+		}
+	}
+	return false
 }
 
 func spanHash(msgs []schemas.ChatMessage, canon func(schemas.ChatMessage) schemas.ChatMessage) string {

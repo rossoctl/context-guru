@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/rossoctl/context-guru/schema"
@@ -84,12 +85,13 @@ func fingerprintOf(canonical []byte) string {
 }
 
 // fingerprintMatches reports whether msg is the message a stored fingerprint fp names. Besides
-// Fingerprint it accepts the two values the rule before #783 (cache_control removed, nothing else)
-// gives the same message: msg as it is, and msg with a string content written as one text block.
-// The first keeps every anchor recorded before the upgrade over a block that is still a block.
-// The second matches an anchor recorded over the block form of a message the client now sends as
-// a string, the case the old rule missed. Neither accepts a message Fingerprint would tell apart:
-// all three forms are the same message under the canonical rule.
+// Fingerprint it accepts the values the rule before #783 (cache_control removed, nothing else)
+// gives the same message: msg as it is, msg with a string content written as one text block, and
+// msg with the string content of its tool_result blocks written as one text block (all of them,
+// or only the last). The first keeps every anchor recorded before the upgrade over a block that is
+// still a block. The others match an anchor recorded over the block form of a message, or of a
+// tool_result, that the client now sends as a string: the case the old rule missed. None accepts
+// a message Fingerprint would tell apart: every form is the same message under the canonical rule.
 func fingerprintMatches(msg gjson.Result, fp string) bool {
 	if fp == "" {
 		return false
@@ -97,7 +99,7 @@ func fingerprintMatches(msg gjson.Result, fp string) bool {
 	if Fingerprint(msg) == fp {
 		return true
 	}
-	for _, raw := range [...]string{msg.Raw, asTextBlock(msg)} {
+	for _, raw := range [...]string{msg.Raw, asTextBlock(msg), toolResultsAsTextBlocks(msg, false), toolResultsAsTextBlocks(msg, true)} {
 		if raw == "" {
 			continue
 		}
@@ -130,6 +132,32 @@ func asTextBlock(msg gjson.Result) string {
 	}
 	out, err := sjson.SetRaw(msg.Raw, "content", `[{"type":"text","text":`+c.Raw+`}]`)
 	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// toolResultsAsTextBlocks returns msg with the string content of its tool_result blocks written
+// as one text block: every one, or only the last when lastOnly is set. "" when no tool_result
+// block has a string content.
+func toolResultsAsTextBlocks(msg gjson.Result, lastOnly bool) string {
+	out, changed := msg.Raw, false
+	blocks := msg.Get("content").Array()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		c := blocks[i].Get("content")
+		if blocks[i].Get("type").String() != "tool_result" || c.Type != gjson.String {
+			continue
+		}
+		next, err := sjson.SetRaw(out, "content."+strconv.Itoa(i)+".content", `[{"type":"text","text":`+c.Raw+`}]`)
+		if err != nil {
+			return ""
+		}
+		out, changed = next, true
+		if lastOnly {
+			break
+		}
+	}
+	if !changed || !msg.Get("content").IsArray() {
 		return ""
 	}
 	return out
