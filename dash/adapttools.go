@@ -597,14 +597,14 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 		return nil, nil, nil
 	}
 	type pendingRow struct {
-		sk, session, digest, name, server string
-		tok                               int
-		ts                                int64
+		sk, session, digest, kind, name, server string
+		tok                                     int
+		ts                                      int64
 	}
 	type part struct {
 		sets map[string]map[string]*adaptToolsSet
 		keys []string
-		// server_tool rows wait until every slice has been read: the stale-kind rule
+		// server_tool rows and unknown skills markers wait until every slice has been read: the stale-kind rule
 		// (stalekind.go) needs the session's newer tool facts, which may sit in another slice.
 		pending []pendingRow
 		rules   *staleRules
@@ -648,8 +648,8 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 				if reqs[sk] == nil {
 					continue // not in scope; reqs is only read here
 				}
-				if kind == KindServerTool {
-					pending = append(pending, pendingRow{sk, s, dg, name, server, tok, ts})
+				if kind == KindServerTool || (kind == KindSkillListing && server == SkillsUnknown) {
+					pending = append(pending, pendingRow{sk, s, dg, kind, name, server, tok, ts})
 					continue
 				}
 				rules.observe(t, s, kind, name, ts)
@@ -707,10 +707,10 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 	for _, p := range parts {
 		for _, r := range p.pending {
 			tenant := r.sk[:len(r.sk)-len(r.session)-1]
-			if rules.stale(tenant, r.session, KindServerTool, r.name, r.ts) {
+			if rules.stale(tenant, r.session, r.kind, r.name, r.server, r.ts) {
 				continue
 			}
-			addCarriedRow(merged, ids, &keys, keyOf, r.sk, r.session, r.digest, KindServerTool, r.name, r.server, r.tok, r.ts)
+			addCarriedRow(merged, ids, &keys, keyOf, r.sk, r.session, r.digest, r.kind, r.name, r.server, r.tok, r.ts)
 		}
 	}
 	out := make([]carriedSession, 0, len(merged))

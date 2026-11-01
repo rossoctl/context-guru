@@ -748,8 +748,8 @@ type declRow struct {
 // dropStaleDecls applies the stale-kind rule (stalekind.go) to declaration rows. A row carries no
 // tenant, so the rule runs per session here, as the grouping of these readers does.
 func dropStaleDecls(rows []declRow) []declRow {
-	return dropStale(rows, func(r *declRow) (string, string, string, string, int64) {
-		return "", r.session, r.kind, r.name, r.ts
+	return dropStale(rows, func(r *declRow) (string, string, string, string, string, int64) {
+		return "", r.session, r.kind, r.name, r.server, r.ts
 	})
 }
 

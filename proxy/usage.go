@@ -596,7 +596,7 @@ func responseStopReason(sse bool, body []byte) string {
 //	OpenAI Responses      output[].{type: "function_call", name}    (buffered); not read from
 //	                      an SSE stream — Responses event names and nesting are not the same as
 //	                      Anthropic's and this proxy does not splice that transport (see
-//	                      proxy.go's own comment on wire == "responses"), so a streamed
+//	                      proxy.go's own comment where it tests schema.IsResponses(wire)), so a streamed
 //	                      Responses tool call reads as if the response had none, same honest gap
 //	                      as a sniffer-truncated Anthropic stream.
 //

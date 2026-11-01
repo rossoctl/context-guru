@@ -222,7 +222,7 @@ func (d *DB) scopedDeclsScan(h *declScanOnce, sessions func(string) bool) ([]dec
 	merged := map[key]*declRow{}
 	stale := scan.staleRules(sessions, false)
 	for k, v := range scan.facts {
-		if !sessions(k.session) || stale.stale("", k.session, k.kind, k.name, v.last) {
+		if !sessions(k.session) || stale.stale("", k.session, k.kind, k.name, k.server, v.last) {
 			continue
 		}
 		kk := key{k.session, k.kind, k.name, k.server}

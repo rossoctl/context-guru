@@ -255,3 +255,64 @@ func TestUnknownListingDoesNotDiluteTheListingAverage(t *testing.T) {
 		t.Errorf("unknown sessions = %d, want 1", rep.Skills.UnknownSessions)
 	}
 }
+
+// A session stored before the Responses skills listing was read holds an `unknown` marker. Stored
+// again after the change, it holds the real skill rows too, under the same digest. The newest fact
+// wins: the marker is stale (#817). A session with no newer skill keeps its marker.
+func seedStaleMarker(t *testing.T) *DB {
+	t.Helper()
+	db := openTestDB(t)
+	var evs []*Event
+	for _, s := range []string{"s1", "s2"} {
+		for i := 0; i < 4; i++ {
+			e := mkEvent(int64(1000+i), s, "gpt", 100, 90)
+			e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
+			evs = append(evs, e)
+		}
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	write := func(session string, ts int64, decls []Decl) {
+		w := &invWriter{db: db, seen: map[string]*invSession{}}
+		if err := w.write([]invMsg{{tenant: "t1", session: session, ts: ts,
+			inv: &Inventory{Digest: "d1", Decls: decls}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknown := Decl{Kind: KindSkillListing, Server: SkillsUnknown, Tokens: 0}
+	write("s1", 1000, []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10}, unknown})
+	write("s1", 2000, []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10},
+		{Kind: KindSkillListing, Server: SkillsOK, Tokens: 200}, {Kind: KindSkill, Name: "dataviz", Tokens: 100}})
+	write("s2", 1000, []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10}, unknown}) // never re-sent
+	return db
+}
+
+func TestStaleUnknownSkillsMarkerIsHidden(t *testing.T) {
+	db := seedStaleMarker(t)
+	bothPaths(t, func(t *testing.T, path string) {
+		rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// s1 read the listing; s2 still holds its marker. So exactly one session is unknown.
+		if rep.Skills.UnknownSessions != 1 {
+			t.Errorf("%s: unknown sessions = %d, want 1 (s2 only)", path, rep.Skills.UnknownSessions)
+		}
+		found := false
+		for _, s := range rep.Skills.Skills {
+			found = found || s.Name == "dataviz"
+		}
+		if !found {
+			t.Errorf("%s: dataviz is missing from the skills", path)
+		}
+		carried, err := db.carriedCost(Filter{Tenant: "t1"}, flatPrice,
+			func(_, kind, name, server string) string { return kind + "\x00" + name + "\x00" + server }, carriedOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := carried.Items[KindSkillListing+"\x00\x00"+SkillsUnknown]; c == nil || c.Sessions != 1 {
+			t.Errorf("%s: the unknown marker is carried by %+v, want 1 session (s2 only)", path, c)
+		}
+	})
+}

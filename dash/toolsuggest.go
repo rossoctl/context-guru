@@ -309,7 +309,7 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		out := map[statKey]declWindow{}
 		stale := scan.staleRules(func(s string) bool { return sessions[s] }, true)
 		for k, v := range scan.facts {
-			if !sessions[k.session] || stale.stale(k.tenant, k.session, k.kind, k.name, v.last) {
+			if !sessions[k.session] || stale.stale(k.tenant, k.session, k.kind, k.name, k.server, v.last) {
 				continue
 			}
 			sk := statKey{k.kind, k.name}
@@ -335,7 +335,7 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 	}
 	// Per (session, kind, name), so the stale-kind rule (stalekind.go) can run on the facts; the
 	// window and the session count are folded in Go, as the broad branch above does.
-	q := `SELECT d.tenant_id, d.session_id, d.kind, d.name, MIN(d.ts), MAX(d.ts)
+	q := `SELECT d.tenant_id, d.session_id, d.kind, d.name, d.server, MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -343,20 +343,20 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		q += ` AND d.tenant_id = ?`
 		a = append(a, f.Tenant)
 	}
-	q += ` GROUP BY 1, 2, 3, 4`
+	q += ` GROUP BY 1, 2, 3, 4, 5`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	type fact struct {
-		tenant, session, kind, name string
-		first, last                 int64
+		tenant, session, kind, name, server string
+		first, last                         int64
 	}
 	var facts []fact
 	for rows.Next() {
 		var f fact
-		if err := rows.Scan(&f.tenant, &f.session, &f.kind, &f.name, &f.first, &f.last); err != nil {
+		if err := rows.Scan(&f.tenant, &f.session, &f.kind, &f.name, &f.server, &f.first, &f.last); err != nil {
 			return nil, err
 		}
 		facts = append(facts, f)
@@ -364,8 +364,8 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	facts = dropStale(facts, func(f *fact) (string, string, string, string, int64) {
-		return f.tenant, f.session, f.kind, f.name, f.last
+	facts = dropStale(facts, func(f *fact) (string, string, string, string, string, int64) {
+		return f.tenant, f.session, f.kind, f.name, f.server, f.last
 	})
 	seen := map[statKey]map[string]bool{}
 	out := map[statKey]declWindow{}

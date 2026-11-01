@@ -17,6 +17,15 @@ package dash
 //   - A `server_tool` fact named "function" (the Responses phantom) is stale when any `tool` or
 //     `mcp_tool` fact of the session is newer.
 //
+// A second case, for the Responses wire (#817): before the wire read the skills listing, it stored
+// a marker row (`skill_listing`, state `unknown`) for it. A session stored then and again now holds
+// that marker next to the real `skill` rows, because the digest is the same. The marker is stale
+// when the session has a newer `skill` fact: a listing that yielded skills was read.
+//
+// Not covered: the matching `deferred_listing` marker. A newer `mcp_tool` fact does not show that
+// a deferred list was read (a client tool makes one too), so dropping it could turn "unknown" into
+// "none". Such a session keeps its marker until its tools change.
+//
 // Nothing is deleted. A session that never re-sends its tools after the upgrade keeps its old
 // kind: no newer fact exists to win.
 //
@@ -32,13 +41,14 @@ type ruleKey struct{ tenant, session string }
 type ruleSessionFacts struct {
 	byName map[string]int64 // newest tool / mcp_tool fact, per name
 	any    int64            // newest tool / mcp_tool fact of the session
+	skill  int64            // newest skill fact of the session
 }
 
 func newStaleRules() *staleRules { return &staleRules{sess: map[ruleKey]*ruleSessionFacts{}} }
 
 // observe records one fact. Only the kinds that can supersede a server_tool matter.
 func (r *staleRules) observe(tenant, session, kind, name string, ts int64) {
-	if kind != KindTool && kind != KindMCPTool {
+	if kind != KindTool && kind != KindMCPTool && kind != KindSkill {
 		return
 	}
 	k := ruleKey{tenant, session}
@@ -46,6 +56,12 @@ func (r *staleRules) observe(tenant, session, kind, name string, ts int64) {
 	if s == nil {
 		s = &ruleSessionFacts{byName: map[string]int64{}}
 		r.sess[k] = s
+	}
+	if kind == KindSkill {
+		if ts > s.skill {
+			s.skill = ts
+		}
+		return
 	}
 	if ts > s.byName[name] {
 		s.byName[name] = ts
@@ -61,36 +77,43 @@ func (r *staleRules) merge(o *staleRules) {
 		for name, ts := range s.byName {
 			r.observe(k.tenant, k.session, KindTool, name, ts)
 		}
+		if s.skill > 0 {
+			r.observe(k.tenant, k.session, KindSkill, "", s.skill)
+		}
 		if d := r.sess[k]; d != nil && s.any > d.any {
 			d.any = s.any
 		}
 	}
 }
 
-// stale reports whether the fact is an old server_tool that a newer fact replaced.
-func (r *staleRules) stale(tenant, session, kind, name string, ts int64) bool {
-	if kind != KindServerTool {
-		return false
-	}
+// stale reports whether the fact is an old row that a newer fact replaced: a server_tool, or the
+// unknown skills marker.
+func (r *staleRules) stale(tenant, session, kind, name, server string, ts int64) bool {
 	s := r.sess[ruleKey{tenant, session}]
 	if s == nil {
 		return false
 	}
-	return s.byName[name] > ts || (name == "function" && s.any > ts)
+	switch kind {
+	case KindServerTool:
+		return s.byName[name] > ts || (name == "function" && s.any > ts)
+	case KindSkillListing:
+		return server == SkillsUnknown && s.skill > ts
+	}
+	return false
 }
 
 // dropStale returns rows without its stale facts. at reads the fact fields of one row; ts is the
 // newest time the fact was seen. The input slice is reused.
-func dropStale[T any](rows []T, at func(*T) (tenant, session, kind, name string, ts int64)) []T {
+func dropStale[T any](rows []T, at func(*T) (tenant, session, kind, name, server string, ts int64)) []T {
 	r := newStaleRules()
 	for i := range rows {
-		t, s, k, n, ts := at(&rows[i])
+		t, s, k, n, _, ts := at(&rows[i])
 		r.observe(t, s, k, n, ts)
 	}
 	out := rows[:0]
 	for i := range rows {
-		t, s, k, n, ts := at(&rows[i])
-		if !r.stale(t, s, k, n, ts) {
+		t, s, k, n, sv, ts := at(&rows[i])
+		if !r.stale(t, s, k, n, sv, ts) {
 			out = append(out, rows[i])
 		}
 	}

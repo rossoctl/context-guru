@@ -482,7 +482,7 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 	return len(regions) > 0
 }
 
-// deferredDecls parses the deferred lists. Only called on a digest miss.
+// deferredDeclsFrom parses the deferred lists. Only called on a digest miss.
 //
 // Fail-safe, like skillDecls, because a user can quote the header:
 //
@@ -496,9 +496,7 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 // APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
 // name costs a little more than a short one. Removing a tool gives back its own line, not the
 // header, so an equal share of the whole is a fair bound, not an exact figure.
-func deferredDecls(body []byte) []Decl { return deferredDeclsFrom(deferred.Texts(body)) }
-
-// deferredDeclsFrom parses the lists in texts, from either wire's finder.
+// deferredDeclsFrom parses the lists in texts, from either wire's finder (deferredTexts).
 func deferredDeclsFrom(texts []string) []Decl {
 	var out []Decl
 	seen := map[string]bool{}

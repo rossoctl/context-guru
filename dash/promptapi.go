@@ -273,15 +273,15 @@ func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int
 	ra := []any{tenant, session, digest}
 	// The session's newest fact per (kind, name), for the stale-kind rule (stalekind.go): a region
 	// of this digest may be replaced by a fact of another digest of the same session.
-	fq, err := d.sql.QueryContext(d.readCtx(), `SELECT kind, name, MAX(ts) FROM tool_declarations
-		WHERE tenant_id = ? AND session_id = ? GROUP BY kind, name`, tenant, session)
+	fq, err := d.sql.QueryContext(d.readCtx(), `SELECT kind, name, server, MAX(ts) FROM tool_declarations
+		WHERE tenant_id = ? AND session_id = ? GROUP BY kind, name, server`, tenant, session)
 	if err != nil {
 		return nil, err
 	}
 	var sessFacts []declRow
 	for fq.Next() {
 		var r declRow
-		if err := fq.Scan(&r.kind, &r.name, &r.ts); err != nil {
+		if err := fq.Scan(&r.kind, &r.name, &r.server, &r.ts); err != nil {
 			fq.Close()
 			return nil, err
 		}
@@ -295,9 +295,9 @@ func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int
 	for _, r := range sessFacts {
 		stale.observe("", "", r.kind, r.name, r.ts)
 	}
-	factTS := map[[2]string]int64{}
+	factTS := map[[3]string]int64{}
 	for _, r := range sessFacts {
-		factTS[[2]string{r.kind, r.name}] = r.ts
+		factTS[[3]string{r.kind, r.name, r.server}] = r.ts
 	}
 	rs, err := d.sql.QueryContext(d.readCtx(), rq, ra...)
 	if err != nil {
@@ -310,7 +310,7 @@ func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int
 		if err := rs.Scan(&reg.Kind, &reg.Name, &reg.Server, &reg.Tokens, &gz); err != nil {
 			return nil, err
 		}
-		if reg.Kind == KindDeferredListing || stale.stale("", "", reg.Kind, reg.Name, factTS[[2]string{reg.Kind, reg.Name}]) {
+		if reg.Kind == KindDeferredListing || stale.stale("", "", reg.Kind, reg.Name, reg.Server, factTS[[3]string{reg.Kind, reg.Name, reg.Server}]) {
 			continue // a note, not a region; or a server_tool region a newer fact replaced
 		}
 		if gz != nil {
@@ -365,7 +365,7 @@ func (d *DB) promptViewScan(f Filter, v *PromptView, sessions map[string]bool) (
 	text := map[grp]bool{}
 	stale := scan.staleRules(func(s string) bool { return sessions[s] }, false)
 	for k, fact := range scan.facts {
-		if sessions[k.session] && k.kind != KindDeferredListing && !stale.stale("", k.session, k.kind, k.name, fact.last) {
+		if sessions[k.session] && k.kind != KindDeferredListing && !stale.stale("", k.session, k.kind, k.name, k.server, fact.last) {
 			g := grp{k.session, k.kind, k.name, k.server}
 			text[g] = text[g] || fact.hasText
 		}
