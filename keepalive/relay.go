@@ -11,8 +11,8 @@ import (
 // relayServesClaude: the Anthropic route forwarded to anything but Anthropic itself is a relay
 // (LiteLLM, a corporate gateway) that may serve another family there, an OpenAI / Azure model
 // with automatic caching or none, where a ping buys nothing. Only those are name-checked; native
-// Anthropic, Bedrock and Vertex upstreams are eligible by type (their ARNs, inference profiles and
-// aliases often do not say "claude").
+// upstreams of every provider in modelinfo.HonoursCacheControl are eligible by type (their ARNs,
+// inference profiles and aliases often do not say "claude").
 // ponytail: name test; a Claude-named alias of another family is caught by the route breaker.
 //
 // base may be a full URL (https://api.anthropic.com), a bare host
