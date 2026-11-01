@@ -1245,54 +1245,18 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 	return ttl
 }
 
-// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache
-// breakpoint — a structural cache_control / cachePoint field on a message, content
-// block, system block, or tool. This is deliberately structural (gjson path queries),
-// not a substring scan of the whole body: a tool output whose text merely contains the
-// string "cache_control" must NOT flip the request into cache-aware mode (that would
-// wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
-// JSON string value never matches these paths.
+// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
+// structural cache_control / cachePoint field on a message, content block, system block, or tool.
+// It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
+// with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
+// Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
+// NOT flip the request into cache-aware mode (that would wrongly restrict offloaders to the tail
+// on a non-caching backend). The count's prefilter keeps an escaped key ("c\u0061che_control").
 func hasCacheBreakpoint(body []byte) bool {
-	// Every path below ends in a key spelled cache_control or cachePoint, so a body with neither
-	// "cache" nor a \u escape anywhere in it (a key could be spelled with one) cannot match, and
-	// five full structural walks of a large body are skipped. Exact, unlike a prefilter that
-	// assumes keys are never escaped.
 	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
 		return false
 	}
-	paths := []string{
-		"messages.#.content.#.cache_control",
-		"messages.#.cache_control",
-		"system.#.cache_control",
-		"tools.#.cache_control",
-		"messages.#.content.#.cachePoint",
-	}
-	for _, p := range paths {
-		r := gjson.GetBytes(body, p)
-		if !r.Exists() {
-			continue
-		}
-		found := false
-		r.ForEach(func(_, v gjson.Result) bool {
-			// nested arrays (content-of-messages) surface as arrays here; recurse one level
-			if v.IsArray() {
-				v.ForEach(func(_, vv gjson.Result) bool {
-					if vv.IsObject() {
-						found = true
-						return false
-					}
-					return true
-				})
-			} else if v.IsObject() {
-				found = true
-			}
-			return !found
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return schema.CountBreakpointsEscaped(body).Total() > 0
 }
 
 // prevLen / putLen track, per session, how many normalized messages the previous

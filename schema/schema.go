@@ -30,6 +30,10 @@ type Provider = schemas.ModelProvider
 // (apply.MarkInBandFollowUp) read one figure; see docs/components/caching.md.
 const LookbackBlocks = 20
 
+// MaxBreakpoints is the provider's hard cap on cache breakpoints per request. Over it, the
+// request fails with a 400. Every host and component reads this one figure.
+const MaxBreakpoints = 4
+
 // MessagesTokens estimates the token cost of a request's messages by counting
 // the message CONTENT text — what the model actually reads — not the JSON
 // envelope. This is the signal the never-worse gate needs: control metadata
