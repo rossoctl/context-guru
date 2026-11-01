@@ -126,6 +126,19 @@ func TestCallSitesFindTheTurnThatExpanded(t *testing.T) {
 	}
 }
 
+// A tool_result whose content is an ARRAY of blocks must give its text, not the raw JSON. Raw JSON
+// never equals the stored original, so planRestore recorded an anchor for a call whose answer WAS
+// the original.
+func TestCallSitesAnswerIsTheTextForArrayContent(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"go"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"tu","name":"` + ToolName + `","input":{"id":"H"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu","content":[{"type":"text","text":"line \"1\""},{"type":"text","text":" line 2"}]}]}]}`)
+	cs := CallSites("anthropic", body)
+	if len(cs) != 1 || cs[0].Answer != `line "1" line 2` {
+		t.Fatalf("call sites = %+v", cs)
+	}
+}
+
 // JSON numbers must keep their exact value. Decoded as float64, two integers above 2^53 that
 // differ by 1 become the same number, so two different messages would share a fingerprint.
 func TestTheFingerprintKeepsLargeIntegersExact(t *testing.T) {
