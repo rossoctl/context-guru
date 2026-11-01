@@ -33,13 +33,37 @@ func TestCountBreakpointsEveryForm(t *testing.T) {
 		{"tools cachePoint", `{"tools":[{"cachePoint":{"type":"default"}}],"messages":[]}`, 1},
 		{"block cachePoint", `{"messages":[{"content":[{"cachePoint":{"type":"default"}}]}]}`, 1},
 		{"message-level cachePoint is not a mark", `{"messages":[{"content":"x","cachePoint":{"type":"default"}}]}`, 0},
-		{"escaped key", `{"messages":[{"content":[{"type":"text","cache_control":` + ce + `}]}]}`, 1},
 		{"mark is not an object", `{"messages":[{"content":[{"cache_control":null}]}]}`, 0},
 		{"both spellings on one block", `{"messages":[{"content":[{"cache_control":` + ce + `,"cachePoint":{}}]}]}`, 2},
 	} {
 		if got := CountBreakpoints([]byte(c.body)).Total(); got != c.want {
 			t.Errorf("%s: %d, want %d", c.name, got, c.want)
 		}
+		if got := CountBreakpointsEscaped([]byte(c.body)).Total(); got != c.want {
+			t.Errorf("%s (escaped count): %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// A key spelled with a \u escape: only the exact count sees it. The hot-path count must not
+// (its prefilter is "cache" only, on purpose), and a \u in unrelated text must not make it parse.
+func TestCountBreakpointsEscapedKey(t *testing.T) {
+	ce := `{"type":"ephemeral"}`
+	for _, c := range []struct{ name, body string }{
+		{"escaped cache_control", `{"messages":[{"content":[{"type":"text","c\u0061che_control":` + ce + `}]}]}`},
+		{"escaped cachePoint", `{"messages":[{"content":[{"c\u0061chePoint":{"type":"default"}}]}]}`},
+		{"escaped in system", `{"system":[{"c\u0061che_control":` + ce + `}],"messages":[]}`},
+		{"escaped on message", `{"messages":[{"content":"x","c\u0061che_control":` + ce + `}]}`},
+	} {
+		if got := CountBreakpointsEscaped([]byte(c.body)).Total(); got != 1 {
+			t.Errorf("%s: escaped count %d, want 1", c.name, got)
+		}
+		if got := CountBreakpoints([]byte(c.body)).Total(); got != 0 {
+			t.Errorf("%s: hot-path count %d, want 0 (cache-only prefilter)", c.name, got)
+		}
+	}
+	if MayHoldBreakpoint(`{"text":"a \u003c b"}`) {
+		t.Error("MayHoldBreakpoint accepts a bare \\u escape; the hot path would parse most tool output")
 	}
 }
 

@@ -1247,7 +1247,8 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
 // structural cache_control / cachePoint field on a message, content block, system block, or tool.
-// It reads the one count (schema.CountBreakpoints), so it and the cap check never disagree.
+// It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
+// with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
 // Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
 // NOT flip the request into cache-aware mode (that would wrongly restrict offloaders to the tail
 // on a non-caching backend). The count's prefilter keeps an escaped key ("c\u0061che_control").
@@ -1255,7 +1256,7 @@ func hasCacheBreakpoint(body []byte) bool {
 	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
 		return false
 	}
-	return CountBreakpoints(body).Total() > 0
+	return schema.CountBreakpointsEscaped(body).Total() > 0
 }
 
 // prevLen / putLen track, per session, how many normalized messages the previous
