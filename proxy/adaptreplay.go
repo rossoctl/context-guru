@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"math"
 	"strings"
 
@@ -21,15 +22,15 @@ const (
 
 // fidMiss is the default miss rate of a request that only a ping kept alive, by model family.
 func fidMiss(model string) float64 {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "opus-5-5"):
+	switch fam := modelinfo.Family(model); {
+	case fam == modelinfo.FamilyOpus && strings.Contains(strings.ToLower(model), "opus-5-5"):
 		return 0.009
-	case strings.Contains(m, "sonnet"):
+	case fam == modelinfo.FamilySonnet:
 		return 0.013
-	case strings.Contains(m, "haiku"):
+	case fam == modelinfo.FamilyHaiku:
 		return 0.017
 	}
+	// Other opus ids and fable have no measured rate here: they get the default.
 	return 0.028
 }
 

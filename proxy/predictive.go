@@ -419,13 +419,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 }
 
 func familyOf(model string) string {
-	m := strings.ToLower(strings.TrimPrefix(model, "aws/"))
-	for _, f := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(m, f) {
-			return f
-		}
-	}
-	return "other"
+	return predictive.FamilyOf(model)
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.

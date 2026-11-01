@@ -64,10 +64,9 @@ const (
 // chargesCacheWritePremium reports whether this model bills a per-token surcharge
 // to create a prompt-cache entry.
 func chargesCacheWritePremium(model string) bool {
-	m := strings.ToLower(model)
 	// Bedrock and Vertex ids carry a vendor prefix ("aws/claude-opus-5",
-	// "anthropic.claude-3-5-sonnet"), so match on the substring, not a prefix.
-	return strings.Contains(m, "claude") || strings.Contains(m, "anthropic") || GPT56OrLater(m)
+	// "anthropic.claude-3-5-sonnet"), so IsClaude matches on the substring, not a prefix.
+	return IsClaude(model) || GPT56OrLater(model)
 }
 
 // GPT56OrLater reports whether an OpenAI GPT model uses the GPT-5.6+ cache rules.
