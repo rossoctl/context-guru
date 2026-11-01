@@ -449,7 +449,7 @@ func (p *Pipeline) FixedRestore() bool { return p != nil && p.fixedRestore }
 // builder, before the pipeline serves a request.
 func (p *Pipeline) SetInBandBreakpoint(on bool) { p.inBandBreakpoint = on }
 
-// InBandBreakpoint reports whether the host moves the client's last message breakpoint to the end
+// InBandBreakpoint reports whether the host moves the last cache_control in messages to the end
 // of an in-band follow-up request (#784). Nil-safe: false, the default.
 func (p *Pipeline) InBandBreakpoint() bool { return p != nil && p.inBandBreakpoint }
 

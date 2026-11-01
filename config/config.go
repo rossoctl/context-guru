@@ -62,7 +62,8 @@ type ExpandConfig struct {
 	// traffic. Anything that makes the anchor unusable (store eviction, a client-side compaction,
 	// an edited history) falls back to the off behaviour for that turn.
 	FixedRestore bool `yaml:"fixed_restore"`
-	// InBandBreakpoint, when true, moves the client's last message breakpoint to the end of each
+	// InBandBreakpoint, when true, moves the last cache_control in `messages`, whoever placed it, to
+	// the end of each
 	// in-band follow-up request (#784): the request the proxy sends upstream after it answered an
 	// expand call itself. The provider then caches the new content (the tool call and the expanded
 	// original) instead of billing it as plain input. The mark keeps the client's TTL and count.

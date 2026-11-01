@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/rossoctl/context-guru/components/reformat"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -45,9 +46,9 @@ func InBandBreakpointStats() (moved, noMark, notFound, tooFar int64) {
 }
 
 // lookbackBlocks is how far back from a breakpoint the provider looks for an earlier cache entry,
-// in content blocks. A breakpoint moved further than this from where the client put it loses the
-// read of the client's cached prefix, and the whole request is written again.
-const lookbackBlocks = 20
+// in content blocks: cacheinject's figure. A breakpoint moved further than this from where it was
+// loses the read of the cached prefix, and the whole request is written again.
+const lookbackBlocks = reformat.LookbackBlocks
 
 // ephemeralMark is the mark the splice anchor adds: the provider's default 5-minute tier.
 const ephemeralMark = `{"type":"ephemeral"}`
@@ -63,10 +64,17 @@ func blockPath(mi, bi int) string {
 // is skipped and counted. A non-empty from is the path of the cache_control to remove in the same
 // step: a MOVE, which keeps the count the client sent, so the cap can never be breached by it.
 //
-// A target that already holds a mark is left as it is. Any write error returns body unchanged.
-// ok reports whether the mark was placed.
+// A target that already holds a mark is left as it is. A target that is not a JSON object (a
+// bare string, number or null in a content array) is counted as not found and left as it is:
+// sjson would replace it whole with the mark, and its bytes would be lost. Any write error
+// returns body unchanged. ok reports whether the mark was placed.
 func placeBreakpoint(body []byte, target, mark, from string, st *placerStats) (out []byte, ok bool) {
-	if elemMarks(gjson.GetBytes(body, target)) > 0 {
+	tb := gjson.GetBytes(body, target)
+	if !tb.IsObject() {
+		st.notFound.Add(1)
+		return body, false
+	}
+	if elemMarks(tb) > 0 {
 		return body, false // already a breakpoint there; nothing to add
 	}
 	out = body
@@ -128,8 +136,8 @@ func anchorCacheBreakpoint(body []byte, toolID string) []byte {
 
 // MarkInBandFollowUp gives an in-band follow-up request the breakpoint the client would have
 // given it (#784). An in-band follow-up is a request the HOST sends upstream inside one client
-// request, after it answered a tool call itself: the expand continuation (expand.Continuation)
-// and #485's tool-search stub. It ends with content the client never sent — the assistant's
+// request, after it answered a tool call itself: the expand continuation (expand.Continuation),
+// and #485's tool-search stub when it lands. It ends with content the client never sent — the assistant's
 // tool_use and the host's tool_result — and no breakpoint covers it, so the provider bills it as
 // plain input and caches none of it.
 //
@@ -137,8 +145,9 @@ func anchorCacheBreakpoint(body []byte, toolID string) []byte {
 // 1h TTL) instead of billing it as plain input (1x). That pays only when a later request READS the
 // entry, which needs that request to carry the same bytes up to the mark. The caller owns that:
 //
-//   - #485's search stub splices the stored exchange back into the client's next request
-//     byte-identically, so the next turn reads it (probe: 474 tokens written without, 0 with).
+//   - #485's search stub, a future caller, will splice the stored exchange back into the client's
+//     next request byte-identically, so the next turn reads it (probe: 474 tokens written
+//     without, 0 with).
 //   - The expand continuation does NOT qualify, so the proxy calls this only when
 //     `expand.inband_breakpoint` is set. The client never sees the tool_use or the tool_result;
 //     its next request carries an assistant turn without the tool_use, and fixed_restore inserts a
@@ -149,7 +158,8 @@ func anchorCacheBreakpoint(body []byte, toolID string) []byte {
 // lookback from the moved mark (lookbackBlocks). A follow-up that adds more blocks than that after
 // the client's mark is left unmarked and counted as too far.
 //
-// It MOVES the client's last breakpoint in `messages` onto the last block of the last message,
+// It MOVES the last cache_control in `messages`, whoever placed it (the client, or the pipeline
+// before it), onto the last block of the last message,
 // with the same cache_control value, so the TTL the client asked for ("1h" stays "1h") is kept.
 // That is what Claude Code itself does on each new request. A move keeps the client's count, so
 // the provider's cap of 4 is never at risk, and breakpoints in `tools` and `system` are not
@@ -194,6 +204,10 @@ func MarkInBandFollowUp(wire string, body []byte) []byte {
 		return body
 	}
 	bi := len(blocks) - 1
+	if !blocks[bi].IsObject() {
+		inBandBreakpoint.notFound.Add(1) // a bare string, number or null takes no mark
+		return body
+	}
 	if t := blocks[bi].Get("type").String(); t == "thinking" || t == "redacted_thinking" {
 		inBandBreakpoint.notFound.Add(1) // the provider takes no cache_control on a thinking block
 		return body

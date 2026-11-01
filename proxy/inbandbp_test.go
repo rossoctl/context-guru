@@ -66,7 +66,7 @@ func TestEachInBandFollowUpCarriesTheClientsBreakpointAtItsEnd(t *testing.T) {
 		if last.Get("type").String() != "tool_result" || last.Get("cache_control").Raw != `{"type":"ephemeral","ttl":"1h"}` {
 			t.Fatalf("round %d: last block %s, want the proxy's tool_result with the client's 1h mark", n, last.Raw)
 		}
-		if got, want := strings.Count(string(b), `"cache_control"`), strings.Count(string(first), `"cache_control"`); got != want || want != 3 {
+		if got, want := apply.CountBreakpoints(b).Total(), apply.CountBreakpoints(first).Total(); got != want || want != 3 {
 			t.Fatalf("round %d: %d breakpoints, round 1 had %d; want 3 on both", n, got, want)
 		}
 		if gjson.GetBytes(b, "system").Raw != gjson.GetBytes(first, "system").Raw {

@@ -287,3 +287,31 @@ func TestAMarkPastTheLookbackIsNotMoved(t *testing.T) {
 		}
 	}
 }
+
+// Review #786 round 1: a last block that is not a JSON object must not be replaced by the mark.
+// sjson would overwrite the whole element, and its bytes would be lost.
+func TestANonObjectLastBlockKeepsItsBytes(t *testing.T) {
+	for _, last := range []string{`"x"`, `42`, `null`} {
+		body := `{"messages":[{"role":"user","content":[{"type":"text","text":"q","cache_control":{"type":"ephemeral"}}]},` +
+			`{"role":"user","content":[{"type":"text","text":"keep"},` + last + `]}]}`
+		_, _, nf, _ := InBandBreakpointStats()
+		out := MarkInBandFollowUp("anthropic", []byte(body))
+		_, _, nf2, _ := InBandBreakpointStats()
+		if string(out) != body {
+			t.Errorf("%s: body changed:\n%s", last, out)
+		}
+		if nf2 != nf+1 {
+			t.Errorf("%s: not_found rose by %d, want 1", last, nf2-nf)
+		}
+	}
+}
+
+// The shared placer refuses a non-object target on the add path too (the #723 anchor's).
+func TestThePlacerSkipsANonObjectTarget(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":["x"]}]}`
+	var st placerStats
+	out, ok := placeBreakpoint([]byte(body), blockPath(0, 0), ephemeralMark, "", &st)
+	if ok || string(out) != body || st.notFound.Load() != 1 || st.written.Load() != 0 {
+		t.Fatalf("ok=%v notFound=%d body=%s", ok, st.notFound.Load(), out)
+	}
+}
