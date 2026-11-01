@@ -121,3 +121,41 @@ func TestScopedEmptyTenantMatchesResolve(t *testing.T) {
 		t.Errorf("blank tenant added a namespace: %q", got)
 	}
 }
+
+func TestExplicitOrder(t *testing.T) {
+	m := map[string]string{"user_id": "u", "taskId": "t"}
+	get := func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	if got := Explicit("h", get); got != "h" {
+		t.Fatalf("header first, got %q", got)
+	}
+	if got := Explicit("", get); got != "u" {
+		t.Fatalf("user_id before taskId, got %q", got)
+	}
+	delete(m, "user_id")
+	if got := Explicit("", get); got != "t" {
+		t.Fatalf("taskId, got %q", got)
+	}
+	if got := Explicit("", nil); got != "" {
+		t.Fatalf("nil metadata, got %q", got)
+	}
+}
+
+func TestExplicitStrictSkipsPlainUserID(t *testing.T) {
+	m := map[string]string{"user_id": "user_42"}
+	get := func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	if got := ExplicitStrict("", get); got != "" {
+		t.Fatalf("plain user_id must be skipped, got %q", got)
+	}
+	if got := Explicit("", get); got != "user_42" {
+		t.Fatalf("Explicit keeps plain user_id, got %q", got)
+	}
+	m["user_id"] = `{"session_id":"s1"}`
+	if got := ExplicitStrict("", get); got != "s1" {
+		t.Fatalf("JSON form, got %q", got)
+	}
+	m["taskId"] = "t"
+	m["user_id"] = "user_42"
+	if got := ExplicitStrict("", get); got != "t" {
+		t.Fatalf("taskId after skipped user_id, got %q", got)
+	}
+}

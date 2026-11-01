@@ -286,8 +286,11 @@ substitute kind.
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
 `sha256(system + firstUser)[:16]` so two turns of one conversation land on the same key.
-Explicit id sources: proxy header `x-context-guru-session`; the external plugin's `pctx.Session`;
-eval-containers stamps it in the gateway.
+Explicit id sources: proxy header `x-context-guru-session`, then the agent's own id in the request
+metadata (`user_id` from Claude Code, `taskId` from Bob Shell; `session.Explicit`); the external
+plugin's `pctx.Session`; eval-containers stamps it in the gateway. The bifrost adapter uses
+`session.ExplicitStrict`: it takes `user_id` only in Claude Code's JSON form, because a plain
+`user_id` may name a user, not a conversation.
 
 ## Metrics
 

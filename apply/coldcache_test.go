@@ -446,7 +446,7 @@ func TestSessionTTLComposesAcrossBothIDs(t *testing.T) {
 		// The case the ALIAS alone cannot serve, and the reason both keys are read rather than
 		// the content hash being picked as canonical: the agent compacts its own context, so
 		// the transcript head changes and sha256(system+firstUser) moves with it. An explicit
-		// id survives that (see metaSessionKeys); the derived one does not.
+		// id survives that (see session.Explicit); the derived one does not.
 		{"the agent compacts its context, moving the alias", []struct {
 			at     time.Time
 			header string
