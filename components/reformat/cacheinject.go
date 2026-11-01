@@ -18,8 +18,8 @@ import (
 func init() { components.Register("cacheinject", newCacheinject) }
 
 // Cache-billing constants, from the provider docs. Identical on the Anthropic
-// API, Bedrock and Vertex; see docs/components/caching.md for the derivation
-// these drive.
+// API and the other providers that honour cache_control (modelinfo.HonoursCacheControl);
+// see docs/components/caching.md for the derivation these drive.
 const maxBreakpoints = 4 // hard provider cap on cache_control blocks per request
 
 // LookbackBlocks is kept for importers; use schema.LookbackBlocks.
@@ -290,7 +290,7 @@ func sortedDesc(m map[int]struct{}) []int {
 
 // cacheAware reports whether the provider honours Anthropic-style cache_control.
 func cacheAware(p schemas.ModelProvider) bool {
-	return modelinfo.HonoursCacheControl(string(p))
+	return modelinfo.HonoursCacheControl(p)
 }
 
 // --------------------------------------------------------------------------- //

@@ -209,5 +209,5 @@ func hashString(s string) uint64 {
 // Gemini-shaped wires cache an implicit longest prefix and stop at the divergence on
 // their own, so there is nothing for a block boundary to add there.
 func explicitBreakpointProvider(p bschemas.ModelProvider) bool {
-	return modelinfo.HonoursCacheControl(string(p))
+	return modelinfo.HonoursCacheControl(p)
 }

@@ -105,7 +105,7 @@ const reserveFrac = 0.25
 // have model/retention-dependent lifetimes and are not safe to schedule here.
 func eligible(p bschemas.ModelProvider, model, route string) bool {
 	switch {
-	case modelinfo.HonoursCacheControl(string(p)):
+	case modelinfo.HonoursCacheControl(p):
 		return true
 	case p == bschemas.OpenAI:
 		return route == "/v1/responses" && modelinfo.OpenAI30MinuteCache(string(p), model)

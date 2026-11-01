@@ -9,10 +9,8 @@ import bschemas "github.com/maximhq/bifrost/core/schemas"
 //
 // Bedrock Mantle serves Claude through the native Anthropic Messages surface
 // (`/anthropic/v1/messages`), so the same body, and the same `cache_control`, applies.
-//
-// The argument is the provider name as a string, as the other modelinfo gates take it.
-func HonoursCacheControl(provider string) bool {
-	switch bschemas.ModelProvider(provider) {
+func HonoursCacheControl(provider bschemas.ModelProvider) bool {
+	switch provider {
 	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
 		return true
 	}
