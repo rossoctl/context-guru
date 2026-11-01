@@ -456,6 +456,12 @@ func SweepMarkerID(original string) string { return hashKey(original) }
 // and the two ends of the text. It is a pure function of the bytes the agent sent, so a message that
 // did not change never changes it. A same-length edit that keeps both ends is missed, and a missed
 // change only means the apply waits for a cold request. It never applies a drop on a warm request.
+//
+// It does not use schema.CanonicalMessage or SpanHash (#787) on purpose. It runs for every message
+// on every turn, so it must stay cheap: it reads 96 bytes of text, not the whole body. It already
+// ignores cache_control and the string-or-block form, because it reads MessageText. It already covers
+// the tool ids and the argument length, which a text-only hash misses. Stored prints are guarded by
+// heldVersion, but a new hash would still void every held answer once.
 func msgPrint(m bschemas.ChatMessage) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(m.Role))

@@ -232,6 +232,14 @@ func hasBreakpoint(m *schemas.ChatMessage) bool {
 // digests returns a per-message content digest. Truncated to 8 bytes: this only
 // ever detects inequality, and a collision costs one missed optimisation, never
 // a wrong request.
+//
+// It hashes role and text only, and does not use schema.CanonicalMessage (#787) on purpose. The text
+// already ignores cache_control and the string-or-block form, which is all the canonical form adds.
+// The gap is real: an assistant message that only calls tools has empty text, so a change in its
+// tool calls is not seen. The cost is small: the divergence point reads late, and rule 3 puts one
+// breakpoint on a changed message (one wasted cache write). Closing it would change every stored
+// digest (`cg:cidx:` has no version field) and hash whole messages on every turn. That needs a
+// human's yes (see CLAUDE.md, behavior changes).
 func digests(msgs []schemas.ChatMessage) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
