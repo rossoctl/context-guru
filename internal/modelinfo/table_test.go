@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -226,6 +227,45 @@ func TestSpecificEntryBeatsAFamilyRegardlessOfMatchKind(t *testing.T) {
 	} {
 		if p, ok := tb.Price(context.Background(), id); ok {
 			t.Errorf("%s matched a Bob tier and was priced at $%.2f/MTok in", id, p.Input*1e6)
+		}
+	}
+}
+
+func TestTableParsesCompactionPoint(t *testing.T) {
+	tb, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1.0, out: 4.0, window: 200000, compaction_point: 167000}\n  - {match: \"aws/claude-sonnet-5\", in: 1.52, out: 7.6, window: 1000000}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if n, ok := tb.CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok || n != 167_000 {
+		t.Fatalf("compaction point = %d, %v, want 167000", n, ok)
+	}
+	if w, ok := tb.Window(ctx, "rits/zai-org/glm-5-3"); !ok || w != 200_000 {
+		t.Fatalf("the window must stay the real window, got %d", w)
+	}
+	if _, ok := tb.CompactionPoint(ctx, "aws/claude-sonnet-5"); ok {
+		t.Fatal("an entry with no compaction_point reported one")
+	}
+	if _, ok := (Chain{tb}).CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok {
+		t.Fatal("the chain did not pass the table's compaction point on")
+	}
+	if _, err := ParseTable([]byte("models:\n  - {match: x, in: 1, out: 1, compaction_point: -1}\n")); err == nil {
+		t.Fatal("a negative compaction_point was accepted")
+	}
+}
+
+func TestTableRejectsACompactionPointAboveItsWindow(t *testing.T) {
+	_, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1, out: 1, window: 200000, compaction_point: 250000}\n"))
+	if err == nil || !strings.Contains(err.Error(), "rits/zai-org/glm-5-3") {
+		t.Fatalf("err = %v, want a refusal that names the model", err)
+	}
+	// Not stated together: no check. A point alone is fine, and equal to the window is fine.
+	for _, y := range []string{
+		"models:\n  - {match: x, in: 1, out: 1, compaction_point: 250000}\n",
+		"models:\n  - {match: x, in: 1, out: 1, window: 200000, compaction_point: 200000}\n",
+	} {
+		if _, err := ParseTable([]byte(y)); err != nil {
+			t.Errorf("%q refused: %v", y, err)
 		}
 	}
 }

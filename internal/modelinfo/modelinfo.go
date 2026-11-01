@@ -296,6 +296,33 @@ func (c Chain) WindowExact(ctx context.Context, model string) (int, bool, bool) 
 	return 0, false, false
 }
 
+// CompactionPoint resolves an operator-stated compaction point (billed input tokens). The first link that
+// states one wins. Links that cannot state one are skipped.
+func (c Chain) CompactionPoint(ctx context.Context, model string) (int, bool) {
+	for _, r := range c {
+		if cp, ok := r.(interface {
+			CompactionPoint(context.Context, string) (int, bool)
+		}); ok {
+			if n, found := cp.CompactionPoint(ctx, model); found {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// OperatorCompactionPoint asks a resolver for the operator's stated compaction point (billed input tokens).
+// ok=false when the resolver cannot state one or states none. The capability is optional, as WindowExact is.
+func OperatorCompactionPoint(r Resolver, ctx context.Context, model string) (int, bool) {
+	cp, has := r.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	})
+	if !has {
+		return 0, false
+	}
+	return cp.CompactionPoint(ctx, model)
+}
+
 // Price tries each element that can price a model; the first ok wins. Elements
 // that only resolve windows are skipped, so a Chain{LiteLLM, Static} prices from
 // LiteLLM and reports unknown when it has not loaded.

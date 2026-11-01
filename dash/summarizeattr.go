@@ -131,11 +131,12 @@ func (d *DB) summarizerLedger(f Filter, windows modelinfo.Resolver, p modelinfo.
 		names = append(names, m)
 	}
 	list := kvcache.NewPriceList(ctx, names, p, kvcache.Multipliers{}, nil)
-	out := walkCompactEpisodes(rows,
+	out := walkCompactEpisodesWith(rows,
 		func(model string) (int, bool) {
 			w, exact, ok := modelinfo.Exact(windows, ctx, model)
 			return w, exact && ok
 		},
+		operatorPoint(ctx, windows),
 		list.For, 0, defaultFillFrac, 0)
 	return &out.Ledger, nil
 }
