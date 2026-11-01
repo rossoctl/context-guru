@@ -809,6 +809,8 @@ type warmApply struct {
 	cSource          string
 	// Sweep v3: D by what chose it (set before the gate runs, so every apply-stage decision line carries it).
 	ruleD map[string]int
+	// Sweep v3 dry run: how many drops the apply decided and did not make (the would-be cut's size).
+	dryDrops int
 	// Sweep v3 experiment premium: what the gate added to the saving, and whether the cost alone passed.
 	premium      float64
 	passedOnCost bool
@@ -832,7 +834,17 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	}}
 	var before map[string]bool
 	src.onClaim = func() { before = v3MarkedIDs(c, req) }
-	keys, changed = e.applyHeldFrom(src, nil, req, rep, c, tkey)
+	keys, changed, dryDrops := e.applyHeldFromDry(src, nil, req, rep, c, tkey)
+	if dryDrops > 0 {
+		// DRY RUN: a cold or changed-prefix cut that was decided and not applied.
+		C, cs := e.v3CutPoint(c)
+		cut := v3CutRec{p: c.PrevBilledInputThread, c: C, cSource: cs, judge: dryDrops, set: true}
+		if C > 0 {
+			cut.pShareC = float64(cut.p) / float64(C)
+		}
+		noteDryRunCut(tkey, cut, e.selector, false, 0)
+		return nil, 0
+	}
 	if changed > 0 {
 		// Sweep v3: a cold or changed-prefix apply is a cut. It is counted and it starts the growth wait.
 		e.v3ColdCut(c, req, tkey, claimed, before, nil)
@@ -847,13 +859,23 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 // the drop records, restore on a panic.
 func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
 	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int) {
+	keys, changed, _ = e.applyHeldFromDry(src, warm, req, rep, c, tkey)
+	return keys, changed
+}
+
+// applyHeldFromDry is applyHeldFrom that also reports how many drops a DRY RUN decided and did not make. It is 0
+// unless sweep v3's dry_run is on. The cold apply (warm == nil) reads it back without becoming a warm apply.
+func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
+	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int, dry int) {
+	dryCount := 0
+	defer func() { dry = dryCount }()
 
 	h, ok := src.get(tkey)
 	if !ok {
-		return nil, 0
+		return nil, 0, 0
 	}
 	if h.Attempts >= maxApplyAttempts {
-		return nil, 0
+		return nil, 0, 0
 	}
 	raw := req.Input
 	if c.RawInput != nil {
@@ -866,7 +888,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 	// drops after it cost nothing extra and need no gate. (A warm answer met by one is applied that way.)
 	warmGated := warm != nil && !cold && changePoint(raw, h) < 0
 	if !cold && !warmGated && changePoint(raw, h) < 0 {
-		return nil, 0 // warm and unchanged: H1. The answer stays held.
+		return nil, 0, 0 // warm and unchanged: H1. The answer stays held.
 	}
 	kind := "cold"
 	switch {
@@ -880,7 +902,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 	// spent for exactly one caller and hands back what it read.
 	claimed, won := src.claim(tkey)
 	if !won {
-		return nil, 0
+		return nil, 0, 0
 	}
 	h = claimed
 	// THE CHANGE POINT COMES FROM THE ANSWER THE CLAIM RETURNED, not from the one read above: a newer
@@ -894,7 +916,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			// this request carries). Nothing to apply on a warm request: give it back, unspent.
 			h.Spent = false
 			src.put(h)
-			return nil, 0
+			return nil, 0, 0
 		}
 	}
 
@@ -925,7 +947,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 					}
 				}
 			}()
-			keys, changed = nil, 0
+			keys, changed, dryCount = nil, 0, 0
 			rep.Event(eventApplyPanic)
 			sweepApplyPanics.Add(1)
 			func() {
@@ -974,7 +996,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			if carried := carryRefused(src, tkey, h, res); carried > 0 {
 				rep.EventN("sweep_warm_carried_drops", carried)
 			}
-			return nil, 0
+			return nil, 0, 0
 		}
 		rep.Event("sweep_warm_gate_accept")
 		rep.EventN("sweep_warm_rewrite_tokens", warm.rewriteBilled)
@@ -1004,6 +1026,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 	if e.v3 {
 		v3calls = v3Calls(req)
 	}
+	dryTokens := 0
 	for _, o := range now {
 		idx, ok := rawToolMessage(req.Input, o.ToolUseID)
 		if !ok {
@@ -1021,6 +1044,13 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 			continue
 		}
 		before := *msg
+		if e.v3 && e.dryRun {
+			// DRY RUN (sweep v3): the drop is decided, gated and logged as a real one, but never applied: no message
+			// changes, no stash, no marker, no record. The request goes out as if the sweep dropped nothing.
+			dryCount++
+			dryTokens += schema.TextTokens(content) - schema.TextTokens(sweepDescriptor(content))
+			continue
+		}
 		key, ok := applySweepDrop(c, rep, e.mode, msg, content)
 		if !ok {
 			rep.Event(eventApplyDeclined)
@@ -1037,6 +1067,15 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		changed++
 		if key != "" {
 			keys = append(keys, key)
+		}
+	}
+
+	// DRY RUN: the would-be drops are counted, and the answer is spent as a real apply would spend it (below). Nothing
+	// else was changed on this request.
+	if dryCount > 0 {
+		noteDryRunApply(tkey, kind, dryCount, dryTokens)
+		if warm != nil {
+			warm.dryDrops = dryCount
 		}
 	}
 
@@ -1113,7 +1152,7 @@ func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bsche
 		}
 	}
 	pending, committed = nil, nil // committed: nothing to restore
-	return keys, changed
+	return keys, changed, dryCount
 }
 
 // identsOf returns the identifier hashes recorded for a tool id by the recheck's index pass.

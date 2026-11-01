@@ -1,9 +1,11 @@
 package offload
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1604,5 +1606,214 @@ func TestV3ARereadIsCountedOncePerDropEvenWhenTheScanSeesItAgain(t *testing.T) {
 	r.request(178_000)
 	if got := v3Counters().Reread; got.Total != 1 || got.BySource[ruleFileReread] != 1 {
 		t.Fatalf("reread = %+v, want the one dropped read of a.txt counted once", got)
+	}
+}
+
+// ---- dry_run: everything runs, no drop is ever applied ----
+
+func dryText(req *bschemas.BifrostChatRequest) string {
+	return strings.Join(texts(req), "\x00")
+}
+
+// ⭐ A warm accept: the gate accepts a real cut, and in a dry run the request is untouched, nothing is stored, and
+// the would-be cut is booked with the numbers of a real one.
+func TestV3DryRunWarmAcceptForwardsTheRequestUntouched(t *testing.T) {
+	// The request as a pipeline with no sweep drops would forward it.
+	untouched := dryText(v3Conv(tCalls(), 9))
+	real := newV3Rig(t, "v3-dry-real", v3Rule)
+	real.request(0)
+	rreq, _ := real.request(175_000)
+	if dryText(rreq) == untouched || v3Counters().Cuts != 1 {
+		t.Fatalf("control: the real run must cut and change the request: cuts %d", v3Counters().Cuts)
+	}
+	realDecision, _ := lastWarmDecision()
+	resetWarmForTest()
+
+	r := newV3Rig(t, "v3-dry", v3Rule+"dry_run: true\n")
+	r.request(0)
+	req, rep := r.request(175_000)
+	if dryText(req) != untouched {
+		t.Fatal("the dry run changed the forwarded request")
+	}
+	if rep.Events[eventAppliedWarm] != 0 || len(dropped(req)) != 0 || len(rep.Events) != 0 && rep.Events[eventAppliedWarm] != 0 {
+		t.Fatalf("events = %v, a dry run applied something", rep.Events)
+	}
+	v := v3Counters()
+	if v.Cuts != 0 || v.DryRunCuts != 1 || v.DryRunDrops != 2 {
+		t.Fatalf("stats = %+v, want 0 real cuts, 1 dry-run cut of 2 drops", v)
+	}
+	if n := DropRecordsForTest(r.st, thread.Key("v3-dry", "")); n != 0 {
+		t.Fatalf("the dry run wrote %d drop records", n)
+	}
+	// The gate's decision is the real run's, number for number.
+	d, _ := lastWarmDecision()
+	if !d.Accept || d.RuleD[ruleFileReread] != realDecision.RuleD[ruleFileReread] || d.Saving != realDecision.Saving || d.Rewrite != realDecision.Rewrite {
+		t.Fatalf("dry decision %+v differs from the real %+v", d, realDecision)
+	}
+	if len(v.DryRunRecent) != 1 || v.DryRunRecent[0].DShareP < 0.15 || v.DryRunRecent[0].PShareC < 0.87 {
+		t.Fatalf("dry_run_recent_cuts = %+v, want a real cut's numbers", v.DryRunRecent)
+	}
+}
+
+func TestV3DryRunLogsTheCutWithARealCutsFields(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(old)
+	r := newV3Rig(t, "v3-dry-log", v3Rule+"dry_run: true\n")
+	r.request(0)
+	r.request(175_000)
+	line := ""
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "cg.sweep.dry_run_cut") {
+			line = l
+		}
+	}
+	for _, f := range []string{"billed_prompt=175000", "cut_point=200000", "c_source=", "dropped_billed=", "d_share_of_p=", "p_share_of_c=", "rule_d=", "passed_on_cost=", "premium_usd="} {
+		if !strings.Contains(line, f) {
+			t.Fatalf("the dry_run_cut line lacks %q: %q", f, line)
+		}
+	}
+	if !strings.Contains(line, "file_reread:") || !strings.Contains(line, "build_rerun:") {
+		t.Fatalf("rule_d must split D by rule: %q", line)
+	}
+}
+
+// A would-be cut does not start the growth wait: the next paced request asks again, as it would before a first cut.
+func TestV3DryRunDoesNotStartTheGrowthWait(t *testing.T) {
+	r := newV3Rig(t, "v3-dry-wait", v3Rule+"dry_run: true\n")
+	r.request(0)
+	for i := 0; i < 4; i++ {
+		r.request(175_000)
+	}
+	v := v3Counters()
+	if v.DryRunCuts < 3 || r.refused("waiting_for_growth") != 0 {
+		t.Fatalf("dry cuts %d, waiting_for_growth %d: a dry run must keep attempting, with no wait", v.DryRunCuts, r.refused("waiting_for_growth"))
+	}
+	warmMu.Lock()
+	t0 := warmThreads[thread.Key("v3-dry-wait", "")]
+	await, base := t0.v3Await, t0.v3Baseline
+	warmMu.Unlock()
+	if await || base != 0 {
+		t.Fatalf("a dry run set the growth wait: await %v baseline %d", await, base)
+	}
+}
+
+// Hybrid: the judge is asked, its answer is held and rechecked, the gate decides, and still nothing is applied.
+func TestV3DryRunHybridAsksTheJudgeAndStillDropsNothing(t *testing.T) {
+	a := pingAsker()
+	r := newV3Rig(t, "v3-dry-hyb", v3Hybrid+"dry_run: true\n")
+	r.asker = a
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(175_000)
+	}
+	r.forward()
+	req, _ := r.request(175_000)
+	if atomic.LoadInt64(&a.calls) == 0 {
+		t.Fatal("a dry run must still ask the judge")
+	}
+	if len(dropped(req)) != 0 || DropRecordsForTest(r.st, thread.Key("v3-dry-hyb", "")) != 0 {
+		t.Fatal("the dry run applied a drop")
+	}
+	if v := v3Counters(); v.DryRunCuts != 1 || v.DryRunDrops != 6 || v.Cuts != 0 {
+		t.Fatalf("stats = %+v, want one dry-run cut of 6 drops (2 rule, 4 judge)", v)
+	}
+}
+
+// Rule mode stays a rule mode: no model call, in a dry run too.
+func TestV3DryRunRuleModeMakesNoModelCall(t *testing.T) {
+	a := pingAsker()
+	r := newV3Rig(t, "v3-dry-rule", v3Rule+"dry_run: true\n")
+	r.asker = a
+	r.request(0)
+	// Past the pace of the question (warm_every_n 3), several times, with every request in the sweet spot.
+	for i := 0; i < 9; i++ {
+		r.request(175_000)
+		r.forward()
+	}
+	if n := atomic.LoadInt64(&a.calls); n != 0 {
+		t.Fatalf("a dry run in rule mode made %d model calls", n)
+	}
+	if v3Counters().DryRunCuts == 0 {
+		t.Fatal("fixture: the dry run made no would-be cut")
+	}
+}
+
+// A cold apply of a held answer: the cold branch of v3 and the Store path both apply nothing.
+func TestV3DryRunColdApplyOfAHeldAnswerDropsNothing(t *testing.T) {
+	st, _ := heldFor(t, shippedSweep(t, ""), "v3-dry-cold", refConversation(3))
+	e := shippedSweep(t, v3Base+"selector: judge\nprotect_last_n: 0\ndry_run: true\n")
+	req := refConversation(3)
+	before := dryText(req)
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, coldCtx("v3-dry-cold", st)); err != nil {
+		t.Fatal(err)
+	}
+	if dryText(req) != before || len(rep.Events) != 0 && rep.Events[eventAppliedCold] != 0 {
+		t.Fatalf("the cold dry run changed the request or applied: %v", rep.Events)
+	}
+	if DropRecordsForTest(st, thread.Key("v3-dry-cold", "")) != 0 {
+		t.Fatal("the cold dry run wrote a drop record")
+	}
+	if v := v3Counters(); v.DryRunCuts != 1 || v.DryRunDrops != 3 || v.Cuts != 0 {
+		t.Fatalf("stats = %+v, want one dry-run cut of 3 drops", v)
+	}
+}
+
+// The v3 cold branch: a held MEMORY answer on a cold request.
+func TestV3DryRunColdBranchOfAMemoryAnswerDropsNothing(t *testing.T) {
+	r := newV3Rig(t, "v3-dry-coldmem", v3Hybrid+"dry_run: true\n")
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(175_000)
+	}
+	r.forward()
+	req := v3Conv(r.calls, 12)
+	c := coldCtx(r.session, r.st)
+	c.PrefixAsk = r.asker
+	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint = r.window, true, r.c
+	c.PrevBilledInput, c.PrevBilledInputThread = 175_000, 175_000
+	before := dryText(req)
+	if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
+		t.Fatal(err)
+	}
+	if dryText(req) != before || len(dropped(req)) != 0 {
+		t.Fatal("the cold branch of a dry run changed the request")
+	}
+	if v := v3Counters(); v.DryRunCuts != 1 || v.Cuts != 0 {
+		t.Fatalf("stats = %+v, want one dry-run cut and no real cut", v)
+	}
+}
+
+// dry_run does nothing without v3, and on its own it switches v3 on, like every v3 setting.
+func TestV3DryRunIsOffByDefaultAndDoesNothingWithoutWarm(t *testing.T) {
+	if e := shippedSweep(t, v3Rule); e.dryRun {
+		t.Fatal("dry_run is on by default")
+	}
+	if e := shippedSweep(t, "dry_run: true\n"); e.v3 || e.dryRun {
+		t.Fatalf("dry_run without warm must do nothing: v3 %v dry %v", e.v3, e.dryRun)
+	}
+	if e := shippedSweep(t, warmCfg+"dry_run: true\n"); !e.v3 || !e.dryRun {
+		t.Fatalf("dry_run with warm must switch v3 on: %+v", e)
+	}
+}
+
+// With dry_run off the real run is what it was: a cut is applied and the growth wait starts.
+func TestV3DryRunOffIsTheRealRun(t *testing.T) {
+	r := newV3Rig(t, "v3-dry-off", v3Rule)
+	r.request(0)
+	req, rep := r.request(175_000)
+	if rep.Events[eventAppliedWarm] != 2 || len(dropped(req)) != 2 {
+		t.Fatalf("events %v", rep.Events)
+	}
+	if v := v3Counters(); v.Cuts != 1 || v.DryRunCuts != 0 || v.DryRunDrops != 0 {
+		t.Fatalf("stats = %+v", v)
+	}
+	warmMu.Lock()
+	await := warmThreads[thread.Key("v3-dry-off", "")].v3Await
+	warmMu.Unlock()
+	if !await {
+		t.Fatal("a real cut must start the growth wait")
 	}
 }
