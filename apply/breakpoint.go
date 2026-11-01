@@ -191,7 +191,7 @@ func anchorCacheBreakpoint(body []byte, toolID string) []byte {
 // every other wire this is a no-op. Fails open: any unexpected shape or error returns body
 // unchanged.
 func MarkInBandFollowUp(wire string, body []byte) []byte {
-	if wire != "anthropic" {
+	if wire != schema.WireAnthropic {
 		return body
 	}
 	msgs := gjson.GetBytes(body, "messages").Array()

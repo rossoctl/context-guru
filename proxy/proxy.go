@@ -2074,7 +2074,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					recIncomplete = record.IncompleteRetainCap
 				}
 			}
-		case isSSE && wire == "responses" && expand.HasMarkersInMessages(body):
+		case isSSE && schema.IsResponses(wire) && expand.HasMarkersInMessages(body):
 			// Responses' terminal event includes the complete output array. Buffer
 			// only when a model-visible marker exists: advertising stays stable
 			// across turns, while marker-free ordinary traffic keeps streaming.

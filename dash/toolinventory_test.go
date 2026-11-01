@@ -1032,11 +1032,53 @@ func TestUsedFromResponsesCountsCustomCallsAndKeepsTheRun(t *testing.T) {
 	}
 }
 
-// Skills, deferred tools and the system prompt are read off Chat and Anthropic bodies. The
-// Responses reading is a follow-up; until then the page must say "unknown", never "none".
-func TestScanInventoryResponsesMarksTheSkillsListingUnknown(t *testing.T) {
-	body := []byte(`{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],
-	  "input":[{"type":"message","role":"developer","content":"` + skills.Header + `\n- dataviz: charts\n"}]}`)
+// The skills listing of a Responses body sits in `instructions` or in a system or developer item
+// of `input`. The inventory reads it with the finder the declaration filter uses
+// (skills.LocateResponses), so the page and the filter read the same string (#817).
+func TestScanInventoryResponsesReadsTheSkillsListing(t *testing.T) {
+	listing := skills.Header + `\n- dataviz: charts\n- plan: plans\n`
+	for name, body := range map[string]string{
+		"instructions": `{"instructions":"` + listing + `","tools":[{"type":"function","name":"Bash","parameters":{}}],"input":[]}`,
+		"input item": `{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],
+		  "input":[{"type":"message","role":"developer","content":"` + listing + `"}]}`,
+		"input text block": `{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+		  "input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"` + listing + `"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			inv := ScanInventory(schema.WireResponses, []byte(body))
+			if inv == nil {
+				t.Fatal("no inventory")
+			}
+			var skillNames []string
+			for _, d := range inv.Decls {
+				if d.Kind == KindSkill {
+					skillNames = append(skillNames, d.Name)
+				}
+				if d.Kind == KindSkillListing && d.Server != SkillsOK {
+					t.Errorf("listing state = %q, want %q", d.Server, SkillsOK)
+				}
+			}
+			sort.Strings(skillNames)
+			if strings.Join(skillNames, ",") != "dataviz,plan" {
+				t.Errorf("skills = %v, want dataviz and plan", skillNames)
+			}
+		})
+	}
+}
+
+// The system prompt of a Responses body is `instructions`.
+func TestScanInventoryResponsesReadsTheInstructions(t *testing.T) {
+	inv := ScanInventory(schema.WireResponses, []byte(`{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],"input":[]}`))
+	if inv == nil || inv.System == nil || inv.System.Text != "be brief" {
+		t.Errorf("system = %+v, want the instructions", inv)
+	}
+}
+
+// A header that no system or developer text holds (here, a tool result that printed it) is NOT a
+// listing. The page says "unknown", never "none" and never a skill from a command's output.
+func TestScanInventoryResponsesUnreadListingIsUnknown(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"function_call_output","call_id":"c","output":"` + skills.Header + `\n- dataviz: charts\n"}]}`)
 	inv := ScanInventory(schema.WireResponses, body)
 	if inv == nil {
 		t.Fatal("no inventory")
@@ -1047,22 +1089,41 @@ func TestScanInventoryResponsesMarksTheSkillsListingUnknown(t *testing.T) {
 			marker = &inv.Decls[i]
 		}
 		if d.Kind == KindSkill {
-			t.Errorf("a skill row %q from a body that was not read", d.Name)
+			t.Errorf("a skill row %q from a tool result", d.Name)
 		}
 	}
 	if marker == nil || marker.Server != SkillsUnknown {
 		t.Errorf("listing marker = %+v, want state %q", marker, SkillsUnknown)
 	}
-	if inv.System == nil || inv.System.Text != "be brief" {
-		t.Errorf("system = %+v, want the instructions", inv.System)
+}
+
+// Deferred tools in a Responses `input` item are read with internal/deferred.
+func TestScanInventoryResponsesReadsDeferredTools(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"message","role":"user","content":"` + deferred.Header + `\nmcp__ctx__query-docs\nmcp__ctx__resolve\n\nnext"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var names []string
+	for _, d := range inv.Decls {
+		if d.Kind == KindDeferredListing {
+			t.Errorf("deferred marker %+v on a list that was read", d)
+		}
+		if d.Kind == KindMCPTool {
+			names = append(names, d.Name)
+		}
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "mcp__ctx__query-docs,mcp__ctx__resolve" {
+		t.Errorf("deferred tools = %v, want both", names)
 	}
 }
 
-// A Responses body whose deferred list sits in `input` is not read. The page must say "unknown",
-// never show an empty set of deferred tools (#817, until #822 reads `input`).
-func TestScanInventoryResponsesMarksDeferredToolsUnknown(t *testing.T) {
+// A deferred header in a tool result is not a list: the page says "unknown", not "none".
+func TestScanInventoryResponsesUnreadDeferredIsUnknown(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
-	  "input":[{"type":"message","role":"user","content":"` + deferred.Header + `\nmcp__ctx__query-docs\n\nnext"}]}`)
+	  "input":[{"type":"function_call_output","call_id":"c","output":"` + deferred.Header + `\nmcp__ctx__query-docs\n\nnext"}]}`)
 	inv := ScanInventory(schema.WireResponses, body)
 	if inv == nil {
 		t.Fatal("no inventory")
@@ -1073,7 +1134,7 @@ func TestScanInventoryResponsesMarksDeferredToolsUnknown(t *testing.T) {
 			marker = &inv.Decls[i]
 		}
 		if d.Kind == KindMCPTool {
-			t.Errorf("an MCP row %q from a list that was not read", d.Name)
+			t.Errorf("an MCP row %q from a tool result", d.Name)
 		}
 	}
 	if marker == nil || marker.Server != SkillsUnknown {

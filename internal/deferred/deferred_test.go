@@ -58,3 +58,15 @@ func TestTextsSkipsToolResults(t *testing.T) {
 		t.Errorf("Texts = %q, want only the user text block", got)
 	}
 }
+
+func TestTextsResponses(t *testing.T) {
+	l := Header + `\nmcp__a__b\n`
+	body := `{"instructions":"` + l + `","input":[
+	  {"role":"user","content":"` + l + `"},
+	  {"role":"developer","content":[{"type":"input_text","text":"` + l + `"}]},
+	  {"role":"assistant","content":"` + l + `"},
+	  {"type":"function_call_output","output":"` + l + `"}]}`
+	if got := len(TextsResponses([]byte(body))); got != 3 {
+		t.Errorf("texts = %d, want 3 (instructions, user, developer; not assistant or a tool result)", got)
+	}
+}

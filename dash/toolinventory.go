@@ -237,22 +237,22 @@ func ScanInventory(wire string, body []byte) *Inventory {
 	if !hit {
 		decls = declsFrom(wire, tools)
 		if deferred {
-			if schema.IsResponses(wire) {
-				// deferredDecls walks `messages`, which a Responses body does not have. Say "not
-				// read". The real reading of `input` is a follow-up after #822.
+			if texts := deferredTexts(wire, body); len(texts) > 0 {
+				decls = mergeDeferred(decls, deferredDeclsFrom(texts))
+			} else if schema.IsResponses(wire) {
+				// The header is in the body but no user, system or developer text holds it (a
+				// tool result, say). Say "not read", not "no deferred tools".
 				decls = append(decls, Decl{Kind: KindDeferredListing, Server: SkillsUnknown})
-			} else {
-				decls = mergeDeferred(decls, deferredDecls(body))
 			}
 		}
 		if region != "" {
-			if schema.IsResponses(wire) {
-				// skillsText walks `messages`, which a Responses body does not have: the listing is
-				// in `input`. Say "not read" rather than let the page read "no listing". The real
-				// reading of `input` is a follow-up, after skillsText moves to internal/skills.
+			text := skillsText(wire, body)
+			if text == "" && schema.IsResponses(wire) {
+				// The header is in the body, but not in `instructions` or a system or developer
+				// item. Say "not read", not "no listing".
 				decls = append(decls, Decl{Kind: KindSkillListing, Server: SkillsUnknown})
 			} else {
-				decls = append(decls, skillDecls(skillsText(body))...)
+				decls = append(decls, skillDecls(text)...)
 			}
 		}
 		declMu.Lock()
@@ -404,9 +404,22 @@ const maxListing = 256 << 10
 // skillsText returns the UNESCAPED listing text. Only called on a digest miss (once per
 // distinct declaration set). The finder is internal/skills's, the one the declaration filter
 // uses, so the page and the filter read the same string.
-func skillsText(body []byte) string {
+func skillsText(wire string, body []byte) string {
+	if schema.IsResponses(wire) {
+		_, text := skills.LocateResponses(body)
+		return text
+	}
 	_, text := skills.Locate(body)
 	return text
+}
+
+// deferredTexts is the text that can hold a deferred list: the finder of the wire, in
+// internal/deferred.
+func deferredTexts(wire string, body []byte) []string {
+	if schema.IsResponses(wire) {
+		return deferred.TextsResponses(body)
+	}
+	return deferred.Texts(body)
 }
 
 // skillDecls parses the skill listing out of a {"role":"system"} message.
@@ -483,10 +496,13 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 // APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
 // name costs a little more than a short one. Removing a tool gives back its own line, not the
 // header, so an equal share of the whole is a fair bound, not an exact figure.
-func deferredDecls(body []byte) []Decl {
+func deferredDecls(body []byte) []Decl { return deferredDeclsFrom(deferred.Texts(body)) }
+
+// deferredDeclsFrom parses the lists in texts, from either wire's finder.
+func deferredDeclsFrom(texts []string) []Decl {
 	var out []Decl
 	seen := map[string]bool{}
-	for _, text := range deferred.Texts(body) {
+	for _, text := range texts {
 		out = appendDeferred(out, seen, text)
 	}
 	return out

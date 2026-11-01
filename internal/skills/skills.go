@@ -237,6 +237,27 @@ func Locate(body []byte) (path, text string) {
 	return path, text
 }
 
+// LocateResponses finds the listing in a Responses body: in `instructions`, else in the first
+// system or developer item of `input`. It returns the sjson path of the string that holds it and
+// that string, "" when there is none. The declaration filter (apply) and the dashboard both call
+// it, as they call Locate for the chat form.
+func LocateResponses(body []byte) (path, text string) {
+	if !bytes.Contains(body, []byte(Header)) {
+		return "", ""
+	}
+	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.Contains(instructions.String(), Header) {
+		return "instructions", instructions.String()
+	}
+	gjson.GetBytes(body, "input").ForEach(func(idx, item gjson.Result) bool {
+		if role := item.Get("role").String(); role != "system" && role != "developer" {
+			return true
+		}
+		path, text = LocateIn(item.Get("content"), "input."+idx.String()+".content")
+		return path == ""
+	})
+	return path, text
+}
+
 // LocateIn finds the header in one `content` value (a string, or an array of blocks with a
 // `text` field) at path, and returns the path of the string that holds it and that string.
 func LocateIn(content gjson.Result, path string) (string, string) {

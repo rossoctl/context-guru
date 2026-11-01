@@ -118,6 +118,37 @@ func Texts(body []byte) []string {
 	return out
 }
 
+// TextsResponses is Texts for a Responses body: the `instructions` string, and the text of every
+// user, system or developer item of `input`. As in Texts, a function_call_output (a tool result)
+// is never read.
+func TextsResponses(body []byte) []string {
+	var out []string
+	if ins := gjson.GetBytes(body, "instructions"); ins.Type == gjson.String && strings.Contains(ins.String(), Header) {
+		out = append(out, ins.String())
+	}
+	gjson.GetBytes(body, "input").ForEach(func(_, it gjson.Result) bool {
+		if !strings.Contains(it.Raw, Header) {
+			return true
+		}
+		if r := it.Get("role").String(); r != "user" && r != "system" && r != "developer" {
+			return true
+		}
+		c := it.Get("content")
+		if c.Type == gjson.String {
+			out = append(out, c.String())
+			return true
+		}
+		c.ForEach(func(_, blk gjson.Result) bool {
+			if t := blk.Get("type").String(); t == "text" || t == "input_text" {
+				out = append(out, blk.Get("text").String())
+			}
+			return true
+		})
+		return true
+	})
+	return out
+}
+
 // List is one parsed list: its tool names and the byte range of the list in the text.
 type List struct {
 	Names      []string
