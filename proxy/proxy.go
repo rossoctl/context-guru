@@ -2139,6 +2139,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			bail() // malformed shapes — fail open, hand the response over unchanged
 			return
 		}
+		if tn.Pipe.InBandBreakpoint() {
+			// The follow-up ends with content the client never sent. The client's last message
+			// breakpoint moves onto it, so the provider caches it (#784). Off by default: the
+			// client's next request does not carry this content, so nothing reads the entry.
+			// No-op off Anthropic.
+			next = apply.MarkInBandFollowUp(wire, next)
+		}
 		// Counted only once the continuation exists, NOT when the answer was composed. Incrementing
 		// before this point double-counted: a Continuation failure bails, the tool_use reaches the
 		// client after all, and the request-path repair then counts the very same stray a second time
@@ -2442,6 +2449,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.CacheAwareSummarizerNoPrefix = offload.CacheAwareSummarizerNoPrefix()
 	snap.PrefixStashOversized = PrefixStashOversized()
 	snap.CacheAnchorWritten, snap.CacheAnchorNoSlot, snap.CacheAnchorNotFound = apply.CacheAnchorStats()
+	snap.CacheInBandBPMoved, snap.CacheInBandBPNoMark, snap.CacheInBandBPNotFound, snap.CacheInBandBPTooFar =
+		apply.InBandBreakpointStats()
 	snap.CacheAwareSummarizerStalePrefix = offload.CacheAwareSummarizerStalePrefix()
 	snap.CacheAwareSummarizerCoordsShifted = offload.CacheAwareSummarizerCoordsShifted()
 	snap.CacheAwareSummarizerPrefixAskUsed = offload.CacheAwareSummarizerPrefixAskUsed()

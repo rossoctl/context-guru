@@ -832,6 +832,15 @@ type Snapshot struct {
 	CacheAnchorWritten  int64 `json:"cache_anchor_written"`
 	CacheAnchorNoSlot   int64 `json:"cache_anchor_no_slot"`
 	CacheAnchorNotFound int64 `json:"cache_anchor_not_found"`
+	// in-band follow-up breakpoints (#784): the client's last message breakpoint moved to the end
+	// of a follow-up the proxy sent after answering an expand, a follow-up whose client request had
+	// no message breakpoint to move, one whose last block cannot take a breakpoint, and one whose
+	// new content is longer than the provider's 20-block lookback. All zero unless
+	// expand.inband_breakpoint is on
+	CacheInBandBPMoved    int64 `json:"cache_inband_bp_moved"`
+	CacheInBandBPNoMark   int64 `json:"cache_inband_bp_no_mark"`
+	CacheInBandBPNotFound int64 `json:"cache_inband_bp_not_found"`
+	CacheInBandBPTooFar   int64 `json:"cache_inband_bp_too_far"`
 	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")

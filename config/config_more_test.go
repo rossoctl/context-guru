@@ -356,3 +356,24 @@ func TestExpandFixedRestoreReachesThePipeline(t *testing.T) {
 		t.Error("a typo'd expand key was accepted")
 	}
 }
+
+// `expand.inband_breakpoint` (#784) is off unless set.
+func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: off\n": false,
+		"preset: off\nexpand:\n  inband_breakpoint: true\n":  true,
+		"preset: off\nexpand:\n  inband_breakpoint: false\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.InBandBreakpoint() != want {
+			t.Errorf("%q: InBandBreakpoint() = %v, want %v", doc, pipe.InBandBreakpoint(), want)
+		}
+	}
+}

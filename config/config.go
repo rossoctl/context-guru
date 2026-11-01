@@ -62,6 +62,16 @@ type ExpandConfig struct {
 	// traffic. Anything that makes the anchor unusable (store eviction, a client-side compaction,
 	// an edited history) falls back to the off behaviour for that turn.
 	FixedRestore bool `yaml:"fixed_restore"`
+	// InBandBreakpoint, when true, moves the client's last message breakpoint to the end of each
+	// in-band follow-up request (#784): the request the proxy sends upstream after it answered an
+	// expand call itself. The provider then caches the new content (the tool call and the expanded
+	// original) instead of billing it as plain input. The mark keeps the client's TTL and count.
+	//
+	// Off (the default) because a cache write costs more than plain input (1.25x, 2x for 1h) and
+	// nothing reads this entry: the client never sees the in-band tool call, so its next request
+	// diverges before the mark. Only a later round of the same loop can read it. See
+	// apply.MarkInBandFollowUp.
+	InBandBreakpoint bool `yaml:"inband_breakpoint"`
 }
 
 // CacheConfig is the `cache:` block: provider prompt-cache policy that lives above the
@@ -908,6 +918,7 @@ func (c *Config) Build(e components.Emitter) (*components.Pipeline, error) {
 	}
 	pipe := components.NewPipeline(comps, e)
 	pipe.SetFixedRestore(c.Expand.FixedRestore)
+	pipe.SetInBandBreakpoint(c.Expand.InBandBreakpoint)
 	return pipe, nil
 }
 
