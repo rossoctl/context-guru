@@ -142,8 +142,8 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 		// turns so the representation never flips at depth.
 		//
 		// This gate used to read `if c.CacheAware && ...` — per REQUEST rather than per
-		// message. resolveCacheAware is true by default for Anthropic/Bedrock/Vertex, so
-		// that form declined every new collapse at every depth and the component could
+		// message. resolveCacheAware is true by default for every provider that honours cache_control
+		// (modelinfo.HonoursCacheControl), so that form declined every new collapse at every depth and the component could
 		// never act at all on the flagship workload; the escape hatch below was
 		// unreachable too, because the only freeze() call is DOWNSTREAM of this gate, so
 		// no first freeze could ever be established for a repair to recover.

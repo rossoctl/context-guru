@@ -811,7 +811,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		if ok && explicitBreakpointProvider(provider) {
 			// The splicing component's kept tool_result, marked so the next turn can read the cache
 			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
-			// carries tool_result blocks and explicit breakpoints (Anthropic, Bedrock, Vertex): an
+			// carries tool_result blocks and explicit breakpoints (explicitBreakpointProvider): an
 			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
 		}
@@ -1033,8 +1033,8 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	if bodyAsksExtendedTTL(body) {
 		return TTLEphemeral1h
 	}
-	switch provider {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(provider):
 		return TTLEphemeral5m
 	default:
 		// Every other backend's cache, where it has one, is not on Anthropic's 5-minute
