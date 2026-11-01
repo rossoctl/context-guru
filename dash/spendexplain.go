@@ -33,8 +33,8 @@ const (
 	rewriteFrac = 0.8
 	// rewriteMinCtx keeps a 300-token request from being reported as a rewrite.
 	rewriteMinCtx = 2000
-	ttl5m         = 5 * 60 * 1000
-	ttl1h         = 60 * 60 * 1000
+	ttl5m         = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
+	ttl1h         = int64(modelinfo.AnthropicCacheTTL1h / time.Millisecond)
 	liveLookback  = 2 * 60 * 60 * 1000
 )
 
@@ -173,7 +173,7 @@ type SpendLedger struct {
 
 type spendRow struct {
 	ts                               int64
-	session, model, thread           string
+	session, model, thread, provider string
 	tools, sysBlocks, messages       int
 	fresh, read, write, write1h, out int64
 	cost, baseline, cgllm, kaSaved   float64
@@ -193,9 +193,12 @@ type threadState struct {
 	ttl      int64
 }
 
-func ttlFor(write1h int64, prev int64) int64 {
-	if write1h > 0 {
-		return ttl1h
+// ttlFor is the lifetime in ms of the entry a row wrote or read: the shared rule
+// (modelinfo.CacheLifetime) from the BILLED tier. A row that billed no 1h write keeps prev, the
+// tier the entry was written at, unless the provider has one fixed lifetime (OpenAI).
+func ttlFor(provider string, write1h int64, prev int64) int64 {
+	if _, fixed := modelinfo.FixedCacheLifetime(provider); fixed || write1h > 0 {
+		return modelinfo.CacheLifetime(provider, write1h > 0).Milliseconds()
 	}
 	return prev
 }
@@ -262,7 +265,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	// kaSavedSince stops the credit's ping half at the counted window (f.Since, not the warm-up
 	// span): PingUSD below counts pings inside the window only, so a ping before it must not
 	// bring a saving in with no cost beside it (#678).
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.provider, r.tools, r.system_blocks,
 		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
 		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSavedSince("r.", f.Since)+`, r.keepalive,
 		r.manual_ping, r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
@@ -290,7 +293,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		var r spendRow
 		var ka, mp int
 		var acct string
-		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
+		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.provider, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
 			&r.fresh, &r.read, &r.write, &r.write1h, &r.out, &r.cost, &r.baseline, &r.cgllm,
 			&r.kaSaved, &ka, &mp, &acct); err != nil {
 			return nil, err
@@ -320,7 +323,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			st = &threadState{ttl: ttl5m}
 			threads[tk] = st
 		}
-		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.write1h, ttl5m)
+		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.provider, r.write1h, ttl5m)
 		if r.write1h == 0 && r.write == 0 && prev != nil {
 			st.ttl = prev.ttl // a pure read keeps the tier the entry was written at
 		}
@@ -513,7 +516,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	lf := Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Since: now - liveLookback, WithKeepAlive: true}
 	cond, args := lf.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.messages,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.provider, r.messages,
 		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h FROM requests r
 		WHERE `+cond+` AND r.token_accounting = 'complete' ORDER BY r.ts`, args...)
 	if err != nil {
@@ -522,14 +525,15 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	defer rows.Close()
 	type acc struct {
 		LiveSession
-		touch int64
+		touch    int64
+		provider string
 	}
 	by := map[string]*acc{}
 	for rows.Next() {
 		var ts, fresh, read, write, w1h int64
-		var sess, model string
+		var sess, model, provider string
 		var msgs int
-		if err := rows.Scan(&ts, &sess, &model, &msgs, &fresh, &read, &write, &w1h); err != nil {
+		if err := rows.Scan(&ts, &sess, &model, &provider, &msgs, &fresh, &read, &write, &w1h); err != nil {
 			return nil, err
 		}
 		ctx := fresh + read + write
@@ -542,6 +546,7 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 		a.touch = ts                                   // the last request of ANY thread refreshed some cache entry
 		if ctx*2 >= a.Context || ts-a.LastTS > ttl1h { // keep the main thread's numbers
 			if ctx >= a.Context/2 {
+				a.provider = provider
 				a.Model, a.LastTS, a.Context, a.Messages = model, ts, ctx, msgs
 				a.TTL1h = w1h > 0 || (a.TTL1h && write == 0)
 			}
@@ -552,10 +557,7 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	}
 	var out []LiveSession
 	for _, a := range by {
-		a.TTLMs = ttl5m
-		if a.TTL1h {
-			a.TTLMs = ttl1h
-		}
+		a.TTLMs = modelinfo.CacheLifetime(a.provider, a.TTL1h).Milliseconds()
 		a.LastTS = a.touch
 		out = append(out, a.LiveSession)
 	}

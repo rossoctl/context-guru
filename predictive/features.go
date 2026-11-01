@@ -174,10 +174,10 @@ func (t *Tracker) closeGap(p pendingGap, nextStartMs int64) {
 			t.cells[k] = c
 		}
 		c.n++
-		if gap <= 300 {
+		if gap <= kvcache.Horizon5m.Seconds() {
 			c.h5++
 		}
-		if gap <= 3600 {
+		if gap <= kvcache.Horizon1h.Seconds() {
 			c.h1++
 		}
 	}

@@ -24,7 +24,7 @@ type CacheState struct {
 	// than LastTS+TTL says. Equal to LastTS when the duration is unknown.
 	EndTS      int64 `json:"end_ts"`
 	NowMS      int64 `json:"now_ms"` // server clock, so a client with skew can still count down
-	TTLSeconds int64 `json:"ttl_s"`  // 3600 if the last cache write was billed at the 1h tier, else 300
+	TTLSeconds int64 `json:"ttl_s"`  // 1800 on OpenAI, 3600 if the last cache write was billed at the 1h tier, else 300
 	// PrefixTokens is what the last request sent: fresh + cache_read + cache_write. If the cache
 	// is cold, this is what the next send rewrites.
 	PrefixTokens int64 `json:"prefix_tokens"`
@@ -226,7 +226,7 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 const maxCacheThreads = 16
 
 // threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 3600
-// for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
+// for the 1h tier, 1800 on OpenAI, else 300. A thread with no write is absent (ThreadsFor then uses 300).
 func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	q, args := cacheTTLQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
@@ -249,6 +249,13 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
+// billedLifetimeSQL is the cache lifetime in seconds of the write on row alias: 1800 on OpenAI,
+// else 3600 when the row was billed at the 1h tier, else 300. One rule with the Go side
+// (modelinfo.CacheLifetime), taken from the BILLED tier.
+func billedLifetimeSQL(alias string) string {
+	return modelinfo.CacheLifetimeSQL(alias+"provider", alias+"cache_write_1h > 0", time.Second)
+}
+
 // cacheTTLQuery is threadTTLs' one statement: GROUP BY thread over the session's cache writes
 // (agent rows and pings, any status), with the TTL taken as a bare column from the row that holds
 // the one MAX(ts), so from the thread's latest write. It replaces a correlated subquery per
@@ -257,7 +264,7 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 // window, a model) do not change which tier the provider's cache entry is on.
 func cacheTTLQuery(f Filter) (string, []any) {
 	cond, args := withKeepAlive(Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Session: f.Session}).where()
-	return `SELECT r.thread_id, MAX(r.ts), CASE WHEN r.cache_write_1h > 0 THEN 3600 ELSE 300 END
+	return `SELECT r.thread_id, MAX(r.ts), ` + billedLifetimeSQL("r.") + `
 		FROM requests r WHERE ` + cond + ` AND r.cache_write > 0 GROUP BY r.thread_id`, args
 }
 
@@ -324,7 +331,7 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 		upMS  float64
 	)
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.ts, r.upstream_ms, r.model, r.fresh_input, r.cache_read, r.cache_write, r.keepalive,
-		COALESCE((SELECT CASE WHEN w.cache_write_1h > 0 THEN 3600 ELSE 300 END FROM requests w
+		COALESCE((SELECT `+billedLifetimeSQL("w.")+` FROM requests w
 			WHERE w.session_id = r.session_id AND w.tenant_id = r.tenant_id AND w.cache_write > 0
 			ORDER BY w.ts DESC LIMIT 1), 300)
 		FROM requests r WHERE `+cond+` AND r.status BETWEEN 200 AND 299

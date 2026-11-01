@@ -1559,14 +1559,7 @@ func (e *kaEntry) cacheTTL() time.Duration { return cacheLifetime(e.provider, e.
 // 30 minutes on OpenAI (the GPT-5.6+ minimum; the one-hour tier is never set there), else 1 hour
 // on the one-hour tier, else 5 minutes.
 func cacheLifetime(provider bschemas.ModelProvider, ttl1h bool) time.Duration {
-	switch {
-	case provider == bschemas.OpenAI:
-		return modelinfo.OpenAIMinimumCacheTTL
-	case ttl1h:
-		return time.Hour
-	default:
-		return 5 * time.Minute
-	}
+	return modelinfo.CacheLifetime(string(provider), ttl1h)
 }
 
 // giveBackFailedPing undoes Sweep's stamp for a ping that failed in transport, so the next sweep

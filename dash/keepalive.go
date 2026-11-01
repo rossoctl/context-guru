@@ -44,7 +44,7 @@ import (
 // addressability test and it gates every count, every dollar and every percentile on this tab.
 
 // ttlTTL is the provider's default prompt-cache lifetime. The coverage arithmetic rests on it.
-const ttlTTL = 300 * time.Second
+const ttlTTL = modelinfo.AnthropicCacheTTL5m
 
 // addressableCTE is the shared read used by the behaviour panels, the calculator's own history
 // and the recommendation. ONE definition, so the panels cannot disagree with each other about
@@ -190,11 +190,8 @@ func kaSavedGate(alias, pingFloor string) string {
 			WHERE kp.keepalive = 1 AND kp.cache_read > 0
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
-			  AND kp.ts + (CASE WHEN kp.provider = 'openai' THEN ` +
-		strconv.FormatInt(apply.OpenAIMinimumCacheTTL.Milliseconds(), 10) +
-		` WHEN ` + alias + `cache_ttl = '` + apply.TTLEphemeral1h + `' THEN ` +
-		strconv.FormatInt(providerCacheTTL1hMs, 10) + ` ELSE ` +
-		strconv.FormatInt(providerCacheTTLMs, 10) + ` END) >= ` + alias + `ts)
+			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
+		alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)
 		THEN ` + col + ` ELSE 0 END)`
 }
 
@@ -955,7 +952,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 
 // ttlTTL1h is the provider's extended prompt-cache lifetime, for sessions whose last write
 // landed in the one-hour tier.
-const ttlTTL1h = time.Hour
+const ttlTTL1h = modelinfo.AnthropicCacheTTL1h
 
 // write1hMultiple is the provider's published price for a ONE-HOUR cache write: 2.0x base
 // input, against 1.25x for the five-minute tier and 0.1x for a read.
@@ -1077,7 +1074,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
 	// tell is whether this session's most recent write was a one-hour write.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH t AS (
-		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model,
+		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model, r.provider AS provider,
 		       r.cache_read + r.cache_write AS prefix,
 		       ROW_NUMBER() OVER w AS rn,
 		       COUNT(*) OVER w2 AS turns,
@@ -1088,7 +1085,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
 		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
-		SELECT session_id, tenant_id, model, turns, ts, prefix,
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider,
 		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
@@ -1105,14 +1102,12 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	for rows.Next() {
 		var r KeepAliveLiveRow
 		var oneHour int
+		var provider string
 		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
-			&r.Prefix, &oneHour); err != nil {
+			&r.Prefix, &provider, &oneHour); err != nil {
 			return nil, err
 		}
-		ttl := ttlTTL
-		if oneHour == 1 {
-			ttl = ttlTTL1h
-		}
+		ttl := modelinfo.CacheLifetime(provider, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
 		r.RemainingSeconds = float64(r.LastTS+ttl.Milliseconds()-now) / 1000
 		if r.RemainingSeconds <= 0 {
