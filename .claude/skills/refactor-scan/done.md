@@ -2,6 +2,8 @@
 
 Do not report these again, unless a new copy of the same concern appeared.
 
+## 2026-11-01 run
+
 Rows are findings that were reported and got an issue or a PR. A row is not proof that the fix
 merged. If a PR in this table closes without a merge, delete its row, so the next run reports that
 duplicate again.

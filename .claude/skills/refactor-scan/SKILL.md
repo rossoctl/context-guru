@@ -96,6 +96,8 @@ Past examples. Read these PRs to see the shape of a good fix:
    issues for them.
 8. When main moves, rebase each PR. Compare the PR's own `+`/`-` lines before and after the rebase.
    If they are the same, the approvals still hold. If they differ, run one more review round.
+   Also run one more round if main gained new code in the same files: a new copy of the rule
+   the PR unifies can land there, and CI does not catch that.
 9. Send each PR to the release integrator only when it has green CI and 2 approvals at its final
    head. The user's yes for each behavior change must be in the integrator's own session.
 
