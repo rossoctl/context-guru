@@ -199,6 +199,18 @@ type CacheConfig struct {
 	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
 	// requests that pay the premium and can never produce a large miss.
 	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
+	// TailBreakpoint adds one cache breakpoint at the end of a request whose client put its last
+	// breakpoint far from the end (#795): Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+	// puts it on the user's text and appends a ~3k-token `system` message after it, which the
+	// provider then bills as plain input. The new mark copies the client's TTL, never takes the
+	// 5th slot, and is added only when more than ~1k tokens follow the client's mark. See
+	// apply.markTail.
+	//
+	// On by default (nil = on), because a live test showed a gain: $0.0574 to $0.0424 a run, 3
+	// runs each way, and no change with default settings. `tail_breakpoint: false` turns it off.
+	// A pipeline with no components (`preset: off`) never runs it, so the A/B control arm stays a
+	// passthrough.
+	TailBreakpoint *bool `yaml:"tail_breakpoint"`
 }
 
 // Keep-alive and head-TTL defaults. Named constants because the same numbers are asserted
@@ -920,6 +932,7 @@ func (c *Config) Build(e components.Emitter) (*components.Pipeline, error) {
 	pipe := components.NewPipeline(comps, e)
 	pipe.SetFixedRestore(c.Expand.FixedRestore)
 	pipe.SetInBandBreakpoint(c.Expand.InBandBreakpoint)
+	pipe.SetTailBreakpoint(len(comps) > 0 && (c.Cache.TailBreakpoint == nil || *c.Cache.TailBreakpoint))
 	return pipe, nil
 }
 

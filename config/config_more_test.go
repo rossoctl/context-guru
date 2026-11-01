@@ -377,3 +377,26 @@ func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
 		}
 	}
 }
+
+// `cache.tail_breakpoint` (#795) is on unless set to false, and never on an empty pipeline.
+func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: cache\n": true,
+		"preset: cache\ncache:\n  tail_breakpoint: true\n":  true,
+		"preset: cache\ncache:\n  tail_breakpoint: false\n": false,
+		"preset: off\n": false,
+		"preset: off\ncache:\n  tail_breakpoint: true\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.TailBreakpoint() != want {
+			t.Errorf("%q: TailBreakpoint() = %v, want %v", doc, pipe.TailBreakpoint(), want)
+		}
+	}
+}

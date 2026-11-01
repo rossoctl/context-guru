@@ -841,6 +841,15 @@ type Snapshot struct {
 	CacheInBandBPNoMark   int64 `json:"cache_inband_bp_no_mark"`
 	CacheInBandBPNotFound int64 `json:"cache_inband_bp_not_found"`
 	CacheInBandBPTooFar   int64 `json:"cache_inband_bp_too_far"`
+	// tail breakpoints (#795): a breakpoint added at the end of a request whose client put its
+	// last one far from the end, a request with no free slot for it, one whose client mark already
+	// sits near the end, one whose client put no mark in messages, and one whose last block cannot
+	// take a mark. All zero when cache.tail_breakpoint is false
+	CacheTailBPAdded     int64 `json:"cache_tail_bp_added"`
+	CacheTailBPNoSlot    int64 `json:"cache_tail_bp_no_slot"`
+	CacheTailBPNotNeeded int64 `json:"cache_tail_bp_not_needed"`
+	CacheTailBPNoMark    int64 `json:"cache_tail_bp_no_mark"`
+	CacheTailBPNotFound  int64 `json:"cache_tail_bp_not_found"`
 	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")
