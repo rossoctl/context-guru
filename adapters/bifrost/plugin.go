@@ -73,8 +73,8 @@ func (p *Plugin) PostLLMHook(_ *bschemas.BifrostContext, resp *bschemas.BifrostR
 }
 
 // resolveSession prefers an explicit id set on the context (from a header),
-// then the agent's own id in the request metadata (session.Explicit, the same rule the proxy
-// uses), falling back to a hash of the system prompt + first user message.
+// then the agent's own id in the request metadata (session.ExplicitStrict: the proxy's rule
+// without a plain per-user user_id), falling back to a hash of the system prompt + first user message.
 func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.BifrostChatRequest) string {
 	explicit := ""
 	if v := ctx.Value(SessionContextKey); v != nil {
@@ -85,9 +85,8 @@ func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.Bif
 	sys, firstUser := schema.SessionHead(chat.Input)
 	var meta func(string) (string, bool)
 	if chat.Params != nil && chat.Params.Metadata != nil {
-		md := *chat.Params.Metadata // a map header: no copy
 		meta = func(k string) (string, bool) {
-			s, ok := md[k].(string)
+			s, ok := (*chat.Params.Metadata)[k].(string)
 			return s, ok
 		}
 	}

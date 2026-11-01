@@ -143,7 +143,7 @@ func explicit(header string, metaString func(key string) (string, bool), plainUs
 			if !ok {
 				continue
 			}
-			if k == "user_id" && !plainUserID && !strings.HasPrefix(strings.TrimSpace(v), "{") {
+			if k == "user_id" && !plainUserID && !isJSONObject(v) {
 				continue
 			}
 			cands = append(cands, v)
@@ -152,14 +152,19 @@ func explicit(header string, metaString func(key string) (string, bool), plainUs
 	return ExplicitID(cands...)
 }
 
+// isJSONObject reports whether v looks like Claude Code's JSON-object user_id.
+func isJSONObject(v string) bool {
+	return strings.HasPrefix(strings.TrimSpace(v), "{")
+}
+
 // metaSessionID unwraps Claude Code's JSON-object user_id, or returns v unchanged.
 // Every malformed shape (truncated JSON, an object without session_id, a nested
 // non-string session_id) yields "", which ExplicitID treats as "no candidate".
 func metaSessionID(v string) string {
-	s := strings.TrimSpace(v)
-	if !strings.HasPrefix(s, "{") {
+	if !isJSONObject(v) {
 		return v
 	}
+	s := strings.TrimSpace(v)
 	if len(s) > maxMetadataLen {
 		return ""
 	}
