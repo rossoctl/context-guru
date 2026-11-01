@@ -77,7 +77,7 @@ form has no explanation of what each choice does; use those for the two rows tha
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
 | **Upstream base URL** | *(empty)* | something else is already the gateway (a corporate proxy, a hosted-agent pod) — set it to whatever `ANTHROPIC_BASE_URL` already contains so context-guru chains behind it instead of replacing it |
 | **Client signals** | `off` | you want the proxy to stop keeping a session's cache warm once you exit it or it is compacted. Needs a proxy started with `CONTEXT_GURU_CLIENT_SIGNALS=on`; see [Client lifecycle signals](cache-keepalive.md#client-lifecycle-signals-opt-in) |
-| **Beep** | `on` | you do not want a sound. The plugin plays a short sound when Claude finishes a turn or waits for you. Set `off` to silence it. To silence one shell only, run `export CONTEXT_GURU_BEEP=off` before you start Claude Code. The sound is local: nothing is sent anywhere. It uses `afplay` on macOS, `paplay` or `aplay` on Linux, and a terminal bell if none is installed |
+| **Beep** | `on` | you do not want a sound. The plugin plays a short sound when Claude finishes a turn or waits for you. Set `off` to silence it. To silence one shell only, run `export CONTEXT_GURU_BEEP=off` before you start Claude Code. The value is not case-sensitive. The sound also plays in scripted `claude -p` runs. The sound is local: nothing is sent anywhere. It uses `afplay` on macOS, `paplay` or `aplay` on Linux, and a terminal bell if none is installed |
 
 ## You do not need an API key
 

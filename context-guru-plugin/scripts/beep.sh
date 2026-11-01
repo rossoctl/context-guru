@@ -14,7 +14,7 @@
 # Never blocks and never fails: every exit is 0. A machine with no way to play a sound stays silent.
 set -uo pipefail
 MODE="${CONTEXT_GURU_BEEP:-${CLAUDE_PLUGIN_OPTION_BEEP:-on}}"
-case "$MODE" in
+case "$(printf %s "$MODE" | tr '[:upper:]' '[:lower:]' 2>/dev/null)" in
   off | 0 | false | no) exit 0 ;;
 esac
 cat >/dev/null 2>&1 # drain the payload so Claude Code never sees a broken pipe
@@ -27,6 +27,6 @@ elif command -v paplay >/dev/null 2>&1 && [ -f /usr/share/sounds/freedesktop/ste
 elif command -v aplay >/dev/null 2>&1 && [ -f /usr/share/sounds/alsa/Front_Center.wav ]; then
   play aplay -q /usr/share/sounds/alsa/Front_Center.wav
 else
-  printf '\a' >/dev/tty 2>/dev/null
+  { printf '\a' >/dev/tty; } 2>/dev/null
 fi
 exit 0
