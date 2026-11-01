@@ -57,6 +57,14 @@ const campaignLegacyMinPrefixTokens = 20000
 // (which prefers 280) or the gate.
 const campaignKeepAlive5mIdle = 240
 
+// The spacing of the arms that keep the simulator's schedule: 280 s on the 5-minute tier, 3360 s
+// (56 min) on the 1-hour tier. They read the simulator's constants, so the two cannot drift. The
+// live default is another value (config.DefaultKeepAliveIdle1h is 59 min); see the PR for #NNN.
+const (
+	campaignLegacyIdle5m = int(kvcache.DefaultPingIdle / time.Second)
+	campaignLegacyIdle1h = int(kvcache.DefaultPingIdle1h / time.Second)
+)
+
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
 
@@ -125,22 +133,21 @@ func campaignArmFor(arm string) campaignArm {
 		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: campaignDefaultMaxPings,
 			minPrefixTokens: campaignDefaultMinPrefixTokens}
 	case kvcache.StrategyKeepAlive5mOnce:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+		return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: 1,
 			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyStopReasonGated:
-		return campaignArm{activatable: true, idleSeconds: 280, maxPings: campaignDefaultMaxPings,
+		return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: campaignDefaultMaxPings,
 			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold,
 			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1h:
-		// 3360s = kvcache.DefaultPingIdle1h — "the same margin against the one-hour
-		// lifetime" the simulator itself ships as this arm's default cadence.
+		// campaignLegacyIdle1h is the simulator's own default cadence for this arm.
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: 3360, maxPings: campaignDefaultMaxPings,
+			idleSeconds: campaignLegacyIdle1h, maxPings: campaignDefaultMaxPings,
 			headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
 			minPrefixTokens:  campaignLegacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1hOnce:
 		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: 3360, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
+			idleSeconds: campaignLegacyIdle1h, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
 			minPrefixTokens: campaignLegacyMinPrefixTokens}
 	}
 	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
@@ -148,7 +155,7 @@ func campaignArmFor(arm string) campaignArm {
 	// keepalive-5m's for K >= 2 (the 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
 	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
 		if k == 1 {
-			return campaignArm{activatable: true, idleSeconds: 280, maxPings: 1,
+			return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: 1,
 				minPrefixTokens: campaignLegacyMinPrefixTokens}
 		}
 		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: k,

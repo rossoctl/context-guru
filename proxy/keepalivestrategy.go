@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -191,7 +192,7 @@ func betterStrategy(candidate, current *tenant.Strategy) bool {
 // hold the same span in the first place (KeepAlive.Describe(): "one twelfth as many
 // refreshes as the 5-minute arm").
 const (
-	maxOverrideIdle1h  = 3590 * time.Second
+	maxOverrideIdle1h  = modelinfo.AnthropicCacheLifetime1h - 10*time.Second
 	maxOverridePings1h = 3
 )
 
@@ -219,10 +220,10 @@ const (
 func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing float64,
 	headTTL1h bool, headTTLMinTokens int) error {
 	maxIdle, maxPings := maxOverrideIdle, maxOverridePings
-	lifetime := 300
+	lifetime := int(modelinfo.AnthropicCacheLifetime5m / time.Second)
 	if headTTL1h {
 		maxIdle, maxPings = maxOverrideIdle1h, maxOverridePings1h
-		lifetime = 3600
+		lifetime = int(modelinfo.AnthropicCacheLifetime1h / time.Second)
 	}
 	if idle < minOverrideIdle || idle > maxIdle {
 		return fmt.Errorf(

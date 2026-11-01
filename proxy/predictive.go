@@ -19,6 +19,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -384,7 +385,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	spec := pc.spec // an auto campaign's refresh swaps it (refreshAutoCampaigns)
 	pc.mu.Unlock()
 	rule := spec.RuleFor(&facts)
-	kk, idle := 0, 280.0
+	kk, idle := 0, kvcache.DefaultPingIdle.Seconds()
 	var row *predictive.Row
 	if pc.model != nil { // the tracker must see every response, whichever rule the segment applies
 		row = predictive.NewRow()

@@ -53,7 +53,7 @@ const (
 	// for no reason; above 290 s the first ping arrives after a 300 s lifetime has already
 	// lapsed and pays a 1.25x WRITE — the exact charge the mechanism exists to avoid.
 	minOverrideIdle = 60 * time.Second
-	maxOverrideIdle = 290 * time.Second
+	maxOverrideIdle = modelinfo.AnthropicCacheLifetime5m - 10*time.Second
 	// The ping-count band. The upper end is bounded again, and more tightly, by the credential
 	// hold below.
 	minOverridePings = 1
