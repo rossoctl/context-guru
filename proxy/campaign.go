@@ -59,7 +59,7 @@ const campaignKeepAlive5mIdle = 240
 
 // The spacing of the arms that keep the simulator's schedule: 280 s on the 5-minute tier, 3360 s
 // (56 min) on the 1-hour tier. They read the simulator's constants, so the two cannot drift. The
-// live default is another value (config.DefaultKeepAliveIdle1h is 59 min); see the PR for #NNN.
+// live default is another value (config.DefaultKeepAliveIdle1h is 59 min); see #808.
 const (
 	campaignLegacyIdle5m = int(kvcache.DefaultPingIdle / time.Second)
 	campaignLegacyIdle1h = int(kvcache.DefaultPingIdle1h / time.Second)
