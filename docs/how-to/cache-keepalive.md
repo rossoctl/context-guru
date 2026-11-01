@@ -313,7 +313,8 @@ turns.
 - **Turn it off** with `tail_breakpoint: false`. The `off` preset never adds it. The switch is
   there mainly to debug a cache-cost problem. We know no reason today to turn it off as a rule.
 - **Counters** on `/stats`: `cache_tail_bp_added`, `_no_slot`, `_not_needed`, `_no_mark`,
-  `_not_found`.
+  `_not_found`. `_not_needed` is the sum of `_at_end` (the client's mark is already at the end,
+  or the last block already holds a mark) and `_short_tail` (4 KiB or less follow it).
 
 ```yaml
 cache:

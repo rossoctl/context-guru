@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/rossoctl/context-guru/components/reformat"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,9 +22,11 @@ type placerStats struct {
 	noMark   atomic.Int64 // a move was skipped: the client put no breakpoint in messages
 	notFound atomic.Int64 // no block to put the mark on
 	tooFar   atomic.Int64 // a move was skipped: the target is past the provider's lookback
-	// notNeeded: the client's last mark already covers all but a little of the request, or the
-	// target already holds a mark. Only the tail step reports it
-	notNeeded atomic.Int64
+	// atEnd: the client's last mark already sits at the very end, or the target already holds a
+	// mark. shortTail: the client's last mark is followed by more than 0 and at most tailMinBytes
+	// bytes. Only the tail step reports them
+	atEnd     atomic.Int64
+	shortTail atomic.Int64
 }
 
 // Cache-anchor counters (#723): anchors written, anchors skipped for want of a free breakpoint slot,
@@ -33,7 +35,8 @@ var cacheAnchor placerStats
 
 // In-band counters (#784): breakpoints moved to the end of a follow-up, follow-ups whose client
 // request had no message breakpoint to move, follow-ups whose last block cannot take one, and
-// follow-ups whose new content is longer than the provider's lookback.
+// follow-ups whose new content is longer than the provider's lookback. noSlot stays 0: a move never
+// needs a free slot.
 var inBandBreakpoint placerStats
 
 // CacheAnchorStats reports the cache-anchor counters: written, no free slot, block not found.
@@ -49,21 +52,22 @@ func InBandBreakpointStats() (moved, noMark, notFound, tooFar int64) {
 }
 
 // Tail-breakpoint counters (#795): breakpoints added at the end of a client request, requests
-// with no free slot, requests whose last mark already sits near the end, requests whose client
-// put no mark in messages, and requests whose last block cannot take a mark.
+// with no free slot, requests whose last mark already sits at the end, requests with only a short
+// tail after it, requests whose client put no mark in messages, and requests whose last block
+// cannot take a mark.
 var tailBreakpoint placerStats
 
-// TailBreakpointStats reports the tail-breakpoint counters: added, no free slot, not needed, no
-// client mark, no target.
-func TailBreakpointStats() (added, noSlot, notNeeded, noMark, notFound int64) {
-	return tailBreakpoint.written.Load(), tailBreakpoint.noSlot.Load(), tailBreakpoint.notNeeded.Load(),
-		tailBreakpoint.noMark.Load(), tailBreakpoint.notFound.Load()
+// TailBreakpointStats reports the tail-breakpoint counters: added, no free slot, mark at the end,
+// short tail, no client mark, no target.
+func TailBreakpointStats() (added, noSlot, atEnd, shortTail, noMark, notFound int64) {
+	return tailBreakpoint.written.Load(), tailBreakpoint.noSlot.Load(), tailBreakpoint.atEnd.Load(),
+		tailBreakpoint.shortTail.Load(), tailBreakpoint.noMark.Load(), tailBreakpoint.notFound.Load()
 }
 
 // lookbackBlocks is how far back from a breakpoint the provider looks for an earlier cache entry,
-// in content blocks: cacheinject's figure. A breakpoint moved further than this from where it was
+// in content blocks: the figure cacheinject reads too. A breakpoint moved further than this from where it was
 // loses the read of the cached prefix, and the whole request is written again.
-const lookbackBlocks = reformat.LookbackBlocks
+const lookbackBlocks = schema.LookbackBlocks
 
 // ephemeralMark is the mark the splice anchor adds: the provider's default 5-minute tier.
 const ephemeralMark = `{"type":"ephemeral"}`
@@ -90,7 +94,7 @@ func placeBreakpoint(body []byte, target, mark, from string, st *placerStats) (o
 		return body, false
 	}
 	if elemMarks(tb) > 0 {
-		st.notNeeded.Add(1)
+		st.atEnd.Add(1)
 		return body, false // already a breakpoint there; nothing to add
 	}
 	out = body
@@ -220,8 +224,8 @@ func MarkInBandFollowUp(wire string, body []byte) []byte {
 // at the end of the request goes on, and the body to write it into. A string content has no block
 // to carry the mark, so it becomes the one text block it means; only this request carries the
 // change, the client never sees it, and the provider renders the two the same way (schema/canon.go).
-// A last block that is not an object (a bare string, number or null) or is a thinking block takes
-// no mark: counted on st as not found, ok false.
+// A last block that is not an object (a bare string, number or null), is a thinking block or is
+// an empty text block takes no mark: counted on st as not found, ok false.
 func lastBlockTarget(body []byte, last int, st *placerStats) (work []byte, target string, ok bool) {
 	work = body
 	mp := "messages." + strconv.Itoa(last) + ".content"
@@ -248,6 +252,10 @@ func lastBlockTarget(body []byte, last int, st *placerStats) (work []byte, targe
 	}
 	if t := blocks[bi].Get("type").String(); t == "thinking" || t == "redacted_thinking" {
 		st.notFound.Add(1) // the provider takes no cache_control on a thinking block
+		return body, "", false
+	}
+	if blocks[bi].Get("type").String() == "text" && blocks[bi].Get("text").String() == "" {
+		st.notFound.Add(1) // the provider rejects cache_control on an empty text block
 		return body, "", false
 	}
 	return work, blockPath(last, bi), true
@@ -296,16 +304,16 @@ func markTail(body []byte) (out []byte, ok bool) {
 		tailBreakpoint.noMark.Add(1)
 		return body, false
 	}
-	if bytesAfter(msgs, from) <= tailMinBytes {
-		tailBreakpoint.notNeeded.Add(1)
+	switch n := bytesAfter(msgs, from); {
+	case n == 0:
+		tailBreakpoint.atEnd.Add(1)
+		return body, false
+	case n <= tailMinBytes:
+		tailBreakpoint.shortTail.Add(1)
 		return body, false
 	}
 	work, target, ok := lastBlockTarget(body, len(msgs)-1, &tailBreakpoint)
 	if !ok {
-		return body, false
-	}
-	if tb := gjson.GetBytes(work, target); tb.Get("type").String() == "text" && tb.Get("text").String() == "" {
-		tailBreakpoint.notFound.Add(1) // the provider rejects cache_control on an empty text block
 		return body, false
 	}
 	if out, ok = placeBreakpoint(work, target, mark, "", &tailBreakpoint); !ok {

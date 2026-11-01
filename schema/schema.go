@@ -25,6 +25,11 @@ import (
 // the adapter renders bytes back out.
 type Provider = schemas.ModelProvider
 
+// LookbackBlocks is how far the provider's backward read-walk reaches from a cache_control
+// breakpoint, in content blocks. Here so cacheinject and the host's breakpoint steps
+// (apply.MarkInBandFollowUp) read one figure; see docs/components/caching.md.
+const LookbackBlocks = 20
+
 // MessagesTokens estimates the token cost of a request's messages by counting
 // the message CONTENT text — what the model actually reads — not the JSON
 // envelope. This is the signal the never-worse gate needs: control metadata

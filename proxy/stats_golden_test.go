@@ -64,6 +64,8 @@ var statsGoldenTopLevel = []string{
 	"cache_tail_bp_added",
 	"cache_tail_bp_no_slot",
 	"cache_tail_bp_not_needed",
+	"cache_tail_bp_at_end",
+	"cache_tail_bp_short_tail",
 	"cache_tail_bp_no_mark",
 	"cache_tail_bp_not_found",
 	"cache_aware_summarizer_stale_prefix",
