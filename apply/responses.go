@@ -103,19 +103,7 @@ func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 		if role := item.Get("role").String(); role != "system" && role != "developer" {
 			return true
 		}
-		content := item.Get("content")
-		if content.Type == gjson.String && strings.Contains(content.String(), skills.Header) {
-			path, text = "input."+idx.String()+".content", content.String()
-			return false
-		}
-		content.ForEach(func(bidx, block gjson.Result) bool {
-			v := block.Get("text")
-			if v.Type == gjson.String && strings.Contains(v.String(), skills.Header) {
-				path, text = "input."+idx.String()+".content."+bidx.String()+".text", v.String()
-				return false
-			}
-			return true
-		})
+		path, text = skills.LocateIn(item.Get("content"), "input."+idx.String()+".content")
 		return path == ""
 	})
 	return path, text
