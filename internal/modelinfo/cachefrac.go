@@ -12,6 +12,13 @@ const (
 	OpenAIDefaultKeepAliveIdle = OpenAIMinimumCacheTTL - 2*time.Minute
 )
 
+// The provider's cache lifetimes. They run from the START of the previous request. Every cap on a
+// ping time reads these two.
+const (
+	AnthropicCacheLifetime5m = 5 * time.Minute
+	AnthropicCacheLifetime1h = time.Hour
+)
+
 // The Anthropic one-hour tier. This is the ONE place the one-hour ping time lives: 59 minutes
 // after the previous request STARTED, one minute inside the lifetime, and one ping. Tune it here.
 // The five-minute pair (240 s, 2 pings) stays in config.

@@ -229,6 +229,12 @@ const (
 	DefaultHeadTTLMinTokens       = 50000
 )
 
+// The provider's cache lifetimes in seconds, for the validate caps below.
+const (
+	lifetime5mSeconds = int(modelinfo.AnthropicCacheLifetime5m / time.Second)
+	lifetime1hSeconds = int(modelinfo.AnthropicCacheLifetime1h / time.Second)
+)
+
 // Resolved returns the block with every zero replaced by its default, so callers never
 // repeat the fallbacks. Disabled flags are left alone: `enabled: false` with a tuned
 // interval is a legitimate parked configuration.
@@ -272,16 +278,16 @@ func (c CacheConfig) validate() error {
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
-	if c.KeepAliveIdleSeconds >= 300 {
-		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under 300 "+
+	if c.KeepAliveIdleSeconds >= lifetime5mSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under %d "+
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
-			c.KeepAliveIdleSeconds)
+			lifetime5mSeconds, c.KeepAliveIdleSeconds)
 	}
-	if c.KeepAliveIdleSeconds1h >= 3600 {
-		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under 3600 "+
+	if c.KeepAliveIdleSeconds1h >= lifetime1hSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under %d "+
 			"(the one-hour lifetime runs from the previous request's START); got %d",
-			c.KeepAliveIdleSeconds1h)
+			lifetime1hSeconds, c.KeepAliveIdleSeconds1h)
 	}
 	if c.KeepAliveMaxPings1h > modelinfo.AnthropicMaxKeepAliveMaxPings1h {
 		return fmt.Errorf("config: cache: keepalive_max_pings_1h must be at most %d "+
