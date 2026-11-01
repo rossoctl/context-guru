@@ -316,3 +316,41 @@ func TestStaleUnknownSkillsMarkerIsHidden(t *testing.T) {
 		}
 	})
 }
+
+// A scope of only transition sessions: the session was stored with an `unknown` marker, then again
+// with real skills (same digest, so the OK marker may be lost). The state must be "ok" with the
+// skills, not "absent" (#817). A scope with no listing stays "absent"; an unread listing stays
+// "unknown".
+func TestSkillsStateOfTransitionSessions(t *testing.T) {
+	db := seedStaleMarker(t)
+	// A third session: no listing at all.
+	e := mkEvent(1000, "s3", "gpt", 100, 90)
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d3"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s3", ts: 1000,
+		inv: &Inventory{Digest: "d3", Decls: []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	bothPaths(t, func(t *testing.T, path string) {
+		for _, c := range []struct {
+			session, state string
+			skills         int
+		}{
+			{"s1", SkillsOK, 1},      // transition: marker + real skill
+			{"s2", SkillsUnknown, 0}, // never re-sent: still an unread listing
+			{"s3", "absent", 0},      // no listing at all
+		} {
+			rep, err := db.ToolReportFor(Filter{Tenant: "t1", Session: c.session}, flatPrice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rep.Skills.State != c.state || len(rep.Skills.Skills) != c.skills {
+				t.Errorf("%s: %s state = %q with %d skills, want %q with %d",
+					path, c.session, rep.Skills.State, len(rep.Skills.Skills), c.state, c.skills)
+			}
+		}
+	})
+}

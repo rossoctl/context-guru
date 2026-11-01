@@ -945,6 +945,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			}
 			continue
 		}
+		if dr.kind == KindSkill {
+			// A real skill fact proves a listing was read. A session stored before and after the
+			// listing was read holds its skills but may have lost its OK marker row to the
+			// primary-key conflict (same digest), so the marker alone cannot set this.
+			skillsSeen = true
+		}
 		k := statKey{dr.kind, dr.name}
 		st := stats[k]
 		if st == nil {
