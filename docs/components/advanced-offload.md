@@ -733,6 +733,25 @@ expanded in this session.
 
 `not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
 
+**Dry run (`dry_run`, an experiment, off by default).** For a paired test of Context Guru in the path with no cut ever. With
+`dry_run: true` everything runs as a normal v3 run, but no drop is applied on any path: warm, cold (a Store or a memory
+answer), changed-prefix and the v3 cold branch. The gates run and their decision lines are written. Each cut the gate
+accepted is logged as `cg.sweep.dry_run_cut`, with a real cut's fields (`billed_prompt`, `cut_point`, `c_source`,
+`dropped_billed`, `d_share_of_p`, `p_share_of_c`, `rule_d`, `premium_usd`, `passed_on_cost`), and counted in
+`v3.dry_run_cuts` (the drops in them in `v3.dry_run_drops`, the last cuts in `v3.dry_run_recent_cuts`).
+- **No growth wait.** A would-be cut does not start the growth wait. The prompt never shrank, so a wait would make the run
+  ask less often than a run with cuts does before its first cut. The result is that a dry run attempts a cut at every paced
+  request in the sweet spot.
+- **The forwarded request is the request of a run whose sweep drops nothing:** no message changes, nothing is stashed, no
+  marker is made, and no drop record is written (`cg:swd:`, `cg:swx:`).
+- **What Context Guru still adds to the wire in a dry run.** These are not sweep drops and `dry_run` does not touch them:
+  the `context_guru_expand` tool (appended to `tools` when the pipeline can mint a marker and the store persists), the
+  `context_guru_adjudicate` tool (when `extract_llm_sweep` is in the pipeline, on Anthropic and Responses), the
+  cache-breakpoint work of `cachesplit` and `cacheinject` if they are in the pipeline (the split of the volatile system
+  tail, the placement of `cache_control`), the one-hour head TTL if it is switched on, and every other component in the
+  pipeline. The keep-alive pings and the judge's questions are separate requests to the provider; they are not in the
+  forwarded body. A pair test should hold these the same on both arms, or list them as the arm difference.
+
 **Did the agent go back?** With v3 on, the drop record also stores the tool name and a **hash** of the file path or command of the call that produced the output. The path is never stored. On each later request the sweep hashes the path or command of the later tool calls and matches them against those hashes. Each drop is counted once, as `reread_after_drop`, by source and by kind. With `dropped_by_kind` it gives a re-read rate.
 
 The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.

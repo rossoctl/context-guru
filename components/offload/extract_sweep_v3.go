@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -89,6 +90,7 @@ type v3Config struct {
 	ruleUnref            bool
 	ruleUnrefMinAge      int
 	premiumUSD           float64
+	dryRun               bool
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
@@ -104,7 +106,7 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		return out, fmt.Errorf("extract_llm_sweep: selector %q is not one of judge, rule, hybrid", cfg.Selector)
 	}
 	if cfg.FillSmall > 0 || cfg.FillLarge > 0 || cfg.MinDropFrac > 0 || len(cfg.ProtectTools) > 0 ||
-		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil || cfg.RuleUnreferenced || cfg.CompactionPremiumUSD != 0 {
+		len(cfg.ProtectPaths) > 0 || cfg.ProtectLastN != nil || cfg.RuleUnreferenced || cfg.CompactionPremiumUSD != 0 || cfg.DryRun {
 		out.on = true
 	}
 	if !out.on {
@@ -131,6 +133,7 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 			out.protectLastN = 0
 		}
 	}
+	out.dryRun = cfg.DryRun
 	if cfg.CompactionPremiumUSD > 0 {
 		out.premiumUSD = cfg.CompactionPremiumUSD
 	}
@@ -613,7 +616,16 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 	// The marked set is read when the claim wins, before the apply changes any message, and not before.
 	var before map[string]bool
 	src.onClaim = func() { before = v3MarkedIDs(c, req) }
-	keys, changed = e.applyHeldFrom(src, &warmApply{}, req, rep, c, tkey)
+	keys, changed, dryDrops := e.applyHeldFromDry(src, &warmApply{}, req, rep, c, tkey)
+	if dryDrops > 0 {
+		C, cs := e.v3CutPoint(c)
+		cut := v3CutRec{p: c.PrevBilledInputThread, c: C, cSource: cs, judge: dryDrops, set: true}
+		if C > 0 {
+			cut.pShareC = float64(cut.p) / float64(C)
+		}
+		noteDryRunCut(tkey, cut, e.selector, false, 0)
+		return nil, 0
+	}
 	if changed > 0 {
 		e.v3ColdCut(c, req, tkey, src.claimedIDs, before, src.ruleOf)
 	}
@@ -774,6 +786,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 type v3CutRec struct {
 	p, c, d          int
 	cSource          string
+	ruleD            map[string]int
 	dShareP, pShareC float64
 	gated, onPremium bool
 	rules            map[string]int
@@ -796,6 +809,15 @@ func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, re
 		warmMu.Unlock()
 	}
 	wk, wn := e.applyHeldFrom(src, wa, req, rep, c, tkey)
+	if wa.dryDrops > 0 {
+		// DRY RUN: the cut was decided and nothing was applied. It is booked as a would-be cut, with a real cut's
+		// numbers, and it does NOT start the growth wait (see the note on the dry run).
+		if !cut.set {
+			cut = v3CutRec{p: P, c: C, cSource: cSource, pShareC: float64(P) / float64(C), judge: wa.dryDrops, set: true}
+		}
+		noteDryRunCut(tkey, cut, e.selector, wa.passedOnCost, wa.premium)
+		return nil, 0
+	}
 	if wn > 0 {
 		if !cut.set {
 			// A changed-prefix apply: the gates did not run (the provider rewrites from the change anyway), but
@@ -853,7 +875,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 			}
 			return false, reason
 		}
-		*cut = v3CutRec{p: P, c: C, cSource: cSource, gated: true, onPremium: !wa.passedOnCost, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
+		*cut = v3CutRec{p: P, c: C, cSource: cSource, ruleD: wa.ruleD, gated: true, onPremium: !wa.passedOnCost, d: dBilled, dShareP: wa.dShareP, pShareC: wa.pShareC, rules: map[string]int{}, set: true}
 		for _, o := range res.Valid {
 			if r, isRule := src.ruleOf[o.ToolUseID]; isRule {
 				cut.rules[r]++
@@ -894,6 +916,11 @@ type V3Stats struct {
 	// HybridRulesOnly counts hybrid attempts that went ahead on the rules alone: the judge gave no answer.
 	HybridRulesOnly int64 `json:"hybrid_rules_only,omitempty"`
 	Cuts            int64 `json:"cuts"`
+	// DryRunCuts counts the cuts a dry run decided and did not apply (dry_run). DryRunDrops counts the drops in them.
+	// DryRunRecent lists the last of them with a real cut's numbers.
+	DryRunCuts   int64   `json:"dry_run_cuts,omitempty"`
+	DryRunDrops  int64   `json:"dry_run_drops,omitempty"`
+	DryRunRecent []V3Cut `json:"dry_run_recent_cuts,omitempty"`
 	// CutsOnCost and CutsOnPremium split the accepted, gated cuts by whether the saving to N beat the rewrite alone
 	// or needed compaction_premium_usd. A cold or changed-prefix cut runs no gate and is in neither.
 	CutsOnCost    int64 `json:"cuts_on_cost,omitempty"`
@@ -963,7 +990,7 @@ func noteV3Expand(rule string) {
 
 // Any reports whether v3 did or counted anything.
 func (s V3Stats) Any() bool {
-	return s.Reread.Total > 0 || len(s.DroppedByKind) > 0 || len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.JudgeDrops > 0 || s.CutsOnCost > 0 || s.CutsOnPremium > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
+	return s.Reread.Total > 0 || len(s.DroppedByKind) > 0 || len(s.Refused) > 0 || len(s.Expands) > 0 || len(s.RecentRefusals) > 0 || len(s.CSource) > 0 || len(s.RuleDrops) > 0 || s.DryRunCuts > 0 || s.DryRunDrops > 0 || s.JudgeDrops > 0 || s.CutsOnCost > 0 || s.CutsOnPremium > 0 || s.HybridRulesOnly > 0 || s.Cuts > 0 || len(s.Recent) > 0
 }
 
 var (
@@ -1053,7 +1080,7 @@ func noteV3Cut(tkey string, r v3CutRec, selector string) {
 func v3Counters() V3Stats {
 	v3Mu.Lock()
 	defer v3Mu.Unlock()
-	out := V3Stats{CutsOnCost: v3Ledger.CutsOnCost, CutsOnPremium: v3Ledger.CutsOnPremium, JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
+	out := V3Stats{DryRunCuts: v3Ledger.DryRunCuts, DryRunDrops: v3Ledger.DryRunDrops, DryRunRecent: append([]V3Cut(nil), v3Ledger.DryRunRecent...), CutsOnCost: v3Ledger.CutsOnCost, CutsOnPremium: v3Ledger.CutsOnPremium, JudgeDrops: v3Ledger.JudgeDrops, HybridRulesOnly: v3Ledger.HybridRulesOnly, Cuts: v3Ledger.Cuts, Recent: append([]V3Cut(nil), v3Ledger.Recent...)}
 	if len(v3Ledger.Refused) > 0 {
 		out.Refused = map[string]int64{}
 		for k, v := range v3Ledger.Refused {
@@ -1340,4 +1367,56 @@ func noteV3Reread(source, tkind string) {
 	r.BySource[source]++
 	r.ByKind[tkind]++
 	v3Mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------------------------------
+// DRY RUN (dry_run, an experiment for a paired test). Context Guru is in the path and decides everything, and
+// nothing is ever dropped.
+//
+// What stays the same as a real v3 run: the expand tool and the adjudication tool are still injected (they are
+// the proxy's, ahead of this component), the ping registry and the keep-alive pings, the judge's questions at the
+// sweet spot and at pings, the rules, the recheck, the gate and its decision lines.
+//
+// What changes: applySweepDrop is never called, so no message changes, nothing is stashed, no marker is made, and
+// no drop record is written. A real cut's records are what replay a drop on the next request, so a dry run has
+// nothing to replay. The held answer is spent exactly as a real apply spends it, so the next question is asked
+// at the real pace.
+//
+// THE GROWTH WAIT IS NOT STARTED by a would-be cut. After a real cut the prompt is smaller and the wait lets it
+// grow again. In a dry run the prompt never shrank, so a wait would stop the run from asking at the pace a real
+// one has before its first cut. This is a choice: it keeps the question and gate load that a run with cuts would
+// have had up to its first cut, and it means a dry run attempts a cut at every paced request in the sweet spot.
+
+// noteDryRunApply logs and counts the drops an apply would have made. Called once per apply, with the drops that
+// were decided and not applied. The line that carries the numbers of the cut is cg.sweep.dry_run_cut, written by
+// noteDryRunCut when the gate accepted.
+func noteDryRunApply(tkey, kind string, drops, tokens int) {
+	v3Mu.Lock()
+	v3Ledger.DryRunDrops += int64(drops)
+	v3Mu.Unlock()
+	slog.Info("cg.sweep.dry_run_drops", "thread", threadLabel(tkey), "kind", kind, "drops", drops, "removed_local", tokens)
+}
+
+// noteDryRunCut books a cut the gate accepted and the dry run did not apply: the same numbers as a real cut.
+func noteDryRunCut(tkey string, r v3CutRec, selector string, passedOnCost bool, premium float64) {
+	v3Mu.Lock()
+	v3Ledger.DryRunCuts++
+	v3Ledger.DryRunRecent = append(v3Ledger.DryRunRecent, V3Cut{Thread: threadLabel(tkey), AtMs: time.Now().UnixMilli(), Selector: selector,
+		P: r.p, C: r.c, CSource: r.cSource, D: r.d, DShareP: r.dShareP, PShareC: r.pShareC, RuleDrops: sumInts(r.rules), JudgeDrops: r.judge})
+	if len(v3Ledger.DryRunRecent) > maxV3Recent {
+		v3Ledger.DryRunRecent = v3Ledger.DryRunRecent[len(v3Ledger.DryRunRecent)-maxV3Recent:]
+	}
+	v3Mu.Unlock()
+	slog.Info("cg.sweep.dry_run_cut", "thread", threadLabel(tkey), "selector", selector,
+		"billed_prompt", r.p, "cut_point", r.c, "c_source", r.cSource, "dropped_billed", r.d,
+		"d_share_of_p", r.dShareP, "p_share_of_c", r.pShareC, "rule_d", ruleDString(r.ruleD),
+		"rule_drops", sumInts(r.rules), "judge_drops", r.judge, "premium_usd", premium, "passed_on_cost", passedOnCost)
+}
+
+func sumInts(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
 }
