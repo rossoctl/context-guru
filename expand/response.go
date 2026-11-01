@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/rossoctl/context-guru/schema"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -154,7 +156,7 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 				continue // not wire input items: answer with the flattened string instead
 			}
 			for i, item := range items.Array() {
-				content := item.Get("content").String()
+				content := schema.ContentText(item.Get("content"))
 				if role := item.Get("role").String(); (role == "user" || role == "assistant") && isSummaryText(content) &&
 					strings.Contains(content, Marker(hash)) {
 					if _, duplicate := replacements[i]; duplicate {

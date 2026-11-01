@@ -285,17 +285,17 @@ func CallSites(wire string, body []byte) []CallSite {
 		switch {
 		case wire == "responses":
 			if t := m.Get("type").String(); t == "function_call_output" || t == "custom_tool_call_output" {
-				answers[m.Get("call_id").String()] = m.Get("output").String()
+				answers[m.Get("call_id").String()] = schema.ContentText(m.Get("output"))
 			}
 		case wire == "anthropic":
 			for _, blk := range m.Get("content").Array() {
 				if blk.Get("type").String() == "tool_result" {
-					answers[blk.Get("tool_use_id").String()] = blk.Get("content").String()
+					answers[blk.Get("tool_use_id").String()] = schema.ToolResultText(blk)
 				}
 			}
 		default:
 			if m.Get("role").String() == "tool" {
-				answers[m.Get("tool_call_id").String()] = m.Get("content").String()
+				answers[m.Get("tool_call_id").String()] = schema.ContentText(m.Get("content"))
 			}
 		}
 	}

@@ -1,7 +1,8 @@
 // Package schema holds the helpers this project layers over bifrost's message schema:
 // token counting, deep-clone, MessageText/SetMessageText, Rewritable, ToolCalls (which
 // pairs a tool result with the call that produced it), SessionHead, and static
-// message-SHAPE validation.
+// message-SHAPE validation. ContentText and ToolResultText apply the MessageText rule to raw
+// gjson values.
 //
 // # Message-shape validation
 //

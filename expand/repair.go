@@ -3,6 +3,8 @@ package expand
 import (
 	"strconv"
 
+	"github.com/rossoctl/context-guru/schema"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -213,6 +215,9 @@ func responsesContentPresent(body []byte, orig string, exceptIndex int) bool {
 					return true
 				}
 			}
+			if value.IsArray() && schema.ContentText(value) == orig {
+				return true
+			}
 		}
 	}
 	return false
@@ -299,6 +304,12 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 			}
 			return !found
 		}
+		// A message whose content is an array holding the original split over several text blocks
+		// (an OpenAI role=tool message, say) counts as present, as CallSites reads it.
+		if c := m.Get("content"); c.IsArray() && base+".content" != exceptPath && schema.ContentText(c) == orig {
+			found = true
+			return false
+		}
 		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
 			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)
 			return !found
@@ -356,6 +367,11 @@ func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
 				return true
 			})
 			if hit {
+				return true
+			}
+			// The joined text of the blocks counts too, as CallSites reads it: a client may split
+			// the original over several text blocks.
+			if schema.ContentText(v) == orig {
 				return true
 			}
 		}
