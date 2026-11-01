@@ -108,8 +108,10 @@ const maxWireBreakpoints = schema.MaxBreakpoints
 // Breakpoints is where a request's breakpoints sit, by location. See schema.Breakpoints.
 type Breakpoints = schema.Breakpoints
 
-// CountBreakpoints counts every breakpoint the provider will see in this request, by location.
-// See schema.CountBreakpoints.
+// CountBreakpoints counts the breakpoints the provider will see in this request, by location,
+// except a mark whose key is spelled with a \u escape: this is the hot-path count (the cap check
+// runs it twice per request) and its prefilter is "cache" only. schema.CountBreakpointsEscaped
+// counts those too; hasCacheBreakpoint uses it. See schema.CountBreakpoints.
 func CountBreakpoints(body []byte) Breakpoints { return schema.CountBreakpoints(body) }
 
 // wireBreakpoints is the total, which is what the provider's cap applies to.
