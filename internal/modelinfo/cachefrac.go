@@ -66,7 +66,7 @@ const (
 func chargesCacheWritePremium(model string) bool {
 	// Bedrock and Vertex ids carry a vendor prefix ("aws/claude-opus-5",
 	// "anthropic.claude-3-5-sonnet"), so IsClaude matches on the substring, not a prefix.
-	return IsClaude(model) || GPT56OrLater(strings.ToLower(model))
+	return IsClaude(model) || GPT56OrLater(model)
 }
 
 // GPT56OrLater reports whether an OpenAI GPT model uses the GPT-5.6+ cache rules.

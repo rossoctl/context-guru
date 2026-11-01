@@ -216,7 +216,8 @@ func b2f(b bool) float64 {
 	return 0
 }
 
-// FamilyOf mirrors the research tables: opus / sonnet / haiku by substring of the lower-cased model name.
+// FamilyOf mirrors the research tables: opus / sonnet / haiku, from modelinfo.Family (case, provider prefix and variant suffix
+// do not matter). Any other id, fable included, is "other".
 func FamilyOf(model string) string {
 	switch f := modelinfo.Family(model); f {
 	case modelinfo.FamilyOpus, modelinfo.FamilySonnet, modelinfo.FamilyHaiku:

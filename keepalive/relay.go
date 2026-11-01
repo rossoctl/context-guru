@@ -50,10 +50,11 @@ func relayHost(base string) string {
 // Bedrock ARNs naming a Claude model) by substring. CONTEXT_GURU_KEEPALIVE_MODELS adds more,
 // comma-separated, for a deployment alias whose name says nothing (an application inference profile).
 func claudeModel(model string) bool {
-	if modelinfo.IsClaude(model) || modelinfo.Family(model) != "" {
+	// Narrow on purpose: "claude" or a tier word. A bare "anthropic" id is not enough here.
+	m := strings.ToLower(model)
+	if modelinfo.Family(model) != "" || strings.Contains(m, "claude") {
 		return true
 	}
-	m := strings.ToLower(model)
 	var words []string
 	for _, w := range strings.Split(os.Getenv("CONTEXT_GURU_KEEPALIVE_MODELS"), ",") {
 		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
