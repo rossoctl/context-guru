@@ -33,10 +33,10 @@ type CFFigure struct {
 	Estimated            bool     // any counted operation or effect is an estimate
 }
 
-// CounterfactualFigure prices the attached Result. A DryRun operation is skipped: computed,
+// AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
-func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
+func (e *Event) AccountantFigure(p modelinfo.Price) CFFigure {
 	f := CFFigure{ByComponent: map[string]float64{}}
 	if e.cfRes == nil {
 		return f
@@ -104,7 +104,7 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 	return f
 }
 
-// Fallback reasons: why PriceMode kept the legacy figures of an event. CounterfactualFallback
+// Fallback reasons: why PriceMode kept the legacy figures of an event. AccountantFallback
 // returns one of them ("" when the override applied).
 const (
 	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
@@ -145,9 +145,9 @@ var gatedChecks = map[string]string{
 	"spans":         FallbackCheckSpans,
 }
 
-// CounterfactualFallback is the reason PriceMode kept the legacy figures, or "" when the override
+// AccountantFallback is the reason PriceMode kept the legacy figures, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
-func (e *Event) CounterfactualFallback() string { return e.cfFallback }
+func (e *Event) AccountantFallback() string { return e.cfFallback }
 
 // PriceMode is Price, then an override of each component's
 // SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
@@ -157,7 +157,7 @@ func (e *Event) CounterfactualFallback() string { return e.cfFallback }
 // component as a $0 saving. It applies only when: a Result is attached; no change was dropped
 // from the operation list; the run was not observe mode; no operation or effect is unpriced; no
 // gated library check failed; the figure is plausible; and every component that acted has a
-// library figure. Otherwise the legacy figures stand and CounterfactualFallback says why.
+// library figure. Otherwise the legacy figures stand and AccountantFallback says why.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.cfFallback = ""
 	if !e.priceLegacy(p, accountingComplete) {
@@ -181,7 +181,7 @@ func (e *Event) cfOverride(p modelinfo.Price) string {
 			return r
 		}
 	}
-	fig := e.CounterfactualFigure(p)
+	fig := e.AccountantFigure(p)
 	if len(fig.Unpriced) > 0 {
 		return FallbackUnpriced
 	}
@@ -233,7 +233,7 @@ func (e *Event) cfOverride(p modelinfo.Price) string {
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
-// CounterfactualFigure.ByComponent: not DryRun, not a spend.
+// AccountantFigure.ByComponent: not DryRun, not a spend.
 func (e *Event) countedSavedTokens() int {
 	n := 0
 	for _, o := range e.cfRes.Ops {

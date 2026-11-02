@@ -15,7 +15,7 @@ func cfThreadID(id string) string {
 	return id
 }
 
-// cfBegin opens the counterfactual record with the body the agent sent. Nil-safe.
+// cfBegin opens the accountant record with the body the agent sent. Nil-safe.
 func (c *capture) cfBegin(meta accountant.RequestMeta, client []byte) {
 	if c == nil || c.savings == nil {
 		return

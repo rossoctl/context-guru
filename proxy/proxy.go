@@ -261,7 +261,7 @@ type Handler struct {
 	observeSeq atomic.Uint64
 	// savings is nil without a dashboard recorder: the Result is attached to the recorded event.
 	savings *savingsTracker
-	// cfSeq numbers requests for the counterfactual RequestMeta.RequestID.
+	// cfSeq numbers requests for the accountant RequestMeta.RequestID.
 	cfSeq atomic.Uint64
 	// shadow is observe mode's own state store, separate from the live one. Observe must
 	// not write into the live store — a real request would then replay a decision that was

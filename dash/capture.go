@@ -17,7 +17,7 @@ type Options struct {
 	// Tap, when non-nil, is called on the writer goroutine with each event once it is stored,
 	// before the live feed gets its summary copy. It must not block or keep the event after
 	// it returns. It is the SOLE test seam for the in-memory fields the store does not keep
-	// (the counterfactual Result, read through Event.Counterfactual): the database drops them
+	// (the accountant Result, read through Event.AccountantResult): the database drops them
 	// and the Hub's subscribe is unexported, so no other route reaches them. No production
 	// code sets it.
 	Tap func(*Event)

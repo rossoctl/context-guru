@@ -26,7 +26,7 @@ func TestFallbackReasonIsLogged(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	evs, _ := cfRunUsage(t, 20, 0, 50)
-	if fb := evs[0].CounterfactualFallback(); fb != "" {
+	if fb := evs[0].AccountantFallback(); fb != "" {
 		t.Fatalf("second event fell back: %s", fb)
 	}
 	if n := strings.Count(buf.String(), `"msg":"cf_fallback"`); n != 1 {

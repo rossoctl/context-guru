@@ -874,7 +874,7 @@ func (c *Ctx) Stats() FilterStatsSink {
 
 // Change is one message a component rewrote, in bytes. The pipeline fills it, so no component
 // has to. Hash is of the text BEFORE the run: the same content re-sent next turn gets the same
-// hash, which is what lets the savings code recognise a replay (counterfactual ChangeID).
+// hash, which is what lets the savings code recognise a replay (accountant ChangeID).
 type Change struct {
 	Idx                     int // index in req.Input; for a splice, where the splice starts
 	BytesBefore, BytesAfter int

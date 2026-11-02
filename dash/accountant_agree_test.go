@@ -12,7 +12,7 @@ import (
 )
 
 // This file plays every cases.Case through the path the proxy uses (Trackers, Request.Add of
-// every op with replays included, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
+// every op with replays included, Compute, Event.SetAccountant, Event.AccountantFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, with
 // the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in accountant_agree_helpers_test.go.
 
@@ -55,8 +55,8 @@ func PlayCF(c cases.Case) []PlayedCF {
 		req.EndRequest(s.End.Thread, s.End.Forwarded, s.End.Breakpoints, s.End.Facts.EntryFacts())
 		res := req.Compute(s.Usage)
 		e := &dash.Event{}
-		e.SetCounterfactual(res)
-		fig := e.CounterfactualFigure(priceOfCF(c.StepRate(s)))
+		e.SetAccountant(res)
+		fig := e.AccountantFigure(priceOfCF(c.StepRate(s)))
 		p := PlayedCF{ByComponent: map[string]int64{}, Unattrib: microsCF(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
 		for k, v := range fig.ByComponent {
 			p.ByComponent[k] = microsCF(v)
@@ -199,7 +199,7 @@ type cfPlace struct {
 	comp string
 }
 
-// cfKnownDifferences are the places where CounterfactualFigure deliberately differs from a case.
+// cfKnownDifferences are the places where AccountantFigure deliberately differs from a case.
 // The test tolerates exactly these places and fails if one stops differing.
 var cfKnownDifferences = map[string]struct {
 	Reason string

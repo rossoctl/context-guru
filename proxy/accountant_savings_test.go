@@ -206,9 +206,9 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 	leg := *e
 	leg.Components = append([]dash.CompRow(nil), e.Components...)
 	leg.Price(cfPrice, true)
-	e.SetCounterfactual(r2)
+	e.SetAccountant(r2)
 	e.PriceMode(cfPrice, true)
-	if fb := e.CounterfactualFallback(); fb != dash.FallbackCheckSum {
+	if fb := e.AccountantFallback(); fb != dash.FallbackCheckSum {
 		t.Fatalf("fallback = %q, want %q", fb, dash.FallbackCheckSum)
 	}
 	if e.Components[0].SavedUSD != leg.Components[0].SavedUSD || e.BaselineCostUSD != leg.BaselineCostUSD {

@@ -121,12 +121,12 @@ type WaitCauseResult struct {
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
-	// cfRes is the counterfactual Result (see accountant_event.go). Unexported: not serialized.
+	// cfRes is the accountant Result (see accountant_event.go). Unexported: not serialized.
 	cfRes *accountant.Result
 	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
 	cfOpsDropped int
 	cfObserve    bool
-	// cfFallback is why PriceMode kept the legacy figures (see CounterfactualFallback).
+	// cfFallback is why PriceMode kept the legacy figures (see AccountantFallback).
 	cfFallback string
 
 	ID int64 `json:"id"`

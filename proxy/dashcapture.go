@@ -117,7 +117,7 @@ type capture struct {
 	// request's record (nil when it was skipped); cfDone guards a double finish.
 	savings *savingsTracker
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
-	// and the counterfactual must not override the legacy figures.
+	// and the accountant figure must not override the legacy figures.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
@@ -675,7 +675,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.pricer != nil && c.model != "" {
 		price, priced = c.pricer.Price(context.Background(), c.model)
 	}
-	// Run the counterfactual BEFORE the event is priced. Only with usage: without it the thread
+	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
 	// state stays untouched and the event carries no result. Not after several upstream rounds
 	// either (see rounds): no Result is attached, so PriceMode keeps the legacy figures
 	// (cf_fallback reason no_result). The thread state is left as the
@@ -684,12 +684,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.cfReq != nil && usageOK && !c.cfDone {
 		c.cfDone = true
 		if c.rounds <= 1 {
-			e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
+			e.SetAccountant(c.savings.compute(c.cfReq, usage))
 		}
 	}
-	e.SetCounterfactualContext(c.trace.OpsDropped, c.observe)
+	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	e.PriceMode(price, usageOK && priced)
-	if c.cfReq != nil && e.CounterfactualFallback() != "" {
+	if c.cfReq != nil && e.AccountantFallback() != "" {
 		logFallback(e)
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {

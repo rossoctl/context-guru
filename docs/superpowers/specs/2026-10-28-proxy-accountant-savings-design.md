@@ -1,12 +1,13 @@
-# Proxy savings from `counterfactual`: design
+# Proxy savings from `accountant`: design
 
 **Status:** proposed.
+**Renamed, 2026-11-02.** The library this spec calls `counterfactual` is now `github.com/rossoctl/accountant`, in its own repo. The in-repo module, `docs/counterfactual/` and the `--savings` flag with its modes were removed. Paths and mode names below are the design as written then.
 **Branch:** `feat/counterfactual-savings`, based on `docs/context-operations-spec`.
 **Method:** `docs/counterfactual/design.md`. Host wiring: `docs/counterfactual/cortex-wiring.md` (W5, W7.3, W9).
 
 ## 1. Goal and scope
 
-`counterfactual.Compute` becomes the only source of savings figures in the context-guru proxy.
+`accountant.Compute` becomes the only source of savings figures in the context-guru proxy.
 It replaces the savings rules in `dash/event.go`.
 
 In scope: the proxy and the engine, in this repo. This is W9 steps 3 to 6, and the proxy half of step 10.

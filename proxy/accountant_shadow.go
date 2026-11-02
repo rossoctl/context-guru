@@ -11,9 +11,9 @@ import (
 // logFallback writes the cf_fallback line for an event whose figures stayed on the legacy rules,
 // with the reason (dash.Fallback*).
 func logFallback(e *dash.Event) {
-	r, _ := e.Counterfactual()
+	r, _ := e.AccountantResult()
 	slog.Info("cf_fallback", "session", e.SessionID, "thread", e.ThreadID,
-		"reason", e.CounterfactualFallback(), "checks", checkNames(r), "recomputed", r.Recomputed)
+		"reason", e.AccountantFallback(), "checks", checkNames(r), "recomputed", r.Recomputed)
 }
 
 // checkNames lists the names of the failed library checks, comma-separated, in order.

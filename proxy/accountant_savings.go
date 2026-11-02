@@ -4,7 +4,7 @@ import (
 	"github.com/rossoctl/accountant"
 )
 
-// savingsTracker runs the counterfactual calls around one request. It holds the one Trackers
+// savingsTracker runs the accountant calls around one request. It holds the one Trackers
 // of the proxy: a thread's state lives there between requests.
 type savingsTracker struct {
 	trackers *accountant.Trackers

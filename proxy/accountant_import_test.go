@@ -6,7 +6,7 @@ import (
 	"github.com/rossoctl/accountant"
 )
 
-func TestCounterfactualImportable(t *testing.T) {
+func TestAccountantImportable(t *testing.T) {
 	if accountant.NewTrackers() == nil {
 		t.Fatal("nil Trackers")
 	}

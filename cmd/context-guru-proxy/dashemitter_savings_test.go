@@ -51,7 +51,7 @@ func tapped(t *testing.T) dash.Event {
 
 func TestDashEmitterAttachesTheAccountantResultToAPing(t *testing.T) {
 	ev := tapped(t)
-	res, ok := ev.Counterfactual()
+	res, ok := ev.AccountantResult()
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
 		t.Fatalf("result %+v ok=%v, want one spend with its call", res, ok)
 	}

@@ -1,14 +1,16 @@
-# Proxy savings from `counterfactual` Implementation Plan
+# Proxy savings from `accountant` Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `counterfactual.Compute` the only source of savings dollars in the context-guru proxy, and delete the rules in `dash/event.go` that it replaces.
+> **Renamed, 2026-11-02.** The library this plan calls `counterfactual` is now `github.com/rossoctl/accountant`, in its own repo. The in-repo module, `docs/counterfactual/` and the `--savings` flag with its `legacy`, `shadow` and `counterfactual` modes no longer exist: the proxy always uses the accountant figure when a dashboard is on. The module paths, file paths and mode names below are the plan as written then.
+
+**Goal:** Make `accountant.Compute` the only source of savings dollars in the context-guru proxy, and delete the rules in `dash/event.go` that it replaces.
 
 **Architecture:** The pipeline records per-message byte changes on each `components.Report`. `apply` turns them into `counterfactual.Operation`s (positions in wire space, `ChangeID` from a content hash). A proxy-side `savingsTracker` owns one `counterfactual.Trackers`, runs `BeginRequest` / `Add` / `EndRequest` / `Compute` around each request, and hands the `Result` to `dash.Event`, which prices tiers with `modelinfo.Price`. A `--savings` mode (`legacy` | `shadow` | `counterfactual`) lets the new figure run beside the old one before it replaces it.
 
 **Tech Stack:** Go 1.26.4, `github.com/rossoctl/context-guru/counterfactual` (stdlib-only module), `gjson`, SQLite via `dash`.
 
-**Spec:** `docs/superpowers/specs/2026-10-28-proxy-counterfactual-savings-design.md`. Method: `docs/counterfactual/design.md`. Host wiring: `docs/counterfactual/cortex-wiring.md` (W5, W7.3, W9).
+**Spec:** `docs/superpowers/specs/2026-10-28-proxy-accountant-savings-design.md`. Method: `docs/counterfactual/design.md`. Host wiring: `docs/counterfactual/cortex-wiring.md` (W5, W7.3, W9).
 
 ## Global Constraints
 

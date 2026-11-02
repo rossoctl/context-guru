@@ -47,10 +47,10 @@ func TestAccountantSkipsARequestWithExpandRounds(t *testing.T) {
 	}
 	waitForRows(t, rec, 1)
 	e := tap.all()[0]
-	if e.HasCounterfactual() {
+	if e.HasAccountant() {
 		t.Fatal("a Result is attached to a request with expand rounds")
 	}
-	if fb := e.CounterfactualFallback(); fb != "no_result" {
+	if fb := e.AccountantFallback(); fb != "no_result" {
 		t.Fatalf("fallback = %q, want no_result", fb)
 	}
 }

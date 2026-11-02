@@ -15,8 +15,8 @@ func cfNear(a, b float64) bool { return math.Abs(a-b) < 1e-12 }
 
 func figOf(r accountant.Result) CFFigure {
 	e := &Event{}
-	e.SetCounterfactual(r)
-	return e.CounterfactualFigure(cfTestPrice)
+	e.SetAccountant(r)
+	return e.AccountantFigure(cfTestPrice)
 }
 
 func TestTierUSD(t *testing.T) {
@@ -27,18 +27,18 @@ func TestTierUSD(t *testing.T) {
 	}
 }
 
-func TestCounterfactualAccessorReturnsACopy(t *testing.T) {
+func TestAccountantResultReturnsACopy(t *testing.T) {
 	e := &Event{}
-	if _, ok := e.Counterfactual(); ok {
+	if _, ok := e.AccountantResult(); ok {
 		t.Fatal("no result attached, ok must be false")
 	}
-	e.SetCounterfactual(accountant.Result{Version: 7})
-	r, ok := e.Counterfactual()
+	e.SetAccountant(accountant.Result{Version: 7})
+	r, ok := e.AccountantResult()
 	if !ok || r.Version != 7 {
 		t.Fatalf("%+v %v", r, ok)
 	}
 	r.Version = 9
-	if r2, _ := e.Counterfactual(); r2.Version != 7 {
+	if r2, _ := e.AccountantResult(); r2.Version != 7 {
 		t.Fatal("accessor must return a copy")
 	}
 }
@@ -155,7 +155,7 @@ func TestFigure_EstimatedFlag(t *testing.T) {
 }
 
 func TestFigure_NoResultIsZeroAndNilSafe(t *testing.T) {
-	f := (&Event{}).CounterfactualFigure(cfTestPrice)
+	f := (&Event{}).AccountantFigure(cfTestPrice)
 	if f.DeltaUSD != 0 || len(f.ByComponent) != 0 || f.Estimated || len(f.Unpriced) != 0 {
 		t.Fatalf("%+v", f)
 	}

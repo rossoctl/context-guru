@@ -74,12 +74,12 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	// reason is visible in cf_fallback.
 	waitForRows(t, rec, 1)
 	e := tap.all()[0]
-	res, _ := e.Counterfactual()
+	res, _ := e.AccountantResult()
 	tools := false
 	for _, c := range res.Checks {
 		tools = tools || (c.Check == "sum" && strings.Contains(c.Detail, "section=tools"))
 	}
-	if !tools || e.CounterfactualFallback() != "check_sum" {
-		t.Fatalf("checks %+v fallback %q: the injection must be caught by the sum gate", res.Checks, e.CounterfactualFallback())
+	if !tools || e.AccountantFallback() != "check_sum" {
+		t.Fatalf("checks %+v fallback %q: the injection must be caught by the sum gate", res.Checks, e.AccountantFallback())
 	}
 }

@@ -90,7 +90,7 @@ func TestNoUsageMeansNoAccountantResult(t *testing.T) {
 	cfPost(t, h, "sess-err")
 	waitForRows(t, rec, 1)
 	for _, e := range tap.all() {
-		if e.HasCounterfactual() {
+		if e.HasAccountant() {
 			t.Error("an event without usage carries an accountant result")
 		}
 	}
@@ -170,11 +170,11 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 		t.Fatalf("events = %d", len(evs))
 	}
 	e := evs[0]
-	r, ok := e.Counterfactual()
+	r, ok := e.AccountantResult()
 	if !ok || len(r.Checks) != 0 {
 		t.Fatalf("Result attached %v, checks %+v: the real path must pass every library check", ok, r.Checks)
 	}
-	if fb := e.CounterfactualFallback(); fb != "" {
+	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("the override must apply, fell back: %s", fb)
 	}
 	msgBytes := func(b []byte) int {
@@ -209,7 +209,7 @@ func TestAbsurdUsageFallsBackToLegacy(t *testing.T) {
 		t.Fatalf("absurd usage did not fall back: component %v vs legacy %v, baseline %v vs %v",
 			got, want, cfs[0].BaselineCostUSD, leg.BaselineCostUSD)
 	}
-	r, ok := cfs[0].Counterfactual()
+	r, ok := cfs[0].AccountantResult()
 	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {
 		t.Fatalf("Result %v: unpriced %+v checks %+v, want a clean Result", ok, r.Unpriced, r.Checks)
 	}
@@ -222,7 +222,7 @@ func TestAbsurdUsageFallsBackToLegacy(t *testing.T) {
 	if saved <= cfs[0].TokensBefore {
 		t.Fatalf("counted Saved %d <= TokensBefore %d: the bound would not fire", saved, cfs[0].TokensBefore)
 	}
-	if fb := cfs[0].CounterfactualFallback(); fb != dash.FallbackImplausibleSize {
+	if fb := cfs[0].AccountantFallback(); fb != dash.FallbackImplausibleSize {
 		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackImplausibleSize)
 	}
 }

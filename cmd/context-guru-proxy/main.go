@@ -994,7 +994,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
 	if res, ok := proxy.PingSavings(r, d.pings); ok {
-		ev.SetCounterfactual(res)
+		ev.SetAccountant(res)
 	}
 	d.rec.Record(ev)
 }

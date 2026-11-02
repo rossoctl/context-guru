@@ -249,7 +249,7 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 // holds that hash for every message an earlier component of the run already changed; the first
 // component to change a message sees the client's own text in before, so it records the hash. The
 // hash therefore does not depend on what earlier components did: if one of them starts or stops
-// acting between turns, a later component keeps the same ChangeID (counterfactual replay).
+// acting between turns, a later component keeps the same ChangeID (accountant replay).
 func changesOf(before, after []schemas.ChatMessage, idx []int, clientHash map[int]string) []Change {
 	if len(idx) == 0 {
 		return nil

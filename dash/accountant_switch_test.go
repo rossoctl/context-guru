@@ -15,7 +15,7 @@ func switchEvent() *Event {
 			{Component: "mask", Acted: true, Mutated: true, SavedGross: 9999, SavedUnique: 9999},
 			{Component: "idle"},
 		}}
-	e.SetCounterfactual(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
 		Saved: accountant.TierTokens{CacheRead: 1000}}}})
 	return e
 }
@@ -27,10 +27,10 @@ func legacyCopy(e *Event) *Event {
 	return &c
 }
 
-func TestPriceMode_CounterfactualOverridesComponentsAndBaseline(t *testing.T) {
+func TestPriceMode_AccountantOverridesComponentsAndBaseline(t *testing.T) {
 	e := switchEvent()
 	e.PriceMode(cfTestPrice, true)
-	if fb := e.CounterfactualFallback(); fb != "" {
+	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("a qualifying event fell back: %q", fb)
 	}
 	want := 1000 * 0.3e-6
@@ -60,8 +60,8 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		reason string
 	}{
 		"no result":   {func(e *Event) { e.cfRes = nil }, FallbackNoResult},
-		"ops dropped": {func(e *Event) { e.SetCounterfactualContext(1, false) }, FallbackOpsDropped},
-		"observe":     {func(e *Event) { e.SetCounterfactualContext(0, true) }, FallbackObserve},
+		"ops dropped": {func(e *Event) { e.SetAccountantContext(1, false) }, FallbackOpsDropped},
+		"observe":     {func(e *Event) { e.SetAccountantContext(0, true) }, FallbackObserve},
 		"unpriced": {func(e *Event) {
 			e.cfRes.Unpriced = []accountant.Unpriced{{OpID: "x", Reason: "r"}}
 		}, FallbackUnpriced},
@@ -87,7 +87,7 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		c.mut(e)
 		want := legacyCopy(e)
 		e.PriceMode(cfTestPrice, true)
-		if got := e.CounterfactualFallback(); got != c.reason {
+		if got := e.AccountantFallback(); got != c.reason {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
 		e.cfFallback = "" // the legacy copy carries no reason; every other field must match
@@ -103,7 +103,7 @@ func TestPriceMode_ConservationCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
 	e.cfRes.Checks = []accountant.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
 	e.PriceMode(cfTestPrice, true)
-	if fb := e.CounterfactualFallback(); fb != "" || !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
+	if fb := e.AccountantFallback(); fb != "" || !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
 		t.Fatalf("conservation gated the override: reason %q components %+v", fb, e.Components)
 	}
 }

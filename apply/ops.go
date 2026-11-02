@@ -7,7 +7,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 )
 
-// changeID is the counterfactual ChangeID of one change: cg:<component>:<idx>:<hash>. idx is the
+// changeID is the accountant ChangeID of one change: cg:<component>:<idx>:<hash>. idx is the
 // req.Input index (the slot, the start of a splice), so two identical tool outputs that one
 // component rewrites in one request get two ids (unique_change would fire on one id). The index is
 // stable across the turns of a transcript that grows by appending, which is the only case in which
@@ -19,7 +19,7 @@ func changeID(component string, c components.Change) string {
 	return "cg:" + component + ":" + strconv.Itoa(c.Idx) + ":" + c.Hash
 }
 
-// OpsFromRun turns a run's per-message changes into counterfactual operations, in pipeline
+// OpsFromRun turns a run's per-message changes into accountant operations, in pipeline
 // order. The sizes are the components' TEXT sizes; the caller must convert them to wire bytes
 // (wireSizes) before the operations reach the library. wire maps a req.Input index to the wire message index (wireGroups). applied is false when
 // the rewritten body was not the one forwarded; a report that ran in observe mode is DryRun too,
