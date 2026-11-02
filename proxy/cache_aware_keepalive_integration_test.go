@@ -142,9 +142,13 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 
 	// Turn 2: the same head, plus two more messages — grows the span tryReuse would otherwise
 	// have replayed byte-identically, which is what makes resummarize_tokens: 1 call it stale.
+	// It ends at a tool_result turn: after a text turn the summary would wait for the extra slot after
+	// the last planned ping instead (#776), and this test is about the planned ping dispatching it.
 	grown := append(append([]any{}, head...),
-		map[string]any{"role": "assistant", "content": "ran them again, same failure"},
-		map[string]any{"role": "user", "content": "try a different approach then"})
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": map[string]any{}}}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": "same failure"}}})
 	post(grown)
 
 	// THE CORE ASSERTION: the candidate turn 2's own pipeline run just registered must still be

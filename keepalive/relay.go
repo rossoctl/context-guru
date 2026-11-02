@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"net/url"
 	"os"
 	"strings"
@@ -11,8 +12,8 @@ import (
 // relayServesClaude: the Anthropic route forwarded to anything but Anthropic itself is a relay
 // (LiteLLM, a corporate gateway) that may serve another family there, an OpenAI / Azure model
 // with automatic caching or none, where a ping buys nothing. Only those are name-checked; native
-// Anthropic, Bedrock and Vertex upstreams are eligible by type (their ARNs, inference profiles and
-// aliases often do not say "claude").
+// upstreams of every provider in modelinfo.HonoursCacheControl are eligible by type (their ARNs,
+// inference profiles and aliases often do not say "claude").
 // ponytail: name test; a Claude-named alias of another family is caught by the route breaker.
 //
 // base may be a full URL (https://api.anthropic.com), a bare host
@@ -49,8 +50,12 @@ func relayHost(base string) string {
 // Bedrock ARNs naming a Claude model) by substring. CONTEXT_GURU_KEEPALIVE_MODELS adds more,
 // comma-separated, for a deployment alias whose name says nothing (an application inference profile).
 func claudeModel(model string) bool {
+	// Narrow on purpose: "claude" or a tier word. A bare "anthropic" id is not enough here.
 	m := strings.ToLower(model)
-	words := []string{"claude", "opus", "sonnet", "haiku"}
+	if modelinfo.Family(model) != "" || strings.Contains(m, "claude") {
+		return true
+	}
+	var words []string
 	for _, w := range strings.Split(os.Getenv("CONTEXT_GURU_KEEPALIVE_MODELS"), ",") {
 		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
 			words = append(words, w)

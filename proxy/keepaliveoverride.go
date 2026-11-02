@@ -50,10 +50,10 @@ const (
 	// defaultOverrideUntil is what the dialog offers.
 	defaultOverrideUntil = time.Hour
 	// The idle interval's band. Below 60 s a ping lands inside the previous one's own refresh
-	// for no reason; above 290 s the first ping arrives after a 300 s lifetime has already
+	// for no reason; above maxOverrideIdle the first ping arrives after the 5-minute lifetime (modelinfo.AnthropicCacheLifetime5m) has already
 	// lapsed and pays a 1.25x WRITE — the exact charge the mechanism exists to avoid.
 	minOverrideIdle = 60 * time.Second
-	maxOverrideIdle = 290 * time.Second
+	maxOverrideIdle = modelinfo.AnthropicCacheLifetime5m - 10*time.Second
 	// The ping-count band. The upper end is bounded again, and more tightly, by the credential
 	// hold below.
 	minOverridePings = 1

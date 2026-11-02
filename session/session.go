@@ -109,14 +109,62 @@ func ExplicitID(cands ...string) string {
 	return ""
 }
 
+// metadataKeys are the request `metadata` fields carrying the agent's OWN session id, in
+// precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON object
+// string, unwrapped by ExplicitID) and `metadata.taskId` is Bob Shell's (a bare randomUUID,
+// re-rolled only by /clear). Both survive the agent's context compaction, which the derived
+// hash does not. A request carrying both resolves to user_id, by this order.
+var metadataKeys = [...]string{"user_id", "taskId"}
+
+// Explicit is the ONE rule for which explicit id a request carries: the header first, then
+// each metadataKeys field in order, then "" (Scoped's derived-hash fallback).
+//
+// metaString reads one metadata field. It returns ok=false when the field is absent or is not
+// a string, so a number, object or array falls back to the derived hash and never becomes a
+// key like `map[]`. A nil metaString means the host has no metadata.
+func Explicit(header string, metaString func(key string) (string, bool)) string {
+	return explicit(header, metaString, true)
+}
+
+// ExplicitStrict is Explicit for a host that cannot tell a per-conversation id from a
+// per-user one. It takes `metadata.user_id` only in Claude Code's JSON-object form, which
+// carries a session_id. A plain `user_id` such as `user_42` names a user, not a
+// conversation, so it falls back to the derived hash. `taskId` is taken as in Explicit.
+func ExplicitStrict(header string, metaString func(key string) (string, bool)) string {
+	return explicit(header, metaString, false)
+}
+
+func explicit(header string, metaString func(key string) (string, bool), plainUserID bool) string {
+	cands := make([]string, 0, 1+len(metadataKeys))
+	cands = append(cands, header)
+	if metaString != nil {
+		for _, k := range metadataKeys {
+			v, ok := metaString(k)
+			if !ok {
+				continue
+			}
+			if k == "user_id" && !plainUserID && !isJSONObject(v) {
+				continue
+			}
+			cands = append(cands, v)
+		}
+	}
+	return ExplicitID(cands...)
+}
+
+// isJSONObject reports whether v looks like Claude Code's JSON-object user_id.
+func isJSONObject(v string) bool {
+	return strings.HasPrefix(strings.TrimSpace(v), "{")
+}
+
 // metaSessionID unwraps Claude Code's JSON-object user_id, or returns v unchanged.
 // Every malformed shape (truncated JSON, an object without session_id, a nested
 // non-string session_id) yields "", which ExplicitID treats as "no candidate".
 func metaSessionID(v string) string {
-	s := strings.TrimSpace(v)
-	if !strings.HasPrefix(s, "{") {
+	if !isJSONObject(v) {
 		return v
 	}
+	s := strings.TrimSpace(v)
 	if len(s) > maxMetadataLen {
 		return ""
 	}

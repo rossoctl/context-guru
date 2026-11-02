@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestSavingsPartsAddUp runs savings.test.mjs: the Overview's three rows must sum to total_saved_usd.
+// TestSavingsPartsAddUp runs savings.test.mjs: the Overview's parts must sum to total_saved_usd.
 func TestSavingsPartsAddUp(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

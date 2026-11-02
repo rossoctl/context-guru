@@ -92,33 +92,7 @@ func (responsesEnvelopeAdapter) pendingCallFor(body []byte, names, servers map[s
 }
 
 func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
-	if !bytes.Contains(body, []byte(skills.Header)) {
-		return "", ""
-	}
-	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.Contains(instructions.String(), skills.Header) {
-		return "instructions", instructions.String()
-	}
-	path, text := "", ""
-	gjson.GetBytes(body, "input").ForEach(func(idx, item gjson.Result) bool {
-		if role := item.Get("role").String(); role != "system" && role != "developer" {
-			return true
-		}
-		content := item.Get("content")
-		if content.Type == gjson.String && strings.Contains(content.String(), skills.Header) {
-			path, text = "input."+idx.String()+".content", content.String()
-			return false
-		}
-		content.ForEach(func(bidx, block gjson.Result) bool {
-			v := block.Get("text")
-			if v.Type == gjson.String && strings.Contains(v.String(), skills.Header) {
-				path, text = "input."+idx.String()+".content."+bidx.String()+".text", v.String()
-				return false
-			}
-			return true
-		})
-		return path == ""
-	})
-	return path, text
+	return skills.LocateResponses(body) // the one rule, shared with dash's reader
 }
 
 // responseInputIndex resolves a normalized slot to its containing wire item.
@@ -517,6 +491,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
@@ -526,6 +501,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
 	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
+	// lifetime below are one fact — this request's cache lifetime.
+	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	maxCachedIdx, idleMs := -1, int64(-1)
 	if cacheAware && !serverHeldHistory {
 		nowMs := o.nowMs()
@@ -533,9 +511,25 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
-			maxCachedIdx--
+			// The alias session id (the headerless twin of res.Session, see apply.go's clock
+			// note): the restart grace asks the lookup for the thread's keys under BOTH ids,
+			// because a refresh under either one kept the provider's single entry warm (#766).
+			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
+			// metadata id when the body carries one, else the content hash. alias below stays
+			// the bare content hash for the cold decision's own clock (aliasSeen).
 			alias := session.Scoped(o.Tenant, "", sys, first)
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// wrote it — the store's alias keys use that id.
+			if alias != res.Session {
+				loadSessionState(st, alias)
+			}
+			graceAlias := graceAliasID(o.Tenant, o.Body, norm)
+			graceAliasKey := thread.Key(graceAlias, res.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
+			maxCachedIdx--
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}
@@ -555,7 +549,6 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	if mode == "" {
 		mode = components.ModeSync
 	}
-	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	if !cacheAware {
 		ttl, ttlKind = 0, CacheLifetimeUnknown
 	}

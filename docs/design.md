@@ -15,7 +15,7 @@ infrastructure the components sit on.
 | `components/offload/` | lossy-reversible components: `skeleton`, `dedup`, `collapse`, `failed_run`, `cmdfilter`, `extract`, `extract_llm`, `smartcrush`, `mask`, `summarize` |
 | `components/dsl/` | declarative text-filter engine (wrapped by `cmdfilter`) |
 | `components/all/` | blank-imports every component so `init()` registrations run |
-| `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation) |
+| `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
@@ -245,12 +245,52 @@ The related fail-*open* on `MaxCachedIdx`: `prevLen` returning 0 on a store miss
 Terminal-Bench requests). `cg:len:` is now pinned and the sliding TTL keeps it alive, so it
 no longer expires mid-session — but inverting `TailOnly` to fail *closed* is a separate change.
 
+## Keep-alive: the cache strategy comes first
+
+The cache strategy decides how long the cache stays warm after the user's last turn (for example
+2 pings at 240 s and 480 s, or 1 ping at 59 minutes on the 1-hour tier). **Nothing the keep-alive
+sends may shorten that.**
+
+- **A request sent in place of a ping** (the sweep question, the summarizer's substitute, any future
+  one) may replace a planned ping **only when it renews the same cache entry** the plain ping renews.
+- **After a tool-result turn it does** (since #777): the request keeps the turn's breakpoint, so it
+  reads and renews the turn's entry.
+- **After a text turn it does not.** The provider renews an entry that ends at a text turn only for
+  the exact same request. A request that appends a question is not that request.
+- **When it cannot renew the entry,** every planned ping stays plain. The request goes out once,
+  after the last planned ping, and nothing goes out after it. A user who comes back inside the
+  strategy's warm period is covered exactly as without it. A user who comes back later pays the
+  re-write the strategy would have paid anyway.
+- **Which request takes that slot.** One slot, 30 s before the normal hold deadline: 210 s after the
+  last ping at the 5-minute defaults. **The hold limit never changes.** One request only, and
+  nothing after it. A missed slot is never sent late. The slot gets the same route-breaker and
+  dead-credential check as a planned ping.
+- **When a summary is due, only the summary goes**, even if it declines. The sweep question does not
+  go in that span: after a declined summary it could pay a cache write, the same problem as the ping.
+  The sweep question takes the slot only when no summary is due. The owner's rule, 2026-10-30: "as
+  for sweep after summary. dont do that. it can probably have the sweep question pay a cache write
+  like the problem with the ping... so we should probably just do summary at that point".
+- **A `cache_state: pre_expiry` summary at that slot.** For this one request only, its pre-expiry
+  window widens to cover the slot, so it runs about 90 s before the cache expires instead of in the
+  usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window. The owner chose
+  this on 2026-10-30: "give it more time, it can run on the 210 sec mark".
+- "Text turn" is read from metadata only: the role and block type of the held request's last
+  non-system message. It is an internal flag on the held entry, not a published metric. It never
+  applies on OpenAI, whose cache has no breakpoints and no text-turn rule.
+
+History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it before each release.
+`keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
+substitute kind.
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
 `sha256(system + firstUser)[:16]` so two turns of one conversation land on the same key.
-Explicit id sources: proxy header `x-context-guru-session`; the external plugin's `pctx.Session`;
-eval-containers stamps it in the gateway.
+Explicit id sources: proxy header `x-context-guru-session`, then the agent's own id in the request
+metadata (`user_id` from Claude Code, `taskId` from Bob Shell; `session.Explicit`); the external
+plugin's `pctx.Session`; eval-containers stamps it in the gateway. The bifrost adapter uses
+`session.ExplicitStrict`: it takes `user_id` only in Claude Code's JSON form, because a plain
+`user_id` may name a user, not a conversation.
 
 ## Metrics
 
@@ -312,8 +352,43 @@ job.
 boundary above which offloaders may mutate (`Ctx.MaxCachedIdx`). It is read and updated in one
 locked call per turn, closing a race where two concurrent turns of one session could otherwise leave
 the boundary describing neither. A boundary that's too high lets an offloader mutate content the
-provider already cached, forcing a cache-write of the suffix; the boundary only ever grows, since an
-agent re-sending a shorter transcript must not shrink it.
+provider already cached, forcing a cache-write of the suffix; a shorter transcript under the same
+key is the agent's own compaction, so the boundary resets to 0 and the new prefix is measured from
+there. After a proxy restart the tracker's records are gone but the provider's cache entries are
+not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
+only while that thread's cached prefix was last refreshed inside the request's cache lifetime
+(5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended tier). A refresh is the
+thread's own last request or a keep-alive ping that read the cache, under either session id the
+conversation uses (an explicit header on some turns, a content-derived id on others). The
+refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
+the dashboard off the fallback is the proxy's start time, and `--restart-grace=false` switches
+the rule off in every case.
+
+The recorder learns a refresh under BOTH session ids a conversation uses: the request's own
+id, and the alias id — the id a HEADERLESS turn of the same body runs under: the metadata
+session id when the body carries one (`metadata.user_id`, `metadata.taskId`), else the
+content hash of the transformed head. One rule resolves it on both sides (`apply.graceAliasID`
+on the ask side, `apply.EnforcedSessionIDFor`'s empty-explicit-id path on the record side,
+over the pipeline's own envelope transform — because toolfilter's skills half rewrites the
+head message the session hash reads, and a hash of the pristine body is a key no request
+ever derives; the record side stores the alias on the row). That is what makes the alias
+widening hold in both directions — a headerless turn asks for the alias id alone, because
+its own derived id IS the alias, so the header turns' warmth must already sit under that
+key. The cold decision's own alias clocks (idle, TTL) still key on the bare content hash
+and do not bridge to a metadata id — old behavior, unchanged by #766. The startup seed
+recovers both keys from the requests table, with two limits: a row written before the alias
+column existed has no alias to recover, so a seesaw-id tenant's first headerless request
+after an UPGRADE can read as expired (one turn, once), and a keep-alive ping carries no body
+to derive an alias from, so a ping refreshes only the id it ran under. In hosted mode a
+tenant running observe mode gets the start-time fallback instead of the lookup: its rows
+carry no session id, so the lookup declines that tenant's keys rather than answering every
+one with a miss.
+
+The recorder holds that refresh time in a bounded map. Pruning runs only once it passes 20,000
+entries, by age (two silent hours); if even that frees nothing, the last resort empties the map
+wholesale. Every thread then reads as new until its next request refreshes it again, so the
+first request of a warm thread is editable — a lost saving for one turn, never a wrong rewrite
+in the other direction.
 
 ### Fail-open per mode
 

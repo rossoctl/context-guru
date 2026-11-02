@@ -288,26 +288,30 @@ func TestAPressIsAllowedOnAnEntryWhosePlannedPingsRanOut(t *testing.T) {
 	}
 }
 
-// A miss or a refused ping stops the entry, and a press stays refused.
-func TestAnEntryStoppedByAFailureIsNotPingableAndSaysStopped(t *testing.T) {
+// A miss or a refused ping stops the entry. While it still holds the copy a press can work (#771);
+// once the keeper releases it, the button is off and says "stopped".
+func TestAnEntryStoppedByAFailureStaysPingableUntilReleasedThenSaysStopped(t *testing.T) {
 	k, _, clock := testKeeper(t)
 	start := clock.now()
 	recordOne(t, k, kaPolicy(), kaBody, start)
 	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) { return Usage{}, http.StatusBadRequest, nil })
 	k.Sweep(start.Add(280 * time.Second)) // the scheduled ping gets a 400 and stops the entry
-	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonStopped {
-		t.Fatalf("state = %+v, want not pingable, %q", st, ReasonStopped)
+	if st := stateOf(k, sess1); !st.Pingable {
+		t.Fatalf("state = %+v, want pingable while the copy is held", st)
 	}
-	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
-		t.Errorf("press on a stopped entry = %v, want ErrNotHeld", err)
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); errors.Is(err, ErrNotHeld) {
+		t.Errorf("press on a stopped entry still held = %v, want a ping to be sent", err)
 	}
 	// And after the keeper releases it, still "stopped", not "not opted in".
 	k.Sweep(start.Add(600 * time.Second))
 	if _, ok := k.Entry(sess1); ok {
 		t.Fatal("the stopped entry was not released")
 	}
-	if st := stateOf(k, sess1); st.Reason != ReasonStopped {
-		t.Errorf("after release: %+v, want %q", st, ReasonStopped)
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonStopped {
+		t.Errorf("after release: %+v, want not pingable, %q", st, ReasonStopped)
+	}
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrNotHeld) {
+		t.Errorf("press after release = %v, want ErrNotHeld", err)
 	}
 }
 

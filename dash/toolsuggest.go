@@ -307,8 +307,9 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		}
 		seen := map[statKey]map[string]bool{}
 		out := map[statKey]declWindow{}
+		stale := scan.staleRules(func(s string) bool { return sessions[s] }, true)
 		for k, v := range scan.facts {
-			if !sessions[k.session] {
+			if !sessions[k.session] || stale.stale(k.tenant, k.session, k.kind, k.name, k.server, v.last) {
 				continue
 			}
 			sk := statKey{k.kind, k.name}
@@ -332,7 +333,9 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		}
 		return out, nil
 	}
-	q := `SELECT d.kind, d.name, COUNT(DISTINCT d.session_id), MIN(d.ts), MAX(d.ts)
+	// Per (session, kind, name), so the stale-kind rule (stalekind.go) can run on the facts; the
+	// window and the session count are folded in Go, as the broad branch above does.
+	q := `SELECT d.tenant_id, d.session_id, d.kind, d.name, d.server, MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -340,22 +343,53 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		q += ` AND d.tenant_id = ?`
 		a = append(a, f.Tenant)
 	}
-	q += ` GROUP BY 1, 2`
+	q += ` GROUP BY 1, 2, 3, 4, 5`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[statKey]declWindow{}
+	type fact struct {
+		tenant, session, kind, name, server string
+		first, last                         int64
+	}
+	var facts []fact
 	for rows.Next() {
-		var k statKey
-		var w declWindow
-		if err := rows.Scan(&k.kind, &k.name, &w.sessions, &w.first, &w.last); err != nil {
+		var f fact
+		if err := rows.Scan(&f.tenant, &f.session, &f.kind, &f.name, &f.server, &f.first, &f.last); err != nil {
 			return nil, err
 		}
-		out[k] = w
+		facts = append(facts, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	facts = dropStale(facts, func(f *fact) (string, string, string, string, string, int64) {
+		return f.tenant, f.session, f.kind, f.name, f.server, f.last
+	})
+	seen := map[statKey]map[string]bool{}
+	out := map[statKey]declWindow{}
+	for _, f := range facts {
+		sk := statKey{f.kind, f.name}
+		if seen[sk] == nil {
+			seen[sk] = map[string]bool{}
+		}
+		seen[sk][f.session] = true
+		w, ok := out[sk]
+		if !ok || f.first < w.first {
+			w.first = f.first
+		}
+		if !ok || f.last > w.last {
+			w.last = f.last
+		}
+		out[sk] = w
+	}
+	for sk, set := range seen {
+		w := out[sk]
+		w.sessions = len(set)
+		out[sk] = w
+	}
+	return out, nil
 }
 
 // ToolFilterDoc is the whole opt-in surface for one scope: what is currently excluded, what
@@ -513,7 +547,7 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	// by a `type` the provider resolves, not by a schema we can drop from the array without
 	// changing what the request IS. Never offered. Nor is the skills LISTING: it is one
 	// indivisible block of prose, and it shrinks by removing the skills inside it.
-	if st.Kind == KindServerTool || st.Kind == KindSkillListing {
+	if st.Kind == KindServerTool || st.Kind == KindSkillListing || st.Kind == KindDeferredListing {
 		return Suggestion{}, false
 	}
 	// A built-in is never offered either, and this is the second gate on that rather than the

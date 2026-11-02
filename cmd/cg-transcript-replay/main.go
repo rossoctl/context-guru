@@ -29,6 +29,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -91,7 +92,7 @@ func toolResults(msgs []gjson.Result) map[string]int {
 	for _, msg := range msgs {
 		msg.Get("content").ForEach(func(_, b gjson.Result) bool {
 			if b.Get("type").String() == "tool_result" {
-				m[b.Get("tool_use_id").String()] += tokens.Count(b.Get("content").Raw)
+				m[b.Get("tool_use_id").String()] += tokens.Count(schema.ToolResultText(b))
 			}
 			return true
 		})

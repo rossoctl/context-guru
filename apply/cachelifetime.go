@@ -18,10 +18,10 @@ const (
 )
 
 const (
-	AnthropicDefaultCacheTTL = 5 * time.Minute
+	AnthropicDefaultCacheTTL = modelinfo.AnthropicCacheTTL5m
 	OpenAIMinimumCacheTTL    = modelinfo.OpenAIMinimumCacheTTL
 	anthropicDefaultTTL      = AnthropicDefaultCacheTTL
-	extendedTTL              = time.Hour
+	extendedTTL              = modelinfo.AnthropicCacheTTL1h
 	coldMargin               = time.Minute
 )
 
@@ -33,13 +33,35 @@ const (
 // without a reliable per-request fact.
 func CacheLifetime(provider bschemas.ModelProvider, model string, body []byte) (time.Duration, CacheLifetimeKind) {
 	if explicitBreakpointProvider(provider) {
-		if bodyAsksExtendedTTL(body) {
-			return extendedTTL, CacheLifetimeExact
-		}
-		return AnthropicDefaultCacheTTL, CacheLifetimeExact
+		// The tier is the one the body REQUESTED; the shared rule maps it to a lifetime.
+		return modelinfo.CacheLifetime(string(provider), model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
 	}
 	if modelinfo.OpenAI30MinuteCache(string(provider), model) {
 		return OpenAIMinimumCacheTTL, CacheLifetimeMinimum
 	}
 	return 0, CacheLifetimeUnknown
+}
+
+// restartGrace is the restart grace for a thread whose first request after the restart carries
+// this lifetime (#496): the lifetime itself — the longest an entry a restart forgot can still
+// be alive — with two substitutions.
+//
+// Every OpenAI request gets the 30-minute minimum, whatever CacheLifetime says about the model.
+// A pre-GPT-5.6 model's Unknown is a statement about what the COLD gate may conclude (it must
+// not declare cold on an undocumented retention), not a claim that the prefix is gone in 5
+// minutes; for the grace the safe read is the documented minimum. CacheLifetime itself is
+// unchanged — the cold gate needs it as it is.
+//
+// A non-OpenAI model whose retention is unknown gets the SHORTEST known lifetime, 5 minutes,
+// because the grace errs in both directions: too long freezes a brand-new thread's first
+// request, too short lets a component rewrite a live prefix. Both this and the keep-alive
+// take the lifetime from modelinfo.CacheLifetime.
+func restartGrace(provider bschemas.ModelProvider, ttl time.Duration, kind CacheLifetimeKind) time.Duration {
+	if provider == bschemas.OpenAI {
+		return OpenAIMinimumCacheTTL
+	}
+	if kind == CacheLifetimeUnknown {
+		return AnthropicDefaultCacheTTL
+	}
+	return ttl
 }

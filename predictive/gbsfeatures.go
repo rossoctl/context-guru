@@ -354,7 +354,7 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	for _, pre := range []string{"aws/", "azure/", "Azure/"} {
 		mm = strings.TrimPrefix(mm, pre)
 	}
-	row.Cat = [NCat]string{family(r.Model), agent, r.Provider, r.StopReason, r.Thinking, none(r.StopReason), prevStop, mm, r.Agent, none(r.CacheTTL), none(r.Thinking), none(r.Effort)}
+	row.Cat = [NCat]string{FamilyOf(r.Model), agent, r.Provider, r.StopReason, r.Thinking, none(r.StopReason), prevStop, mm, r.Agent, none(r.CacheTTL), none(r.Thinking), none(r.Effort)}
 	row.Ctx, row.ModelName = ctx, r.Model
 	a.gs = st
 }

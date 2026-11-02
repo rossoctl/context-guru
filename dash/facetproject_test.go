@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"testing"
 )
 
@@ -240,56 +239,5 @@ func TestTheProjectPickerStaysCompleteAfterSelectingOne(t *testing.T) {
 		t.Errorf("with a project selected the picker offers %v; want both. A picker scoped by "+
 			"its own selection is a one-way door: the reader cannot switch project or get back "+
 			"to the pooled view", doc["project"])
-	}
-}
-
-// CLEANUP'S PICKER OFFERS ONLY PROJECTS THE PROXY MEASURED.
-//
-// Reported, of a project whose whole history predates the proxy: "If a project was used before
-// the proxy existed it should only be in History and not on this page." Cleanup prices what each
-// request DECLARED, which only the proxy sees, so a history-only project can never produce a
-// figure there. Offering it meant a selection whose only possible result was an apology.
-//
-// Opt-in through `measured=1` rather than changed for every caller: the Usage tab legitimately
-// reports imported spend per project, and its picker must keep them.
-func TestTheMeasuredOnlyFacetDropsHistoryOnlyProjects(t *testing.T) {
-	db := openTestDB(t)
-	if err := db.insertBatch([]*Event{
-		{TS: daysAgo(2), SessionID: "s-live", Model: "m", Project: "/Users/v/watched"},
-		{TS: daysAgo(40), SessionID: "s-old", Model: "m", Project: "/Users/v/history-only",
-			Source: SourceImported},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	mux := projectAPIWithHome(t, db, t.TempDir())
-	get := func(q string) []string {
-		rr := httptest.NewRecorder()
-		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/facets"+q, nil))
-		if rr.Code != http.StatusOK {
-			t.Fatalf("GET /api/facets%s = %d: %s", q, rr.Code, rr.Body.String())
-		}
-		var doc map[string][]string
-		if err := json.Unmarshal(rr.Body.Bytes(), &doc); err != nil {
-			t.Fatal(err)
-		}
-		return doc["project"]
-	}
-	if got := get("?measured=1"); len(got) != 1 || got[0] != "/Users/v/watched" {
-		t.Errorf("measured-only facet = %v; want only the project the proxy watched. A "+
-			"history-only project has no figure Cleanup could ever show", got)
-	}
-	// The default keeps both, for the tabs that report imported spend.
-	if got := get(""); len(got) != 2 {
-		t.Errorf("default facet = %v; want both projects — the Usage tab reports imported "+
-			"spend and its picker must still offer them", got)
-	}
-}
-
-// And the view asks for it.
-func TestTheCleanupPickerRequestsMeasuredProjectsOnly(t *testing.T) {
-	src := stripComments(readUI(t, "ui/insights.js"))
-	if !regexp.MustCompile(`api\('facets',\s*\{[^}]*measured:\s*1`).MatchString(src) {
-		t.Error("the Cleanup view loads its project list without measured: 1, so it offers " +
-			"projects whose whole history predates the proxy and can never show a figure")
 	}
 }

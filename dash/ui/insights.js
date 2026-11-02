@@ -542,29 +542,6 @@ function insRender() {
       'A row showing no figures was invoked, so it has no waste to report.' }));
   root.appendChild(intro);
 
-  /* NOTHING IN SCOPE WAS MEASURED: say so, and stop before anything indexes into an empty document.
-   *
-   * Reported as "if I select ai-native-company I get a bug". Every one of that project's requests
-   * was recovered from Claude Code's transcripts, from before this proxy was installed. This page
-   * prices what each request DECLARED, which only the proxy sees, so there is nothing here to
-   * show — and the chart, reading a timeline with no days, threw. A blank or broken page reads as
-   * "this project carried nothing", which is false: it was simply never watched.
-   *
-   * The project picker stays, so the reader can choose another without going back. */
-  const cov = insDoc.coverage;
-  if (cov && !cov.measured_requests && !(insDoc.items || []).length) {
-    root.appendChild(el('div', { class: 'panel' },
-      el('h2', { text: 'Nothing measured for this selection' }),
-      insProjectPicker(),
-      el('p', { text: 'All ' + nf.format(cov.imported_requests || 0) + ' requests here were '
-        + 'recovered from Claude Code\u2019s own history, from before this proxy was installed. '
-        + 'This page prices what each request carried in its prompt, and only the proxy sees '
-        + 'that, so it has no figures for them.' }),
-      el('p', { text: 'That does not mean nothing was wasted here. '
-        + 'Traffic in this project from now on is measured and will appear here.' })));
-    return;
-  }
-
   /* THE CHART IS THE CONTROL, and it comes before the tables because the reader chooses a
    * range from it. At rest it shows the whole history, so the range is picked from evidence
    * rather than guessed — a brush on a blank frame would make the reader supply the knowledge
@@ -767,10 +744,7 @@ async function loadInsights() {
     if (insProjects === null) {
       insProjects = [];
       try {
-        /* MEASURED PROJECTS ONLY. This page prices what each request declared, which only the
-         * proxy sees, so a project used only before the proxy existed could only ever show an
-         * empty state. */
-        const f = await api('facets', { measured: 1 });
+        const f = await api('facets');
         if (f && Array.isArray(f.project)) insProjects = f.project.filter(Boolean).sort();
       } catch (_) {
         /* A picker that cannot list projects is a missing control, not a broken page: the

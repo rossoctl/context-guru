@@ -251,7 +251,7 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   `install-scope.json` (which port belongs to which project, shared by every project on the machine
   — so deleting it affects the others, not just this one), the dashboard
   database (session metadata and token counts, no prompt content unless they enabled content
-  capture), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
+  capture, and the session state: summary checkpoints, which hold summary text), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
   copy — fine once they are working again and have confirmed it, but say so before they agree.
 - **Delete the recovery folder(s)** — `<dir>/context-guru-settings-json/`, beside each settings
   file the install touched (so `.claude/context-guru-settings-json/` for a project install, or

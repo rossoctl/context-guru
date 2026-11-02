@@ -90,3 +90,20 @@ func TestRestoreInsertFollowsTheAnchorThroughACountChange(t *testing.T) {
 		t.Fatalf("an unprovable mapping must append the copy, not guess: %s", nb)
 	}
 }
+
+// The repair path skips an anchor when the client's answer IS the original. That answer can be an
+// array of text blocks; compared as raw JSON it never matched, and an anchor was recorded.
+func TestPlanRestoreSkipsAnArrayAnswerThatIsTheOriginal(t *testing.T) {
+	body := []byte(`{"model":"claude-x","messages":[{"role":"user","content":"go"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"tu","name":"` + expand.ToolName + `","input":{"id":"H"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu","content":[{"type":"text","text":"ORIGINAL OUTPUT"}]}]}]}`)
+	msgs := gjson.GetBytes(body, "messages").Array()
+	pipe := components.NewPipeline(nil, nil)
+	pipe.SetFixedRestore(true)
+	st := store.NewMemory(store.Options{})
+	st.Put("H", []byte("ORIGINAL OUTPUT"))
+	planRestore(pipe, st, "sess", "anthropic", body, msgs)
+	if a := expand.Anchors(st, "sess"); len(a) != 0 {
+		t.Fatalf("an anchor was recorded for an answer that is the original: %+v", a)
+	}
+}

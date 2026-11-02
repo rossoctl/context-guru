@@ -76,7 +76,7 @@ func TestBilledElsewhereMarkerReachesTheDashboardCostQuery(t *testing.T) {
 	st := store.NewMemory(store.Options{MaxEntries: 400})
 	model := &usageSummaryModel{}
 	kaCandidate(t, "sess-1", st, model)
-	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}

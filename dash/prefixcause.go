@@ -17,6 +17,9 @@ type PrefixFacts struct {
 	Bypassed     bool
 	// Messages is the message count of the request. 0 means it was not read.
 	Messages int
+	// PromptTokens is the request's whole prompt: fresh input + cache read + cache write.
+	// A token count, so metadata only. 0 means the usage block was not read.
+	PromptTokens int64
 	// Rewrote says context-guru shortened this request (tokens_after < tokens_before).
 	Rewrote bool
 	// TS is the request time in epoch ms.
@@ -33,7 +36,8 @@ func FactsOf(e *Event) PrefixFacts {
 		SystemHash: e.SystemHash, SystemBlocks: e.SystemBlocks,
 		Effort: e.ReasoningEffort, Thinking: e.ThinkingMode, Budget: e.ThinkingBudget,
 		Bypassed: e.Bypassed, Messages: e.Messages,
-		Rewrote: !e.Bypassed && e.TokensAfter < e.TokensBefore,
+		PromptTokens: e.FreshInput + e.CacheRead + e.CacheWrite,
+		Rewrote:      !e.Bypassed && e.TokensAfter < e.TokensBefore,
 	}
 }
 
@@ -49,6 +53,9 @@ func FactsOf(e *Event) PrefixFacts {
 //     after it refreshed this model's entry (see entryAgeMs).
 //   - known: false when the thread has no facts at all. The caller then keeps the gap it
 //     measured itself (a restart forgets facts but not recency).
+//   - prevPromptTokens: that same-model previous request's whole prompt (fresh input + cache
+//     read + cache write), 0 when there is none. AttributeCache uses it to tell a hit that
+//     covers the prompt from a partial read (#496).
 //
 // A thread whose earlier requests were all on another model reads CauseModelChanged, with two
 // exceptions that read CauseFirstOnModel (stored as cold_start). Both are a first request on
@@ -64,9 +71,9 @@ func FactsOf(e *Event) PrefixFacts {
 // It must run once per request, in request order, with the key ObserveThread uses. fromThread is
 // the thread a new thread inherits from (hasFrom says there is one); it is read only when the
 // thread has no facts yet.
-func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known, lastWasSame bool) {
+func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known, lastWasSame bool, prevPromptTokens int64) {
 	if r == nil {
-		return "", 0, false, false
+		return "", 0, false, false, 0
 	}
 	key := thread.Key(session, threadID)
 	r.mu.Lock()
@@ -102,13 +109,13 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	switch {
 	case same:
 		gap := cur.TS - prev.TS
-		return prefixCause(prev, cur, gap), gap, true, lastWasSame
+		return prefixCause(prev, cur, gap), gap, true, lastWasSame, prev.PromptTokens
 	case failedSame, hadAny && cur.Messages > 0 && cur.Messages <= shortFirstMessages:
-		return CauseFirstOnModel, -1, hadAny, false
+		return CauseFirstOnModel, -1, hadAny, false, 0
 	case hadAny:
-		return CauseModelChanged, -1, true, false
+		return CauseModelChanged, -1, true, false, 0
 	}
-	return "", 0, false, false
+	return "", 0, false, false, 0
 }
 
 // shortFirstMessages is the largest message count of a request that counts as a short first

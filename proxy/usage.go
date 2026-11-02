@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/tidwall/gjson"
 )
 
@@ -164,12 +165,8 @@ func usagePresent(v gjson.Result) bool {
 // this workload — the request is ~99.95% cached and a cache write bills ~11.5x a
 // read, so content-token savings alone cannot express the economics.
 //
-// Dialects handled:
-//
-//	Anthropic  usage.{input_tokens, output_tokens,
-//	           cache_read_input_tokens, cache_creation_input_tokens}
-//	OpenAI     usage.{prompt_tokens, completion_tokens,
-//	           prompt_tokens_details.cached_tokens}
+// Dialects handled (Anthropic, OpenAI Responses, OpenAI chat, output-only): see
+// providerusage.Parse, which holds the field names.
 //
 // Anthropic's `input_tokens` already EXCLUDES the cached tiers, so it is the fresh
 // figure directly. OpenAI's `prompt_tokens` INCLUDES its cached_tokens, so fresh is
@@ -224,43 +221,8 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		}
 		return Usage{}, usageMissAbsent
 	}
-	var out Usage
-	switch {
-	case u.Get("input_tokens").Exists(): // Anthropic or OpenAI Responses
-		input := u.Get("input_tokens").Int()
-		out.Output = u.Get("output_tokens").Int()
-		if u.Get("input_tokens_details.cached_tokens").Exists() || u.Get("input_tokens_details.cache_write_tokens").Exists() {
-			// Responses includes both cache tiers in input_tokens.
-			out.CacheRead = u.Get("input_tokens_details.cached_tokens").Int()
-			out.CacheWrite = u.Get("input_tokens_details.cache_write_tokens").Int()
-			out.FreshInput = input - out.CacheRead - out.CacheWrite
-			if out.FreshInput < 0 {
-				out.FreshInput = 0
-			}
-		} else {
-			// Anthropic reports fresh and cache-read input as separate tiers.
-			out.CacheRead = u.Get("cache_read_input_tokens").Int()
-			out.FreshInput = input
-			out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
-		}
-		// The per-TTL split, when the provider reports one. `cache_creation_input_tokens`
-		// is the total across both tiers, so this is a SUBSET of CacheWrite and never an
-		// addition to it.
-		out.CacheWrite1h = u.Get("cache_creation.ephemeral_1h_input_tokens").Int()
-	case u.Get("prompt_tokens").Exists(): // OpenAI
-		prompt := u.Get("prompt_tokens").Int()
-		out.Output = u.Get("completion_tokens").Int()
-		out.CacheRead = u.Get("prompt_tokens_details.cached_tokens").Int()
-		out.FreshInput = prompt - out.CacheRead
-		if out.FreshInput < 0 {
-			out.FreshInput = 0
-		}
-	case u.Get("output_tokens").Exists():
-		// An OUTPUT-ONLY block. Anthropic's streaming message_delta carries exactly
-		// this, and it holds the FINAL completion count — treating it as "no usage"
-		// under-reports every streamed response's output tokens.
-		out.Output = u.Get("output_tokens").Int()
-	default:
+	tiers, known := providerusage.Parse(u)
+	if !known {
 		// A usage block IS here and this parser read nothing out of it — the Bedrock Converse
 		// camelCase shape (`usage.inputTokens`) is the known instance. The DIALECT is deliberately
 		// not added here: getting the field names wrong (`cacheWriteInputTokens` vs
@@ -268,7 +230,9 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		// closes that gap is the shape record in responseUsage, which needs no guess.
 		return Usage{}, usageMissUnparsed
 	}
-	if out.FreshInput|out.CacheRead|out.CacheWrite|out.Output == 0 {
+	out := Usage{FreshInput: tiers.FreshInput, CacheRead: tiers.CacheRead, CacheWrite: tiers.CacheWrite,
+		CacheWrite1h: tiers.CacheWrite1h, Output: tiers.Output}
+	if tiers.Zero() {
 		// Recognised and genuinely zero, which is legitimate on some responses. Kept out of the
 		// unparsed counter, or every such response would inflate the one number that means a
 		// dialect is missing.
@@ -632,7 +596,7 @@ func responseStopReason(sse bool, body []byte) string {
 //	OpenAI Responses      output[].{type: "function_call", name}    (buffered); not read from
 //	                      an SSE stream — Responses event names and nesting are not the same as
 //	                      Anthropic's and this proxy does not splice that transport (see
-//	                      proxy.go's own comment on wire == "responses"), so a streamed
+//	                      proxy.go's own comment where it tests schema.IsResponses(wire)), so a streamed
 //	                      Responses tool call reads as if the response had none, same honest gap
 //	                      as a sniffer-truncated Anthropic stream.
 //

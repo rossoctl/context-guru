@@ -2,7 +2,6 @@ package dash
 
 import (
 	"strings"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
@@ -146,6 +145,21 @@ type Event struct {
 	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
 	// "p:" id.
 	ThreadID string `json:"thread_id"`
+	// SessionAlias is the session's content-derived alias id (session.Scoped over the
+	// normalized head), stored so the restart grace's seed can reload the warmth a request
+	// under an EXPLICIT header id also left under the alias id: a later headerless turn
+	// derives exactly that alias and asks for it alone (#766). '' on a row with no separate
+	// alias — a headerless request's own id IS the alias, and a keep-alive ping carries no
+	// body to derive one from — and on every row written before the column existed, which is
+	// the documented limit of the seed: the alias warmth of history is gone.
+	SessionAlias string `json:"session_alias,omitempty"`
+	// AliasFn fills SessionAlias and touches the grace clock under the alias key, on the
+	// WRITER goroutine (Recorder.run's write(), beside WaitCause) — never on the request
+	// path: the derivation transforms and normalizes the whole body, the same scans the
+	// enforced path pays, and finish() runs on the handler's own defer. It derives the id
+	// the pipeline's own turn will ask under, through the envelope transform — see
+	// apply.EnforcedSessionIDFor. nil on a row with no session id.
+	AliasFn func() string `json:"-"`
 	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
 	// from the request body and the response's own tool calls/stop reason, by string match
 	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
@@ -439,8 +453,8 @@ type Event struct {
 	// nonzero cachesplit_saved_usd identifies exactly the rows that qualified, and
 	// split_stable_tokens, cache_read and cache_write are all stored beside it, so the
 	// figure can be recomputed from the row. (It is NOT recoverable from
-	// cache_miss_reason, which reads "hit" on every qualifying row — AttributeCache
-	// short-circuits on cache_read > 0 before it ever considers a cold start.)
+	// cache_miss_reason, which reads "hit" on every qualifying row — a qualifying row's
+	// read covers the previous prompt, so the partial-read rule (#496) leaves it a hit.)
 	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
@@ -1085,25 +1099,9 @@ func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
 		if !modelinfo.GPT56OrLater(model) {
 			return 1<<63 - 1 // no known lifetime means no defensible credit
 		}
-		return apply.OpenAIMinimumCacheTTL.Milliseconds()
 	}
-	if cacheTTL == apply.TTLEphemeral1h {
-		return providerCacheTTL1hMs
-	}
-	return providerCacheTTLMs
+	return modelinfo.CacheLifetime(provider, model, cacheTTL == apply.TTLEphemeral1h).Milliseconds()
 }
-
-// providerCacheTTLMs is the Anthropic default used by the Anthropic-only
-// keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
-// be used as proof that an entry has expired.
-//
-// The one-hour tier has its own constant, providerCacheTTL1hMs: a thread whose requests ask the 1h
-// tier is pinged at 59 minutes, so both the write-side floor above and kaSaved's reachability window
-// in keepalive.go use it for rows whose cache_ttl is ephemeral_1h.
-const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
-
-// providerCacheTTL1hMs is the one-hour tier's lifetime.
-const providerCacheTTL1hMs int64 = int64(time.Hour / time.Millisecond)
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a
@@ -1192,9 +1190,17 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 //
 // cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
 // "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string) {
+//
+// prevPromptTokens is that previous same-model request's whole prompt (fresh input + cache read
+// + cache write), 0 when none is known. A read alone is not a hit (#496): Claude Code keeps the
+// system prompt and tools under a separate breakpoint, so a request that re-wrote the rest of
+// the prompt still reads 35k-51k tokens. A PARTIAL read — under half the previous prompt, with
+// more written than read — re-wrote most of the prompt, so it is a miss and takes the chain
+// below like any other. Old rows are not migrated; they keep the label they got.
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string, prevPromptTokens int64) {
+	partialRead := prevPromptTokens > 0 && e.CacheRead*2 < prevPromptTokens && e.CacheWrite > e.CacheRead
 	switch {
-	case e.CacheRead > 0:
+	case e.CacheRead > 0 && !partialRead:
 		e.CacheMissReason = CacheHit
 	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart

@@ -352,6 +352,31 @@ func summaryCoveredHash(c *components.Ctx, start, end int, span []bschemas.ChatM
 	return spanHash(span)
 }
 
+// summaryCoveredHashMatches is how a span is compared with a stored summaryCoveredHash. It also
+// accepts the hash an earlier version wrote over the same span (see spanHashMatches, #783).
+func summaryCoveredHashMatches(c *components.Ctx, start, end int, span []bschemas.ChatMessage, want string) bool {
+	if summaryCoveredHash(c, start, end, span) == want {
+		return true
+	}
+	prefix := ""
+	if c.SummaryStashPayload != nil {
+		b, err := c.SummaryStashPayload(start, end, span)
+		if err != nil {
+			return false
+		}
+		prefix = string(b) + ":"
+	}
+	for _, legacy := range components.LegacySpanHashes(span) {
+		if prefix != "" {
+			legacy = hashKey(prefix + legacy)
+		}
+		if legacy == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
@@ -799,7 +824,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
-	if summaryCoveredHash(c, start, boundary, covered) != cp.CoveredHash {
+	if !summaryCoveredHashMatches(c, start, boundary, covered, cp.CoveredHash) {
 		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The hash
 		// is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
 		// component mutating a message inside the checkpointed span lands here. extract_llm_sweep is the

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -173,35 +174,106 @@ type PrefixAsker interface {
 }
 
 // SpanHash is a stable content hash of a normalized message span, shared by every caller that
-// needs to tell whether two slices of a transcript are byte-for-byte the same conversation.
-// Exported so a PrefixCoverage implementation living outside this package (the host's own
-// stash) can compute the identical hash a components/offload caller computes over its own
-// span, without either package importing the other.
+// needs to tell whether two slices of a transcript are the same conversation. Exported so a
+// PrefixCoverage implementation living outside this package (the host's own stash) can compute
+// the identical hash a components/offload caller computes over its own span, without either
+// package importing the other.
 //
-// Hashes each message with its per-block cache_control stripped first (see
-// stripCacheControl): cache_control marks WHERE a client wants the provider's prompt cache to
-// break, not anything the model reads, and a client that moves the marker to a different
-// message every turn (Claude Code does, to keep it on the last message) must not change this
-// hash — otherwise SpanHash reports two slices of the identical conversation as different
-// spans purely because the cache breakpoint moved, which is exactly the false mismatch that
-// sent cache_aware_summarizer's stale-prefix guard into declining every commission at small
-// keep_last_turns values (PR #402 re-review).
+// Hashes each message in its canonical form (schema.CanonicalMessage, #783): cache_control
+// removed, and a list of one plain text block read as its string. Neither is anything the model
+// reads. A client that moves the cache marker to the newest message every turn (Claude Code
+// does) must not change this hash: that false mismatch sent cache_aware_summarizer's
+// stale-prefix guard into declining every commission at small keep_last_turns values (PR #402
+// re-review). The same holds for a client that sends one message as a block on one request and
+// as a string on the next.
+//
+// A hash stored by an earlier version is compared with SpanHashMatches, not with ==.
 func SpanHash(msgs []schemas.ChatMessage) string {
+	return spanHash(msgs, schema.CanonicalMessage)
+}
+
+// LegacySpanHash is SpanHash as it was before #783: cache_control removed, and nothing else. A
+// message that never carried a list of one plain text block hashes the same under both. It
+// exists only so a hash stored before the upgrade still matches (see SpanHashMatches).
+func LegacySpanHash(msgs []schemas.ChatMessage) string {
+	return spanHash(msgs, legacyStripCacheControl)
+}
+
+// LegacySpanHashes returns the hashes the rule before #783 may have stored for a span that is
+// msgs under the canonical rule. The old rule told a string from a one-text-block list, so one
+// canonical span has several old hashes. Three are tried:
+//
+//   - msgs as they are: a message stored as a block is still a block, or was always a string.
+//   - msgs with the LAST message's string content written as one text block: a checkpoint
+//     whose span held the then-newest message (keep_last_turns: 0). Claude Code sends that
+//     message as a block with cache_control on that turn, and as a string on every later one.
+//   - msgs with every string content written as one text block.
+//
+// Each one is the same span under the canonical rule, so none accepts a span SpanHash rejects.
+func LegacySpanHashes(msgs []schemas.ChatMessage) []string {
+	out := []string{LegacySpanHash(msgs)}
+	if n := len(msgs); n > 0 && isStringContent(msgs[n-1]) {
+		last := append(append([]schemas.ChatMessage(nil), msgs[:n-1]...), asTextBlock(msgs[n-1]))
+		out = append(out, LegacySpanHash(last))
+	}
+	all := make([]schemas.ChatMessage, len(msgs))
+	flipped := 0
+	for i := range msgs {
+		all[i] = msgs[i]
+		if isStringContent(msgs[i]) {
+			all[i] = asTextBlock(msgs[i])
+			flipped++
+		}
+	}
+	if flipped > 1 || (flipped == 1 && !isStringContent(msgs[len(msgs)-1])) {
+		out = append(out, LegacySpanHash(all))
+	}
+	return out
+}
+
+func isStringContent(m schemas.ChatMessage) bool {
+	return m.Content != nil && m.Content.ContentStr != nil
+}
+
+// asTextBlock returns a copy of m with its string content written as one text block.
+func asTextBlock(m schemas.ChatMessage) schemas.ChatMessage {
+	text := *m.Content.ContentStr
+	m.Content = &schemas.ChatMessageContent{ContentBlocks: []schemas.ChatContentBlock{
+		{Type: schemas.ChatContentBlockTypeText, Text: &text}}}
+	return m
+}
+
+// SpanHashMatches reports whether msgs hash to want, under SpanHash or under one of
+// LegacySpanHashes. Every hash a caller compares against a STORED value goes through here: a
+// checkpoint written before #783 over a span with a one-text-block message must not read as a
+// different conversation once after the upgrade. The fallback never accepts a span SpanHash
+// would reject: every form it tries is the same span under the canonical rule.
+func SpanHashMatches(msgs []schemas.ChatMessage, want string) bool {
+	if SpanHash(msgs) == want {
+		return true
+	}
+	for _, h := range LegacySpanHashes(msgs) {
+		if h == want {
+			return true
+		}
+	}
+	return false
+}
+
+func spanHash(msgs []schemas.ChatMessage, canon func(schemas.ChatMessage) schemas.ChatMessage) string {
 	h := sha256.New()
 	for i := range msgs {
-		b, _ := json.Marshal(stripCacheControl(msgs[i]))
+		b, _ := json.Marshal(canon(msgs[i]))
 		h.Write(b)
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }
 
-// stripCacheControl returns a shallow copy of m with every content block's CacheControl
-// cleared, so SpanHash does not depend on where a cache breakpoint happens to sit. It copies
-// rather than mutates: m may be a live request's own message, about to be forwarded or
-// compacted the moment the caller gets control back, and clearing the field in place would
-// delete the real breakpoint from the request itself.
-func stripCacheControl(m schemas.ChatMessage) schemas.ChatMessage {
+// legacyStripCacheControl returns a shallow copy of m with every content block's CacheControl
+// cleared: the canonical form before #783. It copies rather than mutates, as
+// schema.CanonicalMessage does.
+func legacyStripCacheControl(m schemas.ChatMessage) schemas.ChatMessage {
 	if m.Content == nil || len(m.Content.ContentBlocks) == 0 {
 		return m
 	}

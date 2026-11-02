@@ -12,6 +12,13 @@ const (
 	OpenAIDefaultKeepAliveIdle = OpenAIMinimumCacheTTL - 2*time.Minute
 )
 
+// The provider's cache lifetimes. They run from the START of the previous request. Every cap on a
+// ping time reads these two.
+const (
+	AnthropicCacheLifetime5m = 5 * time.Minute
+	AnthropicCacheLifetime1h = time.Hour
+)
+
 // The Anthropic one-hour tier. This is the ONE place the one-hour ping time lives: 59 minutes
 // after the previous request STARTED, one minute inside the lifetime, and one ping. Tune it here.
 // The five-minute pair (240 s, 2 pings) stays in config.
@@ -64,10 +71,9 @@ const (
 // chargesCacheWritePremium reports whether this model bills a per-token surcharge
 // to create a prompt-cache entry.
 func chargesCacheWritePremium(model string) bool {
-	m := strings.ToLower(model)
 	// Bedrock and Vertex ids carry a vendor prefix ("aws/claude-opus-5",
-	// "anthropic.claude-3-5-sonnet"), so match on the substring, not a prefix.
-	return strings.Contains(m, "claude") || strings.Contains(m, "anthropic") || GPT56OrLater(m)
+	// "anthropic.claude-3-5-sonnet"), so IsClaude matches on the substring, not a prefix.
+	return IsClaude(model) || GPT56OrLater(model)
 }
 
 // GPT56OrLater reports whether an OpenAI GPT model uses the GPT-5.6+ cache rules.

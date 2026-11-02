@@ -11,6 +11,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // THE DEFECT: Claude Code sends max_tokens=32000 with thinking.budget_tokens=31999, and
@@ -425,19 +426,19 @@ func TestInsertAskMessage(t *testing.T) {
 	}
 }
 
-// #721: the last message's breakpoint moves onto what is appended; nothing else changes.
-func TestInsertAskMessageMovesTheTrailingBreakpoint(t *testing.T) {
+// #721, #776: the last message's breakpoint is copied onto what is appended, and stays on the last
+// message too. Nothing before the appended messages changes.
+func TestInsertAskMessageCopiesTheTrailingBreakpoint(t *testing.T) {
 	const early = `{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}`
 	count := func(b []byte) int { return len(gjson.GetBytes(b, "messages.#.cache_control").Array()) + bpInBlocks(b) }
 	for _, tc := range []struct {
 		name, last, cc string
-		bridge         bool
 	}{
-		{"system, string content", `{"role":"system","content":"r","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`, true},
-		{"system, block content", `{"role":"system","content":[{"type":"text","text":"r","cache_control":{"type":"ephemeral"}}]}`, `{"type":"ephemeral"}`, true},
-		{"system, 1h ttl", `{"role":"system","content":"r","cache_control":{"type":"ephemeral","ttl":"1h"}}`, `{"type":"ephemeral","ttl":"1h"}`, true},
-		{"user, block content", `{"role":"user","content":[{"type":"text","text":"u","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`, `{"type":"ephemeral","ttl":"1h"}`, true},
-		{"user, string content", `{"role":"user","content":"u","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`, true},
+		{"system, string content", `{"role":"system","content":"r","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`},
+		{"system, block content", `{"role":"system","content":[{"type":"text","text":"r","cache_control":{"type":"ephemeral"}}]}`, `{"type":"ephemeral"}`},
+		{"system, 1h ttl", `{"role":"system","content":"r","cache_control":{"type":"ephemeral","ttl":"1h"}}`, `{"type":"ephemeral","ttl":"1h"}`},
+		{"user, block content", `{"role":"user","content":[{"type":"text","text":"u","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`, `{"type":"ephemeral","ttl":"1h"}`},
+		{"user, string content", `{"role":"user","content":"u","cache_control":{"type":"ephemeral"}}`, `{"type":"ephemeral"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := []byte(`{"model":"m","messages":[` + early + `,` + tc.last + `]}`)
@@ -445,20 +446,17 @@ func TestInsertAskMessageMovesTheTrailingBreakpoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if count(out) != count(in) {
-				t.Errorf("breakpoint count %d -> %d: %s", count(in), count(out), out)
+			if count(out) != count(in)+1 {
+				t.Errorf("breakpoint count %d -> %d, want one more (the bridge's copy): %s", count(in), count(out), out)
 			}
 			msgs := gjson.GetBytes(out, "messages").Array()
 			if msgs[0].Raw != early {
 				t.Errorf("an earlier message changed: %s", msgs[0].Raw)
 			}
-			if strings.Contains(msgs[1].Raw, "cache_control") {
-				t.Errorf("the old last message keeps its breakpoint: %s", msgs[1].Raw)
+			if msgs[1].Raw != tc.last {
+				t.Errorf("the old last message changed; it must keep its breakpoint (#776): %s", msgs[1].Raw)
 			}
-			carrier := msgs[len(msgs)-1]
-			if tc.bridge {
-				carrier = msgs[len(msgs)-2]
-			}
+			carrier := msgs[len(msgs)-2]
 			if got := carrier.Get("content.0.cache_control").Raw; got != tc.cc {
 				t.Errorf("carrier cache_control = %q, want %q: %s", got, tc.cc, out)
 			}
@@ -467,6 +465,86 @@ func TestInsertAskMessageMovesTheTrailingBreakpoint(t *testing.T) {
 			}
 			if last := msgs[len(msgs)-1]; last.Get("content").String() != "ask" || strings.Contains(last.Raw, "cache_control") {
 				t.Errorf("the ask is not a plain string without a breakpoint (#725): %s", last.Raw)
+			}
+		})
+	}
+}
+
+// #776: the question must leave every byte of the turn it reads as it was sent, the last message's
+// breakpoint included. That breakpoint names the turn's cache entry; a question that moves it away
+// refreshes only its own new entry, and the plain ping after it finds the turn's entry expired.
+// Live: Sonnet 5.5, the ping after the question read 13,487 and wrote 18,053 with the breakpoint
+// moved, and read 31,542 and wrote 0 with it kept.
+func TestInsertAskMessageLeavesThePrefixByteIdentical(t *testing.T) {
+	body := []byte(`{"model":"m","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":"go"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"out"}]},` +
+		`{"role":"system","content":[{"type":"text","text":"reminder","cache_control":{"type":"ephemeral"}}]}]}`)
+	out, err := insertAskMessage(body, "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := gjson.GetBytes(body, "messages").Array()
+	got := gjson.GetBytes(out, "messages").Array()
+	if len(got) != len(in)+2 {
+		t.Fatalf("got %d messages, want %d: %s", len(got), len(in)+2, out)
+	}
+	for i := range in {
+		if got[i].Raw != in[i].Raw {
+			t.Errorf("messages[%d] changed:\n was %s\n now %s", i, in[i].Raw, got[i].Raw)
+		}
+	}
+	if gjson.GetBytes(out, "system").Raw != gjson.GetBytes(body, "system").Raw {
+		t.Errorf("system changed: %s", out)
+	}
+}
+
+// #776: the provider refuses more than 4 breakpoints. At the cap the bridge gets no copy, and the
+// last message's breakpoint (which keeps the turn's entry alive) stays.
+func TestInsertAskMessageNeverExceedsTheBreakpointCap(t *testing.T) {
+	sys := `"system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}},{"type":"text","text":"b","cache_control":{"type":"ephemeral"}}]`
+	mark := `{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}`
+	for _, tc := range []struct {
+		name   string
+		body   string
+		in     int
+		bridge bool
+	}{
+		{"3 marks: the bridge gets a copy",
+			`{` + sys + `,"messages":[{"role":"user","content":"go"},{"role":"system","content":[` + mark + `]}]}`, 3, true},
+		{"4 marks: no copy, the last keeps its own",
+			`{` + sys + `,"messages":[{"role":"user","content":[` + mark + `]},{"role":"system","content":[` + mark + `]}]}`, 4, false},
+		{"4 marks with one on tools: no copy",
+			`{"tools":[{"name":"t","cache_control":{"type":"ephemeral"}}],` + sys + `,"messages":[{"role":"user","content":"go"},{"role":"system","content":"r","cache_control":{"type":"ephemeral"}}]}`, 4, false},
+		{"4 marks on a trailing user message: no copy",
+			`{` + sys + `,"messages":[{"role":"assistant","content":[` + mark + `]},{"role":"user","content":[` + mark + `]}]}`, 4, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if n := schema.CountBreakpoints([]byte(tc.body)).Total(); n != tc.in {
+				t.Fatalf("fixture has %d breakpoints, want %d", n, tc.in)
+			}
+			out, err := insertAskMessage([]byte(tc.body), "ask")
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := schema.CountBreakpoints(out).Total()
+			if n > schema.MaxBreakpoints {
+				t.Errorf("%d breakpoints, over the provider's cap of %d: %s", n, schema.MaxBreakpoints, out)
+			}
+			msgs := gjson.GetBytes(out, "messages").Array()
+			bridge := msgs[len(msgs)-2]
+			if bridge.Get("role").String() != "assistant" || !strings.Contains(bridge.Raw, "Understood.") {
+				t.Fatalf("no bridge: %s", out)
+			}
+			if has := strings.Contains(bridge.Raw, "cache_control"); has != tc.bridge {
+				t.Errorf("bridge breakpoint = %v, want %v: %s", has, tc.bridge, out)
+			}
+			if want := tc.in + map[bool]int{true: 1, false: 0}[tc.bridge]; n != want {
+				t.Errorf("%d breakpoints, want %d: %s", n, want, out)
+			}
+			if !strings.Contains(msgs[len(msgs)-3].Raw, "cache_control") {
+				t.Errorf("the last message lost its breakpoint: %s", out)
 			}
 		})
 	}
@@ -500,7 +578,7 @@ func TestInsertAskMessageAddsNoBreakpointWhenTheLastHasNone(t *testing.T) {
 
 // #725 review: a trailing user message WITHOUT a breakpoint needs no bridge; a trailing assistant
 // message keeps its breakpoint where it is and the ask follows it directly.
-func TestInsertAskMessageBridgeOnlyWhereABreakpointMoves(t *testing.T) {
+func TestInsertAskMessageBridgeOnlyWhereABreakpointIsCopied(t *testing.T) {
 	out, err := insertAskMessage([]byte(`{"messages":[{"role":"user","content":"a"}]}`), "ask")
 	if err != nil {
 		t.Fatal(err)

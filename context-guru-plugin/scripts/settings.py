@@ -55,7 +55,7 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
-# The header that opts a session in to MANUAL pings (the Ping button and /context-guru:ping) when keep-alive is
+# The header that opts a session in to MANUAL pings (the Ping button) when keep-alive is
 # off: the proxy holds that session's cache request for a manual ping only: at most 300 s on a 5-minute cache, at most 59 min on a 1-hour cache. It rides in
 # ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
 # 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
@@ -3217,7 +3217,7 @@ def ping_header_state(data: dict) -> str:
 
 
 PING_CONSENT = ("Ping enabled for this install; it works from your next session. The Context Guru server keeps your "
-                "latest request and key in memory so the Ping button and /context-guru:ping can work: for 5 minutes "
+                "latest request and key in memory so the Ping button can work: for 5 minutes "
                 "after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never "
                 "pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, "
                 "re-run the install with --no-ping-header.")

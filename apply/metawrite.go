@@ -2,11 +2,11 @@ package apply
 
 import (
 	"strconv"
-	"strings"
-	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Metadata writes: the narrow exception to the losslessness guard.
@@ -102,171 +102,17 @@ func applyMetaWrites(msg []byte, nBlocks int, writes []metaWrite) ([]byte, bool)
 	return out, true
 }
 
-// maxWireBreakpoints is the provider's hard cap on cache_control directives per
-// request. Over it, the request 400s.
-const maxWireBreakpoints = 4
+// maxWireBreakpoints is the provider's hard cap on cache_control directives per request.
+const maxWireBreakpoints = schema.MaxBreakpoints
 
-// blockMarks are the two spellings a breakpoint takes on an array ELEMENT — a system
-// block, a tool, or a content block. The cap applies across every location together, and
-// the count stays STRUCTURAL (a field, per gjson) for the same reason hasCacheBreakpoint
-// does: a tool output whose text merely contains "cache_control" must not count.
-//
-// `cachePoint` is the Bedrock Converse spelling, and Bedrock places it as its OWN entry in
-// the `system` and `tools` arrays — the two locations defect 2 is about. Both must be
-// counted or the cap stays breachable on Bedrock exactly as it was on Anthropic
-// (constructed: 6 on the wire, counter blind to 3 of them).
-var blockMarks = [...]string{"cache_control", "cachePoint"}
+// Breakpoints is where a request's breakpoints sit, by location. See schema.Breakpoints.
+type Breakpoints = schema.Breakpoints
 
-// mayHold is the cheap prefilter guarding every structural parse below: neither key can
-// be present as a FIELD of raw if their shared prefix is not even a substring of raw's
-// bytes. A plain substring scan is memchr-fast, while gjson.Get on a message whose
-// tool_result carries 50 KB of text parses that text. It errs only toward doing the parse
-// anyway (a payload that merely mentions "cache"), never toward missing a real mark — so
-// the count stays exactly as structural as it was.
-func mayHold(raw string) bool { return strings.Contains(raw, "cache") }
-
-// Breakpoints is where a request's prompt-cache breakpoints actually sit, split by
-// the location the provider hashes them at. The split is what makes the count
-// diagnosable rather than merely a number: `tools` and `system` render AHEAD of
-// `messages`, so a breakpoint's location decides how much of the prefix it protects,
-// and a dashboard that reports only a total cannot tell a well-placed request from a
-// badly-placed one with the same count.
-type Breakpoints struct {
-	System   int // system.#.cache_control / .cachePoint
-	Tools    int // tools.#.cache_control / .cachePoint
-	Messages int // messages.#.cache_control (message level)
-	Blocks   int // messages.#.content.#.cache_control / .cachePoint (content-block level)
-}
-
-// Total is the figure the provider's cap of four applies to.
-func (b Breakpoints) Total() int { return b.System + b.Tools + b.Messages + b.Blocks }
-
-// CountBreakpoints counts every breakpoint the provider will see in this request, by
-// location. Structural (a field, per gjson) for the same reason hasCacheBreakpoint is:
-// a tool output whose text merely contains the string "cache_control" must not count.
-//
-// A component cannot count these for itself. `system` and `tools` never reach it at
-// all, and the `tool_result` blocks this package normalizes into synthetic role=tool
-// messages lose their mark on the way in (see toolMessage) — so on real Claude Code
-// traffic all three of the agent's own breakpoints were invisible to it (2 in
-// `system`, 1 on a `tool_result` block), and it computed 3 free slots when 1 was free:
-// 6 on the wire, and a 400 (issue #32).
-//
-// ONE pass over the top-level object, not one gjson `#.field` query per location. The
-// path form re-scanned the whole body seven times and squashed every matched array on
-// the way, which made this ~22% of the rewrite path's CPU on real 600 KB Claude Code
-// requests — and it runs twice per request (inbound count + the cap check). Walking the
-// object once also means the location a mark was found AT is known for free, which is
-// what the split below reports; the path form had to derive it from the query string.
-func CountBreakpoints(body []byte) Breakpoints {
-	var b Breakpoints
-	// One walk of the top-level object rather than a Get per field: `messages` is the
-	// bulk of the body and gjson has to scan past it to reach whatever follows.
-	gjson.ParseBytes(body).ForEach(func(key, val gjson.Result) bool {
-		switch key.String() {
-		case "system":
-			b.System += arrayMarks(val)
-		case "tools":
-			b.Tools += arrayMarks(val)
-		case "messages":
-			val.ForEach(func(_, m gjson.Result) bool {
-				if !mayHold(m.Raw) {
-					return true
-				}
-				// A MESSAGE carries only the Anthropic spelling (cachePoint is a block).
-				if m.Get("cache_control").IsObject() {
-					b.Messages++
-				}
-				b.Blocks += arrayMarks(m.Get("content"))
-				return true
-			})
-		}
-		return true
-	})
-	return b
-}
-
-// arrayMarks counts the breakpoint marks across every element of one array.
-func arrayMarks(arr gjson.Result) int {
-	n := 0
-	arr.ForEach(func(_, v gjson.Result) bool {
-		n += elemMarks(v)
-		return true
-	})
-	return n
-}
-
-// elemMarks counts the breakpoint marks on one array element.
-func elemMarks(v gjson.Result) int {
-	if !mayHold(v.Raw) {
-		return 0
-	}
-	n := 0
-	for _, k := range blockMarks {
-		if strings.Contains(v.Raw, k) && v.Get(k).IsObject() {
-			n++
-		}
-	}
-	return n
-}
+// CountBreakpoints counts the breakpoints the provider will see in this request, by location,
+// except a mark whose key is spelled with a \u escape: this is the hot-path count (the cap check
+// runs it twice per request) and its prefilter is "cache" only. schema.CountBreakpointsEscaped
+// counts those too; hasCacheBreakpoint uses it. See schema.CountBreakpoints.
+func CountBreakpoints(body []byte) Breakpoints { return schema.CountBreakpoints(body) }
 
 // wireBreakpoints is the total, which is what the provider's cap applies to.
 func wireBreakpoints(body []byte) int { return CountBreakpoints(body).Total() }
-
-// Cache-anchor counters (#723): anchors written, anchors skipped for want of a free breakpoint slot,
-// and anchors whose tool_result was not found in the rebuilt body.
-var cacheAnchorWritten, cacheAnchorNoSlot, cacheAnchorNotFound atomic.Int64
-
-// CacheAnchorStats reports the cache-anchor counters: written, no free slot, block not found.
-func CacheAnchorStats() (written, noSlot, notFound int64) {
-	return cacheAnchorWritten.Load(), cacheAnchorNoSlot.Load(), cacheAnchorNotFound.Load()
-}
-
-// anchorCacheBreakpoint writes one {"type":"ephemeral"} cache_control onto the tool_result block
-// whose tool_use_id is toolID, in the raw body a count-changing rebuild just produced (#723). A
-// splice that keeps its last tool exchange verbatim only gives the next turn a readable cache
-// entry once that exchange's tool_result carries a breakpoint: the provider never reads an entry
-// that ends at a text turn, and Claude Code's own last breakpoint sits on a trailing text turn.
-//
-// THE BUDGET. The provider rejects a request with more than maxWireBreakpoints. The count is taken
-// on the body AS REBUILT, after every component ran, so it already includes any breakpoint
-// cacheinject placed from its own (earlier, raw-body) count; adding ours only when that total is
-// below the cap can never push the wire to 5. With no free slot the anchor is skipped and counted:
-// the turn then behaves exactly as before #723. Claude Code itself uses 3 (2 system, 1 message).
-//
-// Returns the body unchanged when there is nothing to do.
-func anchorCacheBreakpoint(body []byte, toolID string) []byte {
-	if toolID == "" {
-		return body
-	}
-	msgs := gjson.GetBytes(body, "messages").Array()
-	for mi := len(msgs) - 1; mi >= 0; mi-- {
-		blocks := msgs[mi].Get("content")
-		if !blocks.IsArray() {
-			continue
-		}
-		arr := blocks.Array()
-		for bi := range arr {
-			b := arr[bi]
-			if b.Get("type").String() != "tool_result" || b.Get("tool_use_id").String() != toolID {
-				continue
-			}
-			if elemMarks(b) > 0 {
-				return body // already a breakpoint there; nothing to add
-			}
-			if wireBreakpoints(body) >= maxWireBreakpoints {
-				cacheAnchorNoSlot.Add(1)
-				return body
-			}
-			out, err := sjson.SetRawBytes(body, "messages."+strconv.Itoa(mi)+".content."+strconv.Itoa(bi)+".cache_control",
-				[]byte(`{"type":"ephemeral"}`))
-			if err != nil {
-				return body
-			}
-			cacheAnchorWritten.Add(1)
-			return out
-		}
-	}
-	cacheAnchorNotFound.Add(1)
-	return body
-}

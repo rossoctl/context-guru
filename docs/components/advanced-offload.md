@@ -22,6 +22,15 @@ resolvable `<<cg:HASH>>` marker. It never rewrites anything.
 > **It is on in `xhigh`** (#404). The sweep asks at the ping and applies on the next cold request
 > whenever it is enabled. `shadow: true` still turns it into a measurement that applies nothing.
 
+> **Which ping (#776).** After a turn that ends at a **tool_result**, the question may take a planned
+> ping, as before: it renews the turn's cache entry (#777). After a turn that ends at a **text** turn,
+> it cannot renew the entry, so it never takes a planned ping. Every ping the strategy plans goes out
+> plain, and the question goes out once as an extra request at the slot after the last planned ping,
+> 30 seconds before the hold ends. No ping follows it. A user back inside the strategy's warm period is
+> covered exactly as without the sweep. `/stats` counts it as `keepalive_sweep_extra_asked`. The
+> summarizer's keep-alive substitute follows the same rule; see docs/design.md, "Keep-alive: the cache
+> strategy comes first".
+
 ### Why it is separate from `extract_llm`
 
 `extract_llm` does the right thing on a **warm** turn: a cheap model trims one recent tool output
@@ -473,6 +482,12 @@ as a model switch does. The owner chose the read rule only (2026-10-26), so a wr
 not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `sweep_prefix_cache_write`,
 exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
 question writes some tail; the read, not the write alone, shows the prefix held (#721).
+
+The question leaves every byte of the turn it reads as sent, the last message's breakpoint included,
+and copies that breakpoint onto its short "Understood." bridge only while the request stays at or under
+the provider's 4 breakpoints (#776). The breakpoint names the turn's cache entry. A question that moved it
+away refreshed only its own new entry, so the plain ping after it found the turn's entry expired and wrote
+the whole conversation again.
 
 It then **declines**: there is no fallback (#404). A question that reads nothing, or that writes the
 agent's prefix again, is not acted on and the ordinary ping goes out. A failed prefix ask is logged at

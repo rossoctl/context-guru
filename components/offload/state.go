@@ -628,3 +628,10 @@ func saveCheckpoint(c *components.Ctx, cp sumCheckpoint) {
 func spanHash(span []bschemas.ChatMessage) string {
 	return components.SpanHash(span)
 }
+
+// spanHashMatches is how a span is compared with a STORED spanHash: it also accepts the hash an
+// earlier version wrote (components.SpanHashMatches, #783), so an upgrade does not make every
+// standing checkpoint read as a different conversation.
+func spanHashMatches(span []bschemas.ChatMessage, want string) bool {
+	return components.SpanHashMatches(span, want)
+}

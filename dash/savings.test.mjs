@@ -39,3 +39,39 @@ test('a server from before the Ping button has no manual_pings: that is zero, no
   const p = savedParts({ net_saved_usd: 5, total_saved_usd: 5 });
   assert.equal(p.manual, 0); assert.equal(p.total, 5);
 });
+
+test('the headline adds the parts, and its percent is of what the traffic would have cost without us', () => {
+  const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
+  const o = { net_saved_usd: 30, keepalive_net_usd: 10, decl_filter_usd: 5, manual_pings: { ping_usd: 1, saved_usd: 5 },
+    cost_usd: 140, cg_llm_cost_usd: 6, keepalive_ping_usd: 3, total_saved_usd: 50 };
+  const t = overviewTotals(o);
+  assert.equal(t.saved, 50); assert.equal(t.spent, 150); assert.equal(t.without, 200);
+  assert.equal(t.pct, 25);
+  // the parts' percents add up to the total's
+  const sum = t.share(t.parts.cache + t.parts.manual) + t.share(t.parts.compaction) + t.share(t.parts.filter);
+  assert.ok(Math.abs(sum - t.pct) < 1e-9);
+});
+
+test('an empty window has no percent, not NaN', () => {
+  const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
+  const t = overviewTotals({});
+  assert.equal(t.pct, 0); assert.equal(t.without, 0);
+});
+
+test('cache writes prevented count real requests; manual pings are kept apart, not added', () => {
+  const { writesPrevented } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.deepEqual(writesPrevented({ keepalive_misses_avoided: 7, manual_pings: { writes_avoided: 2 } }), { requests: 7, manual: 2 });
+  assert.deepEqual(writesPrevented({}), { requests: 0, manual: 0 });
+});
+
+test('the cache strategy name is read back from the settings, and only for a named strategy', () => {
+  const { strategyName } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(strategyName({ keepalive: true }), 'auto'); // the proxy defaults are auto's numbers
+  assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 240, keepalive_max_pings: 2, keepalive_max_pings_1h: 1 }), 'auto');
+  assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 1 }), '1-ping');
+  assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 2, keepalive_max_pings_1h: 2 }), '2-ping');
+  assert.equal(strategyName({ head_ttl_1h: true }), '1-hour-head');
+  assert.equal(strategyName({}), 'none');
+  assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 120 }), ''); // hand-tuned: no name
+  assert.equal(strategyName(null), '');
+});

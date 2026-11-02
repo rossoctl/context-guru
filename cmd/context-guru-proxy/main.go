@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -65,7 +66,10 @@ func main() {
 	// installer runs has to live in it. Only an exact first argument dispatches; every flag form
 	// (`-listen`, `--version`) still reaches the proxy's own parsing below.
 	if len(os.Args) > 1 && os.Args[1] == "import-history" {
-		os.Exit(dash.RunImportHistory(os.Args[2:], os.Stdout, os.Stderr))
+		// Removed: the history import is gone. Kept as a no-op that exits 0, because an older
+		// install.sh still runs it, and without this the name would fall through and start serving.
+		fmt.Fprintln(os.Stdout, "import-history was removed; it does nothing now")
+		os.Exit(0)
 	}
 	var (
 		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
@@ -90,6 +94,13 @@ func main() {
 		storeFlag   = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
 		savingsFlag = flag.String("savings", envOr("SAVINGS", "legacy"), "where the savings figure comes from: legacy (default) | shadow (also run counterfactual.Compute and attach its result to each dashboard event; the legacy figure is unchanged) | counterfactual (store the library's per-component savings and baseline for events that qualify; keep-alive and cachesplit figures stay on the legacy rules, and an event whose operation list is partial, observe-mode or unpriced keeps its legacy figures). shadow and counterfactual need --dashboard: without a recorder there is no event to attach to")
 		modeFlag    = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		// The tracker's records die with the process; the provider's cache entries do not.
+		// Within the grace — this request's own cache lifetime, per thread — the first request
+		// of an unknown thread is forwarded unchanged, so a live thread's cached prefix
+		// survives a restart (#496). --restart-grace=false turns it off: for an eval that
+		// sends whole transcripts to a fresh proxy and must measure compaction, not the grace.
+		restartGrace = flag.Bool("restart-grace", envBool("RESTART_GRACE", true),
+			"treat the first request of an unknown thread after startup as fully cached, for that request's cache lifetime; --restart-grace=false turns it off (for benchmark runs)")
 		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
 		// that self-terminates is a much worse failure than a laptop process left running.
 		//
@@ -103,6 +114,17 @@ func main() {
 		idleExit = flag.Duration("idle-exit", envDuration("IDLE_EXIT", 0),
 			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
 				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
+
+		// Session state in the dashboard database (#769). ON whenever the dashboard is on, because
+		// the dashboard database is the one file the proxy already keeps. Off without the
+		// dashboard: the memory-only store, as before. --session-state=false is the one off switch.
+		// The state has its own table there (session_state), kept by its own retention.
+		sessionState = flag.Bool("session-state", envBool("SESSION_STATE", true),
+			"with --dashboard: keep the session state (summary checkpoint, billed input, freeze decisions) in the dashboard database, so it survives a restart and a pause longer than store.ttl_seconds. Memory keeps it 24h and a returning session is loaded from the database. --session-state=false keeps today's memory-only store. Not encrypted. Ignored without --dashboard and with --upstreams")
+		sessionStateMetaOnly = flag.Bool("session-state-metadata-only", envBool("SESSION_STATE_METADATA_ONLY", false),
+			"with --session-state: write only metadata keys (counts, hashes, ids) to the file, never the summary text or other content keys")
+		sessionStateRetention = flag.Duration("session-state-retention", envDuration("SESSION_STATE_RETENTION", store.DefaultDiskRetention),
+			"with --session-state: delete a session's rows this long after its last write")
 
 		// Dashboard. Off by default so an existing deployment's behavior and route
 		// table are unchanged until asked for; on, it adds /dashboard/ + /api/*.
@@ -132,6 +154,27 @@ func main() {
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
 			"comma-separated CIDRs allowed to view per-request CONTENT and the effective config (loopback always is; aggregates are open)")
+		// --record / --record-otlp: record each proxied call, for replayable traces. --record is a
+		// DIRECTORY of wire files, one per session: the raw request and response, redacted, in the
+		// format Inference-Perf replays. --record-otlp is a collector URL (Phoenix, Jaeger, an OTel
+		// collector) for a live view. Either or both. Both empty means off.
+		//
+		// The help text says "every request and response body" in as many words on purpose.
+		// This writes MORE than --dashboard-content does -- the whole pristine request body
+		// and every tool result, not a capped before/after blob -- and redaction is a pattern
+		// denylist, which is always one unseen credential shape behind reality (the same
+		// caveat --dashboard-content carries, and for the same reason). An operator must not
+		// be able to turn this on without being told that.
+		recordDir = flag.String("record", envOr("CG_RECORD_DIR", ""),
+			"directory for *.wire.jsonl files, one per session, in Inference-Perf's wire format (empty = off); records every request and response body, redacted on a best-effort pattern denylist, so it is for corpus collection on traffic whose owners opted in")
+		recordOTLP = flag.String("record-otlp", envOr("CG_RECORD_OTLP", ""),
+			"OTLP/HTTP traces URL to export recorded spans to, e.g. http://localhost:6006/v1/traces for Phoenix (empty = off); same content as --record")
+		recordBodyCap = flag.Int("record-body-cap", envInt("CG_RECORD_BODY_CAP", 1<<20),
+			"maximum bytes PER BODY recorded, after redaction")
+		recordTeeCap = flag.Int("record-tee-cap", envInt("CG_RECORD_TEE_CAP", 8<<20),
+			"maximum bytes RETAINED PER IN-FLIGHT RESPONSE while streaming; the memory ceiling is roughly this times the number of concurrent requests")
+		recordQueue = flag.Int("record-queue", envInt("CG_RECORD_QUEUE", 256),
+			"turn channel depth; a full channel DROPS turns (counted, warned once) rather than delaying a request")
 		// Hosted (multi-tenant) mode. Off by default: without --upstreams this binary
 		// behaves exactly as it always has, which keeps every existing deployment and
 		// every benchmark harness working unchanged.
@@ -390,8 +433,42 @@ func main() {
 		} else {
 			slog.Info("dashboard: recovered session recency across the restart", "sessions", n)
 		}
+		// Recover the restart grace's own clock too (#766): per thread, the last request OR
+		// keep-alive ping that refreshed its cached prefix. SeedSessions must stay ping-free
+		// (attribution), which is why this is a separate seed.
+		if n, err := rec.SeedGraceSessions(time.Now().UnixMilli()); err != nil {
+			slog.Warn("dashboard: could not recover the restart grace clock; threads idle across "+
+				"the restart fall back to the proxy start time", "err", err)
+		} else {
+			slog.Info("dashboard: recovered the restart grace clock across the restart", "threads", n)
+		}
 		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
 			"content_capture", *dashContent)
+	}
+
+	// --record. nil unless a directory was given, and the proxy nil-checks it per request.
+	//
+	// The Close is a plain defer, NOT RegisterOnShutdown: those hooks fire as shutdown
+	// BEGINS, before in-flight requests drain, so a flush there would miss the last turns of
+	// every live session. This defer runs after the server has returned -- the same reason
+	// the dashboard recorder's Close is deferred here rather than registered.
+	warnIfRecorderMissing(proxy.RecorderBuiltIn, *recordDir, *recordOTLP, flag.CommandLine)
+	traceRec, err := proxy.NewSessionRecorder(*recordDir, *recordOTLP, *recordBodyCap, *recordTeeCap,
+		*recordQueue, slog.Default())
+	if err != nil {
+		// Fatal, not a warning. Somebody who passed --record believes their session is being
+		// recorded; discovering afterwards that nothing was written wastes the session, which
+		// is the whole cost this feature exists to avoid.
+		log.Fatalf("record: %v", err)
+	}
+	if traceRec != nil {
+		defer traceRec.Close()
+		// Unmissable, and it says what reaches disk. An operator must never be unsure whether
+		// this is on, and must not learn what it captures by reading the source.
+		slog.Warn("RECORDING ENABLED: recording every request and response body",
+			"dir", traceRec.Dir(), "otlp", *recordOTLP, "body_cap", *recordBodyCap, "tee_cap", *recordTeeCap,
+			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee",
+			"hosted", "only accounts that opted in on their settings page are recorded, each under dir/<account id>/")
 	}
 
 	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
@@ -541,7 +618,40 @@ func main() {
 	if tenants == nil && *dashOn && *dashDB != ":memory:" && *dashDB != "" {
 		adaptOverride = *dashDB + ".adapt.json"
 	}
-	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
+	// Session state in the dashboard database (#769). The store gets the recorder's own handle, so
+	// the proxy opens no second file and one pool serializes both writers.
+	stateDB := (*sql.DB)(nil)
+	switch {
+	case !*sessionState:
+	case !*dashOn || rec == nil:
+		// Memory only, as before. Nothing to say: the dashboard is off.
+	case tenants != nil:
+		slog.Warn("context-guru: the session state database is off in hosted multi-tenant mode (--upstreams): each tenant has its own in-memory store")
+	case rec.DB().Path() == "" || rec.DB().Path() == ":memory:":
+		slog.Warn("context-guru: the session state database is off: the dashboard database is in memory, so nothing would survive a restart")
+	default:
+		stateDB = rec.DB().SQL()
+	}
+	if stateDB != nil && (cfg.Store.Enabled == nil || *cfg.Store.Enabled) && cfg.Store.StateTTLSeconds == 0 {
+		// The state keys stay 24h in memory; a session that returns later is loaded from the
+		// database. An explicit store.state_ttl_seconds wins.
+		cfg.Store.StateTTLSeconds = int(store.DefaultStateTTL / time.Second)
+	}
+	pstore := cfg.NewStore()
+	if stateDB != nil {
+		if mem, ok := pstore.(*store.Memory); !ok {
+			slog.Warn("context-guru: the session state database is off because the state store is disabled (--store=false)")
+		} else if d, err := store.OpenDisk(stateDB, store.DiskOptions{
+			MetadataOnly: *sessionStateMetaOnly, Retention: *sessionStateRetention}); err != nil {
+			slog.Warn("context-guru: session state table unusable; state stays in memory only", "err", err)
+		} else {
+			mem.AttachDisk(d)
+			defer d.Close() // flushes; deferred after rec.Close, so it runs first (LIFO)
+			slog.Info("context-guru: session state in the dashboard database",
+				"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
+		}
+	}
+	h := proxy.New(pipe, pstore, agg, proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
 		AdaptOverride: adaptOverride,
@@ -573,6 +683,10 @@ func main() {
 		CheapModel:   cheapModelFromEnv(),        // static "config"-source LLM for NeedsModel components
 		InjectExpand: os.Getenv("INJECT_EXPAND"), // auto (default) | always | never
 		CacheMode:    os.Getenv("CACHE_MODE"),    // auto (default) | on | off — cache-aware compaction
+		// --restart-grace (RESTART_GRACE). The flag always carries a value (its default is
+		// true, the grace on), so pass it through as-is — including an explicit false, which
+		// turns the grace off for benchmark runs.
+		RestartGrace: restartGrace,
 		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
 		Cache:     cachePolicy(cfg.Cache),
@@ -582,7 +696,8 @@ func main() {
 		Dashboard: rec, // nil unless --dashboard
 		Savings:   *savingsFlag,
 		Pings:     kaKeepAlive.pings,
-		Mode:      mode, // sync (default) | observe — explicit, never inferred
+		Record:    traceRec, // nil unless --record
+		Mode:      mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // Filter is the server-side filter set every list/aggregate query accepts. Every
@@ -53,13 +55,6 @@ type Filter struct {
 	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
 	// dashboard opens on — not "the unattributed ones", since absence is not a value.
 	Project string
-	// Source selects rows of one kind: SourceImported for recovered history. Unset means BOTH,
-	// which is the view the dashboard opens on.
-	Source string
-	// SourceMeasured selects the rows the proxy measured itself. Separate from an empty Source
-	// for the same reason ProjectNone is separate from an empty Project: a measured row stores
-	// "", so absence could not also mean "only those" without making one meaning unreachable.
-	SourceMeasured bool
 	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
 	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
 	// here (it is what every pre-migration row and every client that does not state a directory
@@ -166,12 +161,6 @@ func (f Filter) where() (string, []any) {
 	if f.ProjectNone {
 		add("r.project = ''")
 	}
-	if f.Source != "" {
-		add("r.source = ?", f.Source)
-	}
-	if f.SourceMeasured {
-		add("r.source = ''")
-	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
 		add("(r.session_id LIKE ? OR r.model LIKE ? OR r.agent LIKE ?)", like, like, like)
@@ -203,7 +192,8 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
-	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd`
+	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
+	r.session_alias`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -226,7 +216,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
-		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD)
+		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
+		&e.SessionAlias)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
@@ -603,7 +594,22 @@ type SessionRow struct {
 // five minutes (the extended beta is an hour, which would only widen the "still counting"
 // window — under-claiming the in-flight state is the safe direction, since it never labels a
 // settled session as provisional).
-const cacheTTLMs int64 = 5 * 60 * 1000
+const cacheTTLMs int64 = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
+
+// inFlightMs is cacheTTLMs for one session: the OpenAI minimum when every provider the session
+// used is OpenAI and every model is GPT-5.6+, else the Anthropic default. A mixed session keeps
+// the shorter horizon, the safe direction named above.
+func inFlightMs(providers, models string) int64 {
+	if providers != "openai" || models == "" {
+		return cacheTTLMs
+	}
+	for _, m := range strings.Split(models, ",") {
+		if _, ok := modelinfo.FixedCacheLifetime(providers, m); !ok {
+			return cacheTTLMs
+		}
+	}
+	return modelinfo.OpenAIMinimumCacheTTL.Milliseconds()
+}
 
 // Sessions returns the session list, most-recently-active first, filtered and
 // paginated server-side.
@@ -670,7 +676,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		s.PrimaryModel = primaryModel.String
 		s.Saved = s.TokensBefore - s.TokensAfter
 		s.SavedUSD = s.BaselineCostUSD - s.CostUSD - s.CGLLMCostUSD
-		s.InFlight = now-s.End < cacheTTLMs
+		s.InFlight = now-s.End < inFlightMs(s.Providers, s.Models)
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {
@@ -1639,27 +1645,6 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		out = append(out, &g)
 	}
 	return out, rows.Err()
-}
-
-// CoverageFor is the measured/imported split of a window.
-//
-// Asked of the REQUESTS rather than of the inventory, because an inventory row has no source: the
-// declarations table is keyed by digest and shared across requests, so "was this watched" is a
-// property of the traffic and only a request query can answer it.
-func (d *DB) CoverageFor(f Filter) (*InsightsCoverage, error) {
-	where, args := f.where()
-	var out InsightsCoverage
-	err := d.sql.QueryRow(`SELECT
-		COALESCE(SUM(CASE WHEN r.source = '' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN r.source <> '' THEN 1 ELSE 0 END), 0),
-		COALESCE(COUNT(DISTINCT CASE WHEN r.source <> ''
-			THEN date(r.ts/1000, 'unixepoch', 'localtime') END), 0)
-		FROM requests r WHERE `+where, args...).
-		Scan(&out.MeasuredRequests, &out.ImportedRequests, &out.ImportedDays)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // facetQueries are the distinct-value lists that populate the filter dropdowns.

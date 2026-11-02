@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/store"
 	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
@@ -29,6 +30,10 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// dropProbe, when set, runs inside DropOldestSessions between picking the victims and
+	// deleting them. Test seam for the window #772 closed: a request landing there must not
+	// change which sessions the delete removes.
+	dropProbe func()
 	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
 	// checks it; SQLite's mode=ro and query_only refuse any other.
 	readOnly bool
@@ -174,6 +179,9 @@ var nonDerivedTables = map[string]string{
 	"archived_sessions": `session_id,tenant_id,first_ts,last_ts,requests,content_path,
 	                      content_bytes,full_path,full_bytes,archived_at,remote`,
 	"tenant_spend": `tenant_id,month,usd`,
+	// The session state (#769) is rebuilt from traffic, but only by paying for it again (a summary
+	// is a model call), so a schema bump carries it.
+	"session_state": `key,val,updated`,
 }
 
 // carryNonDerived copies the non-derived tables out of the database renamed aside by
@@ -403,6 +411,124 @@ func (d *DB) Close() error {
 	return d.sql.Close()
 }
 
+// SQL returns the underlying handle, for a host that keeps a table of its own in this database.
+// The session state store (package store) does: it shares this pool, so one pool serializes every
+// writer in the process. The caller must not close it.
+func (d *DB) SQL() *sql.DB { return d.sql }
+
+// deleteSessionState removes the state rows of sessions this dashboard just deleted: each
+// session's own id and its content-derived aliases (the session_alias column). A key another
+// live session still uses is kept, whatever half it uses it by: a session whose rows carry it
+// as their alias, or a headerless session whose own id IS it. Both read that state on every
+// turn (cg:seen:, cg:ttl:), so removing it under them makes a warm cache read cold. Call it
+// AFTER the sessions' request rows are gone — the in-use check counts what is left. Best
+// effort: the state is rebuilt from traffic, so a failure only logs. The retention prune does
+// NOT call it: state follows its own retention.
+func (d *DB) deleteSessionState(sessions, aliases []string) {
+	keys := make([]string, 0, len(sessions)+len(aliases))
+	keys = append(keys, sessions...)
+	keys = append(keys, aliases...)
+	inUse := d.inUseIDs(keys)
+	for _, k := range keys {
+		if k == "" || inUse[k] {
+			continue
+		}
+		if _, err := store.DeleteSessionState(d.sql, k); err != nil {
+			slog.Warn("dash: could not delete the session state of a removed session", "session", k, "err", err)
+		}
+	}
+}
+
+// inUseIDs tells which of the given keys a request row still uses, as a session's alias or as
+// a session's own id. TWO queries for the whole list, not one per key: this runs on the writer
+// goroutine during eviction passes, and requests holds millions of rows in production. An
+// answer that cannot be read — the query fails to open, a row fails to scan, or the scan ends
+// early — says every key is in use. Keeping rows is the safe side, and retention bounds them.
+func (d *DB) inUseIDs(keys []string) map[string]bool {
+	inUse := map[string]bool{}
+	if len(keys) == 0 {
+		return inUse
+	}
+	queries := []string{
+		`SELECT DISTINCT session_alias FROM requests WHERE session_alias IN (`,
+		`SELECT DISTINCT session_id FROM requests WHERE session_id IN (`,
+	}
+	// giveUp keeps the promise above however the answer breaks: every key counts as in use.
+	// Logged once per call, whatever the failure and however many queries it hits.
+	var warned bool
+	giveUp := func(err error) {
+		if !warned {
+			slog.Warn("dash: could not tell whether a removed session's state is still in use",
+				"err", err)
+			warned = true
+		}
+		for _, k := range keys {
+			inUse[k] = true
+		}
+	}
+	for _, q := range queries {
+		for _, chunk := range chunkStrings(keys) {
+			rows, err := d.sql.QueryContext(d.readCtx(), q+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+			if err != nil {
+				giveUp(err)
+				return inUse
+			}
+			for rows.Next() {
+				var k string
+				// A row that fails to scan says the same thing as a query that fails to open:
+				// the answer is not trustworthy, and a key it could not deliver must not read
+				// as unused.
+				if err := rows.Scan(&k); err != nil {
+					rows.Close()
+					giveUp(err)
+					return inUse
+				}
+				inUse[k] = true
+			}
+			// A scan that fails midway ends the loop early: the keys it did not reach would
+			// read as unused, and the caller would then delete state a live session still
+			// reads. That is the one unsafe direction this function must never fail in.
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				giveUp(err)
+				return inUse
+			}
+			rows.Close()
+		}
+	}
+	return inUse
+}
+
+// sessionAliases lists the distinct alias ids stored on the given sessions' rows, minus each
+// row's own session id (a headerless turn's id IS its alias, and its rows store none). Read
+// BEFORE the rows are deleted: the alias is a column, and the column goes with them.
+func (d *DB) sessionAliases(sessions ...string) ([]string, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for _, chunk := range chunkStrings(sessions) {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT DISTINCT session_alias FROM requests
+			WHERE session_alias <> '' AND session_alias <> session_id
+			AND session_id IN (`+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+		if err != nil {
+			return out, err
+		}
+		for rows.Next() {
+			var a string
+			if rows.Scan(&a) == nil {
+				out = append(out, a)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return out, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // Path returns the on-disk path ("" when in-memory).
 func (d *DB) Path() string { return d.path }
 
@@ -459,10 +585,10 @@ func (d *DB) insertBatch(evs []*Event) error {
 		keepalive_strategy_id, billed_token_factor, thread_id,
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
 		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
-		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd
+		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -537,6 +663,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			 * safe direction — it claims LESS about the row. */
 			sourceOf(e.Source),
 			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
+			e.SessionAlias,
 		)
 		if err != nil {
 			return err
@@ -674,20 +801,7 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 	var deleted int64
 	if maxAge > 0 {
 		cutoff := now.Add(-maxAge).UnixMilli()
-		// IMPORTED HISTORY IS EXEMPT FROM THE AGE RULE, and that exemption is the difference
-		// between the import being useful and being pointless.
-		//
-		// Imported rows are old BY DEFINITION — being old is the only reason to import them — so
-		// an age rule that applies to them deletes the whole import on the next janitor pass.
-		// Observed: a live import wrote 5,379 rows and the next pass deleted 5,362, leaving the
-		// seventeen that happened to fall inside the seven-day window. The dashboard then showed
-		// a one-week span and looked as though the import had found almost nothing.
-		//
-		// Age is simply the wrong question for them. A measured row ages out because the traffic
-		// behind it keeps coming and the recent rows are the ones that matter; an imported row is
-		// a one-off recovery of something nobody can re-fetch once it is gone. The BYTE rule
-		// below still applies to both, because disk pressure is real regardless of provenance.
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ? AND source = ''`, cutoff)
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
 		if err != nil {
 			return deleted, err
 		}
@@ -863,16 +977,94 @@ func (d *DB) optimize() {
 //
 // "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
 // that is still in use must not be evicted because it started a week ago.
+//
+// The victims are picked ONCE, and the delete removes exactly that set (#772). The
+// delete used to re-run the ordering subquery itself, so a request landing between the
+// pick and the delete could change the order: the rows it removed were then not the rows
+// the state cleanup acted on, and a session that stayed lost its state to one that went.
+// The delete runs in chunks of sqlChunk ids, each chunk one statement and so one
+// transaction. A failed chunk returns before the state cleanup, so victims the earlier
+// chunks already removed keep their state until retention — the safe direction. The pick
+// stays outside the deletes, like every other read
+// here (ArchiveSessionFull reads its events outside its delete too): a read-then-write
+// transaction on this shared pool can fail to upgrade its WAL snapshot when the
+// session-state flush commits in between.
 func (d *DB) DropOldestSessions(n int) (int64, error) {
 	if n <= 0 {
 		return 0, nil
 	}
-	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
-		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
+	// Before the delete: afterwards the victims cannot be found. A failed pick returns its
+	// error rather than reading as an empty table (#775 review).
+	victims, err := d.oldestSessionIDs(n)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	if len(victims) == 0 {
+		return 0, nil
+	}
+	if d.dropProbe != nil {
+		d.dropProbe()
+	}
+	// The aliases are columns of the rows about to go, so they are read before the delete.
+	aliases, err := d.sessionAliases(victims...)
+	if err != nil {
+		return 0, err
+	}
+	var affected int64
+	for _, chunk := range chunkStrings(victims) {
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (`+placeholders(len(chunk))+`)`,
+			anyArgs(chunk)...)
+		if err != nil {
+			return affected, err
+		}
+		n, _ := res.RowsAffected()
+		affected += n
+	}
+	d.deleteSessionState(victims, aliases)
+	return affected, nil
+}
+
+func (d *DB) oldestSessionIDs(n int) ([]string, error) {
+	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out, rows.Err()
+}
+
+func anyArgs(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// sqlChunk caps how many ids one IN (...) list binds. SQLite caps a statement's variables
+// (32,766 in this driver), and the disk rule can ask for a tenth of all sessions at once, so
+// the lists go in batches instead. A var, not a const, so a test can shrink it and exercise
+// the batch boundaries.
+var sqlChunk = 500
+
+// chunkStrings splits ss into sqlChunk-sized batches, keeping every element and its order.
+func chunkStrings(ss []string) [][]string {
+	var out [][]string
+	for len(ss) > sqlChunk {
+		out = append(out, ss[:sqlChunk])
+		ss = ss[sqlChunk:]
+	}
+	if len(ss) > 0 {
+		out = append(out, ss)
+	}
+	return out
 }
 
 // TenantRowCounts reports how many request rows each tenant holds. The caller
@@ -911,7 +1103,8 @@ func (d *DB) tenantRowCount(tenant string) (int64, error) {
 
 // DropOldestSessionsOfTenant trims one tenant back toward its quota, oldest session
 // first, and returns the rows deleted. DESTRUCTIVE, and only correct when there is no
-// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two.
+// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two. The
+// dropped sessions' state rows go with them, exactly as in DropOldestSessions (#772).
 func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64, error) {
 	var deleted int64
 	// Bounded: each pass drops one session, and a tenant with a pathological number
@@ -924,9 +1117,22 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if n <= targetRows {
 			return deleted, nil
 		}
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = (
-			SELECT session_id FROM requests WHERE tenant_id = ?
-			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1)`, tenant, tenant)
+		// The victim is picked first and deleted by id, so the state cleanup below acts on
+		// the session that actually went (#772) — the delete no longer re-picks it itself.
+		var id string
+		err = d.sql.QueryRowContext(d.readCtx(), `SELECT session_id FROM requests WHERE tenant_id = ?
+			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1`, tenant).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return deleted, nil
+		}
+		if err != nil {
+			return deleted, err
+		}
+		aliases, err := d.sessionAliases(id)
+		if err != nil {
+			return deleted, err
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = ?`, tenant, id)
 		if err != nil {
 			return deleted, err
 		}
@@ -934,6 +1140,7 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if got == 0 {
 			return deleted, nil // nothing left to drop; avoid spinning
 		}
+		d.deleteSessionState([]string{id}, aliases)
 		deleted += got
 	}
 	return deleted, nil

@@ -243,6 +243,36 @@ func TestBadLabelRejected(t *testing.T) {
 	}
 }
 
+// Trace recording is consent, so it has exactly one owner: off for a new account, settable
+// by that account, and by nobody else -- a manager can neither opt a user in nor out.
+func TestRecordTracesIsTheTenantsOwnConsent(t *testing.T) {
+	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
+	mgr, _ := register(t, r, "boss@ibm.com")
+	a, _ := register(t, r, "a@ibm.com")
+	if a.RecordTraces {
+		t.Fatal("a new account starts opted in to trace recording; it must start off")
+	}
+	yes, no := true, false
+	if err := r.Update(mgr, a.ID, Patch{RecordTraces: &yes}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("manager opted a user in: got %v, want ErrForbidden", err)
+	}
+	if err := r.Update(a, a.ID, Patch{RecordTraces: &yes}); err != nil {
+		t.Fatalf("self opt-in: %v", err)
+	}
+	if got, _ := r.Get(a.ID); !got.RecordTraces {
+		t.Fatal("opt-in was not stored")
+	}
+	if err := r.Update(mgr, a.ID, Patch{RecordTraces: &no}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("manager opted a user out: got %v, want ErrForbidden", err)
+	}
+	if err := r.Update(a, a.ID, Patch{RecordTraces: &no}); err != nil {
+		t.Fatalf("self opt-out: %v", err)
+	}
+	if got, _ := r.Get(a.ID); got.RecordTraces {
+		t.Fatal("opt-out was not stored")
+	}
+}
+
 func TestUpdatePrivilegeBoundaries(t *testing.T) {
 	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
 	mgr, _ := register(t, r, "boss@ibm.com")
@@ -515,7 +545,7 @@ func TestMigrateRefusesNewerDatabase(t *testing.T) {
 var wantSchema = map[string][]string{
 	"tenants": {"id", "label", "email", "role", "config_yaml", "up_anthropic",
 		"up_openai", "up_bob", "capture_content", "max_rows", "disabled", "created_at",
-		"last_seen_at", "password_hash", "email_verified_at"},
+		"last_seen_at", "password_hash", "email_verified_at", "record_traces"},
 	"tenant_tokens":       {"token_hash", "prefix", "tenant_id", "label", "created_at", "last_used_at", "revoked_at"},
 	"dash_sessions":       {"id", "tenant_id", "created_at", "expires_at", "label", "user_agent", "ip", "last_seen_at"},
 	"tenant_config_audit": {"ts", "actor_tenant", "target_tenant", "field", "before", "after"},

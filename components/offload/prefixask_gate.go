@@ -14,10 +14,10 @@ const (
 // prefixAskWriteCapEnabled switches the write cap. The owner chose the read rule only on 2026-10-26
 // (#721), so the cap ships OFF. The code and its constants stay: set this true to turn it on.
 //
-// If turned on, the cap assumes the question's breakpoint sits on the short bridge, so the ask is
-// fresh input and the write is a few tokens plus the turn's text-turn tail
-// (cheapmodel.insertAskMessage). It would refuse every question if the breakpoint sat on the ask,
-// which writes the whole ask (#725).
+// If turned on, the cap assumes the question's breakpoints sit on the turn's last message and on
+// its copy on the short bridge (#776), never on the ask. So the ask is fresh input and the write is
+// a few tokens plus the turn's text-turn tail (cheapmodel.insertAskMessage). It would refuse every
+// question if a breakpoint sat on the ask, which writes the whole ask (#725).
 const prefixAskWriteCapEnabled = false
 
 // The reasons prefixAskCacheOK gives. Each maps to one gate in the sweep.

@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/schema"
 )
@@ -99,7 +101,7 @@ func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
 		// arrives here already marked. Adding a second mark buys nothing and spends one of the
 		// provider's FOUR per-request breakpoint slots — a fifth is a 400 on the whole call, which
 		// on this path means a wasted summarization and a reverted component.
-		if hasCacheControl(m) {
+		if schema.HasBlockBreakpoint(&m) {
 			return -1
 		}
 		n += tokens.Count(schema.MessageText(m))
@@ -120,19 +122,6 @@ func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
 		}
 	}
 	return -1
-}
-
-// hasCacheControl reports whether this message already carries a breakpoint the caller placed.
-func hasCacheControl(m bschemas.ChatMessage) bool {
-	if m.Content == nil {
-		return false
-	}
-	for _, blk := range m.Content.ContentBlocks {
-		if blk.CacheControl != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // markedContent re-renders content as a block array carrying a cache_control breakpoint on its
@@ -267,22 +256,14 @@ func (o OpenAI) post(ctx context.Context, msgs []any) (string, error) {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return "", err
 	}
-	// OpenAI reports automatic prefix caching as cached_tokens, and counts them INSIDE
-	// prompt_tokens (unlike Anthropic, which reports the tiers disjointly). Subtract so
-	// the "fresh input" figure means the same thing on both backends.
-	cached := out.Usage.PromptTokensDetails.CachedTokens
-	recordUsageCache(ctx, o.Model, out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
+	// providerusage subtracts cached tokens from prompt_tokens, so "fresh input" means the same
+	// thing on both backends.
+	tiers, _ := providerusage.Parse(gjson.GetBytes(respBody, "usage"))
+	recordUsageCache(ctx, o.Model, int(tiers.FreshInput), int(tiers.Output), 0, int(tiers.CacheRead))
 	if len(out.Choices) == 0 {
 		return "", nil
 	}

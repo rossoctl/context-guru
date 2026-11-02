@@ -18,15 +18,17 @@ func causeMiss(r *Recorder, session, threadID string, ts int64, f PrefixFacts) *
 
 // causeMissWith is causeMiss with a cache read and an HTTP status, and it mirrors the gap rule
 // in proxy/dashcapture.go: the TTL test uses the gap since the last request on the SAME model.
+// The facts carry no PromptTokens, so the previous prompt reads as unknown: the label behaves
+// as it did before #496. usageTurn below covers the known-previous-prompt shape.
 func causeMissWith(r *Recorder, session, threadID string, ts int64, f PrefixFacts, read int64, status int) *Event {
 	f.TS = ts
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
-	cause, modelGap, known, _ := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
+	cause, modelGap, known, _, prevPrompt := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
 	if known {
 		since = modelGap
 	}
 	e := &Event{CacheWrite: 400_000, CacheRead: read}
-	e.AttributeCache(seenSession, seenModel, since, fiveMin, cause)
+	e.AttributeCache(seenSession, seenModel, since, fiveMin, cause, prevPrompt)
 	return e
 }
 
@@ -166,12 +168,12 @@ func TestAnInheritingThreadComparesWithItsParent(t *testing.T) {
 	changed.SystemHash = "s2"
 	r := newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
+	if got, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
 		t.Errorf("fork from the primary thread = %q, want %q", got, CauseSystemChanged)
 	}
 	r = newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
+	if got, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
 		t.Errorf("fork with no parent = %q, want no cause", got)
 	}
 }
@@ -249,7 +251,7 @@ func TestAFailedRequestDoesNotReplaceTheBaseline(t *testing.T) {
 // A miss that wrote no cache is not a prefix change, even when something differs.
 func TestAMissThatWroteNothingIsNotAPrefixChange(t *testing.T) {
 	e := &Event{CacheWrite: 0}
-	e.AttributeCache(true, true, 60_000, fiveMin, CauseToolsChanged)
+	e.AttributeCache(true, true, 60_000, fiveMin, CauseToolsChanged, 0)
 	if e.CacheMissReason != CacheUnknown || e.CacheMissCause != "" {
 		t.Errorf("= %q/%q, want unknown with no cause", e.CacheMissReason, e.CacheMissCause)
 	}
@@ -362,5 +364,63 @@ func TestAFailureAfterASuccessKeepsTheModelSeen(t *testing.T) {
 	a.Tools = 21
 	if e := causeMiss(r, "s1", "", t0+120_000, a); e.CacheMissReason != CachePrefixChange || e.CacheMissCause != CauseToolsChanged {
 		t.Errorf("after success then failure = %q/%q, want prefix_change/tools_changed", e.CacheMissReason, e.CacheMissCause)
+	}
+}
+
+// usageTurn runs one request through the same calls proxy/dashcapture.go makes, with the
+// request's own usage numbers, so PrefixFacts.PromptTokens (fresh + read + write) is the figure
+// FactsOf records in production. This is the shape issue #496's partial reads have.
+func usageTurn(r *Recorder, session, threadID string, ts int64, f PrefixFacts, fresh, read, write int64) *Event {
+	f.TS = ts
+	f.PromptTokens = fresh + read + write
+	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
+	cause, modelGap, known, _, prevPrompt := r.ObservePrefix(session, threadID, "", false, f, true)
+	if known {
+		since = modelGap
+	}
+	e := &Event{FreshInput: fresh, CacheRead: read, CacheWrite: write}
+	e.AttributeCache(seenSession, seenModel, since, fiveMin, cause, prevPrompt)
+	return e
+}
+
+// Issue #496. A read alone is not a hit: Claude Code keeps the system prompt and tools under a
+// separate breakpoint, so a request that re-wrote the rest of the prompt still reads tens of
+// thousands of tokens. A read under half the previous prompt, with more written than read, is a
+// miss and takes the normal chain — cold start, then TTL, then the measured cause.
+func TestALargePartialReadIsAMiss(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	toolsChanged := base()
+	toolsChanged.DeclDigest = "d2"
+	// The previous request wrote a 400k-token prompt; this one reads 50k of it and writes 350k.
+	run := func(gapMs int64, second PrefixFacts, read, write int64) *Event {
+		r := newFactsRecorder()
+		usageTurn(r, "s1", "", t0, base(), 10_000, 0, 390_000)
+		return usageTurn(r, "s1", "", t0+gapMs, second, 0, read, write)
+	}
+	cases := []struct {
+		name                  string
+		gapMs                 int64
+		second                PrefixFacts
+		read, write           int64
+		wantReason, wantCause string
+	}{
+		{"62 s later, tools changed", 62_000, toolsChanged, 50_000, 350_000, CachePrefixChange, CauseToolsChanged},
+		{"6 min later", 6 * 60_000, toolsChanged, 50_000, 350_000, CacheTTLExpiry, ""},
+		{"no measured change", 62_000, base(), 50_000, 350_000, CacheUnknown, ""},
+		{"a read that covers the prompt", 62_000, base(), 400_000, 1_000, CacheHit, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := run(tc.gapMs, tc.second, tc.read, tc.write)
+			if e.CacheMissReason != tc.wantReason || e.CacheMissCause != tc.wantCause {
+				t.Errorf("reason/cause = %q/%q, want %q/%q", e.CacheMissReason, e.CacheMissCause, tc.wantReason, tc.wantCause)
+			}
+		})
+	}
+	// The first request of a thread has no previous prompt, so a partial-read verdict is
+	// impossible: it keeps today's label (a read is a hit).
+	r := newFactsRecorder()
+	if e := usageTurn(r, "s2", "", t0, base(), 0, 50_000, 350_000); e.CacheMissReason != CacheHit {
+		t.Errorf("first request of a thread = %q, want hit (as today)", e.CacheMissReason)
 	}
 }

@@ -233,7 +233,7 @@ of a request:
 | **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging. |
 | **No ping mid-request** | a due ping waits while a request of the same thread is in flight. Other threads are not held back: a subagent's slow request never delays the main thread's ping. |
 | **Failed pings stop** | a 401 is about the key: it stops every session pinging with that credential, and only those (a teammate on the same account pings on), for an hour; a 403 (often a per-model permission or a gateway policy) does the same for that credential on that model only. A ping refused with any other non-retryable 4xx or answered 2xx with no usage at all (a translating gateway that hid an error) is counted `failed` and stops that session; 3 in a row for the same account, upstream and model switch the keep-alive off for that route, for that account only, for an hour (`route_trips` in `/stats`). A 429 or 5xx (an overload) is transient: counted `skipped`, and the next ping slot retries. A ping that lands after expiry and reads nothing is a real miss (`missed`): it re-wrote the prefix, so pinging goes on; a second miss in a row is a prefix that does not match and stops the session. |
-| **Claude models only through a relay** | native Anthropic, Bedrock and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
+| **Claude models only through a relay** | native Anthropic, Bedrock, Bedrock Mantle and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
 
 Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
 held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
@@ -296,6 +296,30 @@ daily. A campaign runs in `shadow` (scores live decisions, changes nothing) or `
 ping count of a keep-alive the tenant already has on). `active` is refused unless the build's own
 held-out comparison recommended it. Routes, settings and safety properties:
 `predictive/README.md` in the repository.
+
+## A breakpoint at the end of the request (on by default)
+
+`cache.tail_breakpoint` is a separate switch. It sends no extra request and spends nothing between
+turns.
+
+- **The problem.** With `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, Claude Code puts its last cache
+  breakpoint on the user's text. Then it adds the environment as a `system` message after it, about
+  3k tokens. The provider caches only up to a breakpoint, so it bills that message as plain input.
+- **What the proxy does.** When more than about 1k tokens (4 KiB) follow the client's last breakpoint
+  in `messages`, the proxy adds one breakpoint on the last block. It copies the client's TTL. It
+  never adds a 5th breakpoint. A client with no breakpoint in `messages` gets none.
+- **Measured.** Claude Code 2.1.316, Sonnet 5.5, 3 runs each way: $0.0574 a run without, $0.0424
+  with (-26%). With default Claude Code settings the proxy added nothing.
+- **Turn it off** with `tail_breakpoint: false`. The `off` preset never adds it. The switch is
+  there mainly to debug a cache-cost problem. We know no reason today to turn it off as a rule.
+- **Counters** on `/stats`: `cache_tail_bp_added`, `_no_slot`, `_not_needed`, `_no_mark`,
+  `_not_found`. `_not_needed` is the sum of `_at_end` (the client's mark is already at the end,
+  or the last block already holds a mark) and `_short_tail` (4 KiB or less follow it).
+
+```yaml
+cache:
+  tail_breakpoint: false
+```
 
 ## Related
 

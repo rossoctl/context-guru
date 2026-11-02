@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/sjson"
 )
 
@@ -42,7 +43,7 @@ import (
 // stream is false so the response is one small JSON body with its usage block in it, rather
 // than an SSE stream this would have to read to the end to price.
 func pingOutputBudget(route string) int {
-	if route == "/v1/responses" {
+	if schema.IsResponses(schema.WireFor("", route)) {
 		// The IBM LiteLLM Azure route rejects max_output_tokens below 16.
 		return 16
 	}
@@ -72,7 +73,7 @@ const pingVary = 8
 // on its own: the reply to a keep-alive ping is one token, and output is billed as generated.
 func pingBodyN(body []byte, route string, n int) ([]byte, bool) {
 	field := "max_tokens"
-	if route == "/v1/responses" {
+	if schema.IsResponses(schema.WireFor("", route)) {
 		field = "max_output_tokens"
 	}
 	if n < 0 {
@@ -104,11 +105,11 @@ const reserveFrac = 0.25
 // we know. OpenAI Responses uses implicit caching on GPT-5.6+; earlier models
 // have model/retention-dependent lifetimes and are not safe to schedule here.
 func eligible(p bschemas.ModelProvider, model, route string) bool {
-	switch p {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(p):
 		return true
-	case bschemas.OpenAI:
-		return route == "/v1/responses" && modelinfo.OpenAI30MinuteCache(string(p), model)
+	case p == bschemas.OpenAI:
+		return schema.IsResponses(schema.WireFor("", route)) && modelinfo.OpenAI30MinuteCache(string(p), model)
 	}
 	return false
 }

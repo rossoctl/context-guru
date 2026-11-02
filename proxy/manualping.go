@@ -133,8 +133,14 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 			"retry_after_s": int(soon.RetryAfter.Seconds()) + 1})
 		return
 	case errors.Is(err, keepalive.ErrNotHeld):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "not held",
-			"detail": "the proxy keeps nothing to ping this thread with: keep-alive is off for this account, or it stopped pinging this thread"})
+		// The reason is the keeper's own, read now: a press that raced the release of a thread's copy
+		// must not make the client guess it from a cache-state copy that is up to 15 s old.
+		body := map[string]any{"error": "not held",
+			"detail": "the proxy keeps nothing to ping this thread with: keep-alive is off for this account, or it stopped pinging this thread"}
+		if st := h.keeper.Keeper.PingStates(tenantID, false, scoped).For(thread); st.Reason != "" {
+			body["ping_reason"] = st.Reason
+		}
+		writeJSON(w, http.StatusConflict, body)
 		return
 	case errors.Is(err, keepalive.ErrBusy):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "busy",

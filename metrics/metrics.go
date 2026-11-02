@@ -832,6 +832,28 @@ type Snapshot struct {
 	CacheAnchorWritten  int64 `json:"cache_anchor_written"`
 	CacheAnchorNoSlot   int64 `json:"cache_anchor_no_slot"`
 	CacheAnchorNotFound int64 `json:"cache_anchor_not_found"`
+	// in-band follow-up breakpoints (#784): the client's last message breakpoint moved to the end
+	// of a follow-up the proxy sent after answering an expand, a follow-up whose client request had
+	// no message breakpoint to move, one whose last block cannot take a breakpoint, and one whose
+	// new content is longer than the provider's 20-block lookback. All zero unless
+	// expand.inband_breakpoint is on
+	CacheInBandBPMoved    int64 `json:"cache_inband_bp_moved"`
+	CacheInBandBPNoMark   int64 `json:"cache_inband_bp_no_mark"`
+	CacheInBandBPNotFound int64 `json:"cache_inband_bp_not_found"`
+	CacheInBandBPTooFar   int64 `json:"cache_inband_bp_too_far"`
+	// tail breakpoints (#795): a breakpoint added at the end of a request whose client put its
+	// last one far from the end, a request with no free slot for it, one whose client mark already
+	// sits near the end (not_needed, the sum of at_end and short_tail: the mark is at the very end
+	// or the last block already holds a mark, or only 4 KiB or less follow it), one whose client
+	// put no mark in messages, and one
+	// whose last block cannot take a mark. All zero when cache.tail_breakpoint is false
+	CacheTailBPAdded     int64 `json:"cache_tail_bp_added"`
+	CacheTailBPNoSlot    int64 `json:"cache_tail_bp_no_slot"`
+	CacheTailBPNotNeeded int64 `json:"cache_tail_bp_not_needed"`
+	CacheTailBPAtEnd     int64 `json:"cache_tail_bp_at_end"`
+	CacheTailBPShortTail int64 `json:"cache_tail_bp_short_tail"`
+	CacheTailBPNoMark    int64 `json:"cache_tail_bp_no_mark"`
+	CacheTailBPNotFound  int64 `json:"cache_tail_bp_not_found"`
 	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")

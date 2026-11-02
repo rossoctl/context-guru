@@ -19,6 +19,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -29,7 +30,8 @@ import (
 //
 //	off     loaded but inert
 //	shadow  decides on live traffic, logs and scores what it WOULD have done, changes nothing
-//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings) and the 280 s spacing
+//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings). The spacing stays the tenant's own interval, or campaignKeepAlive5mIdle when none is set;
+//	        kvcache.DefaultPingIdle is only the spacing the decision is scored at
 //
 // The decision costs microseconds and needs only what the proxy sees when a response ends, so it runs inline in keeper.record.
 // An active campaign acts only where the tenant's OWN policy has the keep-alive on: it can lower or shape the ping count, it never turns the mechanism on for a tenant that opted out
@@ -384,7 +386,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	spec := pc.spec // an auto campaign's refresh swaps it (refreshAutoCampaigns)
 	pc.mu.Unlock()
 	rule := spec.RuleFor(&facts)
-	kk, idle := 0, 280.0
+	kk, idle := 0, kvcache.DefaultPingIdle.Seconds()
 	var row *predictive.Row
 	if pc.model != nil { // the tracker must see every response, whichever rule the segment applies
 		row = predictive.NewRow()
@@ -419,13 +421,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 }
 
 func familyOf(model string) string {
-	m := strings.ToLower(strings.TrimPrefix(model, "aws/"))
-	for _, f := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(m, f) {
-			return f
-		}
-	}
-	return "other"
+	return predictive.FamilyOf(model)
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.

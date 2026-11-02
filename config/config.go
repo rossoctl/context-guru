@@ -62,6 +62,17 @@ type ExpandConfig struct {
 	// traffic. Anything that makes the anchor unusable (store eviction, a client-side compaction,
 	// an edited history) falls back to the off behaviour for that turn.
 	FixedRestore bool `yaml:"fixed_restore"`
+	// InBandBreakpoint, when true, moves the last cache_control in `messages`, whoever placed it, to
+	// the end of each
+	// in-band follow-up request (#784): the request the proxy sends upstream after it answered an
+	// expand call itself. The provider then caches the new content (the tool call and the expanded
+	// original) instead of billing it as plain input. The mark keeps the client's TTL and count.
+	//
+	// Off (the default) because a cache write costs more than plain input (1.25x, 2x for 1h) and
+	// nothing reads this entry: the client never sees the in-band tool call, so its next request
+	// diverges before the mark. Only a later round of the same loop can read it. See
+	// apply.MarkInBandFollowUp.
+	InBandBreakpoint bool `yaml:"inband_breakpoint"`
 }
 
 // CacheConfig is the `cache:` block: provider prompt-cache policy that lives above the
@@ -188,6 +199,20 @@ type CacheConfig struct {
 	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
 	// requests that pay the premium and can never produce a large miss.
 	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
+	// TailBreakpoint adds one cache breakpoint at the end of a request whose client put its last
+	// breakpoint far from the end (#795): Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+	// puts it on the user's text and appends a ~3k-token `system` message after it, which the
+	// provider then bills as plain input. The new mark copies the client's TTL, never takes the
+	// 5th slot, and is added only when more than ~1k tokens follow the client's mark. See
+	// apply.markTail.
+	//
+	// On by default (nil = on), because a live test showed a gain: $0.0574 to $0.0424 a run, 3
+	// runs each way, and no change with default Claude Code settings. `tail_breakpoint: false`
+	// turns it off. The switch is there mainly to debug a cache-cost problem; we know no reason
+	// today to turn it off as a rule.
+	// A pipeline with no components (`preset: off`) never runs it, so the A/B control arm stays a
+	// passthrough.
+	TailBreakpoint *bool `yaml:"tail_breakpoint"`
 }
 
 // Keep-alive and head-TTL defaults. Named constants because the same numbers are asserted
@@ -202,6 +227,12 @@ const (
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	DefaultKeepAliveMinPrefix     = 80000
 	DefaultHeadTTLMinTokens       = 50000
+)
+
+// The provider's cache lifetimes in seconds, for the validate caps below.
+const (
+	lifetime5mSeconds = int(modelinfo.AnthropicCacheLifetime5m / time.Second)
+	lifetime1hSeconds = int(modelinfo.AnthropicCacheLifetime1h / time.Second)
 )
 
 // Resolved returns the block with every zero replaced by its default, so callers never
@@ -247,16 +278,16 @@ func (c CacheConfig) validate() error {
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
-	if c.KeepAliveIdleSeconds >= 300 {
-		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under 300 "+
+	if c.KeepAliveIdleSeconds >= lifetime5mSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under %d "+
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
-			c.KeepAliveIdleSeconds)
+			lifetime5mSeconds, c.KeepAliveIdleSeconds)
 	}
-	if c.KeepAliveIdleSeconds1h >= 3600 {
-		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under 3600 "+
+	if c.KeepAliveIdleSeconds1h >= lifetime1hSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under %d "+
 			"(the one-hour lifetime runs from the previous request's START); got %d",
-			c.KeepAliveIdleSeconds1h)
+			lifetime1hSeconds, c.KeepAliveIdleSeconds1h)
 	}
 	if c.KeepAliveMaxPings1h > modelinfo.AnthropicMaxKeepAliveMaxPings1h {
 		return fmt.Errorf("config: cache: keepalive_max_pings_1h must be at most %d "+
@@ -908,6 +939,8 @@ func (c *Config) Build(e components.Emitter) (*components.Pipeline, error) {
 	}
 	pipe := components.NewPipeline(comps, e)
 	pipe.SetFixedRestore(c.Expand.FixedRestore)
+	pipe.SetInBandBreakpoint(c.Expand.InBandBreakpoint)
+	pipe.SetTailBreakpoint(len(comps) > 0 && (c.Cache.TailBreakpoint == nil || *c.Cache.TailBreakpoint))
 	return pipe, nil
 }
 

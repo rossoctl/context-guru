@@ -67,6 +67,7 @@ func TestCacheTTLPerProvider(t *testing.T) {
 		{"anthropic, 1h on a system block", bschemas.Anthropic, "claude-sonnet-5", sysHour, extendedTTL, CacheLifetimeExact},
 		{"bedrock follows the anthropic shape", bschemas.Bedrock, "aws/claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
 		{"vertex follows the anthropic shape", bschemas.Vertex, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
+		{"bedrock mantle follows the anthropic shape", bschemas.BedrockMantle, "claude-sonnet-5", bare, anthropicDefaultTTL, CacheLifetimeExact},
 		{"gpt-5.6 default is a minimum", bschemas.OpenAI, "azure/gpt-5.6-luna", bare, OpenAIMinimumCacheTTL, CacheLifetimeMinimum},
 		{"older OpenAI retention is unknown", bschemas.OpenAI, "gpt-5.5", bare, 0, CacheLifetimeUnknown},
 	} {
@@ -151,7 +152,7 @@ func TestBypassedTurnStillRefreshesTheIdleClock(t *testing.T) {
 
 	// Reading the tracker the way apply does: what time did the bypassed turn leave behind?
 	now := base.Add(7 * time.Minute)
-	_, prevAt := tr.TurnAt(session.Scoped("", "explicit-session", "", ""), 2, now.UnixMilli())
+	_, prevAt := tr.TurnAt(session.Scoped("", "explicit-session", "", ""), 2, now.UnixMilli(), 0)
 	if prevAt == 0 {
 		t.Fatal("the bypassed turn recorded no timestamp at all")
 	}
@@ -291,14 +292,14 @@ func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
 	}
 	base := int64(1_700_000_000_000)
 	// Turn 1 under the explicit id.
-	tr.TurnAt(explicit, 10, base)
+	tr.TurnAt(explicit, 10, base, 0)
 	aliasSeen(st, alias, base)
 	// Turn 2, three minutes later, under the ALIAS — this is what keeps the provider warm.
 	aliasSeen(st, alias, base+ms(3*time.Minute))
 	// Turn 3, seven minutes after turn 1, back under the explicit id. Its own clock says
 	// seven minutes idle, which is past 5m + the margin: the old code read COLD here.
 	now := base + ms(7*time.Minute)
-	_, prevAt := tr.TurnAt(explicit, 14, now)
+	_, prevAt := tr.TurnAt(explicit, 14, now, 0)
 	if !cacheIsCold(prevAt, now, 5*time.Minute) {
 		t.Fatal("fixture broken: the un-aliased clock must read cold, or this proves nothing")
 	}
@@ -446,7 +447,7 @@ func TestSessionTTLComposesAcrossBothIDs(t *testing.T) {
 		// The case the ALIAS alone cannot serve, and the reason both keys are read rather than
 		// the content hash being picked as canonical: the agent compacts its own context, so
 		// the transcript head changes and sha256(system+firstUser) moves with it. An explicit
-		// id survives that (see metaSessionKeys); the derived one does not.
+		// id survives that (see session.Explicit); the derived one does not.
 		{"the agent compacts its context, moving the alias", []struct {
 			at     time.Time
 			header string

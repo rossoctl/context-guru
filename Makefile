@@ -30,6 +30,11 @@ build: ## Build the context-guru-proxy binary into ./bin (pure Go — no C toolc
 	@mkdir -p bin
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
 
+.PHONY: build-record
+build-record: ## Build with the session recorder (--record, --record-otlp) into ./bin; the default build has none
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -tags cg_record -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
+
 .PHONY: build-static
 build-static: ## Same as build, plus -trimpath — the exact build releases ship
 	@mkdir -p bin

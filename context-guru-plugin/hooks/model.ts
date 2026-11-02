@@ -11,6 +11,8 @@ type Entry = {
   last_ts?: number
   ttl_s?: number
   held_until_ms?: number
+  pings_left?: number
+  next_ping_ms?: number
   keepalive?: boolean
   prefix_tokens?: number
   rewrite_usd?: number
@@ -114,9 +116,34 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     saved: num(e.saved_usd),
     isHeld: num(e.held_until_ms) !== undefined,
     // What the per-second clock is computed from: a newer document that moves it must replace the stored one.
-    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), num(e.held_until_ms)].join(','),
+    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), num(e.held_until_ms), num(e.pings_left), num(e.next_ping_ms)].join(','),
     ...clockOf(e, now),
+    nextPingS: nextPingIn(e, now),
   }
+}
+
+/** Seconds until the next automatic ping, only while it fires BEFORE the entry expires (so the cache stays warm
+ * without a press); undefined otherwise: no pings left, none planned, the next one too late, or an old proxy that
+ * sends no `next_ping_ms` (then the rule is the old one: fail open, the button shows). */
+function nextPingIn(e: Entry, now: number): number | undefined {
+  const left = num(e.pings_left)
+  const at = num(e.next_ping_ms)
+  const rem = clockOf(e, now).remS
+  if (left === undefined || left <= 0 || at === undefined || at <= 0 || rem === undefined || rem <= 0) return undefined
+  return at < now + rem * 1000 ? Math.max(0, (at - now) / 1000) : undefined
+}
+
+/** The one rule for the band's Ping button and the pane's "Ping now": show it when the cache is warm, the proxy can
+ * ping, and no automatic ping fires before the cache expires. */
+export const showPing = (v: View): boolean => v.main.isWarm && v.pingable !== false && v.main.nextPingS === undefined
+
+/** While the button is hidden for a planned ping: `↻ next ping 4:12` (`↻ ping 4:12` on a narrow band), `↻ pinging…` at 0:00. */
+export const nextPingWords = (v: View, narrow: boolean): string | undefined => {
+  const s = v.main.nextPingS
+  if (!v.main.isWarm || v.pingable === false || s === undefined) return undefined
+  // The planned time has passed and the next poll has not brought a new plan: the ping is going out now.
+  if (s < 1) return '↻ pinging…'
+  return `↻ ${narrow ? '' : 'next '}ping ${clock(s)}`
 }
 
 /** The status line's cache clock (statusline.py remaining_seconds, held_seconds, _until_cold): seconds until the
@@ -211,7 +238,7 @@ function mainEntry(s: Entry, main: Entry): Entry {
   if (main === s) return s
   const out: Entry = { ...s }
   for (const k of ['last_ts', 'end_ts', 'ttl_s', 'prefix_tokens', 'rewrite_usd'] as const) if (main[k] !== undefined) (out as any)[k] = main[k]
-  for (const k of ['held_until_ms', 'next_warm_usd', 'next_cold_usd'] as const) (out as any)[k] = main[k]
+  for (const k of ['held_until_ms', 'pings_left', 'next_ping_ms', 'next_warm_usd', 'next_cold_usd'] as const) (out as any)[k] = main[k]
   out.keepalive = s.keepalive === true && s.last_ts === main.last_ts
   return out
 }
@@ -277,6 +304,7 @@ export const signature = (v: View | null): string =>
         v.main.isWarm,
         v.main.isPinged,
         v.main.anchor,
+        v.main.nextPingS === undefined,
         v.main.left,
         v.main.warmUsd,
         v.main.coldUsd,

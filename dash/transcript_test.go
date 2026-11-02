@@ -243,3 +243,42 @@ func TestATranscriptsWorkingDirectoryIsSanitised(t *testing.T) {
 			turns[0].Project)
 	}
 }
+
+// The one-hour write split must survive the read. The transcript carries it as
+// usage.cache_creation.ephemeral_1h_input_tokens, the same field the live proxy reads.
+func TestATranscriptTurnKeepsTheOneHourWriteSplit(t *testing.T) {
+	home := t.TempDir()
+	line := `{"type":"assistant","sessionId":"s-1","cwd":"/Users/v/proj",` +
+		`"timestamp":"2026-09-10T06:52:21.341Z","message":{"id":"m1","model":"claude-opus-5","role":"assistant",` +
+		`"usage":{"input_tokens":2,"cache_creation_input_tokens":1000,"cache_read_input_tokens":5,` +
+		`"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":600},` +
+		`"output_tokens":9},"content":[{"type":"text","text":"hi"}]}}`
+	turns, err := ReadTranscript(writeJSONL(t, home, "-Users-v-proj", "s-1", line))
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("turns = %d, err = %v", len(turns), err)
+	}
+	if got := turns[0]; got.CacheWrite != 1000 || got.CacheWrite1h != 600 || got.CacheRead != 5 || got.FreshInput != 2 || got.Output != 9 {
+		t.Fatalf("turn = %+v", got)
+	}
+}
+
+// Claude Code writes several lines per message id. A later line that carries the final usage
+// replaces an earlier partial one, and the 1h split must follow it.
+func TestATranscriptLaterLineOfTheSameMessageCarriesTheFinalOneHourSplit(t *testing.T) {
+	home := t.TempDir()
+	mk := func(w, w1h, out string) string {
+		return `{"type":"assistant","sessionId":"s-1","cwd":"/Users/v/proj",` +
+			`"timestamp":"2026-09-10T06:52:21.341Z","message":{"id":"m1","model":"claude-opus-5","role":"assistant",` +
+			`"usage":{"input_tokens":2,"cache_creation_input_tokens":` + w + `,"cache_read_input_tokens":0,` +
+			`"cache_creation":{"ephemeral_1h_input_tokens":` + w1h + `},"output_tokens":` + out + `},` +
+			`"content":[{"type":"text","text":"hi"}]}}`
+	}
+	path := writeJSONL(t, home, "-Users-v-proj", "s-1", mk("100", "10", "1")+"\n"+mk("1000", "600", "9"))
+	turns, err := ReadTranscript(path)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("turns = %d, err = %v", len(turns), err)
+	}
+	if got := turns[0]; got.CacheWrite != 1000 || got.CacheWrite1h != 600 || got.Output != 9 {
+		t.Fatalf("turn = %+v", got)
+	}
+}

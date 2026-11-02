@@ -331,44 +331,23 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
-// metaSessionKeys are the `metadata` fields carrying the agent's OWN session id,
-// in precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON
-// object string, unwrapped by session.ExplicitID) and `metadata.taskId` is Bob
-// Shell's (a bare randomUUID, re-rolled only by /clear). Both survive the agent's
-// context compaction, which the derived sha256(system+firstUser) does not — see
-// session.ExplicitID for what breaks without them. A request carrying both resolves
-// to user_id, by this order.
-var metaSessionKeys = [...]string{"user_id", "taskId"}
-
 // explicitSession resolves the explicit session id for one request: the header wins,
-// then each metaSessionKeys field in order, then "" (Scoped's derived-hash fallback).
+// then the metadata fields (session.Explicit), then "" (Scoped's derived-hash fallback).
+// The rule lives in session.Explicit; this only reads the fields off the raw body.
+//
+// gjson scans, so this costs no second unmarshal of the body on the request path. A
+// `metadata` that is absent, null, a scalar or an array yields a non-existent result, and a
+// value that is not gjson.String is skipped, so both fall back to the derived hash.
+//
+// `metadata` is fetched ONCE and the fields read off it, rather than a full-body query per
+// field: on a real 600 KB request `metadata` sits behind `messages`, so each query walked
+// the whole transcript to reach it.
 func explicitSession(header string, body []byte) string {
-	cands := make([]string, 0, 1+len(metaSessionKeys))
-	cands = append(cands, header)
-	return session.ExplicitID(append(cands, metaSessionIDs(body)...)...)
-}
-
-// metaSessionIDs reads those fields off the raw body.
-//
-// gjson scans, so this costs no second unmarshal of the body on the request path — the
-// same reason every other body-level read here (messages, wireBreakpoints) uses it. The
-// type check is the whole robustness story: a `metadata` that is absent, null, a scalar
-// or an array yields a non-existent result, and a value that is a number, object or
-// array is not gjson.String — all of which yield "" and fall back to the derived hash
-// rather than stringifying into a key like `map[]`.
-//
-// `metadata` is fetched ONCE and both fields read off it, rather than a full-body query
-// per field: a gjson scan is cheap but not free, and on a real 600 KB request `metadata`
-// sits behind `messages`, so each query walked the whole transcript to reach it.
-func metaSessionIDs(body []byte) []string {
 	md := gjson.GetBytes(body, "metadata")
-	out := make([]string, 0, len(metaSessionKeys))
-	for _, k := range metaSessionKeys {
-		if r := md.Get(k); r.Type == gjson.String {
-			out = append(out, r.Str)
-		}
-	}
-	return out
+	return session.Explicit(header, func(k string) (string, bool) {
+		r := md.Get(k)
+		return r.Str, r.Type == gjson.String
+	})
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -399,7 +378,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res = Result{Body: body}
 		}
 	}()
-	if o.API == "responses" {
+	if schema.IsResponses(schema.WireFor(string(o.Provider), o.API)) {
 		return bodyResponsesOpts(ctx, pipe, st, o)
 	}
 	mode := o.Mode
@@ -415,6 +394,21 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// prevent, reproduced in the logs. cg.cache_boundary used to pass mode as an attr of
 	// its own; it does not any more, because that would now render the key twice.
 	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
+	// The tail breakpoint (#795), on the FINAL body of every return below: it must count every
+	// breakpoint the other edits placed (cacheinject, the splice anchor) against the cap of 4.
+	// Deferred after the recover above, so it runs first and the recover still catches a panic in it.
+	// Not in observe mode, whose body is never sent, and not on a bypassed request, which promises
+	// a byte-identical forward.
+	if mode != components.ModeObserve && !bypass && pipe.TailBreakpoint() && explicitBreakpointProvider(provider) {
+		defer func() {
+			if res.Body == nil {
+				return
+			}
+			if out, ok := markTail(res.Body); ok {
+				res.Body, res.Changed = out, true
+			}
+		}()
+	}
 	models := o.Models
 	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
 	// operates on `messages`). Done FIRST, before any byte offset into the body is
@@ -500,6 +494,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	loadSessionState(st, sessionID)
 	o.resolveThread(tr, sessionID)
 	var restore restorePlan
 	if !bypass {
@@ -549,7 +544,29 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
+			// Read ONCE, used twice: the restart grace the boundary consults and the cold
+			// decision below are one fact — this request's cache lifetime — and must not be
+			// derived twice (see ttlTier for the last time two readers disagreed).
+			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
+			// The alias session id: the same conversation reaches us under it when the explicit
+			// session header comes and goes (see the clock note below). The restart grace asks
+			// the lookup for the thread's keys under BOTH ids, because a refresh under either
+			// one kept the provider's single entry warm (#766).
+			//
+			// Two alias values, two jobs. graceAlias is the id a HEADERLESS turn of this body
+			// runs under — the metadata session id when the body carries one, else the content
+			// hash — and it is the ONE rule the record side also derives (graceAliasID), so
+			// the keys the grace asks for and the keys the recorder warms cannot drift apart.
+			// alias below stays the bare content hash: it keys the cold decision's own clocks
+			// (aliasSeen, sessionTTL, RecordCacheTouch), which this change does not touch.
+			sys, firstUser := schema.SessionHead(norm)
+			alias := session.Scoped(o.Tenant, "", sys, firstUser)
+			graceAlias := graceAliasID(o.Tenant, body, norm)
+			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -576,8 +593,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
-			sys, firstUser := schema.SessionHead(norm)
-			alias := session.Scoped(o.Tenant, "", sys, firstUser)
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. alias and sessionID are declared above,
+			// beside the grace keys — the merge keeps #770's call on the bare-hash alias.
+			if alias != sessionID {
+				loadSessionState(st, alias)
+			}
 			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
 			}
@@ -590,11 +611,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Under both rather than under the alias alone, because neither id is reliable by
 			// itself: the alias splits when the header comes and goes, and it ALSO changes when
-			// the agent compacts its own context (metaSessionKeys survives that, the derived
+			// the agent compacts its own context (session.Explicit survives that, the derived
 			// sha256(system+firstUser) does not — see explicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
-			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			if lifetimeKind == CacheLifetimeExact {
 				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
 				ttl = sessionTTL(st, turnKey, ttl)
@@ -652,7 +671,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
 			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
 			// suffix re-write this whole design exists to avoid.
-			o.Tracker.TurnAt(turnKey, len(norm), nowMs)
+			//
+			// The grace is 0 because the boundary this call returns is discarded: a bypassed
+			// request changes nothing, so there is nothing to protect.
+			o.Tracker.TurnAt(turnKey, len(norm), nowMs, 0)
 		} else {
 			defer putLen(st, turnKey, len(norm))
 		}
@@ -806,7 +828,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		if ok && explicitBreakpointProvider(provider) {
 			// The splicing component's kept tool_result, marked so the next turn can read the cache
 			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
-			// carries tool_result blocks and explicit breakpoints (Anthropic, Bedrock, Vertex): an
+			// carries tool_result blocks and explicit breakpoints (explicitBreakpointProvider): an
 			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
 		}
@@ -1065,8 +1087,8 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	if bodyAsksExtendedTTL(body) {
 		return TTLEphemeral1h
 	}
-	switch provider {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(provider):
 		return TTLEphemeral5m
 	default:
 		// Every other backend's cache, where it has one, is not on Anthropic's 5-minute
@@ -1277,54 +1299,18 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 	return ttl
 }
 
-// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache
-// breakpoint — a structural cache_control / cachePoint field on a message, content
-// block, system block, or tool. This is deliberately structural (gjson path queries),
-// not a substring scan of the whole body: a tool output whose text merely contains the
-// string "cache_control" must NOT flip the request into cache-aware mode (that would
-// wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
-// JSON string value never matches these paths.
+// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
+// structural cache_control / cachePoint field on a message, content block, system block, or tool.
+// It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
+// with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
+// Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
+// NOT flip the request into cache-aware mode (that would wrongly restrict offloaders to the tail
+// on a non-caching backend). The count's prefilter keeps an escaped key ("c\u0061che_control").
 func hasCacheBreakpoint(body []byte) bool {
-	// Every path below ends in a key spelled cache_control or cachePoint, so a body with neither
-	// "cache" nor a \u escape anywhere in it (a key could be spelled with one) cannot match, and
-	// five full structural walks of a large body are skipped. Exact, unlike a prefilter that
-	// assumes keys are never escaped.
 	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
 		return false
 	}
-	paths := []string{
-		"messages.#.content.#.cache_control",
-		"messages.#.cache_control",
-		"system.#.cache_control",
-		"tools.#.cache_control",
-		"messages.#.content.#.cachePoint",
-	}
-	for _, p := range paths {
-		r := gjson.GetBytes(body, p)
-		if !r.Exists() {
-			continue
-		}
-		found := false
-		r.ForEach(func(_, v gjson.Result) bool {
-			// nested arrays (content-of-messages) surface as arrays here; recurse one level
-			if v.IsArray() {
-				v.ForEach(func(_, vv gjson.Result) bool {
-					if vv.IsObject() {
-						found = true
-						return false
-					}
-					return true
-				})
-			} else if v.IsObject() {
-				found = true
-			}
-			return !found
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return schema.CountBreakpointsEscaped(body).Total() > 0
 }
 
 // prevLen / putLen track, per session, how many normalized messages the previous
@@ -1344,6 +1330,19 @@ func prevLen(st store.Store, session string) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
+}
+
+// loadSessionState restores a session's state from the store's disk copy when memory has none
+// (after a restart, or a pause longer than the state lifetime). It runs before the pipeline reads
+// the store. A store without a disk copy does nothing. It reads one session, once per lifetime
+// (store.SessionLoader), and a disk error is absorbed there: the request goes on with memory only.
+//
+// The tenant-less alias id (the content hash that cg:seen: and cg:ttl: are also keyed by) is
+// loaded too, so a session that comes back under its other id finds its clocks.
+func loadSessionState(st store.Store, session string) {
+	if l, ok := st.(store.SessionLoader); ok {
+		l.LoadSession(session)
+	}
 }
 
 func putLen(st store.Store, session string, n int) {
@@ -1433,6 +1432,19 @@ func sessionIDFrom(tenant, explicitSess string, body []byte, norm []bschemas.Cha
 	return session.Scoped(tenant, explicitSession(explicitSess, body), sys, firstUser)
 }
 
+// graceAliasID is the ONE rule for the restart grace's alias id (#766): the id a turn of
+// this body runs under when no session header is present — the METADATA session id when
+// the body carries one (metadata.user_id / metadata.taskId), else the content hash of the
+// head — always derived over the TRANSFORMED body, the same input the pipeline's own turn
+// derives its id from. Both sides of the grace resolve it through here: the ask side (the
+// alias keys handed to Tracker.TurnFrom) calls it directly, and the record side reaches the
+// identical sessionIDFrom(tenant, "", ...) through EnforcedSessionIDFor's empty-explicit-id
+// path over the same transform. Two private copies of this rule drifted apart twice (#766
+// rounds 3 and 4: the pristine body, then the bare hash); one rule cannot.
+func graceAliasID(tenant string, body []byte, norm []bschemas.ChatMessage) string {
+	return sessionIDFrom(tenant, "", body, norm)
+}
+
 // SessionIDFor derives the session id apply WOULD use for a request, without running a pipeline.
 //
 // It exists for the response path in OBSERVE mode. There the enforced path never calls BodyOpts at
@@ -1463,7 +1475,7 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 // repair, #175) calls this, so the two cannot disagree. It costs a transform and a re-parse, so
 // call it only when there is state to write.
 func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
-	if api == "responses" {
+	if schema.IsResponses(schema.WireFor(string(provider), api)) {
 		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
 		return SessionIDFor(tenant, explicitSess, provider, out)
 	}

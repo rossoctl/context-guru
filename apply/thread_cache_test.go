@@ -207,7 +207,7 @@ func TestSingleThreadSessionIsUnchanged(t *testing.T) {
 // session id: its message count and its time.
 func assertBareSessionRecord(t *testing.T, name string, tr *modes.Tracker, last apply.Result, at time.Time) {
 	t.Helper()
-	n, prevAt := tr.TurnAt(last.Session, last.Messages, at.Add(time.Second).UnixMilli())
+	n, prevAt := tr.TurnAt(last.Session, last.Messages, at.Add(time.Second).UnixMilli(), 0)
 	if n != last.Messages || prevAt != at.UnixMilli() {
 		t.Errorf("%s: record under the bare session id %q is (%d, %d), want (%d, %d)",
 			name, last.Session, n, prevAt, last.Messages, at.UnixMilli())

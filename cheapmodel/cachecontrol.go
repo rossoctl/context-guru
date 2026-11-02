@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -88,11 +89,11 @@ func minCacheableO200k(model string) int {
 // family we are talking to, the conservative answer is to demand the larger prefix and
 // place no mark below it.
 func minCacheablePrefix(model string) int {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "sonnet"), strings.Contains(m, "opus"):
+	switch modelinfo.Family(model) {
+	case modelinfo.FamilySonnet, modelinfo.FamilyOpus:
 		return minCacheableSmall
 	default:
+		// Fable has no published minimum in this repo, so it keeps the haiku figure it always got.
 		// haiku-class, and every id we cannot place — including a gateway alias that hides
 		// the real model, which is the common case on a LiteLLM-style deployment.
 		return minCacheableHaiku

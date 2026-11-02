@@ -1320,11 +1320,7 @@ func filterFrom(r *http.Request) Filter {
 		// because "" is what they actually store. A reserved word rather than a sentinel
 		// character: it survives a URL, a bookmark and a copy-paste.
 		ProjectNone: q.Get("project") == "none",
-		// `measured=1` keeps only rows the proxy watched itself. Cleanup asks for it: it prices
-		// what each request DECLARED, which only the proxy sees, so a project whose whole history
-		// was imported from transcripts can never produce a figure there and must not be offered.
-		SourceMeasured: q.Get("measured") == "1",
-		Q:              q.Get("q"),
+		Q:           q.Get("q"),
 	}
 	if f.ProjectNone {
 		f.Project = "" // the reserved word is not a folder name
