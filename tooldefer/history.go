@@ -70,10 +70,76 @@ const schema = `CREATE TABLE IF NOT EXISTS tool_defer_history (
   PRIMARY KEY (tenant_id, session_id, tool)
 )`
 
+// probeSchema keeps probe verdicts across a restart: a thread decided before it needs one.
+const probeSchema = `CREATE TABLE IF NOT EXISTS tool_defer_probe (
+  upstream TEXT NOT NULL DEFAULT '',
+  model    TEXT NOT NULL DEFAULT '',
+  route    TEXT NOT NULL DEFAULT '',
+  verdict  INTEGER NOT NULL DEFAULT 0,
+  ts       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (upstream, model, route)
+)`
+
+// SaveVerdict keeps one probe verdict (Unknown deletes it). Synchronous and short: it runs on a
+// probe's background goroutine, never on the request path.
+func (m *Mem) SaveVerdict(k ProbeKey, v Verdict, at time.Time) {
+	if m == nil || m.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := m.db.ExecContext(ctx, probeSchema); err != nil {
+		return
+	}
+	var err error
+	if v == Unknown {
+		_, err = m.db.ExecContext(ctx, `DELETE FROM tool_defer_probe WHERE upstream = ? AND model = ? AND route = ?`,
+			k.Upstream, k.Model, k.Route)
+	} else {
+		_, err = m.db.ExecContext(ctx, `INSERT INTO tool_defer_probe(upstream, model, route, verdict, ts) VALUES (?,?,?,?,?)
+			ON CONFLICT(upstream, model, route) DO UPDATE SET verdict = excluded.verdict, ts = excluded.ts`,
+			k.Upstream, k.Model, k.Route, int(v), at.UnixMilli())
+	}
+	if err != nil {
+		slog.Debug("tooldefer: probe verdict not kept", "err", err)
+	}
+}
+
+// LoadVerdicts seeds p with every kept verdict. Called once at start, off the request path.
+func (m *Mem) LoadVerdicts(p *Prober) {
+	if m == nil || m.db == nil || p == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := m.db.ExecContext(ctx, probeSchema); err != nil {
+		return
+	}
+	rows, err := m.db.QueryContext(ctx, `SELECT upstream, model, route, verdict, ts FROM tool_defer_probe`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k ProbeKey
+		var v int
+		var ts int64
+		if rows.Scan(&k.Upstream, &k.Model, &k.Route, &v, &ts) == nil {
+			p.Seed(k, Verdict(v), time.UnixMilli(ts))
+		}
+	}
+}
+
 // Open makes the table, loads the whole history into memory and starts the background writer.
 // It returns at once; the load runs in the background, and until it finishes Ready reports false
 // (the rule then defers nothing). stop ends the writer after a last flush.
-func (m *Mem) Open(flushEvery time.Duration) (stop func()) {
+//
+// p, when not nil, is seeded with the kept probe verdicts first, in the same background load.
+// Known window: a request that arrives in the first moments after a start, before the load ends,
+// reads no verdict and no history. A NEW thread then decides "nothing" (safe), and a thread whose
+// record was lost is sent undeferred once. The disk store keeps the record itself, so that second
+// case needs a restart with the session-state database off.
+func (m *Mem) Open(flushEvery time.Duration, p *Prober) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	if m.db == nil {
@@ -88,6 +154,7 @@ func (m *Mem) Open(flushEvery time.Duration) (stop func()) {
 	}
 	go func() {
 		defer close(finished)
+		m.LoadVerdicts(p)
 		if err := m.load(); err != nil {
 			slog.Warn("tooldefer: history not loaded; it starts empty", "err", err)
 		}

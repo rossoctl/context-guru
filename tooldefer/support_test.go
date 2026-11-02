@@ -98,11 +98,11 @@ func TestProberCachesPerKeyAndForgets(t *testing.T) {
 		t.Fatal("a verdict leaked to another model")
 	}
 	now = now.Add(ProbeTTL + time.Second)
-	if p.Verdict(k) != Unknown {
-		t.Fatal("verdict older than 24h still used")
+	if p.Verdict(k) != Pass {
+		t.Fatal("an expired verdict was dropped before the re-probe finished")
 	}
-	p.Ensure(k, send)
-	if calls != 2 {
+	p.Ensure(k, func(context.Context) (Verdict, error) { calls++; return Fail, nil })
+	if calls != 2 || p.Verdict(k) != Fail {
 		t.Fatal("no re-probe after 24h")
 	}
 	p.Forget(k)
@@ -189,7 +189,7 @@ func waitReady(t *testing.T, m *Mem) {
 
 func TestHistoryObserveAndRule(t *testing.T) {
 	m := NewMem(nil)
-	stop := m.Open(0)
+	stop := m.Open(0, nil)
 	defer stop()
 	tools := catalogue()
 	for i, sid := range []string{"a", "b", "c"} {
@@ -223,7 +223,7 @@ func TestHistoryObserveAndRule(t *testing.T) {
 // The project veto: a project that used the tool in its last 10 sessions keeps it loaded.
 func TestHistoryProjectVeto(t *testing.T) {
 	m := NewMem(nil)
-	m.Open(0)
+	m.Open(0, nil)
 	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Workflow","input":{}}]}`
 	m.Observe("t", "old", "/proj", body(catalogue(), "", use), 1)
 	for i, sid := range []string{"a", "b", "c"} {
@@ -260,14 +260,14 @@ func TestHistoryRecordsDeferredListAndLoads(t *testing.T) {
 func TestHistoryPersistsAcrossRestart(t *testing.T) {
 	db := openDB(t)
 	m := NewMem(db)
-	stop := m.Open(time.Hour)
+	stop := m.Open(time.Hour, nil)
 	waitReady(t, m)
 	for i, sid := range []string{"a", "b", "c"} {
 		m.Observe("t", sid, "/w", body(catalogue(), ""), int64(i+1))
 	}
 	stop() // flushes
 	m2 := NewMem(db)
-	stop2 := m2.Open(time.Hour)
+	stop2 := m2.Open(time.Hour, nil)
 	defer stop2()
 	waitReady(t, m2)
 	if got := m2.UserSessions("t", "", 3); len(got) != 3 || !got[0].Declared["Workflow"] {
@@ -288,7 +288,7 @@ func TestHistorySeedsFromDashboardTables(t *testing.T) {
 		}
 	}
 	m := NewMem(db)
-	stop := m.Open(time.Hour)
+	stop := m.Open(time.Hour, nil)
 	defer stop()
 	waitReady(t, m)
 	got := m.UserSessions("t", "", 3)
@@ -302,12 +302,34 @@ func TestHistorySeedsFromDashboardTables(t *testing.T) {
 
 func TestHistoryKeepsNewestSessions(t *testing.T) {
 	m := NewMem(nil)
-	m.Open(0)
+	m.Open(0, nil)
 	for i := 0; i < MaxSessions+10; i++ {
 		m.Observe("t", "s"+itoa(i), "", body([]string{decl("Bash")}, ""), int64(i))
 	}
 	if got := m.UserSessions("t", "", MaxSessions+10); len(got) != MaxSessions {
 		t.Fatalf("kept %d sessions", len(got))
+	}
+}
+
+// A verdict survives a restart with the history, and Forget removes the kept copy.
+func TestProbeVerdictPersists(t *testing.T) {
+	db := openDB(t)
+	k := ProbeKey{"https://gw", "claude-a", "/v1/messages"}
+	m := NewMem(db)
+	m.SaveVerdict(k, Pass, time.Unix(1000, 0))
+	p := NewProber()
+	stop := m.Open(time.Hour, p)
+	waitReady(t, m)
+	stop()
+	if p.Verdict(k) != Pass {
+		t.Fatal("verdict not seeded after a restart")
+	}
+	p.Persist = m.SaveVerdict
+	p.Forget(k)
+	p2 := NewProber()
+	m.LoadVerdicts(p2)
+	if p2.Verdict(k) != Unknown {
+		t.Fatal("Forget left the kept verdict")
 	}
 }
 

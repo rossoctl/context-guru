@@ -31,16 +31,27 @@ case "$MODE" in
      esac ;;
 esac
 case "${ANTHROPIC_BASE_URL:-}" in http*) ;; *) exit 0 ;; esac
+# A plain session start tells the proxy one thing only: that the user set ENABLE_TOOL_SEARCH=false
+# on purpose, which turns tool deferral off for this session (#485). Without that setting there is
+# nothing to say, and nothing is sent.
+STDIN="$(cat)"
+case "$STDIN" in *'"startup"'*) [ "${ENABLE_TOOL_SEARCH:-}" = "false" ] || exit 0 ;; esac
 BODY="$(python3 -c '
-import json, sys, re
+import json, os, sys, re
 d = json.load(sys.stdin)
 ev = d.get("hook_event_name", "")
 kind = {"SessionEnd": d.get("reason"), "SessionStart": d.get("source")}.get(ev, d.get("notification_type", ""))
 sid = d.get("session_id", "")
 if ev not in ("SessionEnd", "SessionStart", "Notification") or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", sid):
     sys.exit(1)
-print(json.dumps({"session": sid, "event": ev, "kind": kind if isinstance(kind, str) else ""}))
-' 2>/dev/null)" || exit 0
+out = {"session": sid, "event": ev, "kind": kind if isinstance(kind, str) else ""}
+# Tool deferral (#485): the RAW ENABLE_TOOL_SEARCH value, so the proxy can tell a deliberate
+# "false" from "auto" (the wire cannot). A short closed-shape value, never content.
+ets = os.environ.get("ENABLE_TOOL_SEARCH")
+if ev == "SessionStart" and ets is not None and len(ets) <= 16:
+    out["enable_tool_search"] = ets
+print(json.dumps(out))
+' 2>/dev/null <<<"$STDIN")" || exit 0
 URL="$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')/signal"
 if [ -n "$CGHDR" ]; then HDR="$CGHDR"
 elif [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then HDR="Authorization: Bearer $ANTHROPIC_AUTH_TOKEN"

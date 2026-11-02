@@ -1,6 +1,8 @@
 package tooldefer
 
 import (
+	"strings"
+
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -196,4 +198,27 @@ func LoadedWeight(body []byte, names []string) int {
 		return true
 	})
 	return n
+}
+
+// SearchesInSSE is SearchesIn for a raw event stream (or a window of one): it reads the
+// content_block_start events of server_tool_use and tool_search_tool_result blocks.
+func SearchesInSSE(raw []byte) (searches int, loaded []string) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "data:") || !strings.Contains(line, "content_block_start") {
+			continue
+		}
+		cb := gjson.Get(strings.TrimSpace(line[5:]), "content_block")
+		switch cb.Get("type").String() {
+		case "server_tool_use":
+			if cb.Get("name").String() == SearchName {
+				searches++
+			}
+		case "tool_search_tool_result":
+			cb.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
+				loaded = append(loaded, r.Get("tool_name").String())
+				return true
+			})
+		}
+	}
+	return searches, loaded
 }

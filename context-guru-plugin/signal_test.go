@@ -97,9 +97,46 @@ func TestSignalHookSendsSessionStartSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	ss := cfg.Hooks["SessionStart"]
-	if len(ss) != 2 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
-		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") {
+	if len(ss) != 3 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
+		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") || ss[2].Matcher != "startup" ||
+		!strings.Contains(ss[2].Hooks[0].Command, "signal.sh") {
 		t.Errorf("SessionStart hooks = %+v", ss)
+	}
+}
+
+// A plain session start sends nothing, unless the user set ENABLE_TOOL_SEARCH=false: then the raw
+// value rides on the event, so the proxy turns tool deferral off for the session (#485).
+func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
+	ch := make(chan map[string]any, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]any
+		json.NewDecoder(r.Body).Decode(&got)
+		ch <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	payload := `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"startup"}`
+	base := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k"}
+	for _, v := range []string{"", "ENABLE_TOOL_SEARCH=auto", "ENABLE_TOOL_SEARCH=true"} {
+		env := base
+		if v != "" {
+			env = append(append([]string{}, base...), v)
+		}
+		runSignal(t, env, payload)
+	}
+	runSignal(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=false"), payload)
+	select {
+	case got := <-ch:
+		if got["kind"] != "startup" || got["enable_tool_search"] != "false" {
+			t.Errorf("body = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ENABLE_TOOL_SEARCH=false did not reach the server")
+	}
+	select {
+	case got := <-ch:
+		t.Errorf("a second event was sent: %v", got)
+	case <-time.After(1500 * time.Millisecond):
 	}
 }
 

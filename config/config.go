@@ -617,6 +617,9 @@ var presets = map[string][]string{
 	// The sweep is back in xhigh (#404 PR C), with no production shadow phase first: the false-drop
 	// signals (SweepDropCounters, the dashboard) are the watch on it.
 	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// ultrahigh = xhigh + tool deferral (#485): the same pipeline, with toolfilter's `defer: auto`.
+	// Opt-in only. Every other preset, xhigh included, leaves deferral off. See package tooldefer.
+	"ultrahigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -907,6 +910,35 @@ components:
       min_request_tokens: 3000
   extract_llm_sweep:
     min_tokens: 1000`,
+	// ultrahigh = xhigh + toolfilter `defer: auto` (#485). Everything else is xhigh's block, copied
+	// verbatim; TestUltrahighIsXhighPlusDeferral pins that the two cannot drift.
+	"ultrahigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+  toolfilter:
+    defer: auto`,
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
 	// reflection model being much cheaper than the agent's — the paper's own choice was

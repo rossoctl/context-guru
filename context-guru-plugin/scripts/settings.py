@@ -4136,7 +4136,9 @@ PRESETS: dict[str, str] = {
     "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
-             "already gone cold — the deepest cut this picker offers",
+             "already gone cold",
+    "ultrahigh": "xhigh plus tool deferral: tools your own last sessions never used are sent as "
+                 "names only and loaded through search when needed — opt-in, Claude models only",
 }
 DEFAULT_PRESET = "off"
 

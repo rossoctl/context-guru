@@ -264,7 +264,7 @@ def read_proxy_options():
 
 
 def save_proxy_options(preset, keepalive):
-    if preset not in {"off", "conservative", "medium", "high", "xhigh"}:
+    if preset not in {"off", "conservative", "medium", "high", "xhigh", "ultrahigh"}:
         raise RuntimeError(f"unknown preset: {preset}")
     path = proxy_config()
     if path.exists() and not path.read_text().startswith(CONFIG_MARKER):
@@ -766,7 +766,7 @@ def main():
     remove.add_argument("--dry-run", action="store_true")
     settings = commands.add_parser("configure")
     settings.add_argument("--show", action="store_true")
-    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh"))
+    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh", "ultrahigh"))
     settings.add_argument("--cache-strategy", choices=("none", "30-min-ping"))
     args = parser.parse_args()
     return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,

@@ -78,6 +78,23 @@ type Prober struct {
 	runs map[Verdict]int64
 	// Go starts fn in the background. Tests replace it to run inline.
 	Go func(fn func())
+	// Persist, when set, is told every verdict, so it survives a restart (see Mem.SaveVerdict).
+	// A thread decided before a restart needs it: without a verdict a store miss mid-thread would
+	// send the thread undeferred and move every deferred tool back into the cached prefix.
+	Persist func(k ProbeKey, v Verdict, at time.Time)
+}
+
+// Seed loads a verdict kept from before a restart. An older verdict than ProbeTTL still seeds:
+// Ensure re-probes it in the background.
+func (p *Prober) Seed(k ProbeKey, v Verdict, at time.Time) {
+	if v == Unknown {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.m[k]; e == nil || e.v == Unknown {
+		p.m[k] = &probeEntry{v: v, at: at}
+	}
 }
 
 // NewProber returns an empty Prober.
@@ -86,16 +103,16 @@ func NewProber() *Prober {
 		Go: func(fn func()) { go fn() }}
 }
 
-// Verdict returns the cached verdict for k. Unknown when there is none, or it is older than
-// ProbeTTL.
+// Verdict returns the cached verdict for k, Unknown when no probe has finished (or Forget dropped
+// it). A verdict older than ProbeTTL is still returned while Ensure re-probes: a gap in which every
+// new thread read Unknown would leave those threads undeferred for their whole life.
 func (p *Prober) Verdict(k ProbeKey) Verdict {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	e := p.m[k]
-	if e == nil || e.v == Unknown || p.now().Sub(e.at) > ProbeTTL {
-		return Unknown
+	if e := p.m[k]; e != nil {
+		return e.v
 	}
-	return e.v
+	return Unknown
 }
 
 // Ensure starts a probe for k in the background when none is fresh and none is running. send is
@@ -128,6 +145,9 @@ func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, err
 		}
 		e.v, e.at = v, p.now()
 		p.runs[v]++
+		if p.Persist != nil {
+			p.Persist(k, v, e.at)
+		}
 	})
 }
 
@@ -135,8 +155,11 @@ func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, err
 // request.
 func (p *Prober) Forget(k ProbeKey) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	delete(p.m, k)
+	p.mu.Unlock()
+	if p.Persist != nil {
+		p.Persist(k, Unknown, p.now())
+	}
 }
 
 // Runs is how many probes finished with each verdict.

@@ -138,6 +138,10 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		Reason           string `json:"reason"`
 		Source           string `json:"source"`
 		NotificationType string `json:"notification_type"`
+		// EnableToolSearch is the RAW value of the client's ENABLE_TOOL_SEARCH, sent by the plugin's
+		// session-start hook. Only a literal "false" turns tool deferral off for the session (#485).
+		// A closed shape: at most a few characters, never stored beyond that flag.
+		EnableToolSearch *string `json:"enable_tool_search"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
@@ -156,6 +160,9 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 	if !ok || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
+	}
+	if in.EnableToolSearch != nil && len(*in.EnableToolSearch) <= 16 {
+		h.noteToolSearch(scoped, strings.TrimSpace(*in.EnableToolSearch))
 	}
 	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, h.keeper.now())
 	w.WriteHeader(http.StatusNoContent)
