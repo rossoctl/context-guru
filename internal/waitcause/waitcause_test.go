@@ -59,6 +59,14 @@ func TestClassifyWaitingFor(t *testing.T) {
 		{"AskUserQuestion is human, not own_tool", []string{"AskUserQuestion"}, "tool_use", false, true, 0, 0, WaitingHuman, ""},
 		{"ExitPlanMode is human", []string{"ExitPlanMode"}, "tool_use", false, true, 0, 0, WaitingHuman, ""},
 		{"ask tool alongside another tool still human", []string{"Bash", "AskUserQuestion"}, "tool_use", false, true, 0, 0, WaitingHuman, ""},
+		{"StructuredOutput alone is done", []string{"StructuredOutput"}, "tool_use", false, true, 0, 0, WaitingDone, ""},
+		{"StructuredOutput last is done", []string{"Read", "StructuredOutput"}, "tool_use", false, true, 0, 0, WaitingDone, ""},
+		{"StructuredOutput NOT last stays own_tool", []string{"StructuredOutput", "Bash"}, "tool_use", false, true, 0, 0, WaitingOwnTool, "Bash"},
+		{"SubagentHandback is like end_turn: human", []string{"SubagentHandback"}, "tool_use", false, true, 0, 0, WaitingHuman, ""},
+		{"SubagentHandback with background open", []string{"SubagentHandback"}, "tool_use", false, true, 1, 0, WaitingBackground, ""},
+		{"SubagentHandback not last stays own_tool", []string{"SubagentHandback", "Bash"}, "tool_use", false, true, 0, 0, WaitingOwnTool, "Bash"},
+		{"done beats an open background task", []string{"StructuredOutput"}, "tool_use", false, true, 2, 1, WaitingDone, ""},
+		{"failed beats done", []string{"StructuredOutput"}, "", true, false, 0, 0, WaitingRetry, ""},
 		{"end_turn, nothing open -> human", nil, "end_turn", false, true, 0, 0, WaitingHuman, ""},
 		{"end_turn, background open -> background", nil, "end_turn", false, true, 1, 0, WaitingBackground, ""},
 		{"end_turn, both open -> background wins", nil, "end_turn", false, true, 1, 1, WaitingBackground, ""},
@@ -677,5 +685,48 @@ func TestOpenCountsReadsWhatObserveWrote(t *testing.T) {
 	}
 	if bg2, _ := tr.OpenCounts("t", "s", "other-thread"); bg2 != 0 {
 		t.Fatal("another thread's open tasks leaked")
+	}
+}
+
+// An empty (non-nil) list switches the #857 rules off: today's reading comes back.
+func TestClassifyWaitingForTerminalOff(t *testing.T) {
+	for _, names := range [][]string{{"StructuredOutput"}, {"SubagentHandback"}} {
+		got, tool := ClassifyWaitingForTerminal([]string{}, names, "tool_use", false, true, 0, 0)
+		if got != WaitingOwnTool || tool != names[0] {
+			t.Errorf("%v with an empty list: got (%s, %q), want own_tool", names, got, tool)
+		}
+	}
+}
+
+func TestClassifyWaitingForCustomTerminalList(t *testing.T) {
+	got, _ := ClassifyWaitingForTerminal([]string{"Finish"}, []string{"Bash", "Finish"}, "tool_use", false, true, 0, 0)
+	if got != WaitingDone {
+		t.Errorf("custom terminal tool: got %s, want done", got)
+	}
+	got, _ = ClassifyWaitingForTerminal([]string{"Finish"}, []string{"StructuredOutput"}, "tool_use", false, true, 0, 0)
+	if got != WaitingOwnTool {
+		t.Errorf("a name outside the custom list: got %s, want own_tool", got)
+	}
+}
+
+// A list with only empty names has no usable tool: it acts like [], the rule is off, and the
+// SubagentHandback relabel is off with it.
+func TestEmptyNamesListActsLikeEmpty(t *testing.T) {
+	for _, names := range [][]string{{"StructuredOutput"}, {"SubagentHandback"}} {
+		got, _ := ClassifyWaitingForTerminal([]string{""}, names, "tool_use", false, true, 0, 0)
+		if got != WaitingOwnTool {
+			t.Errorf("%v with [\"\"]: got %s, want own_tool", names, got)
+		}
+	}
+	if IsDone([]string{"StructuredOutput"}, []string{""}) {
+		t.Error("IsDone with a list of only empty names must be false")
+	}
+}
+
+func TestDefaultTerminalToolsIsACopy(t *testing.T) {
+	l := DefaultTerminalTools()
+	l[0] = "X"
+	if !IsDone([]string{"StructuredOutput"}, nil) {
+		t.Error("changing the returned list changed the shipped list")
 	}
 }

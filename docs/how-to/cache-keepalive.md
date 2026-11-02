@@ -64,7 +64,15 @@ cache:
   keepalive_max_usd_per_ping: 0.50
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
+  keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
 ```
+
+### No pings after the final answer
+
+A response whose **last** tool call is a terminal tool (default: `StructuredOutput`) ends the agent.
+No tool result comes back. The wait cause reads `done`, and the proxy plans no pings for that thread.
+Set `keepalive_terminal_tools: []` to turn this off. The key is **host configuration only**: it applies to the whole proxy, and a hosted tenant document that sets it is refused. A `SubagentHandback` call reads as `human`
+(the subagent waits for its main agent), as an `end_turn` does.
 
 ### Each session follows its own cache lifetime
 

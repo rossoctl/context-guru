@@ -57,7 +57,7 @@ func TestSavingKeepAliveOnADocumentWithNoCacheBlockKeepsIt(t *testing.T) {
 			if got.Cache == nil {
 				t.Fatalf("the whole cache block was discarded; the saved document is:\n%s", out)
 			}
-			if *got.Cache != one {
+			if !reflect.DeepEqual(*got.Cache, one) {
 				t.Errorf("%s did not round-trip: sent %+v, read back %+v\nsaved document:\n%s",
 					name, one, *got.Cache, out)
 			}

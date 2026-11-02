@@ -384,13 +384,13 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	e := j.e
 	k.mu.Lock()
-	names, stop, usageOK, turnRead := e.toolUseNames, e.stopReason, e.usageOK, e.turnRead
+	names, stop, usageOK, turnRead, terminal := e.toolUseNames, e.stopReason, e.usageOK, e.turnRead, e.terminal
 	k.mu.Unlock()
 	bg, tm := 0, 0
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
 	}
-	waitingFor, tool := waitcause.ClassifyWaitingFor(names, stop, false, usageOK, bg, tm)
+	waitingFor, tool := waitcause.ClassifyWaitingForTerminal(terminal, names, stop, false, usageOK, bg, tm)
 	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 

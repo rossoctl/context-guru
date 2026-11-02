@@ -1441,6 +1441,7 @@ PING_REASONS = {
     "too large": "context too large to hold for Ping",
     "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
     "pings used": "the planned keep-alive pings have run out",
+    "done": "this agent has finished, so there is nothing to keep warm",
     "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
     "expired": "cache already cold",
     "no entry": "the server knows nothing about this session yet; send a prompt first",

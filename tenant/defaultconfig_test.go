@@ -91,7 +91,7 @@ func TestDefaultConfigMatchesTheHousePreset(t *testing.T) {
 	if syncOrEmpty(def.Mode) != syncOrEmpty(pre.Mode) {
 		t.Errorf("mode differs: default %q, house %q", def.Mode, pre.Mode)
 	}
-	if def.Cache != pre.Cache {
+	if !reflect.DeepEqual(def.Cache, pre.Cache) {
 		t.Errorf("the `cache:` block differs, and it is the one that spends money:\n"+
 			"default %+v\nhouse   %+v", def.Cache, pre.Cache)
 	}
