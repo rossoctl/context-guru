@@ -5,7 +5,7 @@ small picture; add `details` for the tables.
 
 ## Who runs a command
 
-Some commands only show you something. Claude does not run them by itself; you type them. They are `status`,
+You run some commands yourself: Claude does not run them on its own. They are `status`,
 `dashboard`, `doctor`, `session`, `statusline`, `uninstall`, `update` and the five terminal views (`watch`,
 `timeline`, `chart`, `heatmap`, `fill`). Their skill files set `disable-model-invocation: true`, so they are not in
 the model's skills list and cost no tokens there. If Claude tries one, Claude Code tells it to ask you to run

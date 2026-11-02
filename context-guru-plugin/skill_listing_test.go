@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -91,6 +92,22 @@ func TestDisplayOnlySkillsStayOutOfTheModelListing(t *testing.T) {
 		listed := meta.Policy.AllowImplicitInvocation == nil || *meta.Policy.AllowImplicitInvocation
 		if listed == hidden[name] {
 			t.Errorf("Codex %s: in the model listing=%v, want %v", name, listed, !hidden[name])
+		}
+		if !listed {
+			continue
+		}
+		// The description line is read as it is, not as YAML: strict parsing of the Codex tree is #851's test.
+		m := regexp.MustCompile(`(?m)^description: (.*)$`).FindStringSubmatch(readFileString(t, f))
+		if m == nil {
+			t.Errorf("%s: no one-line description", f)
+			continue
+		}
+		if n := len([]rune(m[1])); n > maxListedDescription {
+			t.Errorf("%s: the model reads this %d-character description on every request; keep it under %d",
+				f, n, maxListedDescription)
+		}
+		if !strings.Contains(m[1], "Use when") {
+			t.Errorf("%s: a listed skill needs a \"Use when\" clause; the model picks skills from it", f)
 		}
 	}
 }
