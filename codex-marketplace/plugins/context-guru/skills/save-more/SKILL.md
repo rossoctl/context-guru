@@ -1,6 +1,6 @@
 ---
 name: context-guru-save-more
-description: Replay your own past sessions under every shipped config and every keep-alive strategy, recommend the cheapest, and apply it after a yes.
+description: Replay your own past sessions under every shipped config and every keep-alive strategy, recommend the cheapest, and apply it after a yes. Use when asked how to save more.
 ---
 
 Say in one line that this replays the user's history and can take a few minutes. Then run this from this skill

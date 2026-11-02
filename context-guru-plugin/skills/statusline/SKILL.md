@@ -1,6 +1,7 @@
 ---
 name: statusline
-description: Enable or disable the context-guru status line — a terminal status line showing money saved (estimate), the prompt-cache clock (warm/expiring/cold) from the proxy's own view, and context fill against the served window, for whichever project is routed through the local proxy. Use when the user asks to show savings in the status line, add a status line for context-guru, see cache/keep-alive status in the terminal, or turn any of it off.
+description: Turn the terminal status line on or off. It shows money saved, the prompt-cache clock and context fill.
+disable-model-invocation: true
 ---
 
 # context-guru status line

@@ -1,6 +1,6 @@
 ---
 name: context-guru-cache-strategy-picker
-description: Inspect or change the Codex prompt-cache keep-alive strategy.
+description: Inspect or change the Codex prompt-cache keep-alive strategy. Use when asked which strategy runs or to turn keep-alive pings on or off.
 ---
 
 # Choose a cache strategy

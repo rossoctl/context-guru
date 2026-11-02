@@ -1,6 +1,6 @@
 ---
 name: context-guru-cache-campaign
-description: Build a cache plan from your own history and compare it with today (manager login needed; an older proxy gets a labelled example).
+description: Build a cache plan from your own history and compare it with today (manager login needed; an older proxy gets a labelled example). Use when a manager asks for a keep-alive plan.
 ---
 
 Run this from this skill directory, then print its output exactly as it is in one code block:
