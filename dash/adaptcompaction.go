@@ -1021,7 +1021,7 @@ func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 	write = p.CacheWrite
 	if r.write > 0 && r.write1h > 0 {
 		f := math.Min(1, float64(r.write1h)/float64(r.write))
-		write = (1-f)*p.CacheWrite + f*2*p.Input
+		write = (1-f)*p.CacheWrite + f*p.CacheWrite1h()
 	}
 	pw := p
 	pw.CacheWrite = write

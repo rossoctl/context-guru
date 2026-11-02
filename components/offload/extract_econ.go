@@ -6,6 +6,7 @@ import (
 
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // The economic gate. extract_llm is the only component that SPENDS money to SAVE money,
@@ -99,7 +100,7 @@ type tokenValue struct {
 // every operator, so the literal is now only what we use when the table said nothing.
 const (
 	agentFreshPerMTok     = 3.00
-	agentCacheReadPerMTok = 0.30 // 0.1x fresh, the standard Anthropic cache-read multiplier
+	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac // 0.1x fresh, the standard Anthropic cache-read multiplier
 	// agentCacheWritePerMTok is 1.25x fresh, the standard cache-WRITE multiplier, and it is
 	// what a token is worth on a turn whose cache has expired.
 	//
@@ -109,7 +110,7 @@ const (
 	// $0.144 for a warm turn, an 11x difference — because all 56.7M of their tokens were
 	// billed as cache_creation_input_tokens. Removing one of those saves 1.25x the fresh
 	// rate, i.e. 12.5x what removing a token from a warm cached prefix saves.
-	agentCacheWritePerMTok = 3.75
+	agentCacheWritePerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheWrite5mFrac
 )
 
 // agentRates resolves the three billing tiers for this request, preferring the deployment's
@@ -127,10 +128,10 @@ func agentRates(c *components.Ctx) (fresh, read, write float64) {
 		}
 		read, write = c.SelfRates.CacheRead, c.SelfRates.CacheWrite
 		if read <= 0 {
-			read = fresh * 0.1
+			read = fresh * modelinfo.AnthropicCacheReadFrac
 		}
 		if write <= 0 {
-			write = fresh * 1.25
+			write = fresh * modelinfo.AnthropicCacheWrite5mFrac
 		}
 	}
 	return fresh, read, write

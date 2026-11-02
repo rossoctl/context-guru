@@ -976,7 +976,7 @@ const ttlTTL1h = modelinfo.AnthropicCacheTTL1h
 // one `cache_write` rate per model and it is the 5-minute one — which is what the provider
 // bills for the tier this service's models actually grant. Any 1-hour figure on this page is
 // therefore explicitly a "what it would be" and is labelled as one.
-const write1hMultiple = 2.0
+const write1hMultiple = modelinfo.AnthropicCacheWrite1hFrac
 
 // KeepAliveLiveRow is one session that may still hold a provider cache entry RIGHT NOW: which
 // lifetime is in force on it, how long that entry has left, and what one ping and one lapse
@@ -1821,7 +1821,7 @@ func (d *DB) medianPingUSD(f Filter) (float64, error) {
 			return 0, err
 		}
 		if prefix > 0 && usd > 0 {
-			xs = append(xs, usd/1.25*0.1)
+			xs = append(xs, usd/modelinfo.AnthropicCacheWrite5mFrac*modelinfo.AnthropicCacheReadFrac)
 		}
 	}
 	if err := rows.Err(); err != nil {

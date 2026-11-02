@@ -2722,7 +2722,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 // the traffic it sees; /stats prices the aggregate).
 const (
 	agentFreshPerMTok     = 3.00
-	agentCacheReadPerMTok = 0.30
+	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 )
 
 // expand resolves a stashed original by id — the HTTP side of reversibility (the
