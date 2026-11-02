@@ -67,7 +67,7 @@ var headTTLPaths = [...]string{"tools", "system"}
 // entry: the tokens of `tools` plus the `system` blocks up to and including the LAST
 // promoted mark. Everything after it stays on the 5m tier and is not part of the premium.
 //
-// minTokens gates it on the request's own size. A dollar filter, not a probability filter:
+// minBytes gates it on the request's own size. A dollar filter, not a probability filter:
 // gating this on the best available predictor of a long idle gap leaves the net unchanged
 // (−$18.32 against −$18.34 blanket), because premium and benefit scale with the same
 // `cache_write` on the same requests and multiplying both by a probability cannot change the
@@ -81,15 +81,16 @@ var headTTLPaths = [...]string{"tools", "system"}
 // does not change the prefix hash, so neither direction costs a cache miss); if it is ever
 // switched on for real, latch the decision per session instead of recomputing it.
 //
-// The size is estimated as len(body)/4 rather than counted. This runs before any byte offset
-// into the body is taken and therefore before anything has been tokenized, and a BPE pass
-// over a whole request to decide a coarse 50,000-token threshold would cost more than the
-// policy earns. Same estimate, same reason, as splitVolatileTail's own floor.
-func upgradeHeadTTL(body []byte, provider bschemas.ModelProvider, minTokens int) (out []byte, upgraded bool, headTokens int) {
+// The gate is a size in BYTES of the request body, not an estimate of tokens. This runs before
+// any byte offset into the body is taken and therefore before anything has been tokenized, and a
+// BPE pass over a whole request to decide a coarse threshold would cost more than the policy
+// earns. A size gate has no provider rule behind it, so it says what it measures. The default,
+// 200,000 bytes, is the old 50,000 "tokens" at 4 bytes each.
+func upgradeHeadTTL(body []byte, provider bschemas.ModelProvider, minBytes int) (out []byte, upgraded bool, headTokens int) {
 	if !explicitBreakpointProvider(provider) {
 		return body, false, 0 // no explicit breakpoints, so no TTL to state
 	}
-	if len(body)/4 < minTokens {
+	if len(body) < minBytes {
 		return body, false, 0
 	}
 	next := body

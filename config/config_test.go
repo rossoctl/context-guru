@@ -171,7 +171,7 @@ cache:
 		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
 		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
 		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
-		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
+		got.HeadTTLMinBytes != DefaultHeadTTLMinBytes {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}
 	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds1h != 59*60 || got.KeepAliveMaxPings1h != 1 {
@@ -343,5 +343,46 @@ func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
 	list, ok := PresetPipeline("xhigh")
 	if !ok || !reflect.DeepEqual(list, want) {
 		t.Errorf("xhigh preset list = %v (ok=%v), want %v", list, ok, want)
+	}
+}
+
+// head_ttl_min_tokens is deprecated. The gate it set was always bytes/4, so an old value
+// x 4 is the same gate in bytes; head_ttl_min_bytes wins when both are set.
+func TestHeadTTLMinBytesResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		in   CacheConfig
+		want int
+	}{
+		{"nothing set: the default", CacheConfig{}, 200000},
+		{"old key only: tokens x 4", CacheConfig{HeadTTLMinTokens: 50000}, 200000},
+		{"old key, other value", CacheConfig{HeadTTLMinTokens: 12345}, 49380},
+		{"new key only", CacheConfig{HeadTTLMinBytes: 123456}, 123456},
+		{"both set: the new key wins", CacheConfig{HeadTTLMinBytes: 1000, HeadTTLMinTokens: 50000}, 1000},
+	}
+	for _, c := range cases {
+		if got := c.in.Resolved().HeadTTLMinBytes; got != c.want {
+			t.Errorf("%s: Resolved().HeadTTLMinBytes = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestHeadTTLMinKeysLoadFromYAML(t *testing.T) {
+	old, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n"))
+	if err != nil {
+		t.Fatalf("an old config with head_ttl_min_tokens did not load: %v", err)
+	}
+	if got := old.Cache.Resolved().HeadTTLMinBytes; got != 200000 {
+		t.Errorf("old config gate = %d bytes, want 200000", got)
+	}
+	both, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n  head_ttl_min_bytes: 300000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := both.Cache.Resolved().HeadTTLMinBytes; got != 300000 {
+		t.Errorf("config with both keys: gate = %d bytes, want 300000 (the new key)", got)
+	}
+	if _, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_min_bytes: -1\n")); err == nil {
+		t.Error("a negative head_ttl_min_bytes was accepted")
 	}
 }

@@ -8791,7 +8791,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 // TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed.
 //
-// `1-hour-head` ships `head_ttl_min_tokens: 50000`, and that number is the difference between the
+// `1-hour-head` ships `head_ttl_min_tokens: 50000` (the deprecated key, on purpose: see settings.py), and that number is the difference between the
 // strategy doing something and doing nothing. It was disclosed in none of the three places a user
 // reads before choosing it.
 //

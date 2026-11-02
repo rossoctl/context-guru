@@ -127,10 +127,13 @@ type decision struct {
 	Arm      string `json:"arm"`
 }
 
-// tok is the same 4-chars-per-token proxy the corpus builder and coref.py use. A proxy on purpose: it
-// only has to be right enough to price a run before committing to it, and it is the SAME proxy the
-// projection in the dry run reports, so the two cannot disagree.
-func tok(s string) int { return len(s) / 4 }
+// bytesPerToken is the 4-bytes-per-token ratio the corpus builder and coref.py use.
+const bytesPerToken = 4
+
+// tok is a BYTES proxy, not a token count. On purpose: it only has to be right enough to price a
+// run before committing to it, and it is the SAME proxy the projection in the dry run reports,
+// so the two cannot disagree.
+func tok(s string) int { return len(s) / bytesPerToken }
 
 func renderEvidence(e map[string]any) string {
 	if len(e) == 0 {

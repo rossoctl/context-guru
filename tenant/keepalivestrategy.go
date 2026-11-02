@@ -83,7 +83,9 @@ type Strategy struct {
 	// a strategy can only turn this ON, never off, matching how it only ever turns
 	// KeepAlive on (proxy/keepalivestrategy.go's applyStrategy).
 	HeadTTL1h bool
-	// HeadTTLMinTokens gates HeadTTL1h on request size. Ignored while HeadTTL1h is false.
+	// HeadTTLMinTokens gates HeadTTL1h on request size. Ignored while HeadTTL1h is false. The name is
+	// kept for the stored column and the manager API. The proxy reads the value as tokens x 4 BYTES of
+	// the request body (config.HeadTTLBytesPerToken), the size the old gate measured.
 	HeadTTLMinTokens int
 	CreatedBy        string
 	CreatedAt        time.Time

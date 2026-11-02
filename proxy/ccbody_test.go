@@ -23,7 +23,7 @@ func jsonStr(v string) string {
 	return string(b)
 }
 
-// volatileSystemText is a system block over cachesplit's 1024-token floor (~4 chars/token) that
+// volatileSystemText is a system block over cachesplit's per-family floor (modelinfo.MinCacheableO200k) that
 // ends in the environment snapshot the split exists to move out of the hashed prefix.
 func volatileSystemText() string {
 	return strings.Repeat("You are a coding agent. Follow the instructions carefully.\n", 120) +

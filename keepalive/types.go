@@ -144,9 +144,12 @@ type Policy struct {
 	// cache_write) a session must reach before it is pinged. With the first-request skip this
 	// sends 8.7x fewer pings for 3.3% less money.
 	MinPrefixTokens int
-	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinTokens gates
-	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
-	HeadTTL1h        bool
+	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinBytes gates
+	// it on the request body size in bytes. Passed through to apply.Opts — see apply/headttl.go.
+	HeadTTL1h       bool
+	HeadTTLMinBytes int
+	// HeadTTLMinTokens is DEPRECATED: the old name of HeadTTLMinBytes, kept so a host that still
+	// sets it builds and behaves as before. Read the gate through HeadTTLGateBytes.
 	HeadTTLMinTokens int
 	// PredictorID optionally names a registered predictor (see predictorFor, and the proxy
 	// host's knownPredictorIDs in proxy/keepalivestrategy.go) that pingable() must also clear before a
@@ -269,4 +272,17 @@ const DefaultMaxUSDPerPing = 0.50
 func Disabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_KEEPALIVE")))
 	return v == "off" || v == "0" || v == "false"
+}
+
+// headTTLBytesPerToken is the factor the old head-TTL gate used (len(body)/4). It equals
+// config.HeadTTLBytesPerToken; keepalive does not import config.
+const headTTLBytesPerToken = 4
+
+// HeadTTLGateBytes is the head-TTL size gate in bytes of the request body: HeadTTLMinBytes, or the
+// deprecated HeadTTLMinTokens x 4 when only that is set. 0 means the upgrade is off.
+func (p Policy) HeadTTLGateBytes() int {
+	if p.HeadTTLMinBytes > 0 {
+		return p.HeadTTLMinBytes
+	}
+	return p.HeadTTLMinTokens * headTTLBytesPerToken
 }

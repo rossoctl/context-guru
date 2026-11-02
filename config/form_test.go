@@ -814,3 +814,37 @@ func TestAComponentTheFormDoesNotSendIsUntouched(t *testing.T) {
 			back.Components["collapse"], out)
 	}
 }
+
+// The settings form round-trips the new byte gate, and keeps a deprecated token gate from an old document.
+func TestFormRoundTripsHeadTTLMinBytes(t *testing.T) {
+	doc := "preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n"
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Cache == nil || f.Cache.HeadTTLMinTokens != 50000 || f.Cache.HeadTTLMinBytes != 0 {
+		t.Fatalf("old document read wrong: %+v", f.Cache)
+	}
+	f.Cache.HeadTTLMinBytes = 300000
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "head_ttl_min_bytes: 300000") {
+		t.Errorf("the saved document lacks head_ttl_min_bytes:\n%s", out)
+	}
+	back, err := ParseForm(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Cache.HeadTTLMinBytes != 300000 {
+		t.Errorf("round trip lost head_ttl_min_bytes: %+v", back.Cache)
+	}
+	c, err := LoadBytes([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Cache.Resolved().HeadTTLMinBytes; got != 300000 {
+		t.Errorf("the new key must win over the old one: gate = %d", got)
+	}
+}

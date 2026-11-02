@@ -184,6 +184,7 @@ func TestValidStrategyBounds(t *testing.T) {
 		{"negative ceiling", 280 * time.Second, 2, 0, -0.01, false, 0, false},
 		{"zero ceiling means default, and is fine", 280 * time.Second, 2, 0, 0, false, 0, true},
 		{"negative head-ttl-min-tokens", 280 * time.Second, 2, 0, 0, false, -1, false},
+		{"head-ttl-min-tokens too large to x4", 280 * time.Second, 2, 0, 0, false, 1 << 40, false},
 
 		// The 1h-tier band, only reachable while headTTL1h is set. A positive
 		// headTTLMinTokens (50000, mirroring config.DefaultHeadTTLMinTokens) is used
@@ -297,8 +298,8 @@ func TestResolveHeadTTLMatchingStrategyOverridesTheAccount(t *testing.T) {
 	}
 	k.setStrategies([]tenant.Strategy{s})
 	on, tokens := k.resolveHeadTTL("t1", now, false, 0)
-	if !on || tokens != 50000 {
-		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 50000)", on, tokens)
+	if !on || tokens != 200000 {
+		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 200000 bytes = 50000 tokens x 4)", on, tokens)
 	}
 }
 
