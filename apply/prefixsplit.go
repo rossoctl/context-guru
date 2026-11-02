@@ -58,11 +58,6 @@ var volatileTailMarkers = []string{
 	"\nHere is a snapshot of the current directory",
 }
 
-// minSplitTokens keeps this from firing on small blocks, where the extra breakpoint
-// slot costs more optionality than the split can recover. It copies the provider's minimum
-// cacheable prefix, so it is in real tokens (tokens.Count), never in bytes/4.
-const minSplitTokens = 1024
-
 // splitVolatileTail splits the FIRST system block large enough to matter that ends
 // in an environment snapshot into [stable][volatile], moving that block's
 // cache_control onto the stable half so the provider's hash stops covering the
@@ -89,6 +84,8 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	if !explicitBreakpointProvider(provider) {
 		return body, false, 0, 0, 0, 0
 	}
+	// The floor depends on the model family; an unnamed model gets the larger (haiku) floor.
+	floor := modelinfo.MinCacheableO200k(gjson.GetBytes(body, "model").String())
 	sys := gjson.GetBytes(body, "system")
 	if !sys.Exists() || !sys.IsArray() {
 		return body, false, 0, 0, 0, 0 // a string system prompt carries no block to split
@@ -103,26 +100,26 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 		b := blocks[i]
 		txt := b.Get("text").String()
 		at := -1
-		// A block never holds more tokens than bytes, so a block under minSplitTokens bytes
-		// cannot pass the real count below. This cheap test keeps the tokenizer off every
-		// block that cannot split.
-		if !split && len(txt) >= minSplitTokens {
+		// A block never holds more tokens than bytes, so a block under floor bytes cannot pass
+		// the real count below. This cheap test keeps the tokenizer off every block that
+		// cannot split.
+		if !split && len(txt) >= floor {
 			for _, mk := range volatileTailMarkers {
 				if i := strings.Index(txt, mk); i >= 0 && (at < 0 || i < at) {
 					at = i + 1 // keep the newline with the stable half
 				}
 			}
 		}
-		// Two checks, as before: the whole block is large enough to matter, and the stable half
-		// is non-trivial (a ~0-token stable half buys nothing and burns one of the four
-		// breakpoint slots). The minimum is the provider's, in provider tokens, so both are
+		// The stable half must reach the provider's minimum cacheable prefix, or the provider
+		// ignores the breakpoint and the split only burns one of the four slots. That floor
+		// is modelinfo's one rule (per family, in o200k units), shared with cheapmodel. It is
 		// counted with the tokenizer, and only for the one block that has a marker.
-		if at <= 0 || at >= len(txt) || at < minSplitTokens {
+		if at <= 0 || at >= len(txt) || at < floor {
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
 		stableCount := tokens.Count(txt[:at])
-		if stableCount < minSplitTokens || tokens.Count(txt) < minSplitTokens {
+		if stableCount < floor {
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}

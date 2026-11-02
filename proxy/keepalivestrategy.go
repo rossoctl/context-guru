@@ -215,15 +215,16 @@ const (
 // design doc's "Model"). Checked on its own terms: non-negative, with 0 left to mean
 // "use the package default" exactly like account config does (CachePolicy.Ceiling()).
 //
-// headTTLMinTokens only needs to be non-negative while headTTL1h is false, the same
-// convention CachePolicy.HeadTTLMinTokens follows — but once headTTL1h IS set, zero is
+// headTTLMinTokens is the stored, token-named field; the proxy reads it as tokens x 4 bytes of
+// request body (see resolveHeadTTL). It only needs to be non-negative while headTTL1h is false, the
+// same convention CachePolicy.HeadTTLMinBytes follows — but once headTTL1h IS set, zero is
 // refused outright rather than silently accepted: apply.Opts's own gate
-// (`o.HeadTTL1h && o.HeadTTLMinTokens > 0`) treats 0 as "never upgrade", so a strategy
+// (`o.HeadTTL1h && o.HeadTTLMinBytes > 0`) treats 0 as "never upgrade", so a strategy
 // with HeadTTL1h=true and HeadTTLMinTokens<=0 would be created successfully, ping on the
 // 1-hour schedule, and never once actually promote the head to the 1-hour tier — paying
 // the ping cost for a benefit that can never happen. There is no legitimate reason to
 // want that combination; account config's own Resolved() never lets this pairing exist
-// either (0 there means "use DefaultHeadTTLMinTokens", not "disable the upgrade").
+// either (0 there means "use DefaultHeadTTLMinBytes", not "disable the upgrade").
 func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing float64,
 	headTTL1h bool, headTTLMinTokens int) error {
 	maxIdle, maxPings := maxOverrideIdle, maxOverridePings
@@ -250,6 +251,10 @@ func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing
 	}
 	if headTTLMinTokens < 0 {
 		return fmt.Errorf("the head-TTL token floor cannot be negative")
+	}
+	if headTTLMinTokens > config.MaxHeadTTLMinBytes/config.HeadTTLBytesPerToken {
+		return fmt.Errorf("the head-TTL token floor is too large (at most %d)",
+			config.MaxHeadTTLMinBytes/config.HeadTTLBytesPerToken)
 	}
 	if headTTL1h && headTTLMinTokens <= 0 {
 		return fmt.Errorf("a strategy asking for the 1h head-TTL tier needs a positive token " +

@@ -184,6 +184,7 @@ func TestValidStrategyBounds(t *testing.T) {
 		{"negative ceiling", 280 * time.Second, 2, 0, -0.01, false, 0, false},
 		{"zero ceiling means default, and is fine", 280 * time.Second, 2, 0, 0, false, 0, true},
 		{"negative head-ttl-min-tokens", 280 * time.Second, 2, 0, 0, false, -1, false},
+		{"head-ttl-min-tokens too large to x4", 280 * time.Second, 2, 0, 0, false, 1 << 40, false},
 
 		// The 1h-tier band, only reachable while headTTL1h is set. A positive
 		// headTTLMinTokens (50000, mirroring config.DefaultHeadTTLMinTokens) is used

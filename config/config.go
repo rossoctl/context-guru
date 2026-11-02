@@ -237,6 +237,9 @@ const (
 	// HeadTTLBytesPerToken converts the deprecated head_ttl_min_tokens into bytes. It is the
 	// factor the old gate used (len(body)/4).
 	HeadTTLBytesPerToken = 4
+	// MaxHeadTTLMinBytes bounds the size gate. 1 GiB is far above any request body, and it keeps
+	// head_ttl_min_tokens x HeadTTLBytesPerToken from overflowing an int.
+	MaxHeadTTLMinBytes = 1 << 30
 )
 
 // The provider's cache lifetimes in seconds, for the validate caps below.
@@ -291,6 +294,10 @@ func (c CacheConfig) validate() error {
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
+	}
+	if c.HeadTTLMinBytes > MaxHeadTTLMinBytes || c.HeadTTLMinTokens > MaxHeadTTLMinBytes/HeadTTLBytesPerToken {
+		return fmt.Errorf("config: cache: head_ttl_min_bytes must be at most %d (head_ttl_min_tokens at most %d)",
+			MaxHeadTTLMinBytes, MaxHeadTTLMinBytes/HeadTTLBytesPerToken)
 	}
 	if c.KeepAliveIdleSeconds >= lifetime5mSeconds {
 		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under %d "+

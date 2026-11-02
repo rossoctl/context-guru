@@ -53,7 +53,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// tier only for the Claude 4.5 family and silently downgrades the models this
 	// service actually runs.
 	headTTL1h, headTTLMinBytes := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
-		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLMinBytes)
+		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLGateBytes())
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
 		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,

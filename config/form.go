@@ -402,14 +402,21 @@ func ApplyForm(doc string, f Form) (string, error) {
 			"keepalive_openai_idle_seconds": f.Cache.KeepAliveOpenAIIdleSeconds,
 			"keepalive_max_pings":           f.Cache.KeepAliveMaxPings,
 			"keepalive_min_prefix_tokens":   f.Cache.KeepAliveMinPrefixTokens,
-			"head_ttl_min_bytes":            f.Cache.HeadTTLMinBytes,
-			"head_ttl_min_tokens":           f.Cache.HeadTTLMinTokens,
 		} {
 			if v > 0 {
 				cb[k] = v
 			} else {
 				delete(cb, k)
 			}
+		}
+		// The head-gate keys are written when the form states them and otherwise LEFT ALONE. The
+		// settings page posts only keepalive and head_ttl_1h, and a zero here means "not sent", so
+		// deleting them would erase a gate tuned on the account page on every settings save.
+		if f.Cache.HeadTTLMinBytes > 0 {
+			cb["head_ttl_min_bytes"] = f.Cache.HeadTTLMinBytes
+		}
+		if f.Cache.HeadTTLMinTokens > 0 {
+			cb["head_ttl_min_tokens"] = f.Cache.HeadTTLMinTokens
 		}
 		if f.Cache.KeepAliveMaxUSDPerPing > 0 {
 			cb["keepalive_max_usd_per_ping"] = f.Cache.KeepAliveMaxUSDPerPing
