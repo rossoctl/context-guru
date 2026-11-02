@@ -3,14 +3,14 @@ package dash_test
 import (
 	"math"
 
-	"github.com/rossoctl/context-guru/counterfactual/opscases"
+	"github.com/rossoctl/accountant/test/cases"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // The helpers cfagree_test.go reuses. accountant_play_test.go holds same-named ones typed for the
 // accountant module's cases, so these carry a CF suffix.
 
-func priceOfCF(r opscases.Rate) modelinfo.Price {
+func priceOfCF(r cases.Rate) modelinfo.Price {
 	return modelinfo.Price{
 		Input:      float64(r.Input) / 1e12,
 		CacheWrite: float64(r.CacheWrite5m) / 1e12,
@@ -29,7 +29,7 @@ func absCF(x int64) int64 {
 }
 
 // expectedCF is the case's expected figure for one step, in micro-dollars.
-func expectedCF(c opscases.Case, s opscases.Step) (net int64, byChange map[string]int64) {
+func expectedCF(c cases.Case, s cases.Step) (net int64, byChange map[string]int64) {
 	byChange = map[string]int64{}
 	rate := c.StepRate(s)
 	for _, e := range s.Expected.Ops {
@@ -37,7 +37,7 @@ func expectedCF(c opscases.Case, s opscases.Step) (net int64, byChange map[strin
 		if e.Call != nil {
 			picos -= c.ModelRate(e.Call.Model).CallPicos(e.Call.Usage)
 		}
-		byChange[e.ChangeID] += opscases.RoundMicros(picos)
+		byChange[e.ChangeID] += cases.RoundMicros(picos)
 		net += picos
 	}
 	for _, e := range s.Expected.Effects { // breaks and rescues are cache effects, not operations
@@ -45,10 +45,10 @@ func expectedCF(c opscases.Case, s opscases.Step) (net int64, byChange map[strin
 			continue
 		}
 		picos := rate.Picos(e.Saved) - rate.Picos(e.Caused)
-		byChange[e.ChangeID] += opscases.RoundMicros(picos)
+		byChange[e.ChangeID] += cases.RoundMicros(picos)
 		net += picos
 	}
-	return opscases.RoundMicros(net), byChange
+	return cases.RoundMicros(net), byChange
 }
 
 // diffCF is one disagreement. change is the ChangeID it is about, or "" when it is about a step or

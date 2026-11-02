@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )

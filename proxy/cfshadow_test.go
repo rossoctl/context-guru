@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )

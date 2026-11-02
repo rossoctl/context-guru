@@ -7,8 +7,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"

@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 )
 
 func TestCounterfactualImportable(t *testing.T) {

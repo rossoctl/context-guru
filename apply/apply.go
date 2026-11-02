@@ -32,8 +32,8 @@ import (
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"

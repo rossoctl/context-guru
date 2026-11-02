@@ -1,6 +1,6 @@
 package dash
 
-import cf "github.com/rossoctl/context-guru/counterfactual"
+import cf "github.com/rossoctl/accountant"
 
 // The counterfactual Result of the request, set by the proxy when it runs with --savings=shadow
 // or counterfactual. It is unexported, so neither JSON nor the SQLite writer sees it.

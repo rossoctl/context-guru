@@ -3,8 +3,8 @@ package apply
 import (
 	"strconv"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 )
 
 // changeID is the counterfactual ChangeID of one change: cg:<component>:<idx>:<hash>. idx is the

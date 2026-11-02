@@ -3,7 +3,7 @@ package dash
 import (
 	"strings"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -69,7 +69,7 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 		f.Estimated = f.Estimated || o.Estimated
 	}
 	for _, ce := range e.cfRes.CacheEffects {
-		// Sign convention (counterfactual/compute.go): value = tierUSD(Saved) - tierUSD(Caused).
+		// Sign convention (accountant internal/engine/compute.go): value = tierUSD(Saved) - tierUSD(Caused).
 		//   break:      Saved is the read that did not happen, Caused the write that did: a cost,
 		//               tierUSD(Caused) - tierUSD(Saved) > 0, charged to the owner of ChangeID.
 		//   rescue:     Saved is the write avoided, Caused the read paid instead: a saving.
@@ -131,7 +131,7 @@ const (
 	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
 )
 
-// gatedChecks maps each library check (counterfactual/compute.go checks() and conservation()) that
+// gatedChecks maps each library check (accountant internal/engine/compute.go checks() and conservation()) that
 // means "the operation list or its attribution is wrong" to its fallback reason. A check not in the
 // map is informational: it is logged in cf_shadow and never gates.
 //

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -43,8 +43,9 @@ func (c *capture) cfBegin(meta cf.RequestMeta, client []byte) {
 }
 
 // cfEnd records the thread, the forwarded body and the operations. A thread that continues
-// another by content starts from a copy of the parent's state. Nil-safe; a no-op when cfBegin
-// did not open a record.
+// another by content names it as its parent, but starts with no state of its own: accountant carries
+// Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when cfBegin did not open a
+// record.
 func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) {
 	if c == nil || c.savings == nil || c.cfReq == nil {
 		return
@@ -52,7 +53,6 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) 
 	t := cf.Thread{ID: cfThreadID(th.ID)}
 	if parent, ok := th.InheritsFrom(); ok {
 		t.Parent = cfThreadID(parent)
-		c.savings.trackers.Fork(c.cfReq.Meta.Session, cf.Thread{ID: t.Parent}, t)
 	}
 	// PingRead is left nil: see the LIMITATION note on entryFacts.
 	c.savings.end(c.cfReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.cfReq.Meta.Session, t))
@@ -74,8 +74,12 @@ func entryFacts(forwarded []byte, pings *PingStore, session string, t cf.Thread)
 			break
 		}
 	}
-	if pf, ok := pings.take(cf.ThreadKey(session, t)); ok {
+	if pf, ok := pings.take(cfPingKey(session, t.ID)); ok {
 		facts.LastPing, facts.PingWindow = pf.LastPing, pf.PingWindow
 	}
 	return facts
 }
+
+// cfPingKey is the key the ping store keeps one thread's ping facts under: the session and the
+// thread id as the accountant sees it ("main" for the primary thread).
+func cfPingKey(session, threadID string) string { return session + "\x00" + threadID }

@@ -3,7 +3,7 @@ package proxy
 import (
 	"github.com/tidwall/gjson"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 )
 
 // cfBodies hashes a request body in the provider's order: tools, system, messages. A string

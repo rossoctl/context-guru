@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -34,7 +34,7 @@ type cfRun struct {
 }
 
 func (c cfRun) do(n int, client, fwd []byte, usage Usage, ops ...cf.Operation) cf.Result {
-	meta := cf.RequestMeta{RequestID: fmt.Sprint("r", n), Session: "s", At: time.Unix(int64(1000+n*10), 0), Billing: cf.BillingFrom(cf.BillingAPI)}
+	meta := cf.RequestMeta{RequestID: fmt.Sprint("r", n), Session: "s", At: time.Unix(int64(1000+n*10), 0), Billing: cf.Billing{Mode: cf.BillingAPI}}
 	r := c.s.begin(meta, client)
 	c.s.end(r, c.th, fwd, ops, cfFacts)
 	return c.s.compute(r, usage)
@@ -68,14 +68,11 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	if n, _ := countChange(res, id); n != 1 {
 		t.Fatalf("first request priced %d times, want 1", n)
 	}
-	if !c.s.trackers.IsActive("s", c.th, id) {
-		t.Fatal("change must stay active after its first request")
-	}
 
 	// (b) the change is reported again while active: it is added, and the library prices it once.
 	client2 := body(m0, big, m2, mustMsg("user", "next"))
 	fwd2 := body(m0, small, m2, mustMsg("user", "next"))
-	req := c.s.begin(cf.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: cf.BillingFrom(cf.BillingAPI)}, client2)
+	req := c.s.begin(cf.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: cf.Billing{Mode: cf.BillingAPI}}, client2)
 	c.s.end(req, c.th, fwd2, []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("replayed change must be added, req.Ops = %d", len(req.Ops))
@@ -110,19 +107,13 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 	const id = "cg:mask:a1"
 
 	c.do(1, body(m0, big, m2), body(m0, small, m2), usage, rewriteOp(id, 1, nBig, nSmall))
-	if !c.s.trackers.IsActive("s", c.th, id) {
-		t.Fatal("expected active after request 1")
-	}
 
 	// The client edits message 0 (at or before the change): the library ends the change.
 	m0b, _ := msg("user", "first, edited")
 	c.do(2, body(m0b, big, m2), body(m0b, big, m2), usage)
-	if c.s.trackers.IsActive("s", c.th, id) {
-		t.Fatal("change must end after a client edit at or before its position")
-	}
 
 	// Request 3 reports the same ChangeID again: it is added and priced (no filter).
-	req := c.s.begin(cf.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: cf.BillingFrom(cf.BillingAPI)}, body(m0b, big, m2))
+	req := c.s.begin(cf.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: cf.Billing{Mode: cf.BillingAPI}}, body(m0b, big, m2))
 	c.s.end(req, c.th, body(m0b, small, m2), []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("ended change must be re-added, req.Ops = %d", len(req.Ops))
@@ -163,7 +154,7 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			b := body(mustMsg("user", "x"))
-			r := s.begin(cf.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: time.Now(), Billing: cf.BillingFrom(cf.BillingAPI)}, b)
+			r := s.begin(cf.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: time.Now(), Billing: cf.Billing{Mode: cf.BillingAPI}}, b)
 			s.end(r, cf.Thread{ID: "main"}, b, nil, cfFacts)
 			res := s.compute(r, Usage{FreshInput: 5})
 			mu.Lock()
@@ -227,61 +218,3 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 }
 
 var cfPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}
-
-// M5: begin runs the idle sweep every savingsEvictEvery requests and holds the hard cap.
-func TestSavings_TrackersAreBounded(t *testing.T) {
-	s := newSavingsTracker()
-	now := time.Unix(1_000_000, 0)
-	s.now = func() time.Time { return now }
-	client := body(mustMsg("user", "hi"))
-	open := func(i int, at time.Time) {
-		r := s.begin(cf.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: at, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
-		s.end(r, cf.Thread{ID: fmt.Sprint("t", i)}, client, nil, cfFacts)
-		s.compute(r, Usage{FreshInput: 10})
-	}
-	// Idle sweep: 10 threads last seen 3h ago, then requests from one fresh thread up to the sweep.
-	for i := range 10 {
-		open(i, now.Add(-3*time.Hour))
-	}
-	for i := 10; s.seen.Load() < savingsEvictEvery-1; i++ {
-		r := s.begin(cf.RequestMeta{RequestID: "x", Session: "s", At: now, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
-		s.end(r, cf.Thread{ID: "live"}, client, nil, cfFacts)
-		s.compute(r, Usage{FreshInput: 10})
-	}
-	if s.trackers.Len() != 11 {
-		t.Fatalf("before the sweep Len = %d, want 11", s.trackers.Len())
-	}
-	open(99, now) // the savingsEvictEvery-th begin sweeps
-	if s.trackers.Len() != 2 {
-		t.Fatalf("after the sweep Len = %d, want 2 (live and t99)", s.trackers.Len())
-	}
-}
-
-func TestSavings_TrackersHardCap(t *testing.T) {
-	s := newSavingsTracker()
-	now := time.Unix(1_000_000, 0)
-	s.now = func() time.Time { return now }
-	client := body(mustMsg("user", "hi"))
-	for i := range savingsMaxTrackers + 1 {
-		r := s.begin(cf.RequestMeta{RequestID: "r", Session: "s", At: now.Add(time.Duration(i) * time.Millisecond), Billing: cf.BillingFrom(cf.BillingAPI)}, client)
-		s.end(r, cf.Thread{ID: fmt.Sprint("t", i)}, client, nil, cfFacts)
-		s.compute(r, Usage{FreshInput: 10})
-	}
-	if n := s.trackers.Len(); n != savingsMaxTrackers+1 {
-		t.Fatalf("Len = %d before the next begin", n)
-	}
-	s.begin(cf.RequestMeta{RequestID: "r", Session: "s", At: now, Billing: cf.BillingFrom(cf.BillingAPI)}, client)
-	if n, want := s.trackers.Len(), savingsMaxTrackers-savingsMaxTrackers/10; n != want {
-		t.Fatalf("Len = %d after the cap, want %d", n, want)
-	}
-	// The oldest thread is gone: Fork from it installs nothing, so the child gets no tracker.
-	before := s.trackers.Len()
-	s.trackers.Fork("s", cf.Thread{ID: "t0"}, cf.Thread{ID: "t0-child"})
-	if s.trackers.Len() != before {
-		t.Fatal("the oldest thread t0 survived the cap")
-	}
-	s.trackers.Fork("s", cf.Thread{ID: fmt.Sprint("t", savingsMaxTrackers)}, cf.Thread{ID: "new-child"})
-	if s.trackers.Len() != before+1 {
-		t.Fatal("the newest thread was evicted by the cap")
-	}
-}

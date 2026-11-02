@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
-	"github.com/rossoctl/context-guru/counterfactual/opscases"
+	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant/test/cases"
 	"github.com/rossoctl/context-guru/dash"
 )
 
-// This file plays every opscases.Case through the path the proxy uses (Trackers, Request.Add of
+// This file plays every cases.Case through the path the proxy uses (Trackers, Request.Add of
 // every op with replays included, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, with
 // the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in cfhelpers_test.go.
@@ -29,7 +29,7 @@ type PlayedCF struct {
 
 // PlayCF drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + SplitUSD + TTLUSD,
 // minus every spend op priced with its own model's rate (the host prices spends).
-func PlayCF(c opscases.Case) []PlayedCF {
+func PlayCF(c cases.Case) []PlayedCF {
 	trackers := cf.NewTrackers()
 	var out []PlayedCF
 	for _, s := range c.Steps {
@@ -41,7 +41,7 @@ func PlayCF(c opscases.Case) []PlayedCF {
 					spend += c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 				}
 			}
-			out = append(out, PlayedCF{Standalone: true, NetMicro: -opscases.RoundMicros(spend), ByComponent: map[string]int64{}})
+			out = append(out, PlayedCF{Standalone: true, NetMicro: -cases.RoundMicros(spend), ByComponent: map[string]int64{}})
 			continue
 		}
 		req := trackers.BeginRequest(s.Begin.Meta, s.Begin.Client, s.Begin.ClientBreakpoints)
@@ -61,7 +61,7 @@ func PlayCF(c opscases.Case) []PlayedCF {
 		for k, v := range fig.ByComponent {
 			p.ByComponent[k] = microsCF(v)
 		}
-		p.NetMicro = microsCF(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - opscases.RoundMicros(spend)
+		p.NetMicro = microsCF(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - cases.RoundMicros(spend)
 		out = append(out, p)
 	}
 	return out
@@ -69,7 +69,7 @@ func PlayCF(c opscases.Case) []PlayedCF {
 
 // componentsOf maps every ChangeID a case reports to its component, across all steps (a replayed
 // change appears in Expected.Ops of a later step, but only in Add of the step that reported it).
-func componentsOf(c opscases.Case) map[string]string {
+func componentsOf(c cases.Case) map[string]string {
 	m := map[string]string{}
 	shared := map[string]bool{} // a ChangeID two components report: no per-component split is derivable
 	for _, s := range c.Steps {
@@ -98,7 +98,7 @@ func componentsOf(c opscases.Case) map[string]string {
 
 // sharedComp reports whether the component reports a ChangeID that another component reports too,
 // so its figure cannot be told from the other's by ChangeID (check/changeid-shared-between-operators).
-func sharedComp(c opscases.Case, comp string) bool {
+func sharedComp(c cases.Case, comp string) bool {
 	byID := map[string]map[string]bool{}
 	for _, s := range c.Steps {
 		for _, op := range s.Add {
@@ -123,7 +123,7 @@ func sharedComp(c opscases.Case, comp string) bool {
 // builds it: the priced rewrite and setting ops (a spend is priced by the host, so it is left out)
 // plus the counted breaks whose ChangeID a component owns. Rescue, split and TTL effects are their
 // own CFFigure fields, not component figures; a break nobody owns is UnattributedBreakUSD.
-func expectedByComponent(c opscases.Case, s opscases.Step, comps map[string]string) map[string]int64 {
+func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) map[string]int64 {
 	picos := map[string]int64{}
 	rate := c.StepRate(s)
 	for _, e := range s.Expected.Ops {
@@ -144,7 +144,7 @@ func expectedByComponent(c opscases.Case, s opscases.Step, comps map[string]stri
 	}
 	out := map[string]int64{}
 	for k, v := range picos {
-		out[k] = opscases.RoundMicros(v)
+		out[k] = cases.RoundMicros(v)
 	}
 	return out
 }
@@ -154,7 +154,7 @@ func expectedByComponent(c opscases.Case, s opscases.Step, comps map[string]stri
 // not derivable from CFFigure (it sums by component), so the expected per-ChangeID figures are
 // summed to their component, and a ChangeID that names no component (a keep-alive window, a
 // spend) is skipped.
-func CompareCF(c opscases.Case, played []PlayedCF) (diffs []diffCF) {
+func CompareCF(c cases.Case, played []PlayedCF) (diffs []diffCF) {
 	comps := componentsOf(c)
 	var wantTotal, gotTotal int64
 	for i, s := range c.Steps {
@@ -229,8 +229,8 @@ var cfKnownDifferences = map[string]struct {
 // They are skipped, with the reason, so the suite stays green and the finding stays visible.
 var cfLibraryDisagrees = map[string]string{}
 
-func TestProxyPathMatchesOpscases(t *testing.T) {
-	for _, c := range opscases.All() {
+func TestProxyPathMatchesTheAccountantCases(t *testing.T) {
+	for _, c := range cases.All() {
 		t.Run(c.ID, func(t *testing.T) {
 			diffs := CompareCF(c, PlayCF(c))
 			if why, ok := cfLibraryDisagrees[c.ID]; ok {

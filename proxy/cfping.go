@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 )
 
 // pingStoreMax bounds PingStore. It is keyed by session and thread, so without a bound a
@@ -73,8 +73,8 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (cf.Result, bool) 
 		r.FreshInput+r.CacheRead+r.CacheWrite+r.CacheWrite1h+r.Output == 0 {
 		return cf.Result{}, false
 	}
-	ops, facts := cf.PingOps(pingFromReport(r), cf.BillingFrom(cf.BillingAPI))
+	ops, facts := cf.PingOps(pingFromReport(r), cf.Billing{Mode: cf.BillingAPI})
 	res := cf.ComputeStandalone(ops)
-	st.put(cf.ThreadKey(r.Session, cf.Thread{ID: cfThreadID(r.Thread)}), facts)
+	st.put(cfPingKey(r.Session, cfThreadID(r.Thread)), facts)
 	return res, true
 }

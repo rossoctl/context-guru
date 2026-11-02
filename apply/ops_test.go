@@ -3,8 +3,8 @@ package apply
 import (
 	"testing"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 )
 
 func TestOpsFromRun_MapsToWirePositionAndSkipsRevertedAndSkipped(t *testing.T) {

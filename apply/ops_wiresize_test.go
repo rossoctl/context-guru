@@ -7,8 +7,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 )
 
 // wireDelta is, per wire message index, len(in) - len(out) of an equal-count rewrite.
@@ -145,7 +145,7 @@ func libraryResult(client, fwd []byte, ops []cf.Operation) cf.Result {
 		return cf.NewBody(nil, nil, m)
 	}
 	ts := cf.NewTrackers()
-	r := ts.BeginRequest(cf.RequestMeta{RequestID: "r1", Session: "s", Billing: cf.BillingFrom(cf.BillingAPI)}, b(client), nil)
+	r := ts.BeginRequest(cf.RequestMeta{RequestID: "r1", Session: "s", Billing: cf.Billing{Mode: cf.BillingAPI}}, b(client), nil)
 	for _, o := range ops {
 		r.Add(o)
 	}

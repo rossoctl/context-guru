@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	cf "github.com/rossoctl/context-guru/counterfactual"
+	cf "github.com/rossoctl/accountant"
 )
 
 // switchEvent is a priced-looking event with a mask component that acted and a library Result

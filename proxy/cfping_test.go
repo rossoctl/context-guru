@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 )
 
 var pingAt = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
@@ -36,7 +36,7 @@ func TestPingSavingsPricesAndStoresFacts(t *testing.T) {
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
 		t.Fatalf("ok=%v res=%+v", ok, res)
 	}
-	f, ok := st.take(cf.ThreadKey("s", cf.Thread{ID: "main"}))
+	f, ok := st.take(cfPingKey("s", "main"))
 	if !ok || f.PingWindow == "" || !f.LastPing.Equal(time.UnixMilli(pingAt.UnixMilli())) {
 		t.Fatalf("facts %+v ok=%v", f, ok)
 	}

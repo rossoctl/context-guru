@@ -27,11 +27,11 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	cf "github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	cf "github.com/rossoctl/context-guru/counterfactual"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
@@ -1401,7 +1401,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					Model:     gjson.GetBytes(orig, "model").String(),
 					At:        cp.start,
 					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: cf.BillingFrom(cf.BillingAPI),
+					Billing: cf.Billing{Mode: cf.BillingAPI},
 				}, orig)
 			}
 			// A real request has arrived on this session: cancel any pending keep-alive
