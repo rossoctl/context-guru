@@ -214,7 +214,7 @@ func TestToolDeferRetriesOriginalOn400(t *testing.T) {
 	if got := tdTools(up.last()); strings.Contains(got, "*") || strings.Contains(got, "tool_search") {
 		t.Fatalf("retry was not the original: %s", got)
 	}
-	if !h.toolDefer().gate.Broken("", "claude-sonnet-5-5") || h.toolDefer().gate.Retries.Load() != 1 {
+	if !h.deferGate().Broken("", "claude-sonnet-5-5") || h.deferGate().Retries.Load() != 1 {
 		t.Fatal("deferral not turned off after the 400")
 	}
 	// The next new thread is not deferred.
@@ -283,5 +283,70 @@ func TestToolDeferLifecycleFlag(t *testing.T) {
 	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-3"), 1))
 	if got := tdTools(up.last()); !strings.Contains(got, "*") {
 		t.Fatalf("ENABLE_TOOL_SEARCH=auto turned deferral off: %s", got)
+	}
+}
+
+// /stats and /signal race the first ultrahigh request, which builds the deferral state. Under -race
+// this failed before the state was behind one lock.
+func TestToolDeferStatsRacesFirstRequest(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	cfg, err := config.LoadBytes([]byte("preset: ultrahigh\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL})
+	defer h.Close()
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 6; i++ {
+		wg.Add(3)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte(fmt.Sprintf("race-%d", i)), 1))
+		}(i)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 20; j++ {
+				if r, err := http.Get(srv.URL + "/stats"); err == nil {
+					io.Copy(io.Discard, r.Body)
+					r.Body.Close()
+				}
+			}
+		}()
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			b := fmt.Sprintf(`{"session":"sig-%d","event":"SessionStart","kind":"startup","enable_tool_search":"false"}`, i)
+			if r, err := http.Post(srv.URL+"/signal", "application/json", strings.NewReader(b)); err == nil {
+				r.Body.Close()
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+}
+
+// A /signal on a proxy that never served an ultrahigh request records the flag without building
+// the deferral state (no history load, no database open).
+func TestToolDeferSignalDoesNotBuildState(t *testing.T) {
+	cfg, _ := config.LoadBytes([]byte("preset: xhigh\n"))
+	agg := metrics.NewAggregator()
+	pipe, _ := cfg.Build(agg)
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: "http://127.0.0.1:1"})
+	defer h.Close()
+	h.noteToolSearch("s", "false")
+	if st, g := h.deferPeek(); st != nil || g == nil || !g.SearchOff("s") {
+		t.Fatalf("state built=%v, gate=%v", st != nil, g != nil)
 	}
 }

@@ -22,34 +22,70 @@ import (
 // request after a 400, the ENABLE_TOOL_SEARCH flag from /lifecycle, and the /stats ledger.
 
 // deferState is one handler's deferral state. Built lazily, so a proxy no tenant of which asks for
-// deferral pays nothing.
+// deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
 type deferState struct {
-	once   sync.Once
 	hist   *tooldefer.Mem
 	stop   func()
-	gate   *tooldefer.Gate
 	prober *tooldefer.Prober
 	ledger tooldefer.Ledger
+}
+
+// deferHost holds the state behind a lock, so the lazy build, /stats and Close never see it half
+// built. The gate is not lazy: /signal writes it on any proxy, and building the whole state (the
+// database open, the history load) for a flag no tenant may ever read would be waste.
+type deferHost struct {
+	mu    sync.Mutex
+	state *deferState
+	gate  *tooldefer.Gate
+}
+
+// deferGate is the off-switch gate, built on first use under the same lock.
+func (h *Handler) deferGate() *tooldefer.Gate {
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	if h.defer_.gate == nil {
+		h.defer_.gate = tooldefer.NewGate()
+	}
+	return h.defer_.gate
 }
 
 // toolDefer returns the handler's deferral state, building it on first use. The history reads and
 // writes its own table in the dashboard database when there is one, else it is memory only.
 func (h *Handler) toolDefer() *deferState {
-	h.defer_.once.Do(func() {
-		d := &h.defer_
-		d.hist = tooldefer.NewMem(nil)
-		if h.rec != nil {
-			if db := h.rec.DB(); db != nil && db.Path() != "" && db.Path() != ":memory:" {
-				d.hist = tooldefer.NewMem(db.SQL())
-			}
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	if d := h.defer_.state; d != nil {
+		return d
+	}
+	d := &deferState{hist: tooldefer.NewMem(nil)}
+	if h.rec != nil {
+		if db := h.rec.DB(); db != nil && db.Path() != "" && db.Path() != ":memory:" {
+			d.hist = tooldefer.NewMem(db.SQL())
 		}
-		d.gate = tooldefer.NewGate()
-		d.prober = tooldefer.NewProber()
-		// The verdicts survive a restart with the history, so a thread decided before it keeps its set.
-		d.prober.Persist = d.hist.SaveVerdict
-		d.stop = d.hist.Open(0, d.prober)
-	})
-	return &h.defer_
+	}
+	d.prober = tooldefer.NewProber()
+	// The verdicts survive a restart with the history, so a thread decided before it keeps its set.
+	d.prober.Persist = d.hist.SaveVerdict
+	d.stop = d.hist.Open(0, d.prober)
+	h.defer_.state = d
+	return d
+}
+
+// deferPeek returns the state and the gate when they exist, without building anything.
+func (h *Handler) deferPeek() (*deferState, *tooldefer.Gate) {
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	return h.defer_.state, h.defer_.gate
+}
+
+// closeToolDefer flushes the history, once.
+func (h *Handler) closeToolDefer() {
+	h.defer_.mu.Lock()
+	d := h.defer_.state
+	h.defer_.mu.Unlock()
+	if d != nil {
+		d.stop()
+	}
 }
 
 // deferOn reports whether this tenant's pipeline asks for deferral, and its keep list.
@@ -91,7 +127,7 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	// Every request feeds the history, including the ones deferral then declines.
 	ds.hist.Observe(tn.ID, session, project, orig, time.Now().UnixMilli())
 	key := tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path}
-	o := tooldefer.Apply(tooldefer.Env{Store: tn.Store, History: ds.hist, Gate: ds.gate, Prober: ds.prober},
+	o := tooldefer.Apply(tooldefer.Env{Store: tn.Store, History: ds.hist, Gate: h.deferGate(), Prober: ds.prober},
 		tooldefer.Req{Tenant: tn.ID, Session: session, Thread: threadID, Project: project, Model: model,
 			Orig: orig, Body: body, Probe: key, Keep: keep})
 	if o.NeedProbe {
@@ -131,9 +167,8 @@ func (h *Handler) deferRetry(di *deferInfo, status int) bool {
 	if di == nil || (status != http.StatusBadRequest && status != http.StatusUnprocessableEntity) {
 		return false
 	}
-	ds := h.toolDefer()
-	ds.gate.Break(di.tenant, di.model)
-	ds.prober.Forget(di.probe)
+	h.deferGate().Break(di.tenant, di.model)
+	h.toolDefer().prober.Forget(di.probe)
 	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model,
 		"note", "the provider refused a request with deferred tools; sent the original and turned deferral off for this model")
 	return true
@@ -161,24 +196,25 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 	h.toolDefer().ledger.Add(r, p)
 }
 
-// noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent.
+// noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent. It
+// writes the gate only: it never builds the deferral state.
 func (h *Handler) noteToolSearch(scoped, raw string) {
-	h.toolDefer().gate.NoteToolSearch(scoped, raw)
+	h.deferGate().NoteToolSearch(scoped, raw)
 }
 
 // deferStats is the /stats block. nil when deferral never ran in this process.
 func (h *Handler) deferStats() any {
-	ds := &h.defer_
-	if ds.gate == nil {
+	ds, g := h.deferPeek()
+	if ds == nil || g == nil {
 		return nil
 	}
 	pass, fail := ds.prober.Runs()
 	return map[string]any{
 		"ledger":       ds.ledger.Snapshot(),
-		"decisions":    ds.gate.Decisions.Load(),
-		"rebuilds":     ds.gate.Rebuilds.Load(),
-		"requests":     ds.gate.Deferred.Load(),
-		"retries_400":  ds.gate.Retries.Load(),
+		"decisions":    g.Decisions.Load(),
+		"rebuilds":     g.Rebuilds.Load(),
+		"requests":     g.Deferred.Load(),
+		"retries_400":  g.Retries.Load(),
 		"probes_pass":  pass,
 		"probes_fail":  fail,
 		"history_live": ds.hist.Ready(),

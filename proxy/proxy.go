@@ -336,7 +336,7 @@ type Handler struct {
 	lastSession string
 
 	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
-	defer_ deferState
+	defer_ deferHost
 }
 
 // upstreamTransport is the default upstream client's transport, and the reason there is no
@@ -480,9 +480,7 @@ func (h *Handler) Close() {
 	// credentials. Stopping it drops both, which is why this is not optional on a host that
 	// builds and discards handlers.
 	h.keeper.Stop()
-	if h.defer_.stop != nil {
-		h.defer_.stop() // flushes the tool history
-	}
+	h.closeToolDefer() // flushes the tool history
 }
 
 // Mux wires the routes: chat proxying + health/stats/expand management.
