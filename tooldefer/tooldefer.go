@@ -328,6 +328,30 @@ func Save(st store.Store, session, thread string, r Record) {
 	}
 }
 
+// searchOffKey is the store key of a session's tool search opt-out.
+func searchOffKey(session string) string { return store.ToolSearchOffPrefix + session }
+
+// SearchOff reports whether st holds the tool search opt-out for session.
+func SearchOff(st store.Store, session string) bool {
+	if st == nil || session == "" {
+		return false
+	}
+	v, ok := st.Get(searchOffKey(session))
+	return ok && string(v) == "1"
+}
+
+// SetSearchOff stores the opt-out for session (on), or removes it.
+func SetSearchOff(st store.Store, session string, on bool) {
+	if st == nil || session == "" {
+		return
+	}
+	v := []byte("0") // the Store has no delete: "0" is "not off"
+	if on {
+		v = []byte("1")
+	}
+	st.Put(searchOffKey(session), v)
+}
+
 // Rebuild is the set after a store miss: the rule decided again (the history leaves out this
 // session), plus every tool our search has loaded in this transcript. A tool our search loaded was
 // deferred by definition, so adding it back cannot move a tool the provider cached as loaded.

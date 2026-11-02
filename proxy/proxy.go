@@ -122,6 +122,13 @@ type Options struct {
 	// transcripts to a fresh proxy wants, so it measures compaction, not the grace.
 	// Startup setting, not a live knob.
 	RestartGrace *bool
+	// ToolDeferPath is where tool deferral keeps its own on-disk state (#485): the per-thread
+	// records for a session store that does not survive a restart, and the history when there is
+	// no dashboard database. Opened at the first ultrahigh request that needs it. "": there is no
+	// such place, and ultrahigh defers only with a durable session store. ToolDeferRetention bounds
+	// a row's age there (0: store.DefaultDiskRetention).
+	ToolDeferPath      string
+	ToolDeferRetention time.Duration
 	// Prices resolves a model's per-token rates so the dashboard can price each
 	// request AT WRITE TIME (so history does not reprice when a rate changes). nil =
 	// no pricing, and every captured row is marked partially accounted rather than
@@ -1966,9 +1973,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 			resp.Body.Close()
-			h.deferRetry(di, resp.StatusCode, errBody)
-			body, di = di.orig, nil
+			refused := resp.StatusCode
+			body = di.orig
 			resp, err = h.doUpstream(r, up, body)
+			ok := err == nil && resp != nil && resp.StatusCode < 400
+			h.deferRetry(di, refused, errBody, ok)
+			di = nil
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than

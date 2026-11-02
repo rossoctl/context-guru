@@ -2,6 +2,7 @@ package tooldefer
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -424,10 +425,26 @@ func TestGateBreakEvictsOldest(t *testing.T) {
 
 // ── Apply: the thread-fixed set ──────────────────────────────────────────
 
-func env(h History) Env {
+// env is a deferral Env over a memory-only session store and tool deferral's own file, which holds
+// the records (the session store is not durable). Its file is in a fresh folder of the test.
+func env(t *testing.T, h History) Env {
+	t.Helper()
+	e, _ := envAt(t, h, filepath.Join(t.TempDir(), FileName))
+	return e
+}
+
+// envAt is env over the file at path: a second envAt on the same path is the same proxy after a
+// restart (fresh memory, fresh prober, the same file).
+func envAt(t *testing.T, h History, path string) (Env, *File) {
+	t.Helper()
+	f, err := OpenFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
 	p := NewProber()
 	p.Go = func(fn func()) { fn() }
-	return Env{Store: store.NewMemory(store.Options{}), History: h, Gate: NewGate(), Prober: p}
+	return Env{Store: store.NewMemory(store.Options{}), Fallback: f.Store, History: h, Gate: NewGate(), Prober: p}, f
 }
 
 func passProbe(e Env, k ProbeKey) {
@@ -443,7 +460,7 @@ func req(b []byte) Req {
 
 func TestApplyDecidesOnceAndKeepsTheSet(t *testing.T) {
 	h := threeUnused()
-	e := env(h)
+	e := env(t, h)
 	passProbe(e, ProbeKey{"u", "m", "r"})
 	first := body(catalogue(), "")
 	o := Apply(e, req(first))
@@ -468,7 +485,7 @@ func TestApplyDecidesOnceAndKeepsTheSet(t *testing.T) {
 
 // A thread first seen mid-way without a record and without a probe verdict sends the original.
 func TestApplyMidThreadUnknownProbeSendsOriginal(t *testing.T) {
-	e := env(threeUnused())
+	e := env(t, threeUnused())
 	later := body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`)
 	o := Apply(e, req(later))
 	if o.Changed || !o.NeedProbe {
@@ -477,7 +494,7 @@ func TestApplyMidThreadUnknownProbeSendsOriginal(t *testing.T) {
 }
 
 func TestApplyFirstRequestUnprobedDecidesNothingForTheThread(t *testing.T) {
-	e := env(threeUnused())
+	e := env(t, threeUnused())
 	o := Apply(e, req(body(catalogue(), "")))
 	if o.Changed || !o.NeedProbe || o.Why != "probe_unknown" {
 		t.Fatalf("%s", show(o))
@@ -490,29 +507,143 @@ func TestApplyFirstRequestUnprobedDecidesNothingForTheThread(t *testing.T) {
 	}
 }
 
-// A proxy restart loses memory: the record is rebuilt from the request and the history, and the
-// bytes match what the thread sent before.
-func TestApplyRestartRebuildsTheSameSet(t *testing.T) {
+// B1. A restart with a memory-only session store: the record comes back from tool deferral's own
+// file, so tools and messages[1] are byte-identical and nothing is rebuilt.
+func TestApplyRestartKeepsTheRecordInTheFile(t *testing.T) {
 	h := threeUnused()
-	e := env(h)
-	k := ProbeKey{"u", "m", "r"}
-	passProbe(e, k)
+	path := filepath.Join(t.TempDir(), FileName)
+	e, f := envAt(t, h, path)
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	first := Apply(e, req(body(catalogue(), "")))
+	later := body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`)
+	before := Apply(e, req(later))
+	f.Close() // the process ends: the file is flushed
+	// Restart: a fresh session store, a fresh prober (no verdict), an EMPTY history, the same file.
+	e2, _ := envAt(t, hist{}, path)
+	after := Apply(e2, req(later))
+	if after.Decided || after.Rebuilt || string(after.Body) != string(before.Body) {
+		t.Fatalf("restart changed the request:\nbefore %s\nafter  %s (%s)", names(before.Body), names(after.Body), show(after))
+	}
+	if strings.Join(after.Deferred, ",") != strings.Join(first.Deferred, ",") {
+		t.Fatalf("set after restart = %v, want %v", after.Deferred, first.Deferred)
+	}
+}
+
+// B1. With no durable place at all (the session store is memory only, and no file), nothing is
+// deferred, so a restart has nothing to flip.
+func TestApplyNoDurablePlaceDefersNothing(t *testing.T) {
+	e := env(t, threeUnused())
+	e.Fallback = nil
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	if o := Apply(e, req(body(catalogue(), ""))); o.Changed || o.Why != "no_durable_store" {
+		t.Fatalf("%s", show(o))
+	}
+	// A durable session store (the dashboard's Disk) is used as before.
+	e.Store = e2Durable(t)
+	if o := Apply(e, req(body(catalogue(), ""))); !o.Changed {
+		t.Fatalf("with a durable session store: %s", show(o))
+	}
+	if _, ok := Load(e.Store, "s", ""); !ok {
+		t.Fatal("the record is not in the durable session store")
+	}
+}
+
+// e2Durable is a session store with a Disk attached, as with the dashboard database.
+func e2Durable(t *testing.T) store.Store {
+	f, err := OpenFile(filepath.Join(t.TempDir(), "dash.db"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f.Store
+}
+
+// A record lost mid-thread (evicted) in a thread our search loaded from: rebuilt, and the bytes
+// match.
+func TestApplyLostRecordRebuildsTheSameSet(t *testing.T) {
+	h := threeUnused()
+	e := env(t, h)
+	passProbe(e, ProbeKey{"u", "m", "r"})
 	o := Apply(e, req(body(catalogue(), "")))
-	// The model loaded Workflow through our search; the client echoes it.
 	load := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"Workflow","limit":1}},` +
 		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Workflow"}]}},` +
 		`{"type":"tool_use","id":"t9","name":"Workflow","input":{}}]}`
 	res := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"done"}]}`
 	later := body(catalogue(), "", load, res)
 	before := Apply(e, req(later))
-	// Restart: a fresh store, a fresh prober (no verdict cached). The history survives (its table).
-	e2 := env(h)
+	e2 := env(t, h) // a different file: the record is gone
 	after := Apply(e2, req(later))
 	if !after.Rebuilt || string(after.Body) != string(before.Body) {
-		t.Fatalf("restart changed the request:\nbefore %s\nafter  %s (%s)", names(before.Body), names(after.Body), show(after))
+		t.Fatalf("rebuild changed the request:\nbefore %s\nafter  %s (%s)", names(before.Body), names(after.Body), show(after))
 	}
 	if strings.Join(after.Deferred, ",") != strings.Join(o.Deferred, ",") {
-		t.Fatalf("set after restart = %v, want %v", after.Deferred, o.Deferred)
+		t.Fatalf("set after rebuild = %v, want %v", after.Deferred, o.Deferred)
+	}
+}
+
+// N11. A thread whose first request already holds assistant turns (a fork, a resume under a new
+// session id), with no record and no search of ours, is a first request: it is decided.
+func TestApplyForkIsAFirstRequest(t *testing.T) {
+	e := env(t, threeUnused())
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	fork := body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`)
+	if o := Apply(e, req(fork)); !o.Decided || o.Rebuilt || !o.Changed {
+		t.Fatalf("%s", show(o))
+	}
+}
+
+// H3. The opt-out blocks NEW threads only. With `claude -p` the flag can land after the thread's
+// first request: that thread keeps its record, and a new thread of the session is not deferred.
+func TestApplyOptOutAfterFirstRequestKeepsTheThread(t *testing.T) {
+	e := env(t, threeUnused())
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	first := Apply(e, req(body(catalogue(), "")))
+	if !first.Changed {
+		t.Fatalf("%s", show(first))
+	}
+	// The hook's flag arrives now, for a seen session.
+	e.Gate.NoteToolSearch("", "s", "false", e.RecordStore(), true)
+	later := Apply(e, req(body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"x"}`)))
+	if !later.Changed || strings.Join(later.Deferred, ",") != strings.Join(first.Deferred, ",") {
+		t.Fatalf("the flag flipped a live thread: %s", show(later))
+	}
+	sub := req(body(catalogue(), ""))
+	sub.Thread = "agent-2"
+	if o := Apply(e, sub); o.Changed || o.Why != "tool_search_false" {
+		t.Fatalf("a new thread after the flag: %s", show(o))
+	}
+	// The flag is in the durable store: a restart keeps it.
+	if !SearchOff(e.RecordStore(), "s") {
+		t.Fatal("the flag is not stored")
+	}
+}
+
+// B4b and H3. A flag for a session the proxy has not seen waits, per tenant, for that session's
+// first request; one tenant's flags cannot push out another's.
+func TestGatePendingOptOutIsPerTenant(t *testing.T) {
+	g := NewGate()
+	for i := 0; i < maxPendingPerTenant+10; i++ {
+		g.NoteToolSearch("noisy", "s"+itoa(i), "false", nil, false)
+	}
+	g.NoteToolSearch("quiet", "q", "false", nil, false)
+	for i := 0; i < maxPendingPerTenant+10; i++ {
+		g.NoteToolSearch("noisy", "x"+itoa(i), "false", nil, false)
+	}
+	st := e2Durable(t)
+	if !g.TakePending("quiet", "q", st) || !SearchOff(st, "q") {
+		t.Fatal("another tenant's flags pushed this one out")
+	}
+	if g.TakePending("quiet", "q", st) {
+		t.Fatal("a pending flag was taken twice")
+	}
+	if g.TakePending("other", "s1", st) {
+		t.Fatal("a flag leaked across tenants")
+	}
+	g.mu.Lock()
+	n := len(g.pending["noisy"])
+	g.mu.Unlock()
+	if n > maxPendingPerTenant {
+		t.Fatalf("%d pending for one tenant", n)
 	}
 }
 
@@ -522,12 +653,12 @@ func TestApplyOffSwitches(t *testing.T) {
 	for name, mut := range map[string]func(*Env, *Req){
 		"account_off":          func(_ *Env, r *Req) { r.AccountOff = true },
 		"not_anthropic":        func(_ *Env, r *Req) { r.Model = "gpt-5.5" },
-		"tool_search_false":    func(e *Env, r *Req) { e.Gate.NoteToolSearch(r.Session, "false") },
+		"tool_search_false":    func(e *Env, r *Req) { e.Gate.NoteToolSearch(r.Tenant, r.Session, "false", nil, false) },
 		"turned_off_after_400": func(e *Env, r *Req) { e.Gate.Break(r.Tenant, r.Model) },
-		"store_off":            func(e *Env, _ *Req) { e.Store = store.Nop{} },
+		"no_durable_store":     func(e *Env, _ *Req) { e.Fallback = nil },
 		"no_session":           func(_ *Env, r *Req) { r.Session = "" },
 	} {
-		e := env(threeUnused())
+		e := env(t, threeUnused())
 		passProbe(e, k)
 		r := req(b)
 		mut(&e, &r)
@@ -536,9 +667,9 @@ func TestApplyOffSwitches(t *testing.T) {
 		}
 	}
 	// "auto" is not a decision.
-	e := env(threeUnused())
+	e := env(t, threeUnused())
 	passProbe(e, k)
-	e.Gate.NoteToolSearch("s", "auto")
+	e.Gate.NoteToolSearch("", "s", "auto", nil, false)
 	if o := Apply(e, req(b)); !o.Changed {
 		t.Errorf("ENABLE_TOOL_SEARCH=auto turned deferral off: %s", show(o))
 	}
@@ -547,7 +678,7 @@ func TestApplyOffSwitches(t *testing.T) {
 // Subagents are their own thread: each keeps its own set.
 func TestApplyThreadsAreSeparate(t *testing.T) {
 	h := threeUnused()
-	e := env(h)
+	e := env(t, h)
 	passProbe(e, ProbeKey{"u", "m", "r"})
 	main := Apply(e, req(body(catalogue(), "")))
 	sub := req(body([]string{decl("Read"), decl("Bash")}, ""))
@@ -556,10 +687,10 @@ func TestApplyThreadsAreSeparate(t *testing.T) {
 	if so.Changed {
 		t.Fatalf("subagent with no deferrable tool changed: %s", show(so))
 	}
-	if r, ok := Load(e.Store, "s", "agent-1"); !ok || len(r.Deferred) != 0 {
+	if r, ok := Load(e.RecordStore(), "s", "agent-1"); !ok || len(r.Deferred) != 0 {
 		t.Fatalf("subagent record: %+v %v", r, ok)
 	}
-	if r, _ := Load(e.Store, "s", ""); strings.Join(r.Deferred, ",") != strings.Join(main.Deferred, ",") {
+	if r, _ := Load(e.RecordStore(), "s", ""); strings.Join(r.Deferred, ",") != strings.Join(main.Deferred, ",") {
 		t.Fatal("subagent changed the main thread's record")
 	}
 }
@@ -567,7 +698,7 @@ func TestApplyThreadsAreSeparate(t *testing.T) {
 // The weights come from the ORIGINAL body, and a Body already rewritten by the pipeline is what
 // gets the marks.
 func TestApplyDecidesOnOriginal(t *testing.T) {
-	e := env(threeUnused())
+	e := env(t, threeUnused())
 	passProbe(e, ProbeKey{"u", "m", "r"})
 	orig := body(catalogue(), "")
 	r := req(orig)

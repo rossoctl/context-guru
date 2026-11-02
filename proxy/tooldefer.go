@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -10,8 +11,10 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -37,6 +40,8 @@ type deferHost struct {
 	mu    sync.Mutex
 	state *deferState
 	gate  *tooldefer.Gate
+	// file is tool deferral's own file, opened with the state when needed; nil when it is not.
+	file *tooldefer.File
 	// asks holds the tenants whose preset picker asked for a probe, until their next request.
 	asks map[string]bool
 }
@@ -80,19 +85,45 @@ func (h *Handler) deferGate() *tooldefer.Gate {
 	return h.defer_.gate
 }
 
-// toolDefer returns the handler's deferral state, building it on first use. The history reads and
-// writes its own table in the dashboard database when there is one, else it is memory only.
+// toolDefer returns the handler's deferral state, building it on first use.
+//
+// The history and the probe verdicts live in the dashboard database when there is one, else in
+// tool deferral's own file (Options.ToolDeferFile), else in memory only. The seed reads the
+// dashboard database, per tenant (SeedTenant).
 func (h *Handler) toolDefer() *deferState {
 	h.defer_.mu.Lock()
 	defer h.defer_.mu.Unlock()
 	if d := h.defer_.state; d != nil {
 		return d
 	}
-	d := &deferState{hist: tooldefer.NewMem(nil)}
+	var dashDB *sql.DB
 	if h.rec != nil {
 		if db := h.rec.DB(); db != nil && db.Path() != "" && db.Path() != ":memory:" {
-			d.hist = tooldefer.NewMem(db.SQL())
+			dashDB = db.SQL()
 		}
+	}
+	// The file is needed when the session store is not durable, or there is no dashboard database
+	// for the history. Without a path, or when it cannot be opened, it stays nil.
+	if (!store.Durable(h.store) || dashDB == nil) && h.opts.ToolDeferPath != "" {
+		ret := h.opts.ToolDeferRetention
+		if ret <= 0 {
+			ret = store.DefaultDiskRetention
+		}
+		if f, err := tooldefer.OpenFile(h.opts.ToolDeferPath, ret); err != nil {
+			slog.Warn("context-guru: tool deferral's file could not be opened", "path", h.opts.ToolDeferPath, "err", err)
+		} else {
+			h.defer_.file = f
+		}
+	}
+	histDB := dashDB
+	if histDB == nil && h.defer_.file != nil {
+		histDB = h.defer_.file.DB
+	}
+	d := &deferState{hist: tooldefer.NewMem(histDB)}
+	d.hist.SeedDB = dashDB
+	d.hist.Retention = h.opts.ToolDeferRetention
+	if d.hist.Retention <= 0 {
+		d.hist.Retention = store.DefaultDiskRetention
 	}
 	d.prober = tooldefer.NewProber()
 	// The verdicts survive a restart with the history, so a thread decided before it keeps its set.
@@ -102,6 +133,45 @@ func (h *Handler) toolDefer() *deferState {
 	return d
 }
 
+// deferFallback is the record store for a tenant whose session store is not durable.
+func (h *Handler) deferFallback() store.Store {
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	if f := h.defer_.file; f != nil {
+		return f.Store
+	}
+	return nil
+}
+
+// deferEnv is the deferral environment for tn.
+func (h *Handler) deferEnv(tn *Tenancy) tooldefer.Env {
+	ds := h.toolDefer()
+	return tooldefer.Env{Store: tn.Store, Fallback: h.deferFallback(), History: ds.hist, Gate: h.deferGate(), Prober: ds.prober}
+}
+
+// noDurableOnce logs, once per process, that ultrahigh defers nothing for want of a durable place.
+var noDurableOnce sync.Once
+
+// purgeToolDefer forgets tenantID's tool deferral state: in memory (history, opt-outs, turn-offs)
+// and in tool deferral's own file. The dashboard purge deletes the dashboard database's rows.
+func (h *Handler) purgeToolDefer(ctx context.Context, tenantID string) (int64, error) {
+	if ds, g := h.deferPeek(); ds != nil || g != nil {
+		if ds != nil {
+			ds.hist.DropTenant(tenantID)
+		}
+		g.DropTenant(tenantID)
+	}
+	h.defer_.mu.Lock()
+	f := h.defer_.file
+	h.defer_.mu.Unlock()
+	if f != nil {
+		f.Store.DropPrefix(store.ToolDeferPrefix + tenantID + ":")
+		f.Store.DropPrefix(store.ToolSearchOffPrefix + tenantID + ":")
+		return dash.PurgeToolDefer(ctx, f.DB, tenantID)
+	}
+	return 0, nil
+}
+
 // deferPeek returns the state and the gate when they exist, without building anything.
 func (h *Handler) deferPeek() (*deferState, *tooldefer.Gate) {
 	h.defer_.mu.Lock()
@@ -109,13 +179,17 @@ func (h *Handler) deferPeek() (*deferState, *tooldefer.Gate) {
 	return h.defer_.state, h.defer_.gate
 }
 
-// closeToolDefer flushes the history, once.
+// closeToolDefer flushes the history, then closes tool deferral's file, once.
 func (h *Handler) closeToolDefer() {
 	h.defer_.mu.Lock()
-	d := h.defer_.state
+	d, f := h.defer_.state, h.defer_.file
+	h.defer_.file = nil
 	h.defer_.mu.Unlock()
 	if d != nil {
 		d.stop()
+	}
+	if f != nil {
+		f.Close()
 	}
 }
 
@@ -167,12 +241,20 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	ds := h.toolDefer()
 	model := gjson.GetBytes(orig, "model").String()
 	project := tooldefer.NormProject(apply.ProjectFor(provider, orig))
+	ds.hist.SeedTenant(tn.ID) // this tenant only, once, in the background
 	// Every request feeds the history, including the ones deferral then declines.
 	ds.hist.Observe(tn.ID, session, project, orig, time.Now().UnixMilli())
 	key := tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path}
-	o := tooldefer.Apply(tooldefer.Env{Store: tn.Store, History: ds.hist, Gate: h.deferGate(), Prober: ds.prober},
-		tooldefer.Req{Tenant: tn.ID, Session: session, Thread: threadID, Project: project, Model: model,
-			Orig: orig, Body: body, Probe: key, Keep: keep})
+	env := h.deferEnv(tn)
+	o := tooldefer.Apply(env, tooldefer.Req{Tenant: tn.ID, Session: session, Thread: threadID, Project: project,
+		Model: model, Orig: orig, Body: body, Probe: key, Keep: keep})
+	if o.Why == "no_durable_store" {
+		noDurableOnce.Do(func() {
+			slog.Warn("context-guru: ultrahigh defers no tools: no durable place for its per-thread record " +
+				"(the session store is memory only and tool deferral's own file could not be opened). " +
+				"A record lost at a restart would move tools inside live cached prefixes.")
+		})
+	}
 	if o.NeedProbe {
 		h.startProbe(r, tn, provider, up, key)
 	}
@@ -189,6 +271,14 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 // startProbe runs a probe in the background, through the host's Dispatcher, with the caller's own
 // endpoint and credential (the same resolution as the incoming model).
 func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.ModelProvider, up upstream, key tooldefer.ProbeKey) {
+	// Only a model the price table knows: the name comes from the client, and a probe spends a
+	// credential. An unknown model is never probed, so it is never deferred.
+	if h.opts.Prices == nil {
+		return
+	}
+	if p, ok := h.opts.Prices.Price(r.Context(), key.Model); !ok || p.Zero() {
+		return
+	}
 	m, ok := h.incomingModel(provider, up, []byte(`{"model":"x"}`), r).(cheapmodel.Anthropic)
 	if !ok {
 		return // no credential the proxy may spend: deferral stays off for this key
@@ -203,20 +293,25 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	})
 }
 
-// deferRetry handles a 400 or 422 to a request we changed. The caller always sends the client's
-// original next, so the client never sees our 400. Deferral is turned off for this tenant and
-// model, and the probe verdict dropped, only when the provider's message names a deferral cause
-// (tooldefer.DeferralCause): any other 400 is not ours to act on, and the retry answers it.
-func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte) {
-	if !tooldefer.DeferralCause(errBody) {
+// deferRetry books a 400 or 422 to a request we changed, after the client's original was sent in
+// its place (so the client never sees our 400). originalOK is that original's outcome.
+//
+// The original succeeding where the deferred body was refused is the proof that deferral caused
+// the refusal, whatever the provider's text: deferral is then turned off for this tenant and model,
+// and the probe verdict dropped. Without that, an unrecognised message would send every later
+// request twice. When the original fails too, the refusal is not ours: deferral stays on.
+// tooldefer.DeferralCause only labels the log line.
+func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte, originalOK bool) {
+	cause := tooldefer.DeferralCause(errBody)
+	if !originalOK {
 		h.deferGate().Retries.Add(1)
-		slog.Info("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", false)
+		slog.Info("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", cause, "original_ok", false)
 		return
 	}
 	h.deferGate().Break(di.tenant, di.model)
 	h.toolDefer().prober.Forget(di.probe)
-	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", true,
-		"note", "the provider refused a request with deferred tools; sent the original and turned deferral off for this model")
+	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", cause, "original_ok", true,
+		"note", "the provider refused a request with deferred tools and accepted the original; turned deferral off for this model")
 }
 
 // deferLedger books one finished request in the net-saving ledger. msg is the response message
@@ -241,10 +336,18 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 	h.toolDefer().ledger.Add(r, p)
 }
 
-// noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent. It
-// writes the gate only: it never builds the deferral state.
-func (h *Handler) noteToolSearch(scoped, raw string) {
-	h.deferGate().NoteToolSearch(scoped, raw)
+// noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent, for
+// tn's session scoped. A session the proxy has seen (its history knows it) gets the flag in its
+// record store at once; any other waits, per tenant, for the session's first request. It never
+// builds the deferral state.
+func (h *Handler) noteToolSearch(tn *Tenancy, scoped, raw string) {
+	ds, _ := h.deferPeek()
+	seen := ds != nil && ds.hist.Has(tn.ID, scoped)
+	var rs store.Store
+	if seen {
+		rs = h.deferEnv(tn).RecordStore()
+	}
+	h.deferGate().NoteToolSearch(tn.ID, scoped, raw, rs, seen && rs != nil)
 }
 
 // deferStats is the /stats block. nil when deferral never ran in this process.
@@ -260,7 +363,7 @@ func (h *Handler) deferStats() any {
 		"rebuilds":  g.Rebuilds.Load(),
 		"requests":  g.Deferred.Load(),
 		// Every 400/422 to a changed request that the proxy answered with the original, whatever
-		// the cause; "turned_off" counts only those that named a deferral cause and turned it off.
+		// the cause; "turned_off" counts only those whose original succeeded, which turned it off.
 		"retries_400":  g.Retries.Load(),
 		"turned_off":   g.TurnedOff.Load(),
 		"probes_pass":  pass,

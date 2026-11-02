@@ -2,16 +2,19 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tooldefer"
@@ -40,13 +43,14 @@ type tdUpstream struct {
 	bodies      [][]byte
 	reject400   bool
 	rejectOther bool // a 400 that does not name a deferral cause
+	rejectAll   bool // a 400 for every request but a probe
 }
 
 func (u *tdUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
 	u.bodies = append(u.bodies, b)
-	reject := u.reject400
+	reject, rejectOther, rejectAll := u.reject400, u.rejectOther, u.rejectAll
 	u.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if probe := gjson.GetBytes(b, "tools.1.name").String(); strings.HasPrefix(probe, "cg_probe_") {
@@ -60,7 +64,12 @@ func (u *tdUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"tools.2.custom.defer_loading: Extra inputs are not permitted"}}`)
 		return
 	}
-	if u.rejectOther && bytes.Contains(b, []byte(`"defer_loading"`)) {
+	if rejectAll {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3: text content blocks must be non-empty"}}`)
+		return
+	}
+	if rejectOther && bytes.Contains(b, []byte(`"defer_loading"`)) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3: text content blocks must be non-empty"}}`)
 		return
@@ -91,7 +100,24 @@ func (u *tdUpstream) count() int {
 	return n
 }
 
+// tdPrices prices every Claude model, so the probe runs (only priced models are probed).
+type tdPrices struct{}
+
+func (tdPrices) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	if !strings.Contains(model, "claude") {
+		return modelinfo.Price{}, false
+	}
+	return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6}, true
+}
+
 func tdHandler(t *testing.T, preset, upstream string) *Handler {
+	t.Helper()
+	return tdHandlerAt(t, preset, upstream, filepath.Join(t.TempDir(), tooldefer.FileName))
+}
+
+// tdHandlerAt is a handler with a memory-only session store (no dashboard) whose tool deferral file
+// is at path. A second handler on the same path is the same proxy after a restart.
+func tdHandlerAt(t *testing.T, preset, upstream, path string) *Handler {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte("preset: " + preset + "\n"))
 	if err != nil {
@@ -102,7 +128,8 @@ func tdHandler(t *testing.T, preset, upstream string) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: upstream})
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: upstream,
+		ToolDeferPath: path, Prices: tdPrices{}})
 	t.Cleanup(h.Close)
 	// Three past sessions that declared Workflow and Monitor and used neither.
 	ds := h.toolDefer()
@@ -231,11 +258,15 @@ func TestToolDeferRetriesOriginalOn400(t *testing.T) {
 }
 
 // A restart mid-thread: a new handler over the same history and a fresh store sends the same bytes.
+// B1, end to end: a proxy with a memory-only session store (no dashboard) restarts mid-thread. The
+// thread's record comes back from tool deferral's own file, so tools and messages[1] are
+// byte-identical, with no history and no probe verdict carried over.
 func TestToolDeferSurvivesRestart(t *testing.T) {
 	up := &tdUpstream{}
 	us := httptest.NewServer(up)
 	defer us.Close()
-	h := tdHandler(t, "ultrahigh", us.URL)
+	path := filepath.Join(t.TempDir(), tooldefer.FileName)
+	h := tdHandlerAt(t, "ultrahigh", us.URL, path)
 	srv := httptest.NewServer(h.Mux())
 	tdPost(t, srv, tdBody())
 	s2 := bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1)
@@ -243,13 +274,17 @@ func TestToolDeferSurvivesRestart(t *testing.T) {
 	turn2 := bytes.Replace(tdBody(`{"role":"assistant","content":"ok"}`, `{"role":"user","content":"next"}`), []byte("sess-1"), []byte("sess-2"), 1)
 	tdPost(t, srv, turn2)
 	before := up.last()
+	if !strings.Contains(tdTools(before), "*") {
+		t.Fatalf("fixture: nothing deferred before the restart: %s", tdTools(before))
+	}
 	srv.Close()
+	h.Close() // the process ends: the file is flushed
 
-	h2 := tdHandler(t, "ultrahigh", us.URL)
-	// A real restart keeps the history and the probe verdict (their tables). Copy what h had.
-	h2.toolDefer().hist.Observe("", "sess-1", "/w", tdBody(), 10)
-	k := tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"}
-	h2.toolDefer().prober.Seed(k, h.toolDefer().prober.Verdict(k), time.Now())
+	cfg, _ := config.LoadBytes([]byte("preset: ultrahigh\n"))
+	agg := metrics.NewAggregator()
+	pipe, _ := cfg.Build(agg)
+	h2 := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL, ToolDeferPath: path, Prices: tdPrices{}})
+	defer h2.Close()
 	srv2 := httptest.NewServer(h2.Mux())
 	defer srv2.Close()
 	tdPost(t, srv2, turn2)
@@ -257,6 +292,30 @@ func TestToolDeferSurvivesRestart(t *testing.T) {
 	if gjson.GetBytes(after, "tools").Raw != gjson.GetBytes(before, "tools").Raw ||
 		gjson.GetBytes(after, "messages.1").Raw != gjson.GetBytes(before, "messages.1").Raw {
 		t.Fatalf("restart moved the set:\nbefore %s\nafter  %s", tdTools(before), tdTools(after))
+	}
+}
+
+// B1: with no durable place (a memory-only session store and no file path), ultrahigh defers nothing.
+func TestToolDeferNoDurablePlaceDefersNothing(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	cfg, _ := config.LoadBytes([]byte("preset: ultrahigh\n"))
+	agg := metrics.NewAggregator()
+	pipe, _ := cfg.Build(agg)
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL, Prices: tdPrices{}})
+	defer h.Close()
+	ds := h.toolDefer()
+	for i, s := range []string{"p1", "p2", "p3"} {
+		ds.hist.Observe("", s, "/w", tdBody(), int64(i+1))
+	}
+	ds.prober.Go = func(fn func()) { fn() }
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tdPost(t, srv, tdBody())
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
+	if got := tdTools(up.last()); strings.Contains(got, "*") {
+		t.Fatalf("deferred with no durable place: %s", got)
 	}
 }
 
@@ -316,7 +375,8 @@ func TestToolDeferStatsRacesFirstRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL})
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL,
+		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: tdPrices{}})
 	defer h.Close()
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -360,15 +420,16 @@ func TestToolDeferSignalDoesNotBuildState(t *testing.T) {
 	pipe, _ := cfg.Build(agg)
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: "http://127.0.0.1:1"})
 	defer h.Close()
-	h.noteToolSearch("s", "false")
-	if st, g := h.deferPeek(); st != nil || g == nil || !g.SearchOff("s") {
+	h.noteToolSearch(&Tenancy{}, "s", "false")
+	if st, g := h.deferPeek(); st != nil || g == nil || !g.TakePending("", "s", store.NewMemory(store.Options{})) {
 		t.Fatalf("state built=%v, gate=%v", st != nil, g != nil)
 	}
 }
 
-// A 400 that does not name a deferral cause is still answered with the original, but deferral stays
-// on for the account and model.
-func TestToolDeferOther400DoesNotTurnDeferralOff(t *testing.T) {
+// H1. The original succeeding after the deferred body got a 400 is the proof, whatever the text:
+// a 400 that names no known cause still turns deferral off when the original then succeeds. When the
+// original fails too, the refusal is not deferral's: deferral stays on.
+func TestToolDeferRetryProofIsTheOriginalSucceeding(t *testing.T) {
 	up := &tdUpstream{}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -384,18 +445,27 @@ func TestToolDeferOther400DoesNotTurnDeferralOff(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || up.count()-before != 2 {
 		t.Fatalf("status %d, rounds %d: %s", resp.StatusCode, up.count()-before, body)
 	}
-	if h.deferGate().Broken("", "claude-sonnet-5-5") {
-		t.Fatal("a 400 with another cause turned deferral off")
+	if !h.deferGate().Broken("", "claude-sonnet-5-5") || h.deferGate().TurnedOff.Load() != 1 {
+		t.Fatal("an unrecognised 400 whose original succeeded did not turn deferral off")
 	}
-	if h.deferGate().Retries.Load() != 1 {
-		t.Fatal("the retry was not counted")
+
+	// A second account: the original fails too, so deferral stays on.
+	up2 := &tdUpstream{}
+	us2 := httptest.NewServer(up2)
+	defer us2.Close()
+	h2 := tdHandler(t, "ultrahigh", us2.URL)
+	srv2 := httptest.NewServer(h2.Mux())
+	defer srv2.Close()
+	tdPost(t, srv2, tdBody())
+	up2.mu.Lock()
+	up2.rejectAll = true
+	up2.mu.Unlock()
+	resp, _ = tdPost(t, srv2, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want the original's 400", resp.StatusCode)
 	}
-	up.mu.Lock()
-	up.rejectOther = false
-	up.mu.Unlock()
-	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-3"), 1))
-	if got := tdTools(up.last()); !strings.Contains(got, "*") {
-		t.Fatalf("deferral off after an unrelated 400: %s", got)
+	if h2.deferGate().Broken("", "claude-sonnet-5-5") || h2.deferGate().Retries.Load() != 1 {
+		t.Fatal("a 400 the original also got turned deferral off")
 	}
 }
 
@@ -477,15 +547,118 @@ func TestToolDeferRoutesObeyTheClientSignalsSwitch(t *testing.T) {
 	if c := post("/tool-defer/probe", `{}`); c != http.StatusNotFound {
 		t.Errorf("/tool-defer/probe with the switch off = %d", c)
 	}
-	if h.deferGate().SearchOff("s1") || h.takeProbeAsk(&Tenancy{}) {
+	if h.deferGate().TakePending("", "s1", store.NewMemory(store.Options{})) || h.takeProbeAsk(&Tenancy{}) {
 		t.Fatal("a route changed state with the switch off")
 	}
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	t.Setenv("CONTEXT_GURU_KEEPALIVE", "off")
-	if c := post("/tool-search", `{"session":"s1","enable_tool_search":"false"}`); c != http.StatusNoContent || !h.deferGate().SearchOff("s1") {
+	if c := post("/tool-search", `{"session":"s1","enable_tool_search":"false"}`); c != http.StatusNoContent ||
+		!h.deferGate().TakePending("", "s1", store.NewMemory(store.Options{})) {
 		t.Errorf("/tool-search with keep-alive off = %d", c)
 	}
 	if c := post("/tool-defer/probe", `{}`); c != http.StatusAccepted || !h.takeProbeAsk(&Tenancy{}) {
 		t.Errorf("/tool-defer/probe with keep-alive off = %d", c)
 	}
+}
+
+// B3 (#861). The purge hook forgets the tenant's tool deferral state: the history in memory, the
+// pending opt-outs, and the records and rows in tool deferral's own file.
+func TestToolDeferPurgeForgetsTheTenant(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tdPost(t, srv, tdBody())
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
+	ds := h.toolDefer()
+	// The single-tenant id is "": give the purge a tenant id by writing a tenant's rows directly.
+	ds.hist.Observe("acct", "acct:s9", "/w", tdBody(), 5)
+	f := h.defer_.file
+	tooldefer.Save(f.Store, "acct:s9", "", tooldefer.Record{Deferred: []string{"Workflow"}})
+	tooldefer.SetSearchOff(f.Store, "acct:s9", true)
+	h.deferGate().NoteToolSearch("acct", "acct:s10", "false", nil, false)
+	f.Store.Put(store.ToolDeferPrefix+"other:s1", []byte(`{"d":[]}`))
+	n, err := h.purgeToolDefer(context.Background(), "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = n
+	if ds.hist.Has("acct", "acct:s9") {
+		t.Error("the history kept the tenant's session")
+	}
+	if _, ok := tooldefer.Load(f.Store, "acct:s9", ""); ok {
+		t.Error("the file kept the tenant's record")
+	}
+	if tooldefer.SearchOff(f.Store, "acct:s9") || h.deferGate().TakePending("acct", "acct:s10", f.Store) {
+		t.Error("an opt-out of the tenant survived the purge")
+	}
+	if _, ok := f.Store.Get(store.ToolDeferPrefix + "other:s1"); !ok {
+		t.Error("the purge took another tenant's record")
+	}
+}
+
+// B4b (#861). A flag for a session the proxy has seen is stored at once; one for a session it has
+// not seen waits for that session's first request, and is applied there.
+func TestToolDeferOptOutForUnseenSessionWaits(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tdPost(t, srv, tdBody()) // the probe
+	post := func(sid string) {
+		r, err := http.Post(srv.URL+"/tool-search", "application/json",
+			strings.NewReader(fmt.Sprintf(`{"session":%q,"enable_tool_search":"false"}`, sid)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+	}
+	// Before its first request (the `claude -p` race): it waits, then applies.
+	post("sess-new")
+	if tooldefer.SearchOff(h.defer_.file.Store, "sess-new") {
+		t.Fatal("a flag for an unseen session was stored at once")
+	}
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-new"), 1))
+	if got := tdTools(up.last()); strings.Contains(got, "*") {
+		t.Fatalf("the pending flag was not applied at the first request: %s", got)
+	}
+	if !tooldefer.SearchOff(h.defer_.file.Store, "sess-new") {
+		t.Fatal("the pending flag did not reach the record store")
+	}
+	// A seen session: stored at once.
+	post("sess-1")
+	if !tooldefer.SearchOff(h.defer_.file.Store, "sess-1") {
+		t.Fatal("a flag for a seen session was not stored")
+	}
+}
+
+// H4 (#861). A model the price table does not know is never probed, so it is never deferred.
+func TestToolDeferUnknownModelIsNotProbed(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	b := bytes.Replace(tdBody(), []byte("claude-sonnet-5-5"), []byte("claude-made-up-9"), 1)
+	h.opts.Prices = tdPricesOnly{"claude-sonnet-5-5"}
+	tdPost(t, srv, b)
+	for _, rb := range up.bodies {
+		if strings.Contains(string(rb), "cg_probe_") {
+			t.Fatal("an unpriced model was probed")
+		}
+	}
+}
+
+type tdPricesOnly struct{ model string }
+
+func (p tdPricesOnly) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	if model != p.model {
+		return modelinfo.Price{}, false
+	}
+	return modelinfo.Price{Input: 3e-6, Output: 15e-6}, true
 }

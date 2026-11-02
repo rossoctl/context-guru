@@ -261,6 +261,10 @@ const (
 	// every storage level. PINNED, because losing it moves tools between loaded and deferred inside
 	// the cached prefix, which rewrites the whole prefix.
 	ToolDeferPrefix = "cg:tdf:"
+	// ToolSearchOffPrefix is a session's tool search opt-out (#485): the user set ENABLE_TOOL_SEARCH
+	// to an off value, so new threads of that session are not deferred. A flag only (metadata),
+	// pinned for the same reason as ToolDeferPrefix: losing it would change a later decision.
+	ToolSearchOffPrefix = "cg:tso:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
@@ -268,7 +272,7 @@ const (
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
 	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
-	ToolDeferPrefix}
+	ToolDeferPrefix, ToolSearchOffPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
@@ -667,6 +671,25 @@ func NewMemory(o Options) *Memory {
 }
 
 func (*Memory) Persists() bool { return true }
+
+// Durable reports whether this store's state survives a restart: a disk copy is attached.
+func (m *Memory) Durable() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.disk != nil
+}
+
+// Durable reports whether s keeps its state across a restart. Persists means "keeps state at all";
+// a plain Memory does, but only until the process ends. A Store that does not say is not durable.
+//
+// An optional interface rather than a Store method, so a host's own Store keeps compiling.
+func Durable(s Store) bool {
+	d, ok := s.(interface{ Durable() bool })
+	return ok && d.Durable()
+}
 
 // evictableEntriesForTest counts entries the LRU may take. For TESTS only: the evictable floor
 // is a property of the whole cache rather than of any one write, so asserting it needs the

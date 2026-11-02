@@ -46,16 +46,20 @@ type histSession struct {
 type Mem struct {
 	mu      sync.Mutex
 	tenants map[string][]*histSession // newest first
-	ready   map[string]bool           // tenants loaded from the database (or known empty)
+	seeded  map[string]bool           // tenants whose seed from the dashboard ran (or started)
 	db      *sql.DB
-	loaded  bool
-	now     func() time.Time
+	// SeedDB is the dashboard database to seed a tenant's history from (SeedTenant). nil: no seed.
+	SeedDB *sql.DB
+	// Retention bounds a row's age: the flush deletes sessions idle longer. 0: no age bound.
+	Retention time.Duration
+	loaded    bool
+	now       func() time.Time
 }
 
 // NewMem returns an empty history. db may be nil: the history then lives in memory only, and a
 // restart starts it from zero (so nothing is deferred until 3 new sessions).
 func NewMem(db *sql.DB) *Mem {
-	return &Mem{tenants: map[string][]*histSession{}, ready: map[string]bool{}, db: db, now: time.Now}
+	return &Mem{tenants: map[string][]*histSession{}, seeded: map[string]bool{}, db: db, now: time.Now}
 }
 
 // Schema creates the history table. Called by Open.
@@ -226,17 +230,6 @@ func (m *Mem) load() error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(byKey) == 0 {
-		// A new table: seed it once from the dashboard's own inventory tables, so a user who picks
-		// ultrahigh has their recent sessions at once rather than after 3 more. Best effort: an
-		// older dashboard database without these tables simply seeds nothing.
-		if err := seed(ctx, m.db, byKey); err != nil {
-			slog.Debug("tooldefer: history not seeded from the dashboard", "err", err)
-		}
-		for _, s := range byKey {
-			s.dirty = true
-		}
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, s := range byKey {
@@ -252,11 +245,58 @@ func (m *Mem) load() error {
 	return nil
 }
 
-// seed reads the newest MaxSessions sessions per tenant from tool_declarations and tool_uses.
-// Kinds tool and mcp_tool only: a skill is not a tool this package defers.
-func seed(ctx context.Context, db *sql.DB, byKey map[[2]string]*histSession) error {
+// SeedTenant copies tenant's own sessions from the dashboard's inventory tables into its history,
+// once per process and only for this tenant, so a user who picks ultrahigh has their recent sessions
+// at once rather than after 3 more. Called at the tenant's first deferral request; the copy runs in
+// the background. Best effort: an older dashboard database simply seeds nothing. Sessions the
+// history already holds win (they are newer).
+func (m *Mem) SeedTenant(tenant string) {
+	if m == nil || m.SeedDB == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.seeded[tenant] {
+		m.mu.Unlock()
+		return
+	}
+	m.seeded[tenant] = true
+	m.mu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		byKey := map[[2]string]*histSession{}
+		if err := seed(ctx, m.SeedDB, tenant, byKey); err != nil {
+			slog.Debug("tooldefer: history not seeded from the dashboard", "err", err)
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for k, s := range byKey {
+			if k[0] == tenant && m.find(tenant, s.id) == nil { // this tenant's rows only
+				s.dirty = true
+				m.tenants[tenant] = append(m.tenants[tenant], s)
+			}
+		}
+		m.sortLocked(tenant)
+	}()
+}
+
+// DropTenant forgets tenant's history in memory (a purge; the rows are the purge's to delete).
+func (m *Mem) DropTenant(tenant string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tenants, tenant)
+	delete(m.seeded, tenant)
+}
+
+// seed reads tenant's newest sessions from tool_declarations and tool_uses. Kinds tool and
+// mcp_tool only: a skill is not a tool this package defers.
+func seed(ctx context.Context, db *sql.DB, tenant string, byKey map[[2]string]*histSession) error {
 	rows, err := db.QueryContext(ctx, `SELECT tenant_id, session_id, name, MAX(ts) FROM tool_declarations
-		WHERE kind IN ('tool','mcp_tool') AND name <> '' GROUP BY tenant_id, session_id, name`)
+		WHERE tenant_id = ? AND kind IN ('tool','mcp_tool') AND name <> '' GROUP BY tenant_id, session_id, name`, tenant)
 	if err != nil {
 		return err
 	}
@@ -282,7 +322,7 @@ func seed(ctx context.Context, db *sql.DB, byKey map[[2]string]*histSession) err
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	urows, err := db.QueryContext(ctx, `SELECT tenant_id, session_id, project, name FROM tool_uses WHERE name <> ''`)
+	urows, err := db.QueryContext(ctx, `SELECT tenant_id, session_id, project, name FROM tool_uses WHERE tenant_id = ? AND name <> ''`, tenant)
 	if err != nil {
 		return err
 	}
@@ -300,6 +340,16 @@ func seed(ctx context.Context, db *sql.DB, byKey map[[2]string]*histSession) err
 		}
 	}
 	return urows.Err()
+}
+
+// Has reports whether the history has seen tenant's session.
+func (m *Mem) Has(tenant, session string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.find(tenant, session) != nil
 }
 
 func (m *Mem) find(tenant, sid string) *histSession {
@@ -410,6 +460,19 @@ func (m *Mem) flush() {
 		last                       int64
 	}
 	m.mu.Lock()
+	if m.Retention > 0 {
+		// Sessions idle longer than the retention go from memory too (the rows go below).
+		cutoff := m.now().Add(-m.Retention).UnixMilli()
+		for tenant, ss := range m.tenants {
+			kept := ss[:0]
+			for _, s := range ss {
+				if s.last >= cutoff {
+					kept = append(kept, s)
+				}
+			}
+			m.tenants[tenant] = kept
+		}
+	}
 	var rows []row
 	keep := map[string][]string{}
 	for tenant, ss := range m.tenants {
@@ -454,6 +517,12 @@ func (m *Mem) flush() {
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.tenant, r.sid, r.project, r.tool, r.decl, r.used, r.last); err != nil {
 			slog.Debug("tooldefer: history flush", "err", err)
+			return
+		}
+	}
+	if m.Retention > 0 {
+		cutoff := m.now().Add(-m.Retention).UnixMilli()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tool_defer_history WHERE last_ts < ?`, cutoff); err != nil {
 			return
 		}
 	}

@@ -11,10 +11,27 @@ import (
 // Env is the state one host keeps for deferral. One per process (or per tenant, as the host
 // likes); every field is safe for concurrent use.
 type Env struct {
-	Store   store.Store
-	History History
-	Gate    *Gate
-	Prober  *Prober
+	// Store is the session store. Records live there when it is durable (store.Durable).
+	Store store.Store
+	// Fallback holds the records when Store is not durable: tool deferral's own file (File.Store).
+	// nil means there is none.
+	Fallback store.Store
+	History  History
+	Gate     *Gate
+	Prober   *Prober
+}
+
+// RecordStore is where this Env keeps its records: a durable session store, else the durable
+// fallback, else nil (nothing is deferred: a record that dies with the process would move tools
+// inside live cached prefixes on the next start).
+func (e Env) RecordStore() store.Store {
+	switch {
+	case store.Durable(e.Store):
+		return e.Store
+	case store.Durable(e.Fallback):
+		return e.Fallback
+	}
+	return nil
 }
 
 // Req is one request, as the host sees it.
@@ -52,9 +69,9 @@ type Outcome struct {
 
 // Apply defers the thread's set on one request. Fail open: on any problem Body is the input.
 //
-// The off switches are read on every request: the account opt-out, the user's literal
-// ENABLE_TOOL_SEARCH=false, and a 400 turn-off for this tenant and model. Each one sends the
-// original request. The probe verdict and the history only gate a NEW decision: once a thread has
+// The off switches are read on every request: the account opt-out and a 400 turn-off for this
+// tenant and model. Each one sends the original request. The user's ENABLE_TOOL_SEARCH opt-out
+// blocks new decisions only. The probe verdict and the history only gate a NEW decision: once a thread has
 // a stored set, the set is applied as stored, so a restart that loses the in-memory probe cache
 // cannot move a tool.
 func Apply(env Env, r Req) (o Outcome) {
@@ -71,18 +88,15 @@ func Apply(env Env, r Req) (o Outcome) {
 	case r.Session == "":
 		o.Why = "no_session"
 		return o
-	case env.Store == nil || !env.Store.Persists():
-		// Storage off: no thread-fixed set, so nothing is deferred.
-		o.Why = "store_off"
+	case env.RecordStore() == nil:
+		// No durable place for the record: nothing is deferred (see RecordStore).
+		o.Why = "no_durable_store"
 		return o
 	case r.AccountOff:
 		o.Why = "account_off"
 		return o
 	case !AnthropicModel(r.Model):
 		o.Why = "not_anthropic"
-		return o
-	case env.Gate.SearchOff(r.Session):
-		o.Why = "tool_search_false"
 		return o
 	case env.Gate.Broken(r.Tenant, r.Model):
 		o.Why = "turned_off_after_400"
@@ -91,7 +105,20 @@ func Apply(env Env, r Req) (o Outcome) {
 		o.Why = "no_tools"
 		return o
 	}
-	rec, ok := Load(env.Store, r.Session, r.Thread)
+	rs := env.RecordStore()
+	if l, isL := rs.(interface{ LoadSession(string) }); isL {
+		l.LoadSession(r.Session) // the fallback file's rows for this session; a no-op once loaded
+	}
+	searchOff := SearchOff(rs, r.Session) || env.Gate.TakePending(r.Tenant, r.Session, rs)
+	rec, ok := Load(rs, r.Session, r.Thread)
+	if !ok && searchOff {
+		// The user's tool search opt-out. It blocks a NEW decision only: a thread that already has a
+		// record keeps it (below), so a flag that lands after the thread's first request, as with
+		// `claude -p`, never moves a tool inside the thread's cached prefix.
+		o.Why = "tool_search_false"
+		Save(rs, r.Session, r.Thread, Record{})
+		return o
+	}
 	if !ok {
 		v := Pass
 		if env.Prober != nil {
@@ -102,8 +129,11 @@ func Apply(env Env, r Req) (o Outcome) {
 		}
 		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep}
 		switch {
-		case !HasAssistantTurn(r.Orig):
+		case !HasAssistantTurn(r.Orig) || !hasSearchTurn(r.Orig):
 			// The thread's first request: it writes the cache anyway, so this is when to decide.
+			// A thread with assistant turns but no record and no search of ours (a fork, or a resume
+			// under a new session id) is a first request too: the records are durable, so a missing
+			// one means a new thread, and only our own search turn proves an earlier set.
 			if v != Pass {
 				o.Why = "probe_" + v.String()
 				rec = Record{} // decided: nothing, for this whole thread
@@ -111,17 +141,13 @@ func Apply(env Env, r Req) (o Outcome) {
 				rec = Record{Deferred: Decide(env.History, in)}
 			}
 			o.Decided = true
-		case v == Pass || hasSearchTurn(r.Orig):
-			// A store miss mid-thread (a restart with no disk copy): rebuild.
+		default:
+			// A record lost mid-thread (evicted at the pin cap) in a thread our search has loaded
+			// from: rebuild. Our search could only load a deferred tool, so the provider supported it.
 			rec = Record{Deferred: Rebuild(env.History, in)}
 			o.Decided, o.Rebuilt = true, true
-		default:
-			// Mid-thread, no record and no proof the provider supports deferral: send the original.
-			o.Why = "probe_" + v.String()
-			rec = Record{}
-			o.Decided = true
 		}
-		Save(env.Store, r.Session, r.Thread, rec)
+		Save(rs, r.Session, r.Thread, rec)
 		if env.Gate != nil {
 			env.Gate.Decisions.Add(1)
 			if o.Rebuilt {

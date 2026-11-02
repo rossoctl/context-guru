@@ -62,8 +62,15 @@ func TestProbeVerdicts(t *testing.T) {
 		"400 unknown variant": {&fakeD{status: 400, resp: func([]byte) []byte { return []byte(`{"error":{}}`) }}, Fail, false},
 		"429 is no verdict":   {&fakeD{status: 429, resp: func([]byte) []byte { return nil }}, Unknown, true},
 		"401 is no verdict":   {&fakeD{status: 401, resp: func([]byte) []byte { return nil }}, Unknown, true},
-		"403 is no verdict":   {&fakeD{status: 403, resp: func([]byte) []byte { return nil }}, Unknown, true},
-		"transport error":     {&fakeD{err: errors.New("boom")}, Unknown, true},
+		"404 is no verdict":   {&fakeD{status: 404, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"408 is no verdict":   {&fakeD{status: 408, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"409 is no verdict":   {&fakeD{status: 409, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"413 is no verdict":   {&fakeD{status: 413, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"pause_turn is no verdict": {&fakeD{status: 200, resp: func([]byte) []byte {
+			return []byte(`{"stop_reason":"pause_turn","content":[{"type":"server_tool_use","id":"s","name":"tool_search_tool_bm25","input":{}}]}`)
+		}}, Unknown, true},
+		"403 is no verdict": {&fakeD{status: 403, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"transport error":   {&fakeD{err: errors.New("boom")}, Unknown, true},
 	} {
 		v, err := RunProbe(context.Background(), tc.d, "r", "", "claude-sonnet-5-5")
 		if v != tc.want || (err != nil) != tc.err {
@@ -279,28 +286,69 @@ func TestHistoryPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestHistorySeedsFromDashboardTables(t *testing.T) {
+// B4a. The seed copies one tenant's own sessions, at that tenant's first deferral request, and no
+// other tenant's.
+func TestHistorySeedsOneTenantFromDashboardTables(t *testing.T) {
 	db := openDB(t)
 	for _, q := range []string{
 		`CREATE TABLE tool_declarations (tenant_id TEXT, session_id TEXT, kind TEXT, name TEXT, ts INTEGER)`,
 		`CREATE TABLE tool_uses (tenant_id TEXT, session_id TEXT, project TEXT, name TEXT)`,
 		`INSERT INTO tool_declarations VALUES ('t','a','tool','Workflow',1),('t','b','tool','Workflow',2),('t','c','tool','Workflow',3),('t','c','skill','x',3)`,
+		`INSERT INTO tool_declarations VALUES ('other','o1','tool','Workflow',1),('other','o2','tool','Workflow',2)`,
 		`INSERT INTO tool_uses VALUES ('t','b','/w/.claude/worktrees/z','Bash')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
 		}
 	}
-	m := NewMem(db)
+	m := NewMem(nil)
+	m.SeedDB = db
 	stop := m.Open(time.Hour, nil)
 	defer stop()
 	waitReady(t, m)
-	got := m.UserSessions("t", "", 3)
+	if got := m.UserSessions("t", "", 3); len(got) != 0 {
+		t.Fatalf("seeded before the tenant asked: %d", len(got))
+	}
+	m.SeedTenant("t")
+	var got []Session
+	for i := 0; i < 500 && len(got) < 3; i++ {
+		got = m.UserSessions("t", "", 3)
+		time.Sleep(5 * time.Millisecond)
+	}
 	if len(got) != 3 || !got[0].Declared["Workflow"] || got[0].Declared["x"] {
 		t.Fatalf("seed: %+v", got)
 	}
+	time.Sleep(50 * time.Millisecond) // let the seed finish copying, so a leak would show
+	if n := len(m.UserSessions("t", "", 10)); n != 3 {
+		t.Fatalf("tenant t holds %d sessions, want its own 3", n)
+	}
 	if !m.ProjectUsed("t", "/w", "Bash", "", 10) {
 		t.Fatal("seeded use lost its (normalized) project")
+	}
+	if n := len(m.UserSessions("other", "", 10)); n != 0 {
+		t.Fatalf("another tenant was seeded: %d sessions", n)
+	}
+}
+
+// B3. Rows older than the retention are deleted, in memory and on disk.
+func TestHistoryRetentionPrunes(t *testing.T) {
+	db := openDB(t)
+	m := NewMem(db)
+	now := time.Unix(100000, 0)
+	m.now = func() time.Time { return now }
+	m.Retention = time.Hour
+	stop := m.Open(time.Hour, nil)
+	waitReady(t, m)
+	m.Observe("t", "old", "/w", body(catalogue(), ""), now.Add(-2*time.Hour).UnixMilli())
+	m.Observe("t", "new", "/w", body(catalogue(), ""), now.UnixMilli())
+	stop() // flushes
+	if got := m.UserSessions("t", "", 10); len(got) != 1 {
+		t.Fatalf("%d sessions in memory after the prune", len(got))
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_defer_history`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("%d sessions on disk after the prune", n)
 	}
 }
 
@@ -392,7 +440,7 @@ func TestHistoryUserSessionsReturnsCopies(t *testing.T) {
 // A Fail verdict is re-probed once it is older than ProbeTTL: one bad answer must not keep
 // deferral off forever (it is also kept across restarts).
 func TestStaleFailVerdictIsReprobed(t *testing.T) {
-	e := env(threeUnused())
+	e := env(t, threeUnused())
 	k := ProbeKey{"u", "m", "r"}
 	now := time.Unix(5000, 0)
 	e.Prober.now = func() time.Time { return now }
@@ -468,6 +516,109 @@ func TestHistoryMCPServerUseCarriesOver(t *testing.T) {
 	m.Observe("t", "g", "/w", body(tools, ""), 5) // now c, e, g: the use in b is out of the window
 	if got := Decide(m, Input{Tenant: "t", Session: "f", Body: body(tools, "")}); len(got) != 30 {
 		t.Fatalf("after 3 newer unused sessions: %d deferred, want 30", len(got))
+	}
+}
+
+// H2. The probe leaves room for a preamble, and a Fail holds FailTTL (15 minutes), not a day.
+func TestProbeFailIsShortLived(t *testing.T) {
+	if n := gjson.GetBytes(ProbeBody("claude-x", "n"), "max_tokens").Int(); n != 1000 {
+		t.Fatalf("probe max_tokens = %d", n)
+	}
+	p := NewProber()
+	p.Go = func(fn func()) { fn() }
+	now := time.Unix(1000, 0)
+	p.now = func() time.Time { return now }
+	k := ProbeKey{"u", "m", "r"}
+	calls := 0
+	p.Ensure(k, func(context.Context) (Verdict, error) { calls++; return Fail, nil })
+	now = now.Add(FailTTL - time.Minute)
+	if p.Stale(k) {
+		t.Fatal("a Fail went stale early")
+	}
+	p.Ensure(k, func(context.Context) (Verdict, error) { calls++; return Pass, nil })
+	if calls != 1 {
+		t.Fatal("a fresh Fail was probed again")
+	}
+	now = now.Add(2 * time.Minute)
+	if !p.Stale(k) {
+		t.Fatal("a Fail older than FailTTL is not stale")
+	}
+	p.Ensure(k, func(context.Context) (Verdict, error) { calls++; return Pass, nil })
+	if calls != 2 || p.Verdict(k) != Pass {
+		t.Fatalf("calls=%d verdict=%v", calls, p.Verdict(k))
+	}
+	// A Pass still holds the full ProbeTTL.
+	now = now.Add(FailTTL + time.Hour)
+	if p.Stale(k) {
+		t.Fatal("a Pass went stale after FailTTL")
+	}
+}
+
+// B2. A probe's verdict is written to the database AFTER p.mu is released: Verdict and Stale run on
+// the request path and must not wait on a slow write.
+func TestEnsurePersistsOutsideTheLock(t *testing.T) {
+	p := NewProber()
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	p.Persist = func(ProbeKey, Verdict, time.Time) { close(entered); <-block }
+	k := ProbeKey{"u", "m", "r"}
+	p.Ensure(k, func(context.Context) (Verdict, error) { return Pass, nil }) // runs on its own goroutine
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Persist never ran")
+	}
+	done := make(chan Verdict, 1)
+	go func() { done <- p.Verdict(k); p.Stale(k) }()
+	select {
+	case v := <-done:
+		if v != Pass {
+			t.Fatalf("verdict %v", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Verdict waited on Persist")
+	}
+	close(block)
+}
+
+// H4. At most maxInFlight probes run at once, and the prober keeps at most maxKeys keys.
+func TestProberCaps(t *testing.T) {
+	p := NewProber()
+	var held []func()
+	p.Go = func(fn func()) { held = append(held, fn) }
+	for i := 0; i < maxInFlight+3; i++ {
+		p.Ensure(ProbeKey{"u", "m" + itoa(i), "r"}, func(context.Context) (Verdict, error) { return Pass, nil })
+	}
+	if len(held) != maxInFlight {
+		t.Fatalf("%d probes started, want %d", len(held), maxInFlight)
+	}
+	for _, fn := range held {
+		fn()
+	}
+	p.Go = func(fn func()) { fn() }
+	for i := 0; i < maxKeys+20; i++ {
+		p.Ensure(ProbeKey{"u2", "m" + itoa(i), "r"}, func(context.Context) (Verdict, error) { return Pass, nil })
+		p.Seed(ProbeKey{"u3", "m" + itoa(i), "r"}, Pass, time.Now())
+	}
+	p.mu.Lock()
+	n := len(p.m)
+	p.mu.Unlock()
+	if n > maxKeys {
+		t.Fatalf("%d keys, cap %d", n, maxKeys)
+	}
+}
+
+// A probe in flight when Forget runs does not write its answer back.
+func TestForgetVoidsAProbeInFlight(t *testing.T) {
+	p := NewProber()
+	var held []func()
+	p.Go = func(fn func()) { held = append(held, fn) }
+	k := ProbeKey{"u", "m", "r"}
+	p.Ensure(k, func(context.Context) (Verdict, error) { return Pass, nil })
+	p.Forget(k)
+	held[0]() // the probe finishes now, after the Forget
+	if p.Verdict(k) != Unknown {
+		t.Fatal("a probe that finished after Forget wrote its verdict back")
 	}
 }
 

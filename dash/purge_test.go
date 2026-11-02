@@ -177,3 +177,56 @@ func TestForeignKeyCascadeIsEnabledInMemory(t *testing.T) {
 			"outlived their request", comps, content)
 	}
 }
+
+// B3 (#861). The purge deletes tool deferral's rows for the tenant: its tool history, and its
+// thread records and opt-outs in session_state. Another tenant's rows stay, and TenantHasRows
+// counts the new tables.
+func TestPurgeTenantClearsToolDeferral(t *testing.T) {
+	rec, _ := archiveRecorder(t, Options{})
+	db := rec.db.sql
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS tool_defer_history (tenant_id TEXT, session_id TEXT, project TEXT, tool TEXT,
+		  declared INTEGER, used INTEGER, last_ts INTEGER, PRIMARY KEY (tenant_id, session_id, tool))`,
+		`CREATE TABLE IF NOT EXISTS session_state (key BLOB PRIMARY KEY, val BLOB NOT NULL, updated INTEGER NOT NULL) WITHOUT ROWID`,
+		`INSERT INTO tool_defer_history VALUES ('t1','t1:s','/secret/project','Workflow',1,0,1),('t2','t2:s','/p','Workflow',1,0,1)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []string{"cg:tdf:t1:s", "cg:tdf:t1:s:abcd", "cg:tso:t1:s", "cg:tdf:t2:s", "cg:tdf:t10:s", "cg:sum:t1:s"} {
+		if _, err := db.Exec(`INSERT INTO session_state VALUES (?, ?, 1)`, []byte(k), []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if has, _ := rec.db.TenantHasRows("t1"); !has {
+		t.Fatal("TenantHasRows does not count tool deferral's rows")
+	}
+	res, err := rec.PurgeTenant(context.Background(), "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ToolDefer != 4 {
+		t.Errorf("purged %d tool deferral rows, want 4 (1 history, 3 session_state): %+v", res.ToolDefer, res)
+	}
+	if has, err := rec.db.TenantHasRows("t1"); err != nil || has {
+		t.Errorf("t1 still has rows (has=%v err=%v)", has, err)
+	}
+	var left []string
+	rows, _ := db.Query(`SELECT key FROM session_state ORDER BY key`)
+	for rows.Next() {
+		var k []byte
+		rows.Scan(&k)
+		left = append(left, string(k))
+	}
+	rows.Close()
+	// cg:sum: is not tool deferral's (the session-state purge is another change); t10 is another tenant.
+	if strings.Join(left, ",") != "cg:sum:t1:s,cg:tdf:t10:s,cg:tdf:t2:s" {
+		t.Errorf("session_state after the purge = %v", left)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_defer_history WHERE tenant_id = 't2'`).Scan(&n)
+	if n != 1 {
+		t.Error("the purge took another tenant's history")
+	}
+}

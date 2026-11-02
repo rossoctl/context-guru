@@ -249,7 +249,7 @@ func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad tool-search signal", http.StatusBadRequest)
 		return
 	}
-	h.noteToolSearch(scoped, in.EnableToolSearch)
+	h.noteToolSearch(tn, scoped, in.EnableToolSearch)
 	w.WriteHeader(http.StatusNoContent)
 }
 

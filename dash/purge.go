@@ -2,9 +2,12 @@ package dash
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/rossoctl/context-guru/store"
 )
 
 // Erasing one tenant's observability data.
@@ -48,11 +51,14 @@ type PurgeResult struct {
 	ObjectErrors []string `json:"object_errors,omitempty"`
 	// SpendRows is monthly rollup rows removed.
 	SpendRows int64 `json:"spend_rows"`
+	// ToolDefer is tool deferral's rows removed (#485): the tenant's tool history and its per-thread
+	// records and opt-outs in the session state.
+	ToolDefer int64 `json:"tool_defer"`
 }
 
 // Removed reports whether anything at all was deleted.
 func (p PurgeResult) Removed() bool {
-	return p.Requests+p.Components+p.Content+p.Archives+p.Objects+p.SpendRows > 0
+	return p.Requests+p.Components+p.Content+p.Archives+p.Objects+p.SpendRows+p.ToolDefer > 0
 }
 
 // ErrPurgeNoTenant refuses a purge with no tenant named.
@@ -142,6 +148,15 @@ func (r *Recorder) PurgeTenant(ctx context.Context, tenantID string) (PurgeResul
 		*step.into += n
 	}
 
+	// 3. Tool deferral (#485). Its tables exist only once a tenant used ultrahigh, so a missing table
+	// is no error. The probe verdicts are not purged: they describe an endpoint and a model, not a
+	// tenant.
+	n, err := PurgeToolDefer(ctx, r.db.sql, tenantID)
+	if err != nil {
+		return out, err
+	}
+	out.ToolDefer += n
+
 	// Hand the freed pages back. A purge is the one deletion big enough to be worth
 	// reclaiming immediately — it is usually run because something has to go away, and
 	// leaving the bytes in the file makes "purged" look untrue to anyone watching the disk.
@@ -157,6 +172,50 @@ func (r *Recorder) PurgeTenant(ctx context.Context, tenantID string) (PurgeResul
 	return out, nil
 }
 
+// PurgeToolDefer deletes tool deferral's rows for tenant from db: the tool history, and the
+// tenant's thread records and opt-outs in session_state (their keys start with the tenant-scoped
+// session id, "<tenant>:"). A table that does not exist is skipped. Exported for the host, which
+// runs it on tool deferral's own file too.
+func PurgeToolDefer(ctx context.Context, db *sql.DB, tenantID string) (int64, error) {
+	if tenantID == "" {
+		return 0, ErrPurgeNoTenant
+	}
+	var total int64
+	for _, q := range toolDeferPurge(tenantID) {
+		if !tableExists(ctx, db, q.table) {
+			continue
+		}
+		res, err := db.ExecContext(ctx, q.sql, q.args...)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+type tdQuery struct {
+	table, sql string
+	args       []any
+}
+
+func toolDeferPurge(tenantID string) []tdQuery {
+	var out []tdQuery
+	out = append(out, tdQuery{"tool_defer_history", `DELETE FROM tool_defer_history WHERE tenant_id = ?`, []any{tenantID}})
+	for _, p := range []string{store.ToolDeferPrefix, store.ToolSearchOffPrefix} {
+		lo := p + tenantID + ":"
+		hi := lo[:len(lo)-1] + ";" // ':' + 1
+		out = append(out, tdQuery{"session_state", `DELETE FROM session_state WHERE key >= ? AND key < ?`, []any{[]byte(lo), []byte(hi)}})
+	}
+	return out
+}
+
+func tableExists(ctx context.Context, db *sql.DB, name string) bool {
+	var n int
+	return db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n) == nil && n > 0
+}
+
 // TenantHasRows reports whether any local row still names this tenant. Used by the
 // deletion path's own check, and by its test: "no orphans left" is the property, and a
 // caller that cannot ask cannot assert it.
@@ -167,7 +226,23 @@ func (d *DB) TenantHasRows(tenantID string) (bool, error) {
 	  (SELECT COUNT(*) FROM archived_sessions WHERE tenant_id = ?) +
 	  (SELECT COUNT(*) FROM tenant_spend WHERE tenant_id = ?)`,
 		tenantID, tenantID, tenantID).Scan(&n)
-	return n > 0, err
+	if err != nil || n > 0 {
+		return n > 0, err
+	}
+	// Tool deferral's rows, in the tables that exist.
+	for _, q := range toolDeferPurge(tenantID) {
+		if !tableExists(d.readCtx(), d.sql, q.table) {
+			continue
+		}
+		count := "SELECT COUNT(*) FROM" + q.sql[len("DELETE FROM"):]
+		if err := d.sql.QueryRowContext(d.readCtx(), count, q.args...).Scan(&n); err != nil {
+			return false, err
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // OrphanRows counts child rows whose request is gone — component rows and content rows

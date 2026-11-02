@@ -39,6 +39,26 @@ const ProbeTTL = 24 * time.Hour
 // probeFailTTL is how long a FAILED probe (a transport error, not a verdict) waits before a retry.
 const probeFailTTL = 10 * time.Minute
 
+// FailTTL is how long a Fail verdict holds before a re-probe. Short, because one bad answer (the
+// model only wrote text, a gateway hiccup) must not keep deferral off for a day; a Pass holds
+// ProbeTTL.
+const FailTTL = 15 * time.Minute
+
+// Bounds on the prober: how many probes may be in flight at once, and how many keys it keeps. Past
+// either, Ensure starts nothing (the request is sent undeferred, as without a verdict).
+const (
+	maxInFlight = 4
+	maxKeys     = 256
+)
+
+// ttl is how long verdict v holds.
+func ttl(v Verdict) time.Duration {
+	if v == Fail {
+		return FailTTL
+	}
+	return ProbeTTL
+}
+
 // Verdict is a probe's result.
 type Verdict int
 
@@ -68,14 +88,17 @@ type probeEntry struct {
 	at      time.Time
 	running bool
 	retryAt time.Time
+	gen     uint64 // Forget's generation when the probe started: a later Forget voids its answer
 }
 
 // Prober runs and caches probes. Safe for concurrent use.
 type Prober struct {
-	mu   sync.Mutex
-	m    map[ProbeKey]*probeEntry
-	now  func() time.Time
-	runs map[Verdict]int64
+	mu       sync.Mutex
+	m        map[ProbeKey]*probeEntry
+	now      func() time.Time
+	runs     map[Verdict]int64
+	inFlight int
+	gen      uint64
 	// Go starts fn in the background. Tests replace it to run inline.
 	Go func(fn func())
 	// Persist, when set, is told every verdict, so it survives a restart (see Mem.SaveVerdict).
@@ -92,7 +115,7 @@ func (p *Prober) Seed(k ProbeKey, v Verdict, at time.Time) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e := p.m[k]; e == nil || e.v == Unknown {
+	if e := p.m[k]; (e == nil && len(p.m) < maxKeys) || (e != nil && e.v == Unknown) {
 		p.m[k] = &probeEntry{v: v, at: at}
 	}
 }
@@ -120,7 +143,7 @@ func (p *Prober) Stale(k ProbeKey) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e := p.m[k]
-	return e != nil && e.v != Unknown && p.now().Sub(e.at) > ProbeTTL
+	return e != nil && e.v != Unknown && p.now().Sub(e.at) > ttl(e.v)
 }
 
 // Ensure starts a probe for k in the background when none is fresh and none is running. send is
@@ -129,32 +152,44 @@ func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, err
 	p.mu.Lock()
 	e := p.m[k]
 	if e == nil {
+		if len(p.m) >= maxKeys {
+			p.mu.Unlock()
+			return
+		}
 		e = &probeEntry{}
 		p.m[k] = e
 	}
 	now := p.now()
-	fresh := e.v != Unknown && now.Sub(e.at) <= ProbeTTL
-	if fresh || e.running || now.Before(e.retryAt) {
+	fresh := e.v != Unknown && now.Sub(e.at) <= ttl(e.v)
+	if fresh || e.running || now.Before(e.retryAt) || p.inFlight >= maxInFlight {
 		p.mu.Unlock()
 		return
 	}
-	e.running = true
+	e.running, e.gen = true, p.gen
+	p.inFlight++
 	p.mu.Unlock()
 	p.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		v, err := send(ctx)
 		p.mu.Lock()
-		defer p.mu.Unlock()
+		p.inFlight--
 		e.running = false
-		if err != nil {
-			e.retryAt = p.now().Add(probeFailTTL)
+		if err != nil || e.gen != p.gen || p.m[k] != e {
+			// No verdict, or Forget ran while the probe was in flight: its answer is void.
+			if err != nil {
+				e.retryAt = p.now().Add(probeFailTTL)
+			}
+			p.mu.Unlock()
 			return
 		}
 		e.v, e.at = v, p.now()
 		p.runs[v]++
-		if p.Persist != nil {
-			p.Persist(k, v, e.at)
+		at, persist := e.at, p.Persist
+		// The database write runs after the unlock: Verdict and Stale take p.mu on the request path.
+		p.mu.Unlock()
+		if persist != nil {
+			persist(k, v, at)
 		}
 	})
 }
@@ -168,6 +203,7 @@ func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, err
 func (p *Prober) Forget(k ProbeKey) {
 	p.mu.Lock()
 	delete(p.m, k)
+	p.gen++
 	now := p.now()
 	p.mu.Unlock()
 	if persist := p.Persist; persist != nil {
@@ -192,7 +228,7 @@ func Nonce() string {
 // ProbeBody is the probe request for model, with nonce.
 func ProbeBody(model, nonce string) []byte {
 	tool := "cg_probe_" + nonce
-	body := []byte(`{"max_tokens":200,"tools":[` +
+	body := []byte(`{"max_tokens":1000,"tools":[` +
 		`{"name":"cg_probe_echo","description":"Echo a short text back.","input_schema":{"type":"object","properties":{"text":{"type":"string"}}}},` +
 		`{"name":"","description":"Report the probe code. Call it with code set to the number you are given.","input_schema":{"type":"object","properties":{"code":{"type":"integer"}},"required":["code"]},"defer_loading":true},` +
 		searchTool + `],"messages":[{"role":"user","content":""}]}`)
@@ -243,14 +279,21 @@ func RunProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path
 	if err != nil {
 		return Unknown, err
 	}
-	// No verdict for a rate limit, a server error, or a credential the gateway refused (401/403):
-	// none of them says whether the provider supports deferral.
-	if resp.Status == http.StatusTooManyRequests || resp.Status >= 500 ||
-		resp.Status == http.StatusUnauthorized || resp.Status == http.StatusForbidden {
+	// No verdict for a rate limit, a server error, a credential the gateway refused (401/403), or a
+	// 404/408/409/413: none of them says whether the provider supports deferral.
+	switch resp.Status {
+	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusConflict, http.StatusRequestEntityTooLarge:
+		return Unknown, errStatus(resp.Status)
+	}
+	if resp.Status >= 500 {
 		return Unknown, errStatus(resp.Status)
 	}
 	if resp.Status != http.StatusOK {
 		return Fail, nil
+	}
+	if gjson.GetBytes(resp.Body, "stop_reason").String() == "pause_turn" {
+		return Unknown, errStatus(resp.Status) // the API paused a long server-tool turn: no answer yet
 	}
 	return ProbeVerdict(resp.Body, nonce), nil
 }
