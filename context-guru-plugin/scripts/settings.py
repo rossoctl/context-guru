@@ -3730,7 +3730,12 @@ STRATEGIES: dict[str, dict] = {
                 "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
-        "cache": {"head_ttl_1h": True, "head_ttl_min_bytes": 200000},
+        # Keep the deprecated token key on purpose. The plugin updates through the marketplace and the
+        # proxy binary is released on its own, so this file can run against an OLDER proxy, and that
+        # proxy rejects an unknown key (strict YAML). Every proxy accepts head_ttl_min_tokens; a new
+        # proxy reads 50000 as the 200000-byte gate. Write head_ttl_min_bytes from the plugin only in
+        # a later release, once the oldest proxy in use knows it (#798).
+        "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
         "spends": False,
         # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
         # the difference between this strategy doing something and doing nothing - and because both
