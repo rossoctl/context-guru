@@ -123,7 +123,10 @@ type CacheForm struct {
 	KeepAliveMaxUSDPerPing     float64 `json:"keepalive_max_usd_per_ping,omitempty"`
 	KeepAliveMinPrefixTokens   int     `json:"keepalive_min_prefix_tokens,omitempty"`
 	HeadTTL1h                  bool    `json:"head_ttl_1h"`
-	HeadTTLMinTokens           int     `json:"head_ttl_min_tokens,omitempty"`
+	HeadTTLMinBytes            int     `json:"head_ttl_min_bytes,omitempty"`
+	// HeadTTLMinTokens is DEPRECATED, see CacheConfig. The form still reads it from an old
+	// document and keeps it, so a re-save does not drop a value the user set.
+	HeadTTLMinTokens int `json:"head_ttl_min_tokens,omitempty"`
 }
 
 // ExtractLLMForm is the RECOMMENDED prefill for the compaction-model component — a policy
@@ -329,7 +332,7 @@ func cacheForm(c CacheConfig) *CacheForm {
 		KeepAliveMaxPings:          c.KeepAliveMaxPings,
 		KeepAliveMaxUSDPerPing:     c.KeepAliveMaxUSDPerPing,
 		KeepAliveMinPrefixTokens:   c.KeepAliveMinPrefixTokens,
-		HeadTTL1h:                  c.HeadTTL1h, HeadTTLMinTokens: c.HeadTTLMinTokens,
+		HeadTTL1h:                  c.HeadTTL1h, HeadTTLMinBytes: c.HeadTTLMinBytes, HeadTTLMinTokens: c.HeadTTLMinTokens,
 	}
 }
 
@@ -399,6 +402,7 @@ func ApplyForm(doc string, f Form) (string, error) {
 			"keepalive_openai_idle_seconds": f.Cache.KeepAliveOpenAIIdleSeconds,
 			"keepalive_max_pings":           f.Cache.KeepAliveMaxPings,
 			"keepalive_min_prefix_tokens":   f.Cache.KeepAliveMinPrefixTokens,
+			"head_ttl_min_bytes":            f.Cache.HeadTTLMinBytes,
 			"head_ttl_min_tokens":           f.Cache.HeadTTLMinTokens,
 		} {
 			if v > 0 {
@@ -583,7 +587,7 @@ func (f Form) validate() error {
 			KeepAliveMaxPings:          f.Cache.KeepAliveMaxPings,
 			KeepAliveMaxUSDPerPing:     f.Cache.KeepAliveMaxUSDPerPing,
 			KeepAliveMinPrefixTokens:   f.Cache.KeepAliveMinPrefixTokens,
-			HeadTTL1h:                  f.Cache.HeadTTL1h, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
+			HeadTTL1h:                  f.Cache.HeadTTL1h, HeadTTLMinBytes: f.Cache.HeadTTLMinBytes, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
 		}).validate(); err != nil {
 			return err
 		}

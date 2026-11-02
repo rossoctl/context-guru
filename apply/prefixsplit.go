@@ -59,7 +59,8 @@ var volatileTailMarkers = []string{
 }
 
 // minSplitTokens keeps this from firing on small blocks, where the extra breakpoint
-// slot costs more optionality than the split can recover.
+// slot costs more optionality than the split can recover. It copies the provider's minimum
+// cacheable prefix, so it is in real tokens (tokens.Count), never in bytes/4.
 const minSplitTokens = 1024
 
 // splitVolatileTail splits the FIRST system block large enough to matter that ends
@@ -102,16 +103,26 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 		b := blocks[i]
 		txt := b.Get("text").String()
 		at := -1
-		if !split && len(txt)/4 >= minSplitTokens {
+		// A block never holds more tokens than bytes, so a block under minSplitTokens bytes
+		// cannot pass the real count below. This cheap test keeps the tokenizer off every
+		// block that cannot split.
+		if !split && len(txt) >= minSplitTokens {
 			for _, mk := range volatileTailMarkers {
 				if i := strings.Index(txt, mk); i >= 0 && (at < 0 || i < at) {
 					at = i + 1 // keep the newline with the stable half
 				}
 			}
 		}
-		// Require both halves to be non-trivial: a split that leaves a ~0-token
-		// stable half buys nothing and burns one of the four breakpoint slots.
-		if at <= 0 || at/4 < minSplitTokens || at >= len(txt) {
+		// Two checks, as before: the whole block is large enough to matter, and the stable half
+		// is non-trivial (a ~0-token stable half buys nothing and burns one of the four
+		// breakpoint slots). The minimum is the provider's, in provider tokens, so both are
+		// counted with the tokenizer, and only for the one block that has a marker.
+		if at <= 0 || at >= len(txt) || at < minSplitTokens {
+			sysOut = append(sysOut, json.RawMessage(b.Raw))
+			continue
+		}
+		stableCount := tokens.Count(txt[:at])
+		if stableCount < minSplitTokens || tokens.Count(txt) < minSplitTokens {
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
@@ -159,7 +170,7 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 		}
 		sysOut = append(sysOut, vb)
 		split = true
-		stableTokens = tokens.Count(txt[:at])
+		stableTokens = stableCount
 		// The tail's identity, so the dashboard can tell a turn where the snapshot MOVED from
 		// one where it did not. That distinction is the whole saving: only on a turn whose
 		// tail changed would the unsplit block have been re-created, and without it the

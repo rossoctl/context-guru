@@ -430,8 +430,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// offset into the body is taken. It adds no breakpoint, so it cannot breach the
 	// provider's cap of four. See headttl.go; off unless the host asks.
 	headTTL1h, headTTLTokens := false, 0
-	if !bypass && o.HeadTTL1h && o.HeadTTLMinTokens > 0 {
-		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinTokens)
+	if !bypass && o.HeadTTL1h && o.HeadTTLMinBytes > 0 {
+		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinBytes)
 	}
 	tr.HeadTTL1h, tr.HeadTTLTokens = headTTL1h, headTTLTokens
 

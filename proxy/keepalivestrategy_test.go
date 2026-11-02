@@ -297,8 +297,8 @@ func TestResolveHeadTTLMatchingStrategyOverridesTheAccount(t *testing.T) {
 	}
 	k.setStrategies([]tenant.Strategy{s})
 	on, tokens := k.resolveHeadTTL("t1", now, false, 0)
-	if !on || tokens != 50000 {
-		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 50000)", on, tokens)
+	if !on || tokens != 200000 {
+		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 200000 bytes = 50000 tokens x 4)", on, tokens)
 	}
 }
 

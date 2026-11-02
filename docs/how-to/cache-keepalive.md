@@ -321,6 +321,24 @@ cache:
   tail_breakpoint: false
 ```
 
+## The size gate of the 1-hour head
+
+`cache.head_ttl_1h` asks for the 1-hour tier on the head breakpoints. It does so only on a large
+request.
+
+- **The gate is in bytes.** `cache.head_ttl_min_bytes` is the smallest request body that gets the
+  1-hour tier. The default is `200000`.
+- **Deprecated key.** `cache.head_ttl_min_tokens` still works. The gate was always the body size
+  divided by 4, not a token count. When `head_ttl_min_bytes` is not set, the proxy uses
+  `head_ttl_min_tokens` x 4 bytes. `50000` tokens is the same gate as `200000` bytes.
+- **Both set.** `head_ttl_min_bytes` wins.
+
+```yaml
+cache:
+  head_ttl_1h: true
+  head_ttl_min_bytes: 200000
+```
+
 ## Related
 
 - [Measuring savings](measure-savings.md) — how the ledger separates the provider's cache

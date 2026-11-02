@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -137,7 +138,7 @@ func (k *keeper) applyStrategy(tenantID string, pol CachePolicy, now time.Time) 
 // resolveHeadTTL resolves the same matching strategy applyStrategy would, but for the
 // WRITE-TIER half of the policy — the half read on the request path (applyMode), not
 // inside keeper.record where the ping half resolves. Returns the account's own
-// fallback (accountHeadTTL1h, accountHeadTTLMinTokens) unchanged when no strategy
+// fallback (accountHeadTTL1h, accountHeadTTLMinBytes) unchanged when no strategy
 // matches, or when k itself is nil (keepalive not built into this deployment at all):
 // a tenant with no matching strategy sees exactly the behaviour it had before
 // strategies could touch this field.
@@ -145,16 +146,22 @@ func (k *keeper) applyStrategy(tenantID string, pol CachePolicy, now time.Time) 
 // A strategy can only turn HeadTTL1h ON, never off, mirroring applyStrategy's own
 // pol.KeepAlive = true — there is no "deny" strategy mode for either mechanism.
 func (k *keeper) resolveHeadTTL(tenantID string, now time.Time, accountHeadTTL1h bool,
-	accountHeadTTLMinTokens int) (bool, int) {
+	accountHeadTTLMinBytes int) (bool, int) {
 	if k == nil {
-		return accountHeadTTL1h, accountHeadTTLMinTokens
+		return accountHeadTTL1h, accountHeadTTLMinBytes
 	}
 	best := k.bestStrategyFor(tenantID, now)
 	if best == nil || !best.HeadTTL1h {
-		return accountHeadTTL1h, accountHeadTTLMinTokens
+		return accountHeadTTL1h, accountHeadTTLMinBytes
 	}
-	return true, best.HeadTTLMinTokens
+	// A stored strategy keeps the old token-named field: the database column and the manager API
+	// carry it. It is read as bytes at 4 per token, the rule the old gate used.
+	return true, best.HeadTTLMinTokens * headTTLBytesPerToken
 }
+
+// headTTLBytesPerToken converts the deprecated head_ttl_min_tokens to the byte gate. It is the
+// factor the old gate used (len(body)/4), so an old value gates at exactly the same size.
+const headTTLBytesPerToken = config.HeadTTLBytesPerToken
 
 // betterStrategy reports whether candidate beats current under the design doc's fixed
 // precedence: a list-target strategy beats an all-target one (more specific wins);

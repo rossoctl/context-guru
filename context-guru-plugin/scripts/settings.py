@@ -3730,7 +3730,7 @@ STRATEGIES: dict[str, dict] = {
                 "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
-        "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
+        "cache": {"head_ttl_1h": True, "head_ttl_min_bytes": 200000},
         "spends": False,
         # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
         # the difference between this strategy doing something and doing nothing - and because both

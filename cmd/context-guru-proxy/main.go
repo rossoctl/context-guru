@@ -1122,27 +1122,27 @@ func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, err
 func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	// Resolve the defaults only when something is actually switched on. A parked block
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
-	// zero HeadTTLMinTokens must stay zero so a host that never configured this asks for
+	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
 	// nothing rather than asking on every request.
 	if !c.KeepAlive && !c.HeadTTL1h {
 		return proxy.CachePolicy{}
 	}
 	r := c.Resolved()
 	return proxy.CachePolicy{
-		KeepAlive:        c.KeepAlive,
-		Idle:             time.Duration(r.KeepAliveIdleSeconds) * time.Second,
-		OpenAIIdle:       time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
-		MaxPings:         r.KeepAliveMaxPings,
-		Idle1h:           time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
-		MaxPings1h:       r.KeepAliveMaxPings1h,
-		MaxUSDPerPing:    r.KeepAliveMaxUSDPerPing,
-		MinPrefixTokens:  r.KeepAliveMinPrefixTokens,
-		HeadTTL1h:        c.HeadTTL1h,
-		HeadTTLMinTokens: headTTLMin(c.HeadTTL1h, r.HeadTTLMinTokens),
+		KeepAlive:       c.KeepAlive,
+		Idle:            time.Duration(r.KeepAliveIdleSeconds) * time.Second,
+		OpenAIIdle:      time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
+		MaxPings:        r.KeepAliveMaxPings,
+		Idle1h:          time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
+		MaxPings1h:      r.KeepAliveMaxPings1h,
+		MaxUSDPerPing:   r.KeepAliveMaxUSDPerPing,
+		MinPrefixTokens: r.KeepAliveMinPrefixTokens,
+		HeadTTL1h:       c.HeadTTL1h,
+		HeadTTLMinBytes: headTTLMin(c.HeadTTL1h, r.HeadTTLMinBytes),
 	}
 }
 
-// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinTokens > 0` is
+// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinBytes > 0` is
 // the single condition apply has to test.
 func headTTLMin(on bool, n int) int {
 	if !on {

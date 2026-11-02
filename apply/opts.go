@@ -84,10 +84,10 @@ type Opts struct {
 	// cannot affect anything today because this is off, but it is the one way this field
 	// touches shared behaviour.
 	HeadTTL1h bool
-	// HeadTTLMinTokens is the size gate on HeadTTL1h, in estimated tokens. 0 disables the
+	// HeadTTLMinBytes is the size gate on HeadTTL1h, in bytes of the request body. 0 disables the
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.
-	HeadTTLMinTokens int
+	HeadTTLMinBytes int
 	// PrefixAsk, when set, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the cached prefix. See components.PrefixAsker. nil => a component
 	// that wants one gets none and decides for itself; today's behaviour for every caller that does

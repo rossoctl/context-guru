@@ -522,3 +522,40 @@ func TestSplitOnBedrockConverseKeepsCachePointAfterStableHalf(t *testing.T) {
 		}
 	}
 }
+
+// The split floor is the provider's minimum cacheable prefix, in provider tokens. Bytes/4 is
+// wrong both ways: repetitive text has many bytes per token, so bytes/4 splits a prefix the
+// provider will not cache; dense text has few, so bytes/4 refuses a prefix it would cache.
+func TestSplitFloorCountsRealTokensNotBytesOverFour(t *testing.T) {
+	tail := "Current branch: main\nRecent commits:\n0898367954 SWE-bench\n"
+
+	// Many bytes, few tokens: bytes/4 is over the floor, the real count is under it.
+	sparse := strings.Repeat("=", 8000) + "\n"
+	if n := tokens.Count(sparse); len(sparse)/4 < minSplitTokens || n >= minSplitTokens {
+		t.Fatalf("fixture premise broken: bytes/4 = %d, tokens = %d", len(sparse)/4, n)
+	}
+	if _, split := splitTail(sysBody(textBlock(sparse+tail, true)), bschemas.Anthropic); split {
+		t.Error("split a block whose stable half is under the provider minimum in real tokens")
+	}
+
+	// Few bytes, many tokens: bytes/4 is under the floor, the real count is over it.
+	dense := denseText(3800) + "\n"
+	if n := tokens.Count(dense); len(dense)/4 >= minSplitTokens || n < minSplitTokens {
+		t.Fatalf("fixture premise broken: bytes/4 = %d, tokens = %d", len(dense)/4, n)
+	}
+	if _, split := splitTail(sysBody(textBlock(dense+tail, true)), bschemas.Anthropic); !split {
+		t.Error("did not split a block whose stable half is over the provider minimum in real tokens")
+	}
+}
+
+// denseText is n bytes of pseudo-random letters and digits: about 2 bytes per token.
+func denseText(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var b strings.Builder
+	x := uint32(12345)
+	for b.Len() < n {
+		x = x*1664525 + 1013904223
+		b.WriteByte(alphabet[(x>>16)%uint32(len(alphabet))])
+	}
+	return b.String()
+}

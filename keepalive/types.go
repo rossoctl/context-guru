@@ -144,10 +144,10 @@ type Policy struct {
 	// cache_write) a session must reach before it is pinged. With the first-request skip this
 	// sends 8.7x fewer pings for 3.3% less money.
 	MinPrefixTokens int
-	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinTokens gates
-	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
-	HeadTTL1h        bool
-	HeadTTLMinTokens int
+	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinBytes gates
+	// it on the request body size in bytes. Passed through to apply.Opts — see apply/headttl.go.
+	HeadTTL1h       bool
+	HeadTTLMinBytes int
 	// PredictorID optionally names a registered predictor (see predictorFor, and the proxy
 	// host's knownPredictorIDs in proxy/keepalivestrategy.go) that pingable() must also clear before a
 	// ping fires. "" (every account today, and every strategy created before this field

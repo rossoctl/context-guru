@@ -189,8 +189,9 @@ type CacheConfig struct {
 	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
 	// zero on a model the honest projection for it is $0.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
-	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
-	// DefaultHeadTTLMinTokens (50,000).
+	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
+	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
+	// (200,000). When both are set, this key wins.
 	//
 	// A dollar filter, not a probability filter, and that distinction is the whole result.
 	// Gating 1h on the best available predictor of a long gap leaves the net unchanged
@@ -198,6 +199,10 @@ type CacheConfig struct {
 	// SAME cache_write on the same requests, so multiplying both by a probability cannot
 	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
 	// requests that pay the premium and can never produce a large miss.
+	HeadTTLMinBytes int `yaml:"head_ttl_min_bytes"`
+	// HeadTTLMinTokens is DEPRECATED: use head_ttl_min_bytes. It is a byte gate with a token label
+	// (the gate always measured len(body)/4). It still works: when head_ttl_min_bytes is not set,
+	// this value x 4 is the gate, so an old config behaves exactly as before.
 	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
 	// TailBreakpoint adds one cache breakpoint at the end of a request whose client put its last
 	// breakpoint far from the end (#795): Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
@@ -226,7 +231,12 @@ const (
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	DefaultKeepAliveMinPrefix     = 80000
-	DefaultHeadTTLMinTokens       = 50000
+	DefaultHeadTTLMinBytes        = 200000
+	// DefaultHeadTTLMinTokens is DEPRECATED, kept for old callers: the old default of 50,000.
+	DefaultHeadTTLMinTokens = DefaultHeadTTLMinBytes / HeadTTLBytesPerToken
+	// HeadTTLBytesPerToken converts the deprecated head_ttl_min_tokens into bytes. It is the
+	// factor the old gate used (len(body)/4).
+	HeadTTLBytesPerToken = 4
 )
 
 // The provider's cache lifetimes in seconds, for the validate caps below.
@@ -260,8 +270,12 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
-	if c.HeadTTLMinTokens <= 0 {
-		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
+	if c.HeadTTLMinBytes <= 0 {
+		if c.HeadTTLMinTokens > 0 {
+			c.HeadTTLMinBytes = c.HeadTTLMinTokens * HeadTTLBytesPerToken
+		} else {
+			c.HeadTTLMinBytes = DefaultHeadTTLMinBytes
+		}
 	}
 	return c
 }
@@ -273,7 +287,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 // of reading at 0.1x.
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
-		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
+		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
