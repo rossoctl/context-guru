@@ -61,6 +61,10 @@ way. Only a project with no routing at all falls back to project-local, since th
 to inherit. Pass `--user-scope` to deliberately diverge from that — a preset the user wants on
 every project even though routing itself is project-scoped.
 
+For `ultrahigh`, the same command also asks the running proxy to start the provider check that
+tool deferral needs, and prints `probe=asked` (or why not: `not_routed`, `unavailable`). The check
+runs at your next request, in the background. The first session after the restart is not deferred.
+
 ## 4. A restart is required
 
 Like a cache-strategy change, this takes effect at the **next proxy start**, not this session.

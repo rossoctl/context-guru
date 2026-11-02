@@ -37,6 +37,37 @@ type deferHost struct {
 	mu    sync.Mutex
 	state *deferState
 	gate  *tooldefer.Gate
+	// asks holds the tenants whose preset picker asked for a probe, until their next request.
+	asks map[string]bool
+}
+
+// maxProbeAsks bounds asks: one entry per tenant that asked and has not sent a request since.
+const maxProbeAsks = 10000
+
+// askProbe records that tenant wants a probe at its next request. It returns at once.
+func (h *Handler) askProbe(tenant string) {
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	if h.defer_.asks == nil {
+		h.defer_.asks = map[string]bool{}
+	}
+	if len(h.defer_.asks) < maxProbeAsks {
+		h.defer_.asks[tenant] = true
+	}
+}
+
+// takeProbeAsk reports, once, whether tenant asked for a probe.
+func (h *Handler) takeProbeAsk(tn *Tenancy) bool {
+	if tn == nil {
+		return false
+	}
+	h.defer_.mu.Lock()
+	defer h.defer_.mu.Unlock()
+	if !h.defer_.asks[tn.ID] {
+		return false
+	}
+	delete(h.defer_.asks, tn.ID)
+	return true
 }
 
 // deferGate is the off-switch gate, built on first use under the same lock.
@@ -117,8 +148,20 @@ type deferInfo struct {
 // Fail open: on any problem it returns body unchanged.
 func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas.ModelProvider, wire string,
 	up upstream, session, threadID string, orig, body []byte) ([]byte, *deferInfo) {
+	if wire != schema.WireAnthropic || provider != bschemas.Anthropic {
+		return body, nil
+	}
 	on, keep := deferOn(tn)
-	if !on || wire != schema.WireAnthropic || provider != bschemas.Anthropic {
+	if h.takeProbeAsk(tn) {
+		// The preset picker asked for a probe (POST /tool-defer/probe). It runs now, in the
+		// background, with this request's own upstream, model and credential: the proxy holds no
+		// credential between requests to run it earlier.
+		model := gjson.GetBytes(orig, "model").String()
+		if tooldefer.AnthropicModel(model) {
+			h.startProbe(r, tn, provider, up, tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path})
+		}
+	}
+	if !on {
 		return body, nil
 	}
 	ds := h.toolDefer()

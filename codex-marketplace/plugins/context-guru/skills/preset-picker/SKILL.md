@@ -12,4 +12,5 @@ deferral. On OpenAI models `ultrahigh` behaves like `xhigh`: deferral is Anthrop
 Ask which one they want, then run `python3 ../../scripts/codex_plugin.py configure --preset NAME`.
 Run the change with `sandbox_permissions="require_escalated"`, explaining that it writes the
 user's context-guru configuration and restarts the local proxy. Report the emitted settings and
-whether the proxy restarted successfully.
+whether the proxy restarted successfully. For `ultrahigh` the output also has a `probe=` line: the
+proxy was asked to start deferral's provider check.

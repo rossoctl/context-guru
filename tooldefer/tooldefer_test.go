@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/deferred"
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -62,7 +63,7 @@ func (h hist) UserSessions(_, _ string, n int) []Session {
 	}
 	return h.sessions
 }
-func (h hist) ProjectUsed(_, _, tool, _ string, _ int) bool { return h.project[tool] }
+func (h hist) ProjectUsed(_, _, tool, _ string, _ int) bool { return inSet(h.project, tool) }
 
 func sess(declared []string, used ...string) Session {
 	s := Session{Declared: map[string]bool{}, Used: map[string]bool{}}
@@ -157,6 +158,77 @@ func TestDecideWeighsOriginal(t *testing.T) {
 	}
 	// The same decision on the REWRITTEN body would see defer_loading and skip; Apply always
 	// passes Orig, which TestApplyDecidesOnOriginal pins.
+}
+
+// mcpTool is one MCP tool of about 120 tokens.
+func mcpTool(server string, i int) string {
+	return fmt.Sprintf(`{"name":"mcp__%s__t%d","description":"%s","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}`,
+		server, i, strings.Repeat("Looks up one record of the service. ", 12))
+}
+
+func serverTools(server string, n int) []string {
+	var out []string
+	for i := 0; i < n; i++ {
+		out = append(out, mcpTool(server, i))
+	}
+	return out
+}
+
+func toolNames(tools []string) []string {
+	var out []string
+	for _, t := range tools {
+		out = append(out, gjson.Get(t, "name").String())
+	}
+	return out
+}
+
+// MCP tools are decided per server. A server of 30 small tools (each under 200 tokens) is deferred
+// whole; a server whose total is under 200 is not.
+func TestDecideMCPPerServer(t *testing.T) {
+	big := serverTools("big", 30)
+	small := serverTools("small", 1)
+	if n := tokens.Count(big[0]); n >= MinTokens || n < 80 {
+		t.Fatalf("fixture: one tool weighs %d tokens", n)
+	}
+	tools := append(append([]string{decl("Bash")}, big...), small...)
+	declared := append([]string{"Bash"}, append(toolNames(big), toolNames(small)...)...)
+	h := hist{sessions: []Session{sess(declared), sess(declared), sess(declared)}}
+	got := Decide(h, Input{Session: "s", Body: body(tools, "")})
+	if len(got) != 30 || !strings.HasPrefix(got[0], "mcp__big__") {
+		t.Fatalf("deferred %d tools: %v", len(got), got)
+	}
+	for _, n := range got {
+		if strings.HasPrefix(n, "mcp__small__") {
+			t.Fatalf("a server under %d tokens in total was deferred: %v", MinTokens, got)
+		}
+	}
+}
+
+// Using one tool of a server in a past session keeps the whole server loaded.
+func TestDecideMCPOneUseKeepsTheServer(t *testing.T) {
+	big := serverTools("big", 30)
+	tools := append([]string{decl("Bash")}, big...)
+	declared := append([]string{"Bash"}, toolNames(big)...)
+	h := hist{sessions: []Session{sess(declared), sess(declared, "mcp__big__t7"), sess(declared)}}
+	if got := Decide(h, Input{Session: "s", Body: body(tools, "")}); len(got) != 0 {
+		t.Fatalf("a used server was deferred: %v", got)
+	}
+	// The project veto works per server too.
+	h = hist{sessions: []Session{sess(declared), sess(declared), sess(declared)}, project: map[string]bool{"mcp__big__t3": true}}
+	if got := Decide(h, Input{Session: "s", Project: "/w", Body: body(tools, "")}); len(got) != 0 {
+		t.Fatalf("project veto ignored for the server: %v", got)
+	}
+	// A server not declared in every session is not deferred.
+	h = hist{sessions: []Session{sess(declared), sess([]string{"Bash"}), sess(declared)}}
+	if got := Decide(h, Input{Session: "s", Body: body(tools, "")}); len(got) != 0 {
+		t.Fatalf("a server missing from one session was deferred: %v", got)
+	}
+	// A tool of the server loaded in this thread keeps the server loaded.
+	load := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"mcp__big__t1","input":{}}]}`
+	h = hist{sessions: []Session{sess(declared), sess(declared), sess(declared)}}
+	if got := Decide(h, Input{Session: "s", Body: body(tools, "", load)}); len(got) != 0 {
+		t.Fatalf("a server used in this thread was deferred: %v", got)
+	}
 }
 
 func TestRewriteShape(t *testing.T) {

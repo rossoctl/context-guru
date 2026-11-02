@@ -451,6 +451,26 @@ func TestForgetDoesNotPersistOnTheCaller(t *testing.T) {
 	<-called
 }
 
+// Through the real history: one session that used one tool of a server keeps the whole server
+// loaded in the next session.
+func TestHistoryMCPServerUseCarriesOver(t *testing.T) {
+	m := NewMem(nil)
+	m.Open(0, nil)
+	tools := append([]string{decl("Bash")}, serverTools("big", 30)...)
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"mcp__big__t4","input":{}}]}`
+	m.Observe("t", "a", "/w", body(tools, ""), 1)
+	m.Observe("t", "b", "/w", body(tools, "", use), 2)
+	m.Observe("t", "c", "/w", body(tools, ""), 3)
+	if got := Decide(m, Input{Tenant: "t", Session: "d", Body: body(tools, "")}); len(got) != 0 {
+		t.Fatalf("server deferred after one of its tools was used: %v", got)
+	}
+	m.Observe("t", "e", "/w", body(tools, ""), 4)
+	m.Observe("t", "g", "/w", body(tools, ""), 5) // now c, e, g: the use in b is out of the window
+	if got := Decide(m, Input{Tenant: "t", Session: "f", Body: body(tools, "")}); len(got) != 30 {
+		t.Fatalf("after 3 newer unused sessions: %d deferred, want 30", len(got))
+	}
+}
+
 func TestNormProject(t *testing.T) {
 	if NormProject("/r/.claude/worktrees/x") != "/r" || NormProject("/r") != "/r" {
 		t.Fatal("NormProject")

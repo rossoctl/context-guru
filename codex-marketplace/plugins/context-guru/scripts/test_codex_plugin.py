@@ -8,6 +8,7 @@ import plistlib
 import subprocess
 import tarfile
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -490,6 +491,31 @@ screen_reader_detection_done = true
             self.assertEqual(PLUGIN.configure(args), 0)
         self.assertEqual(PLUGIN.proxy_config().read_bytes(), before)
         restart.assert_not_called()
+
+    def test_configure_ultrahigh_asks_for_a_probe(self):
+        PLUGIN.routing_state().parent.mkdir(parents=True)
+        PLUGIN.routing_state().write_text("{}")
+        PLUGIN.save_proxy_options("xhigh", True)
+        args = type("Args", (), {"show": False, "preset": "ultrahigh", "cache_strategy": None})()
+        with mock.patch.object(PLUGIN, "restart_proxy", return_value=True), \
+                mock.patch.object(PLUGIN, "read_record", return_value={"port": 8799}), \
+                mock.patch.object(PLUGIN, "ask_defer_probe", return_value="asked") as ask, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.configure(args), 0)
+        ask.assert_called_once_with(8799)
+        self.assertIn("probe=asked", out.getvalue())
+        args.preset = "high"
+        with mock.patch.object(PLUGIN, "restart_proxy", return_value=True), \
+                mock.patch.object(PLUGIN, "ask_defer_probe") as ask, \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            PLUGIN.configure(args)
+        ask.assert_not_called()
+
+    def test_ask_defer_probe_returns_at_once_without_a_proxy(self):
+        start = time.monotonic()
+        with mock.patch.object(PLUGIN, "healthy", return_value=True):
+            self.assertEqual(PLUGIN.ask_defer_probe(1), "unavailable")
+        self.assertLess(time.monotonic() - start, 2)
 
 
 if __name__ == "__main__":

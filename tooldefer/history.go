@@ -392,7 +392,7 @@ func (m *Mem) ProjectUsed(tenant, project, tool, exclude string, n int) bool {
 		if s.id == exclude || s.project != project {
 			continue
 		}
-		if s.used[tool] {
+		if inSet(s.used, tool) {
 			return true
 		}
 		if seen++; seen == n {

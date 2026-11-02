@@ -398,3 +398,60 @@ func TestToolDeferOther400DoesNotTurnDeferralOff(t *testing.T) {
 		t.Fatalf("deferral off after an unrelated 400: %s", got)
 	}
 }
+
+// The preset picker's probe ask returns at once and starts no request itself; the account's next
+// request starts the probe (in the background), even before the thread is decided.
+func TestToolDeferProbeAsk(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	var started []func()
+	h.toolDefer().prober.Go = func(fn func()) { started = append(started, fn) }
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	t0 := time.Now()
+	resp, err := http.Post(srv.URL+"/tool-defer/probe", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted || time.Since(t0) > time.Second || len(up.bodies) != 0 || len(started) != 0 {
+		t.Fatalf("status %d, %d upstream calls, %d probes on the ask itself", resp.StatusCode, len(up.bodies), len(started))
+	}
+	// A thread that already has a stored record needs no probe of its own, so only the ask starts it.
+	h.toolDefer().prober.Seed(tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"}, tooldefer.Pass, time.Now())
+	tdPost(t, srv, tdBody())
+	if len(started) != 0 {
+		t.Fatal("a fresh verdict was probed again")
+	}
+	h.toolDefer().prober.Forget(tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"})
+	started = nil
+	resp, _ = http.Post(srv.URL+"/tool-defer/probe", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-9"), 1))
+	if len(started) == 0 {
+		t.Fatal("the next request did not start the asked probe")
+	}
+}
+
+// The ask works in a preset that does not defer yet: the picker sets ultrahigh, and the request
+// before the restart starts the probe.
+func TestToolDeferProbeAskInXhigh(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "xhigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	resp, _ := http.Post(srv.URL+"/tool-defer/probe", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+	tdPost(t, srv, tdBody())
+	k := tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"}
+	if h.toolDefer().prober.Verdict(k) != tooldefer.Pass {
+		t.Fatal("the asked probe did not run")
+	}
+	if got := tdTools(up.last()); strings.Contains(got, "*") {
+		t.Fatalf("xhigh deferred: %s", got)
+	}
+}

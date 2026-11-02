@@ -16,6 +16,11 @@
 //     AskUserQuestion, Context Guru's own tools, a tool tool_choice forces, the account keep list);
 //  5. it weighs at least 200 tokens, weighed on the ORIGINAL request.
 //
+// An MCP server is one unit: all of mcp__<server>__* is deferred together, when the user's last 3
+// sessions declared the server and used none of its tools, the project used none of them in its last
+// 10 sessions, and the server's tools weigh at least 200 tokens together. A load of any one of its
+// tools counts as a use of the server.
+//
 // Without 3 user sessions of history, nothing is deferred. A tool loaded through search counts as
 // used, so the user's next sessions keep it loaded.
 //
@@ -86,7 +91,7 @@ type History interface {
 	// session is what makes a re-decision after a restart give the same set.
 	UserSessions(tenant, exclude string, n int) []Session
 	// ProjectUsed reports whether the project used tool in its last n sessions, leaving out
-	// `exclude`.
+	// `exclude`. tool may be a server unit ("mcp__<server>__"): any tool of that server counts.
 	ProjectUsed(tenant, project, tool, exclude string, n int) bool
 }
 
@@ -127,29 +132,89 @@ func Decide(h History, in Input) []string {
 		keep[k] = true
 	}
 	forced := forcedTool(in.Body)
-	var out []string
+	// MCP tools are decided per SERVER (mcp__<server>__*): the unit a user installs. A server is
+	// deferred whole or not at all, from the history of all its tools together, and its 200-token
+	// minimum is the sum of its tools. Built-in tools are decided one by one.
+	type unit struct {
+		names  []string
+		tokens int
+		veto   bool // some member is excluded on its own: the whole unit stays loaded
+	}
+	units := map[string]*unit{}
+	var order []string
 	tools.ForEach(func(_, t gjson.Result) bool {
 		n := t.Get("name").String()
-		switch {
-		case n == "" || t.Get("type").Exists(): // a server tool, or no name
-		case t.Get("defer_loading").Bool(): // the client deferred it already
-		case NeverDefer(n), keep[n], n == forced, used[n]:
-		case tokens.Count(t.Raw) < MinTokens:
-		case !unusedIn(past, n):
-		case in.Project != "" && h.ProjectUsed(in.Tenant, in.Project, n, in.Session, ProjectSessions):
-		default:
-			out = append(out, n)
+		if n == "" || t.Get("type").Exists() || t.Get("defer_loading").Bool() {
+			return true // a server tool, no name, or one the client deferred already
+		}
+		key := n
+		if srv := mcpServer(n); srv != "" {
+			key = mcpPrefix + srv + "__"
+		}
+		u := units[key]
+		if u == nil {
+			u = &unit{}
+			units[key] = u
+			order = append(order, key)
+		}
+		u.names = append(u.names, n)
+		u.tokens += tokens.Count(t.Raw)
+		if NeverDefer(n) || keep[n] || keep[strings.TrimSuffix(key, "__")] || n == forced || used[n] {
+			u.veto = true
 		}
 		return true
 	})
+	var out []string
+	for _, key := range order {
+		u := units[key]
+		switch {
+		case u.veto:
+		case u.tokens < MinTokens:
+		case !unusedIn(past, key):
+		case in.Project != "" && h.ProjectUsed(in.Tenant, in.Project, key, in.Session, ProjectSessions):
+		default:
+			out = append(out, u.names...)
+		}
+	}
 	sort.Strings(out)
 	return out
 }
 
-// unusedIn reports whether every one of the sessions declared name and none used it.
+const mcpPrefix = "mcp__"
+
+// mcpServer returns the server half of an MCP tool name (mcp__<server>__<tool>), or "".
+func mcpServer(n string) string {
+	if !strings.HasPrefix(n, mcpPrefix) {
+		return ""
+	}
+	rest := n[len(mcpPrefix):]
+	i := strings.Index(rest, "__")
+	if i <= 0 || i+2 >= len(rest) {
+		return ""
+	}
+	return rest[:i]
+}
+
+// inSet reports whether set holds name, where name may be a server unit ("mcp__<server>__"): then
+// any tool of that server counts.
+func inSet(set map[string]bool, name string) bool {
+	if !strings.HasSuffix(name, "__") {
+		return set[name]
+	}
+	for n := range set {
+		if strings.HasPrefix(n, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// unusedIn reports whether every one of the sessions declared name and none used it. name may be a
+// server unit ("mcp__<server>__"): declared means any tool of the server declared, used means any
+// tool of it used or loaded.
 func unusedIn(past []Session, name string) bool {
 	for _, s := range past {
-		if !s.Declared[name] || s.Used[name] {
+		if !inSet(s.Declared, name) || inSet(s.Used, name) {
 			return false
 		}
 	}

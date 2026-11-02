@@ -240,3 +240,27 @@ func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
 	h.noteToolSearch(scoped, in.EnableToolSearch)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// toolDeferProbe is the preset picker's call when the user picks ultrahigh (#485): it asks for the
+// provider check of tool deferral to start at this account's next request, so the probe runs at once
+// instead of waiting for deferral to need it. It returns 202 at once and holds no credential: the
+// probe runs in the background through the prober, with that next request's own upstream, model and
+// credential. The same checks as /signal.
+func (h *Handler) toolDeferProbe(w http.ResponseWriter, r *http.Request) {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "tool-defer probe asks are application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	tn, err := h.authenticate(r)
+	if err != nil {
+		h.refuse(w, r, err)
+		return
+	}
+	release, ok := h.meter(w, r, tn)
+	defer release()
+	if !ok {
+		return
+	}
+	h.askProbe(tn.ID)
+	w.WriteHeader(http.StatusAccepted)
+}
