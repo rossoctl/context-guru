@@ -8,7 +8,7 @@ import (
 )
 
 // Gate holds the per-account off switches that are not configuration: the user's literal
-// ENABLE_TOOL_SEARCH=false (from the plugin's session-start hook, on /lifecycle), and the
+// ENABLE_TOOL_SEARCH=false (from the plugin's session-start hook, on /tool-search), and the
 // turn-off after a 400 on a request we changed. Safe for concurrent use.
 type Gate struct {
 	mu sync.Mutex

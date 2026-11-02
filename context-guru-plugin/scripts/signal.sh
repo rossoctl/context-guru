@@ -48,14 +48,16 @@ sid = d.get("session_id", "")
 if ev not in ("SessionEnd", "SessionStart", "Notification") or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", sid):
     sys.exit(1)
 out = {"session": sid, "event": ev, "kind": kind if isinstance(kind, str) else ""}
-# Tool deferral (#485): the RAW ENABLE_TOOL_SEARCH value, so the proxy can tell a deliberate
-# "false" from "auto" (the wire cannot). A short closed-shape value, never content.
-ets = os.environ.get("ENABLE_TOOL_SEARCH")
-if ev == "SessionStart" and ets is not None and len(ets) <= 16:
-    out["enable_tool_search"] = ets
+if ev == "SessionStart" and kind == "startup":
+    # Tool deferral (#485): the RAW ENABLE_TOOL_SEARCH value, so the proxy can tell a deliberate
+    # "false" from "auto" (the wire cannot). A short closed-shape value, never content. It goes to
+    # its own route, which works with keep-alive off.
+    out = {"session": sid, "enable_tool_search": os.environ.get("ENABLE_TOOL_SEARCH", "")[:16]}
 print(json.dumps(out))
 ' 2>/dev/null <<<"$STDIN")" || exit 0
-URL="$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')/signal"
+ROUTE=/signal
+case "$BODY" in *'"enable_tool_search"'*) ROUTE=/tool-search ;; esac
+URL="$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')$ROUTE"
 if [ -n "$CGHDR" ]; then HDR="$CGHDR"
 elif [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then HDR="Authorization: Bearer $ANTHROPIC_AUTH_TOKEN"
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then HDR="x-api-key: $ANTHROPIC_API_KEY"

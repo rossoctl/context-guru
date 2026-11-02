@@ -138,10 +138,6 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		Reason           string `json:"reason"`
 		Source           string `json:"source"`
 		NotificationType string `json:"notification_type"`
-		// EnableToolSearch is the RAW value of the client's ENABLE_TOOL_SEARCH, sent by the plugin's
-		// session-start hook. Only a literal "false" turns tool deferral off for the session (#485).
-		// A closed shape: at most a few characters, never stored beyond that flag.
-		EnableToolSearch *string `json:"enable_tool_search"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
@@ -160,9 +156,6 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 	if !ok || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
-	}
-	if in.EnableToolSearch != nil && len(*in.EnableToolSearch) <= 16 {
-		h.noteToolSearch(scoped, strings.TrimSpace(*in.EnableToolSearch))
 	}
 	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, h.keeper.now())
 	w.WriteHeader(http.StatusNoContent)
@@ -208,4 +201,42 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 	// positive, so a rule that stops them would lose money. SessionStart presence: see the table above.
 	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "applied", false)
 	return false
+}
+
+// toolSearchSignal receives the raw ENABLE_TOOL_SEARCH value of one session, from the plugin's
+// session-start hook (#485). A value that turns search off (tooldefer.SearchOffValue) turns tool
+// deferral off for that session. Its own route, because /signal is off with keep-alive and this flag
+// is not about keep-alive. The same checks as /signal: JSON only, the same authentication, the same
+// tenant-scoped session id. 204 on accept.
+func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "tool-search signals are application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	tn, err := h.authenticate(r)
+	if err != nil {
+		h.refuse(w, r, err)
+		return
+	}
+	release, ok := h.meter(w, r, tn)
+	defer release()
+	if !ok {
+		return
+	}
+	var in struct {
+		Session          string `json:"session"`
+		EnableToolSearch string `json:"enable_tool_search"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil ||
+		len(in.EnableToolSearch) > 16 {
+		http.Error(w, "bad tool-search signal", http.StatusBadRequest)
+		return
+	}
+	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
+	if !ok {
+		http.Error(w, "bad tool-search signal", http.StatusBadRequest)
+		return
+	}
+	h.noteToolSearch(scoped, in.EnableToolSearch)
+	w.WriteHeader(http.StatusNoContent)
 }

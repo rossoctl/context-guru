@@ -260,8 +260,9 @@ func TestToolDeferSurvivesRestart(t *testing.T) {
 	}
 }
 
-// ENABLE_TOOL_SEARCH=false on /lifecycle turns deferral off for that session; "auto" does not.
-func TestToolDeferLifecycleFlag(t *testing.T) {
+// ENABLE_TOOL_SEARCH=false on /tool-search turns deferral off for that session, with keep-alive off;
+// "auto" does not.
+func TestToolDeferToolSearchRouteWithKeepAliveOff(t *testing.T) {
 	up := &tdUpstream{}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -269,15 +270,23 @@ func TestToolDeferLifecycleFlag(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	tdPost(t, srv, tdBody())
+	t.Setenv("CONTEXT_GURU_KEEPALIVE", "off") // the flag's route must not depend on keep-alive
 	post := func(sid, v string) {
-		b := fmt.Sprintf(`{"session":%q,"event":"SessionStart","kind":"startup","enable_tool_search":%q}`, sid, v)
-		resp, err := http.Post(srv.URL+"/signal", "application/json", strings.NewReader(b))
+		b := fmt.Sprintf(`{"session":%q,"enable_tool_search":%q}`, sid, v)
+		resp, err := http.Post(srv.URL+"/tool-search", "application/json", strings.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("signal status %d", resp.StatusCode)
+		}
+	}
+	// The keep-alive route really is off, so the next post proves the flag does not ride on it.
+	if r, err := http.Post(srv.URL+"/signal", "application/json", strings.NewReader(`{"session":"x","event":"SessionEnd"}`)); err == nil {
+		r.Body.Close()
+		if r.StatusCode != http.StatusNotFound {
+			t.Fatalf("/signal with keep-alive off = %d, want 404", r.StatusCode)
 		}
 	}
 	post("sess-2", "0")
@@ -333,8 +342,8 @@ func TestToolDeferStatsRacesFirstRequest(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			b := fmt.Sprintf(`{"session":"sig-%d","event":"SessionStart","kind":"startup","enable_tool_search":"false"}`, i)
-			if r, err := http.Post(srv.URL+"/signal", "application/json", strings.NewReader(b)); err == nil {
+			b := fmt.Sprintf(`{"session":"sig-%d","enable_tool_search":"false"}`, i)
+			if r, err := http.Post(srv.URL+"/tool-search", "application/json", strings.NewReader(b)); err == nil {
 				r.Body.Close()
 			}
 		}(i)

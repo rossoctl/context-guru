@@ -104,13 +104,15 @@ func TestSignalHookSendsSessionStartSource(t *testing.T) {
 	}
 }
 
-// A plain session start sends nothing, unless the user set ENABLE_TOOL_SEARCH=false: then the raw
-// value rides on the event, so the proxy turns tool deferral off for the session (#485).
+// A plain session start sends nothing, unless the user set ENABLE_TOOL_SEARCH=false: then the hook
+// sends the session id and the raw value to /tool-search, so the proxy turns tool deferral off for the
+// session (#485). Nothing else of the payload goes.
 func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
 	ch := make(chan map[string]any, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var got map[string]any
 		json.NewDecoder(r.Body).Decode(&got)
+		got["path"] = r.URL.Path
 		ch <- got
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -127,7 +129,7 @@ func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
 	runSignal(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=FALSE"), payload)
 	select {
 	case got := <-ch:
-		if got["kind"] != "startup" || got["enable_tool_search"] != "FALSE" {
+		if len(got) != 3 || got["session"] != "abc-123" || got["enable_tool_search"] != "FALSE" || got["path"] != "/tool-search" {
 			t.Errorf("body = %v", got)
 		}
 	case <-time.After(5 * time.Second):

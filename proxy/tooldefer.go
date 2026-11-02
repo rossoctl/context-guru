@@ -19,7 +19,7 @@ import (
 // The proxy's half of tool deferral (#485). The decision and the rewrite are package tooldefer's;
 // this file only wires them: which requests ask for it (the tenant's toolfilter `defer: auto`, which
 // only the ultrahigh preset sets), the probe through the host's Dispatcher, the retry of the original
-// request after a 400, the ENABLE_TOOL_SEARCH flag from /lifecycle, and the /stats ledger.
+// request after a 400, the ENABLE_TOOL_SEARCH flag from /tool-search, and the /stats ledger.
 
 // deferState is one handler's deferral state. Built lazily, so a proxy no tenant of which asks for
 // deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
