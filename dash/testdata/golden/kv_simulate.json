@@ -398,7 +398,7 @@
    }
   ],
   "multipliers": {
-   "cache_read": 0.1,
+   "cache_read": 0,
    "write_1h": 2,
    "write_5m": 1.25
   }
