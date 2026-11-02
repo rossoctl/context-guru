@@ -1,6 +1,7 @@
 package tooldefer
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,7 +19,7 @@ type Gate struct {
 	now    func() time.Time
 
 	// Counters, for /stats.
-	Retries   atomic.Int64 // a 4xx on a changed request, answered with the original request
+	Retries   atomic.Int64 // a 400/422 on a changed request, answered with the original request
 	Deferred  atomic.Int64 // requests that carried deferred tools
 	Decisions atomic.Int64 // threads decided
 	Rebuilds  atomic.Int64 // threads whose set was rebuilt after a store miss
@@ -47,15 +48,24 @@ func (g *Gate) SearchOff(session string) bool {
 	return ok && g.now().Sub(at) < gateTTL
 }
 
-// NoteToolSearch records the raw ENABLE_TOOL_SEARCH value a session's hook sent. Only a literal
-// "false" turns deferral off; "auto", "auto:N", "true" and "" are not a decision.
+// SearchOffValue reports whether a raw ENABLE_TOOL_SEARCH value turns tool search off on purpose:
+// false, 0, no or off, in any case. "auto", "auto:N", "true" and "" are not a decision.
+func SearchOffValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "no", "off":
+		return true
+	}
+	return false
+}
+
+// NoteToolSearch records the raw ENABLE_TOOL_SEARCH value a session's hook sent (SearchOffValue).
 func (g *Gate) NoteToolSearch(session, raw string) {
 	if g == nil || session == "" {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if raw != "false" {
+	if !SearchOffValue(raw) {
 		delete(g.searchOff, session)
 		return
 	}
@@ -85,21 +95,36 @@ func (g *Gate) Break(tenant, model string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.broken) >= maxGate {
-		for k := range g.broken {
-			delete(g.broken, k)
-			break
-		}
+		pruneOldest(g.broken)
 	}
 	g.broken[[2]string{tenant, model}] = g.now()
 }
 
-func pruneOldest(m map[string]time.Time) {
-	var oldK string
+// pruneOldest deletes the oldest entry of m.
+func pruneOldest[K comparable](m map[K]time.Time) {
+	var oldK K
 	var oldT time.Time
+	first := true
 	for k, t := range m {
-		if oldK == "" || t.Before(oldT) {
-			oldK, oldT = k, t
+		if first || t.Before(oldT) {
+			oldK, oldT, first = k, t, false
 		}
 	}
-	delete(m, oldK)
+	if !first {
+		delete(m, oldK)
+	}
+}
+
+// DeferralCause reports whether a provider's 400/422 body names a cause deferral can produce:
+// defer_loading, a tool reference, the search tool, "all tools deferred", or cache_control on a
+// deferred tool. Only such a refusal turns deferral off; any other 400 is the request's own fault
+// (another component, the client), and the retry of the original answers it.
+func DeferralCause(body []byte) bool {
+	b := strings.ToLower(string(body))
+	for _, k := range []string{"defer_loading", "tool_reference", "tool reference", "tool_search", "at least one tool"} {
+		if strings.Contains(b, k) {
+			return true
+		}
+	}
+	return false
 }

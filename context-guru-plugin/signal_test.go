@@ -124,10 +124,10 @@ func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
 		}
 		runSignal(t, env, payload)
 	}
-	runSignal(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=false"), payload)
+	runSignal(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=FALSE"), payload)
 	select {
 	case got := <-ch:
-		if got["kind"] != "startup" || got["enable_tool_search"] != "false" {
+		if got["kind"] != "startup" || got["enable_tool_search"] != "FALSE" {
 			t.Errorf("body = %v", got)
 		}
 	case <-time.After(5 * time.Second):

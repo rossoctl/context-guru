@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/store"
@@ -266,6 +267,86 @@ func TestRewriteLeavesServerAndClientDeferredTools(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "tools.1.defer_loading").Exists() {
 		t.Fatal("a server tool was marked")
+	}
+}
+
+// No cache_control mark is lost: with the last loaded tool already marked, the moved mark goes on
+// the loaded tool before it, and two marked deferred tools keep both marks.
+func TestRewriteKeepsEveryCacheMark(t *testing.T) {
+	mk := func(d string) string { return strings.TrimSuffix(d, "}") + `,"cache_control":{"type":"ephemeral"}}` }
+	b := body([]string{decl("Bash"), decl("Read"), mk(decl("Edit")), mk(decl("Workflow")), mk(decl("Monitor"))}, "")
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true})
+	if !ok || strings.Join(n, ",") != "Monitor,Workflow" {
+		t.Fatalf("names = %v", n)
+	}
+	if c := strings.Count(string(out), `"cache_control"`); c != 3 {
+		t.Fatalf("%d cache_control marks, want 3: %s", c, gjson.GetBytes(out, "tools").Raw)
+	}
+	for i, want := range []bool{true, true, true, false, false} {
+		if got := gjson.GetBytes(out, "tools."+itoa(i)+".cache_control").Exists(); got != want {
+			t.Errorf("tools.%d cache_control = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// A later turn that forces a deferred tool gets it loaded for that request, and the names list keeps
+// its bytes.
+func TestRewriteLeavesForcedToolLoaded(t *testing.T) {
+	set := map[string]bool{"Workflow": true, "Monitor": true}
+	plain, _, _ := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, ""), set)
+	forced, n, ok := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, `"tool_choice":{"type":"tool","name":"Workflow"},`), set)
+	if !ok || strings.Join(n, ",") != "Monitor" {
+		t.Fatalf("names = %v", n)
+	}
+	if got := names(forced); got != "Bash,Workflow,Monitor*,tool_search_tool_bm25" {
+		t.Fatalf("tools = %s", got)
+	}
+	if gjson.GetBytes(forced, "messages.1").Raw != gjson.GetBytes(plain, "messages.1").Raw {
+		t.Fatal("the names list changed on the forced turn")
+	}
+	if !set["Workflow"] {
+		t.Fatal("Rewrite changed the caller's set")
+	}
+}
+
+func TestSearchOffValue(t *testing.T) {
+	for v, want := range map[string]bool{"false": true, "FALSE": true, "False": true, "0": true, "no": true, "OFF": true,
+		" false ": true, "auto": false, "auto:5": false, "true": false, "1": false, "": false} {
+		if SearchOffValue(v) != want {
+			t.Errorf("SearchOffValue(%q) = %v", v, !want)
+		}
+	}
+}
+
+func TestDeferralCause(t *testing.T) {
+	for b, want := range map[string]bool{
+		`{"error":{"message":"tools.2.custom.defer_loading: Extra inputs are not permitted"}}`:               true,
+		`{"error":{"message":"At least one tool must have defer_loading=false."}}`:                           true,
+		`{"error":{"message":"Tool 'X' cannot have both defer_loading=true and cache_control set."}}`:        true,
+		`{"error":{"message":"Tool reference 'X' not found in available tools"}}`:                            true,
+		`{"error":{"message":"tool type 'tool_search_tool_bm25_20990101' is not supported for this model"}}`: true,
+		`{"error":{"message":"messages.3: text content blocks must be non-empty"}}`:                          false,
+		`{"error":{"message":"model: unknown model"}}`:                                                       false,
+		``: false,
+	} {
+		if DeferralCause([]byte(b)) != want {
+			t.Errorf("DeferralCause(%s) = %v", b, !want)
+		}
+	}
+}
+
+func TestGateBreakEvictsOldest(t *testing.T) {
+	g := NewGate()
+	now := time.Unix(0, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < maxGate; i++ {
+		now = now.Add(time.Second)
+		g.Break("t", "m"+itoa(i))
+	}
+	now = now.Add(time.Second)
+	g.Break("t", "new")
+	if g.Broken("t", "m0") || !g.Broken("t", "m1") || !g.Broken("t", "new") {
+		t.Fatal("Break did not evict the oldest entry")
 	}
 }
 

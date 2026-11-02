@@ -4,7 +4,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,11 +34,20 @@ func NamesList(names []string) string {
 //     alone;
 //   - at least one client tool stays loaded, so a cache_control mark always has a home: if the set
 //     would defer every client tool, the last one in array order stays loaded;
-//   - a deferred tool cannot carry cache_control: its mark moves to the last loaded tool.
+//   - a deferred tool cannot carry cache_control: its mark moves to the nearest loaded tool before
+//     it that has no mark, so no mark is lost while one has a home;
+//   - a tool `tool_choice` forces on THIS request stays loaded for this request (a forced deferred
+//     tool can draw a 400). The thread's set does not change; the names list still names it.
 func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok bool) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || len(set) == 0 {
 		return body, nil, false
+	}
+	// listed is the names list's set: the thread's set, forced tool included, so messages[1] has the
+	// same bytes on the turn that forces one.
+	listed := set
+	if f := forcedTool(body); f != "" && set[f] {
+		set = withoutName(set, f)
 	}
 	arr := tools.Array()
 	mark := make([]bool, len(arr))
@@ -67,7 +75,7 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 			}
 		}
 	}
-	moveMark := ""
+	var moved []string // the marks taken off deferred tools, in array order
 	elems := make([]string, len(arr))
 	for i, t := range arr {
 		elems[i] = t.Raw
@@ -76,9 +84,7 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 		}
 		raw := t.Raw
 		if cc := t.Get("cache_control"); cc.Exists() {
-			if moveMark == "" {
-				moveMark = cc.Raw
-			}
+			moved = append(moved, cc.Raw)
 			var err error
 			if raw, err = sjson.Delete(raw, "cache_control"); err != nil {
 				return body, nil, false
@@ -94,12 +100,24 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 	if len(names) == 0 {
 		return body, nil, false
 	}
-	if moveMark != "" && lastLoaded >= 0 && !arr[lastLoaded].Get("cache_control").Exists() {
-		raw, err := sjson.SetRaw(elems[lastLoaded], "cache_control", moveMark)
+	// Each moved mark goes on the last loaded tool without a mark, walking back from the end. The
+	// latest mark is placed first, so the furthest breakpoint stays the furthest. A mark with no free
+	// loaded tool left is dropped: the body then carries no more marks than the client sent.
+	free := len(arr) - 1
+	for j := len(moved) - 1; j >= 0; j-- {
+		for free >= 0 && (mark[free] || arr[free].Get("type").Exists() || arr[free].Get("defer_loading").Bool() ||
+			gjson.Get(elems[free], "cache_control").Exists()) {
+			free--
+		}
+		if free < 0 {
+			break
+		}
+		raw, err := sjson.SetRaw(elems[free], "cache_control", moved[j])
 		if err != nil {
 			return body, nil, false
 		}
-		elems[lastLoaded] = raw
+		elems[free] = raw
+		free--
 	}
 	if !hasSearch {
 		elems = append(elems, searchTool)
@@ -109,7 +127,12 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 		return body, nil, false
 	}
 	sort.Strings(names)
-	if out, ok = placeList(out, NamesList(names)); !ok {
+	list := names
+	if f := forcedTool(body); f != "" && listed[f] && !set[f] {
+		list = append(append([]string{}, names...), f)
+	}
+	sort.Strings(list)
+	if out, ok = placeList(out, NamesList(list)); !ok {
 		return body, nil, false
 	}
 	return out, names, true
@@ -181,14 +204,12 @@ func itoa(i int) string {
 	return string(b[n:])
 }
 
-// ClaudeCodeSearchOn reports whether Claude Code's own search is on in this request: its
-// ToolSearch tool, its placeholder, or its deferred-tools list.
-func ClaudeCodeSearchOn(body []byte) bool {
-	found := false
-	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
-		n := t.Get("name").String()
-		found = n == claudeCodeSearch || n == placeholder
-		return !found
-	})
-	return found || strings.Contains(string(body), deferred.Header)
+func withoutName(set map[string]bool, n string) map[string]bool {
+	out := make(map[string]bool, len(set))
+	for k, v := range set {
+		if k != n {
+			out[k] = v
+		}
+	}
+	return out
 }

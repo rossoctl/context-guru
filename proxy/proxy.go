@@ -1960,8 +1960,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// Tool deferral changed this request and the provider refused it: the client must never see
 		// that 400 (Claude Code would turn its own search off for the session). Send the request
 		// without deferral, once, before answering. Round 0 only: a later round is the proxy's own.
-		if round == 0 && err == nil && resp != nil && h.deferRetry(di, resp.StatusCode) {
+		if round == 0 && err == nil && resp != nil && di != nil &&
+			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 			resp.Body.Close()
+			h.deferRetry(di, resp.StatusCode, errBody)
 			body, di = di.orig, nil
 			resp, err = h.doUpstream(r, up, body)
 		}

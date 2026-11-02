@@ -36,9 +36,10 @@ func tdBody(extra ...string) []byte {
 // tdUpstream answers like the gateway. reject400 makes it refuse any body with defer_loading, the way
 // a model without support does. It answers a probe as the API would.
 type tdUpstream struct {
-	mu        sync.Mutex
-	bodies    [][]byte
-	reject400 bool
+	mu          sync.Mutex
+	bodies      [][]byte
+	reject400   bool
+	rejectOther bool // a 400 that does not name a deferral cause
 }
 
 func (u *tdUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,11 @@ func (u *tdUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if reject && bytes.Contains(b, []byte(`"defer_loading"`)) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"tools.2.custom.defer_loading: Extra inputs are not permitted"}}`)
+		return
+	}
+	if u.rejectOther && bytes.Contains(b, []byte(`"defer_loading"`)) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3: text content blocks must be non-empty"}}`)
 		return
 	}
 	fmt.Fprint(w, `{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"cache_read_input_tokens":3000,"output_tokens":2}}`)
@@ -274,7 +280,7 @@ func TestToolDeferLifecycleFlag(t *testing.T) {
 			t.Fatalf("signal status %d", resp.StatusCode)
 		}
 	}
-	post("sess-2", "false")
+	post("sess-2", "0")
 	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
 	if got := tdTools(up.last()); strings.Contains(got, "*") {
 		t.Fatalf("ENABLE_TOOL_SEARCH=false still deferred: %s", got)
@@ -348,5 +354,38 @@ func TestToolDeferSignalDoesNotBuildState(t *testing.T) {
 	h.noteToolSearch("s", "false")
 	if st, g := h.deferPeek(); st != nil || g == nil || !g.SearchOff("s") {
 		t.Fatalf("state built=%v, gate=%v", st != nil, g != nil)
+	}
+}
+
+// A 400 that does not name a deferral cause is still answered with the original, but deferral stays
+// on for the account and model.
+func TestToolDeferOther400DoesNotTurnDeferralOff(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tdPost(t, srv, tdBody())
+	up.mu.Lock()
+	up.rejectOther = true
+	up.mu.Unlock()
+	before := up.count()
+	resp, body := tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
+	if resp.StatusCode != http.StatusOK || up.count()-before != 2 {
+		t.Fatalf("status %d, rounds %d: %s", resp.StatusCode, up.count()-before, body)
+	}
+	if h.deferGate().Broken("", "claude-sonnet-5-5") {
+		t.Fatal("a 400 with another cause turned deferral off")
+	}
+	if h.deferGate().Retries.Load() != 1 {
+		t.Fatal("the retry was not counted")
+	}
+	up.mu.Lock()
+	up.rejectOther = false
+	up.mu.Unlock()
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-3"), 1))
+	if got := tdTools(up.last()); !strings.Contains(got, "*") {
+		t.Fatalf("deferral off after an unrelated 400: %s", got)
 	}
 }

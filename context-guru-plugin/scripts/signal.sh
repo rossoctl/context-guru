@@ -35,7 +35,10 @@ case "${ANTHROPIC_BASE_URL:-}" in http*) ;; *) exit 0 ;; esac
 # on purpose, which turns tool deferral off for this session (#485). Without that setting there is
 # nothing to say, and nothing is sent.
 STDIN="$(cat)"
-case "$STDIN" in *'"startup"'*) [ "${ENABLE_TOOL_SEARCH:-}" = "false" ] || exit 0 ;; esac
+# false, 0, no, off, in any case: the same values the proxy reads as "off" (tooldefer.SearchOffValue).
+case "$STDIN" in *'"startup"'*)
+  case "$(printf %s "${ENABLE_TOOL_SEARCH:-}" | tr '[:upper:]' '[:lower:]')" in false|0|no|off) ;; *) exit 0 ;; esac ;;
+esac
 BODY="$(python3 -c '
 import json, os, sys, re
 d = json.load(sys.stdin)

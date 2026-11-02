@@ -160,18 +160,20 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	})
 }
 
-// deferRetry reports whether a response to a request we changed must be answered with the
-// client's original request instead: a 400 or 422. It turns deferral off for this tenant and
-// model and drops the probe verdict, so the next request probes again.
-func (h *Handler) deferRetry(di *deferInfo, status int) bool {
-	if di == nil || (status != http.StatusBadRequest && status != http.StatusUnprocessableEntity) {
-		return false
+// deferRetry handles a 400 or 422 to a request we changed. The caller always sends the client's
+// original next, so the client never sees our 400. Deferral is turned off for this tenant and
+// model, and the probe verdict dropped, only when the provider's message names a deferral cause
+// (tooldefer.DeferralCause): any other 400 is not ours to act on, and the retry answers it.
+func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte) {
+	if !tooldefer.DeferralCause(errBody) {
+		h.deferGate().Retries.Add(1)
+		slog.Info("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", false)
+		return
 	}
 	h.deferGate().Break(di.tenant, di.model)
 	h.toolDefer().prober.Forget(di.probe)
-	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model,
+	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", true,
 		"note", "the provider refused a request with deferred tools; sent the original and turned deferral off for this model")
-	return true
 }
 
 // deferLedger books one finished request in the net-saving ledger. msg is the response message
