@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -131,6 +132,8 @@ type kaEntry struct {
 	// wait cause the sweep's question stores with its held answer (#404, #453).
 	toolUseNames []string
 	usageOK      bool
+	// terminal is Options.TerminalTools as of record time (#857).
+	terminal []string
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
 	// (endsAtTextTurn, #776): roles and block types only. Never on OpenAI: its cache has no breakpoints
 	// and no text-turn rule, so a substitute there renews the prefix like a ping. Then the sweep's question cannot renew the
@@ -302,6 +305,11 @@ func (e *kaEntry) pingable() bool {
 	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
+	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
+	// request follows, so a ping only spends money (#857). Tool names only.
+	if waitcause.IsDone(e.toolUseNames, e.terminal) {
+		return false
+	}
 	if e.pol.PredictorID == "" {
 		return true
 	}
@@ -331,6 +339,10 @@ type Options struct {
 	// OpenTasks reports a thread's open background-task and teammate-wait counts, for the wait cause
 	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
 	OpenTasks func(tenant, session, thread string) (background, teammate int)
+	// TerminalTools names the tools whose call ends an agent (#857). A thread whose last response
+	// ends with one is done: it is never pinged. nil: waitcause.DefaultTerminalTools. A non-nil
+	// empty list turns the rule off, which is the behavior before #857.
+	TerminalTools []string
 }
 
 // Record is one finished upstream request, handed to Keeper.Record by the host.
@@ -878,7 +890,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		toolUseNames: r.ToolUseNames, usageOK: usageOK, endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
+		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: k.o.TerminalTools, endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}

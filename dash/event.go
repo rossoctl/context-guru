@@ -160,7 +160,7 @@ type Event struct {
 	// compaction behaviour — it only writes them, so a later change can.
 	//
 	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
-	// right now (own_tool|human|background|teammate|retry|unknown); WaitTool is the LAST
+	// right now (own_tool|human|background|teammate|retry|done|unknown); WaitTool is the LAST
 	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
 	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
 	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the

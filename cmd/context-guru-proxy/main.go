@@ -685,13 +685,15 @@ func main() {
 		RestartGrace: restartGrace,
 		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
-		Cache:     cachePolicy(cfg.Cache),
-		Windows:   windows,                // dynamic context-window resolver (fraction triggers)
-		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
-		Preset:    cfg.Preset,
-		Dashboard: rec,      // nil unless --dashboard
-		Record:    traceRec, // nil unless --record
-		Mode:      mode,     // sync (default) | observe — explicit, never inferred
+		Cache: cachePolicy(cfg.Cache),
+		// Tools whose call ends an agent: no pings after one (#857). nil = shipped list; [] = off.
+		TerminalTools: cfg.Cache.KeepAliveTerminalTools,
+		Windows:       windows,                // dynamic context-window resolver (fraction triggers)
+		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
+		Preset:        cfg.Preset,
+		Dashboard:     rec,      // nil unless --dashboard
+		Record:        traceRec, // nil unless --record
+		Mode:          mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,

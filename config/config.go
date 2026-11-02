@@ -165,6 +165,12 @@ type CacheConfig struct {
 	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
 	// well as the efficiency one.
 	KeepAliveMinPrefixTokens int `yaml:"keepalive_min_prefix_tokens"`
+	// KeepAliveTerminalTools names the tools whose call ENDS an agent (#857). When the last tool
+	// call of a response is one of them, the thread is done: no tool result comes back, so the
+	// keep-alive plans no pings for it, and the wait cause reads "done". Absent: the shipped list
+	// (StructuredOutput). An empty list (`keepalive_terminal_tools: []`) turns the rule off, which
+	// is the behavior before #857: such a thread gets its pings.
+	KeepAliveTerminalTools []string `yaml:"keepalive_terminal_tools"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's

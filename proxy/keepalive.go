@@ -79,7 +79,13 @@ type keeper struct {
 	signalApplied atomic.Int64
 }
 
-func newKeeper(h *Handler) *keeper { return newKeeperWith(h, keepalive.Options{}) }
+func newKeeper(h *Handler) *keeper {
+	o := keepalive.Options{}
+	if h != nil {
+		o.TerminalTools = h.opts.TerminalTools
+	}
+	return newKeeperWith(h, o)
+}
 
 // newKeeperWith lets tests inject the clock and an inline runner. Dispatcher and Spare are always
 // the proxy's own.

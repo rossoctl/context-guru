@@ -87,6 +87,8 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
+	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
+	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
 	// body, the wire dialect, and the bypass flag — everything apply.EnforcedSessionIDFor
 	// needs to derive the id the pipeline's own turn will ask under. Stashed here because
@@ -131,9 +133,10 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
-		llm:    &cheapmodel.Sink{},
-		unique: map[string]int{},
-		waits:  h.waits,
+		llm:      &cheapmodel.Sink{},
+		unique:   map[string]int{},
+		waits:    h.waits,
+		terminal: h.opts.TerminalTools,
 	}
 }
 
@@ -502,7 +505,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
-	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
+	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
@@ -526,8 +529,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
-		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
-			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
+			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
 		return dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
