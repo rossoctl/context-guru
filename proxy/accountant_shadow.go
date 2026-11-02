@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -63,7 +63,7 @@ func logFallback(e *dash.Event) {
 }
 
 // checkNames lists the names of the failed library checks, comma-separated, in order.
-func checkNames(r cf.Result) string {
+func checkNames(r accountant.Result) string {
 	n := make([]string, len(r.Checks))
 	for i, c := range r.Checks {
 		n[i] = c.Check

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/accountant/test/cases"
 	"github.com/rossoctl/context-guru/dash"
 )
@@ -30,14 +30,14 @@ type PlayedCF struct {
 // PlayCF drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + SplitUSD + TTLUSD,
 // minus every spend op priced with its own model's rate (the host prices spends).
 func PlayCF(c cases.Case) []PlayedCF {
-	trackers := cf.NewTrackers()
+	trackers := accountant.NewTrackers()
 	var out []PlayedCF
 	for _, s := range c.Steps {
 		if s.IsStandalone() {
-			_ = cf.ComputeStandalone(*s.Standalone) // the library returns the Call; the host prices it
+			_ = accountant.ComputeStandalone(*s.Standalone) // the library returns the Call; the host prices it
 			var spend int64
 			for _, op := range s.Standalone.Ops {
-				if op.Kind == cf.KindSpend && op.Call != nil {
+				if op.Kind == accountant.KindSpend && op.Call != nil {
 					spend += c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 				}
 			}
@@ -48,7 +48,7 @@ func PlayCF(c cases.Case) []PlayedCF {
 		var spend int64
 		for _, op := range s.Add {
 			req.Add(op)
-			if op.Kind == cf.KindSpend && op.Call != nil {
+			if op.Kind == accountant.KindSpend && op.Call != nil {
 				spend += c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 			}
 		}
@@ -78,7 +78,7 @@ func componentsOf(c cases.Case) map[string]string {
 			ops = s.Standalone.Ops
 		}
 		for _, op := range ops {
-			if op.Kind == cf.KindSpend || op.ChangeID == "" {
+			if op.Kind == accountant.KindSpend || op.ChangeID == "" {
 				continue
 			}
 			comp := strings.TrimPrefix(op.Operator, "context-guru.")
@@ -102,7 +102,7 @@ func sharedComp(c cases.Case, comp string) bool {
 	byID := map[string]map[string]bool{}
 	for _, s := range c.Steps {
 		for _, op := range s.Add {
-			if op.Kind == cf.KindSpend || op.ChangeID == "" {
+			if op.Kind == accountant.KindSpend || op.ChangeID == "" {
 				continue
 			}
 			if byID[op.ChangeID] == nil {
@@ -135,7 +135,7 @@ func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) ma
 		}
 	}
 	for _, e := range s.Expected.Effects {
-		if !e.Counted() || e.Kind != cf.EffectBreak {
+		if !e.Counted() || e.Kind != accountant.EffectBreak {
 			continue
 		}
 		if comp, ok := comps[e.ChangeID]; ok && e.ChangeID != "" {

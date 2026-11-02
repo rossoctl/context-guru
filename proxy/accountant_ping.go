@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -17,16 +17,16 @@ const pingStoreMax = 4096
 // and to the Handler (reader) through Options.Pings. A nil *PingStore is a no-op.
 type PingStore struct {
 	mu sync.Mutex
-	m  map[string]cf.PingFacts
+	m  map[string]accountant.PingFacts
 }
 
 // NewPingStore returns an empty store holding at most pingStoreMax threads.
-func NewPingStore() *PingStore { return &PingStore{m: map[string]cf.PingFacts{}} }
+func NewPingStore() *PingStore { return &PingStore{m: map[string]accountant.PingFacts{}} }
 
 // put keeps the latest facts for key; a second ping overwrites the first. When the store is full
 // and key is new, an arbitrary other entry is evicted (map order), which only costs the evicted
 // thread its LastPing gap on its next request.
-func (s *PingStore) put(key string, f cf.PingFacts) {
+func (s *PingStore) put(key string, f accountant.PingFacts) {
 	if s == nil {
 		return
 	}
@@ -42,9 +42,9 @@ func (s *PingStore) put(key string, f cf.PingFacts) {
 }
 
 // take returns the facts for key and deletes them: they belong to the next real request only.
-func (s *PingStore) take(key string) (cf.PingFacts, bool) {
+func (s *PingStore) take(key string) (accountant.PingFacts, bool) {
 	if s == nil {
-		return cf.PingFacts{}, false
+		return accountant.PingFacts{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,10 +55,10 @@ func (s *PingStore) take(key string) (cf.PingFacts, bool) {
 
 // pingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not
 // carried: the host prices the ping with its own rates.
-func pingFromReport(r components.KeepAliveReport) cf.Ping {
-	return cf.Ping{
+func pingFromReport(r components.KeepAliveReport) accountant.Ping {
+	return accountant.Ping{
 		Session: r.Session, ThreadID: r.Thread, Model: r.Model, Host: r.Route,
-		Usage: cf.CallUsage{Usage: cf.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
+		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
 			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)}, Output: int(r.Output)},
 		At: time.UnixMilli(r.TS), Window: r.Window,
 	}
@@ -68,13 +68,13 @@ func pingFromReport(r components.KeepAliveReport) cf.Ping {
 // thread's next real request. ok is false, and nothing is stored, for a ping that is not
 // converted: no Window (its ChangeID would be shared by every such ping), a status outside
 // 200-299, or no usage (it billed nothing). Manual and sweep-substitute pings are converted.
-func PingSavings(r components.KeepAliveReport, st *PingStore) (cf.Result, bool) {
+func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result, bool) {
 	if r.Window.IsZero() || r.Status < 200 || r.Status > 299 ||
 		r.FreshInput+r.CacheRead+r.CacheWrite+r.CacheWrite1h+r.Output == 0 {
-		return cf.Result{}, false
+		return accountant.Result{}, false
 	}
-	ops, facts := cf.PingOps(pingFromReport(r), cf.Billing{Mode: cf.BillingAPI})
-	res := cf.ComputeStandalone(ops)
+	ops, facts := accountant.PingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
+	res := accountant.ComputeStandalone(ops)
 	st.put(cfPingKey(r.Session, cfThreadID(r.Thread)), facts)
 	return res, true
 }

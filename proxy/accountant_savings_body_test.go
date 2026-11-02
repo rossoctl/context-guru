@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 )
 
 const cfSample = `{"tools":[{"name":"a"}],"system":"sys",
@@ -55,7 +55,7 @@ func TestCfBodies_OpenAIShapeLeavesToolsAndSystemEmpty(t *testing.T) {
 
 func TestCfBreakpoints_FindsBlockLevelMarkAndTTL(t *testing.T) {
 	got := cfBreakpoints([]byte(cfSample))
-	want := []cf.Breakpoint{{Pos: cf.Position{Section: cf.SectionMessages, Index: 1}, TTL: "1h"}}
+	want := []accountant.Breakpoint{{Pos: accountant.Position{Section: accountant.SectionMessages, Index: 1}, TTL: "1h"}}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -66,10 +66,10 @@ func TestCfBreakpoints_AllSectionsInBodyOrder(t *testing.T) {
 	 "system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],
 	 "messages":[{"role":"user","content":"x","cache_control":{"type":"ephemeral"}}]}`
 	got := cfBreakpoints([]byte(raw))
-	want := []cf.Breakpoint{
-		{Pos: cf.Position{Section: cf.SectionTools, Index: 0}, TTL: "5m"},
-		{Pos: cf.Position{Section: cf.SectionSystem, Index: 0}, TTL: "1h"},
-		{Pos: cf.Position{Section: cf.SectionMessages, Index: 0}, TTL: "5m"},
+	want := []accountant.Breakpoint{
+		{Pos: accountant.Position{Section: accountant.SectionTools, Index: 0}, TTL: "5m"},
+		{Pos: accountant.Position{Section: accountant.SectionSystem, Index: 0}, TTL: "1h"},
+		{Pos: accountant.Position{Section: accountant.SectionMessages, Index: 0}, TTL: "5m"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v", got)
@@ -90,7 +90,7 @@ func TestCfBreakpointsOnePerPositionLongerTTL(t *testing.T) {
 		`{"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}},{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`,
 	} {
 		bps := cfBreakpoints([]byte(raw))
-		if len(bps) != 1 || bps[0].TTL != "1h" || bps[0].Pos != (cf.Position{Section: cf.SectionMessages, Index: 0}) {
+		if len(bps) != 1 || bps[0].TTL != "1h" || bps[0].Pos != (accountant.Position{Section: accountant.SectionMessages, Index: 0}) {
 			t.Fatalf("%s: breakpoints = %+v, want one 1h at messages[0]", raw, bps)
 		}
 	}

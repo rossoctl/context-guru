@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -19,8 +19,8 @@ func okReport() components.KeepAliveReport {
 
 func TestPingFromReportMapsEveryField(t *testing.T) {
 	p := pingFromReport(okReport())
-	want := cf.Ping{Session: "s", ThreadID: "", Model: "m", Host: "h",
-		Usage: cf.CallUsage{Usage: cf.Usage{Input: 10, CacheRead: 5000, CacheWrite: 300, CacheWrite1h: 100}, Output: 1},
+	want := accountant.Ping{Session: "s", ThreadID: "", Model: "m", Host: "h",
+		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: 10, CacheRead: 5000, CacheWrite: 300, CacheWrite1h: 100}, Output: 1},
 		At:    time.UnixMilli(pingAt.UnixMilli()), Window: pingAt.Add(-4 * time.Minute)}
 	if p != want {
 		t.Fatalf("got %+v want %+v", p, want)
@@ -82,8 +82,8 @@ func TestPingSavingsNilStoreIsFine(t *testing.T) {
 
 func TestPingStoreTakeDeletesAndOverwriteKeepsLatest(t *testing.T) {
 	s := NewPingStore()
-	s.put("k", cf.PingFacts{PingWindow: "a"})
-	s.put("k", cf.PingFacts{PingWindow: "b"})
+	s.put("k", accountant.PingFacts{PingWindow: "a"})
+	s.put("k", accountant.PingFacts{PingWindow: "b"})
 	f, ok := s.take("k")
 	if !ok || f.PingWindow != "b" {
 		t.Fatalf("%+v %v", f, ok)
@@ -92,7 +92,7 @@ func TestPingStoreTakeDeletesAndOverwriteKeepsLatest(t *testing.T) {
 		t.Fatal("take must delete")
 	}
 	var nilStore *PingStore
-	nilStore.put("k", cf.PingFacts{})
+	nilStore.put("k", accountant.PingFacts{})
 	if _, ok := nilStore.take("k"); ok {
 		t.Fatal("nil store")
 	}
@@ -101,7 +101,7 @@ func TestPingStoreTakeDeletesAndOverwriteKeepsLatest(t *testing.T) {
 func TestPingStoreIsBounded(t *testing.T) {
 	s := NewPingStore()
 	for i := 0; i < pingStoreMax+500; i++ {
-		s.put(fmt.Sprint("k", i), cf.PingFacts{PingWindow: "w"})
+		s.put(fmt.Sprint("k", i), accountant.PingFacts{PingWindow: "w"})
 	}
 	if len(s.m) > pingStoreMax {
 		t.Fatalf("len %d > %d", len(s.m), pingStoreMax)
@@ -114,7 +114,7 @@ func TestPingStoreIsBounded(t *testing.T) {
 func TestEntryFactsConsumesPingFactsOnce(t *testing.T) {
 	st := NewPingStore()
 	PingSavings(okReport(), st)
-	th := cf.Thread{ID: "main"}
+	th := accountant.Thread{ID: "main"}
 	f := entryFacts(nil, st, "s", th)
 	if f.LastPing.IsZero() || f.PingWindow == "" || f.PingRead != nil {
 		t.Fatalf("%+v", f)
@@ -135,10 +135,10 @@ func TestNamedThreadKeyRoundTrips(t *testing.T) {
 	if _, ok := PingSavings(r, st); !ok {
 		t.Fatal("not converted")
 	}
-	if f := entryFacts(nil, st, "s", cf.Thread{ID: "main"}); !f.LastPing.IsZero() {
+	if f := entryFacts(nil, st, "s", accountant.Thread{ID: "main"}); !f.LastPing.IsZero() {
 		t.Fatal("the main thread must not take a named thread's ping")
 	}
-	f := entryFacts(nil, st, "s", cf.Thread{ID: "sub-1"})
+	f := entryFacts(nil, st, "s", accountant.Thread{ID: "sub-1"})
 	if f.LastPing.IsZero() || f.PingWindow == "" {
 		t.Fatalf("%+v", f)
 	}

@@ -32,7 +32,7 @@ import (
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -289,7 +289,7 @@ type Trace struct {
 	Run *components.RunReport
 	// Ops are the rewrite operations of this request for the savings computation, in pipeline
 	// order, with wire positions. OpsDropped counts changes that could not be placed.
-	Ops        []cf.Operation
+	Ops        []accountant.Operation
 	OpsDropped int
 	// Changes lists each rewritten message's before/after text (clipped).
 	Changes []Change

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 )
 
 // switchEvent is a priced-looking event with a mask component that acted and a library Result
@@ -15,8 +15,8 @@ func switchEvent() *Event {
 			{Component: "mask", Acted: true, Mutated: true, SavedGross: 9999, SavedUnique: 9999},
 			{Component: "idle"},
 		}}
-	e.SetCounterfactual(cf.Result{Ops: []cf.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
-		Saved: cf.TierTokens{CacheRead: 1000}}}})
+	e.SetCounterfactual(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+		Saved: accountant.TierTokens{CacheRead: 1000}}}})
 	return e
 }
 
@@ -60,7 +60,7 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		"ops dropped": {func(e *Event) { e.SetCounterfactualContext(1, false) }, FallbackOpsDropped},
 		"observe":     {func(e *Event) { e.SetCounterfactualContext(0, true) }, FallbackObserve},
 		"unpriced": {func(e *Event) {
-			e.cfRes.Unpriced = []cf.Unpriced{{OpID: "x", Reason: "r"}}
+			e.cfRes.Unpriced = []accountant.Unpriced{{OpID: "x", Reason: "r"}}
 		}, FallbackUnpriced},
 		"acted without figure": {func(e *Event) { e.Components[1].Acted = true }, FallbackActedWithoutFigure},
 		"figure without row":   {func(e *Event) { e.Components = e.Components[1:] }, FallbackFigureWithoutRow},
@@ -70,13 +70,13 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 			e.Components = append(e.Components, CompRow{Component: "mask"})
 		}, FallbackDuplicateName},
 		"check sum": {func(e *Event) {
-			e.cfRes.Checks = []cf.CheckFailure{{Check: "sum", Detail: "section=messages ops=1800 bodies=900 bytes"}}
+			e.cfRes.Checks = []accountant.CheckFailure{{Check: "sum", Detail: "section=messages ops=1800 bodies=900 bytes"}}
 		}, FallbackCheckSum},
 		"check unique_change": {func(e *Event) {
-			e.cfRes.Checks = []cf.CheckFailure{{Check: "unique_change", Operator: "context-guru.mask"}}
+			e.cfRes.Checks = []accountant.CheckFailure{{Check: "unique_change", Operator: "context-guru.mask"}}
 		}, FallbackCheckUniqueChange},
 		"check spans": {func(e *Event) {
-			e.cfRes.Checks = []cf.CheckFailure{{Check: "spans", Operator: "context-guru.mask"}}
+			e.cfRes.Checks = []accountant.CheckFailure{{Check: "spans", Operator: "context-guru.mask"}}
 		}, FallbackCheckSpans},
 	}
 	for name, c := range cases {
@@ -98,7 +98,7 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 // the plausibility bound covers where it matters. It must not gate the override.
 func TestPriceMode_ConservationCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
-	e.cfRes.Checks = []cf.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
+	e.cfRes.Checks = []accountant.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
 	e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
 	if fb := e.CounterfactualFallback(); fb != "" || !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
 		t.Fatalf("conservation gated the override: reason %q components %+v", fb, e.Components)
@@ -114,7 +114,7 @@ func TestPriceMode_FallbackReasonPerMode(t *testing.T) {
 		t.Errorf("legacy: fallback %q, want none", fb)
 	}
 	e = switchEvent()
-	e.cfRes.Checks = []cf.CheckFailure{{Check: "sum"}}
+	e.cfRes.Checks = []accountant.CheckFailure{{Check: "sum"}}
 	want := legacyCopy(e)
 	e.PriceMode(cfTestPrice, true, SavingsShadow)
 	if fb := e.CounterfactualFallback(); fb != FallbackCheckSum {

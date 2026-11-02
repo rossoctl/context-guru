@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -20,10 +20,10 @@ func TestShadowDiff_BothFigures(t *testing.T) {
 	// write ($3.75/M) for a read ($0.30/M): 2000 x 3.45e-6 = $0.0069.
 	p := modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}
 	e := &dash.Event{BaselineCostUSD: 0.0100, CostUSD: 0.0097, KeepAliveSavedUSD: 0.0001, CachesplitSavedUSD: 0.0002}
-	e.SetCounterfactual(cf.Result{
-		Ops: []cf.PricedOp{{Operator: "context-guru.dedup", ChangeID: "c1", Saved: cf.TierTokens{CacheRead: 1000}}},
-		CacheEffects: []cf.CacheEffect{{Kind: cf.EffectRescue, ChangeID: "ka",
-			Saved: cf.TierTokens{CacheWrite5m: 2000}, Caused: cf.TierTokens{CacheRead: 2000}}},
+	e.SetCounterfactual(accountant.Result{
+		Ops: []accountant.PricedOp{{Operator: "context-guru.dedup", ChangeID: "c1", Saved: accountant.TierTokens{CacheRead: 1000}}},
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectRescue, ChangeID: "ka",
+			Saved: accountant.TierTokens{CacheWrite5m: 2000}, Caused: accountant.TierTokens{CacheRead: 2000}}},
 	})
 	legacy, cfUSD := shadowDiff(e, p)
 	if want := 0.0003 + 0.0001 + 0.0002; !near(legacy, want) {

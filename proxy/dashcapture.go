@@ -8,7 +8,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -124,7 +124,7 @@ type capture struct {
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
-	cfReq  *cf.Request
+	cfReq  *accountant.Request
 	cfDone bool
 	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
 	// LAST round's, billed on a body the expand loop grew, while the savings record holds the

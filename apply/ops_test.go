@@ -3,7 +3,7 @@ package apply
 import (
 	"testing"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -18,10 +18,10 @@ func TestOpsFromRun_MapsToWirePositionAndSkipsRevertedAndSkipped(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	o := ops[0]
-	if o.Kind != cf.KindRewrite || o.Operator != "context-guru.mask" || o.ChangeID != "cg:mask:1:aa11" {
+	if o.Kind != accountant.KindRewrite || o.Operator != "context-guru.mask" || o.ChangeID != "cg:mask:1:aa11" {
 		t.Fatalf("op = %+v", o)
 	}
-	if o.At != (cf.Position{Section: cf.SectionMessages, Index: 3}) {
+	if o.At != (accountant.Position{Section: accountant.SectionMessages, Index: 3}) {
 		t.Fatalf("At = %+v, want messages[3] (wire index, not req.Input index)", o.At)
 	}
 	if o.SizeBefore.Bytes != 4000 || o.SizeAfter.Bytes != 100 || o.DryRun {
@@ -95,7 +95,7 @@ func TestOpsFromRun_SpliceMapsToWire(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	o := ops[0]
-	if *o.MessageSplice != (cf.MessageSplice{At: 1, Removed: 1, Inserted: 1}) || o.At.Index != 1 ||
+	if *o.MessageSplice != (accountant.MessageSplice{At: 1, Removed: 1, Inserted: 1}) || o.At.Index != 1 ||
 		o.SizeBefore.Bytes != 8 || o.SizeAfter.Bytes != 2 || o.ChangeID != "cg:sum:1:ss" {
 		t.Fatalf("op = %+v splice %+v", o, o.MessageSplice)
 	}
@@ -103,7 +103,7 @@ func TestOpsFromRun_SpliceMapsToWire(t *testing.T) {
 
 func TestOpsFromRun_SpliceAtZero(t *testing.T) {
 	ops, dropped := OpsFromRun(spliceReport(0, 1, 0), []int{0, 1, 2}, true)
-	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (cf.MessageSplice{At: 0, Removed: 1, Inserted: 0}) {
+	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (accountant.MessageSplice{At: 0, Removed: 1, Inserted: 0}) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 }
@@ -111,7 +111,7 @@ func TestOpsFromRun_SpliceAtZero(t *testing.T) {
 func TestOpsFromRun_SpliceAppendedAtTheEnd(t *testing.T) {
 	// the last wire message (5) spans two slots: one past it is 6, not len(wire) = 3.
 	ops, dropped := OpsFromRun(spliceReport(3, 0, 1), []int{0, 5, 5}[:3], true)
-	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (cf.MessageSplice{At: 6, Removed: 0, Inserted: 1}) {
+	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (accountant.MessageSplice{At: 6, Removed: 0, Inserted: 1}) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	if ops[0].At.Index != 6 {
@@ -163,7 +163,7 @@ func TestOpsFromRun_SpliceBeforeAWireHoleIsKept(t *testing.T) {
 	wire := []int{0, 1, 2, 5, 6}
 	ops, dropped := OpsFromRun(spliceReport(0, 2, 1), wire, true)
 	// end=2: pair (wire[1], wire[2]) = (1,2) is dense, so it is kept.
-	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (cf.MessageSplice{At: 0, Removed: 2, Inserted: 1}) {
+	if dropped != 0 || len(ops) != 1 || *ops[0].MessageSplice != (accountant.MessageSplice{At: 0, Removed: 2, Inserted: 1}) {
 		t.Fatalf("ops = %+v dropped = %d", ops, dropped)
 	}
 	// ending at slot 3 touches the pair (2,5): dropped.

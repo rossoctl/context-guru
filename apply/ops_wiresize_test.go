@@ -7,7 +7,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 )
 
@@ -136,19 +136,19 @@ func TestTraceOpsSpliceWireBytesPassTheSumCheck(t *testing.T) {
 
 // libraryResult runs the library on the inbound and forwarded bodies, positions measured as raw
 // JSON elements (the proxy's cfBodies does the same).
-func libraryResult(client, fwd []byte, ops []cf.Operation) cf.Result {
-	b := func(raw []byte) cf.Body {
+func libraryResult(client, fwd []byte, ops []accountant.Operation) accountant.Result {
+	b := func(raw []byte) accountant.Body {
 		var m [][]byte
 		for _, v := range gjson.GetBytes(raw, "messages").Array() {
 			m = append(m, []byte(v.Raw))
 		}
-		return cf.NewBody(nil, nil, m)
+		return accountant.NewBody(nil, nil, m)
 	}
-	ts := cf.NewTrackers()
-	r := ts.BeginRequest(cf.RequestMeta{RequestID: "r1", Session: "s", Billing: cf.Billing{Mode: cf.BillingAPI}}, b(client), nil)
+	ts := accountant.NewTrackers()
+	r := ts.BeginRequest(accountant.RequestMeta{RequestID: "r1", Session: "s", Billing: accountant.Billing{Mode: accountant.BillingAPI}}, b(client), nil)
 	for _, o := range ops {
 		r.Add(o)
 	}
-	r.EndRequest(cf.Thread{ID: "main"}, b(fwd), nil, cf.EntryFacts{Lifetime: cf.LifetimeUnknown})
-	return r.Compute(cf.Usage{Input: 1000})
+	r.EndRequest(accountant.Thread{ID: "main"}, b(fwd), nil, accountant.EntryFacts{Lifetime: accountant.LifetimeUnknown})
+	return r.Compute(accountant.Usage{Input: 1000})
 }

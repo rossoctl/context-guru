@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -122,7 +122,7 @@ type WaitCauseResult struct {
 // entirely by the writer goroutine.
 type Event struct {
 	// cfRes is the counterfactual Result (see accountant_event.go). Unexported: not serialized.
-	cfRes *cf.Result
+	cfRes *accountant.Result
 	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
 	cfOpsDropped int
 	cfObserve    bool

@@ -3,7 +3,7 @@ package dash
 import (
 	"strings"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -13,7 +13,7 @@ import (
 const oneHourWriteInputMultiple = 2
 
 // tierUSD prices tokens by tier.
-func tierUSD(p modelinfo.Price, t cf.TierTokens) float64 {
+func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 	return float64(t.Input)*p.Input + float64(t.CacheRead)*p.CacheRead +
 		float64(t.CacheWrite5m)*p.CacheWrite + float64(t.CacheWrite1h)*oneHourWriteInputMultiple*p.Input
 }
@@ -54,7 +54,7 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
-		if unpricedIDs[o.OpID] && o.Saved == (cf.TierTokens{}) && o.Caused == (cf.TierTokens{}) {
+		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
 			continue
 		}
 		c := strings.TrimPrefix(o.Operator, "context-guru.")
@@ -78,7 +78,7 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
 		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
 		switch ce.Kind {
-		case cf.EffectBreak:
+		case accountant.EffectBreak:
 			// An empty ChangeID is a break nobody caused (client edit, cache expiry): unowned.
 			if c, ok := owner[ce.ChangeID]; ok && ce.ChangeID != "" {
 				f.ByComponent[c] += value
@@ -86,11 +86,11 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 			} else {
 				f.UnattributedBreakUSD -= value
 			}
-		case cf.EffectRescue:
+		case accountant.EffectRescue:
 			f.KeepAliveSavedUSD += value
-		case cf.EffectSplit:
+		case accountant.EffectSplit:
 			f.SplitUSD += value
-		case cf.EffectTTLPremium, cf.EffectTTLRescue:
+		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
 			f.TTLUSD += value
 		default:
 			f.Unpriced = append(f.Unpriced, "effect:"+string(ce.Kind)+":unknown_kind")

@@ -11,7 +11,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 )
@@ -32,8 +32,8 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	}))
 	defer up.Close()
 	h, rec, tap := cfHandlerYAML(t, up.URL, "shadow", "pipeline: [extract, extract_llm_sweep]\n")
-	var got atomic.Pointer[cf.Request]
-	h.savings.onEnd = func(r *cf.Request) { got.Store(r) }
+	var got atomic.Pointer[accountant.Request]
+	h.savings.onEnd = func(r *accountant.Request) { got.Store(r) }
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	body := `{"model":"claude-sonnet-5","max_tokens":64,` +

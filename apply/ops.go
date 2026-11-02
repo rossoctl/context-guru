@@ -3,7 +3,7 @@ package apply
 import (
 	"strconv"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -29,14 +29,14 @@ func changeID(component string, c components.Change) string {
 // changed the message count carries one splice change, mapped to a MessageSplice operation when it
 // covers whole wire messages (else dropped). Every report after it indexes a req.Input that no
 // longer lines up with wire, so those changes are dropped, never guessed.
-func OpsFromRun(rr components.RunReport, wire []int, applied bool) (ops []cf.Operation, dropped int) {
+func OpsFromRun(rr components.RunReport, wire []int, applied bool) (ops []accountant.Operation, dropped int) {
 	return opsFromRun(rr, wire, applied, nil)
 }
 
 // opsFromRun is OpsFromRun plus keep: when non-nil, a change whose req.Input index it rejects is
 // counted as dropped. The equal-count writeback passes the set of messages that really reached the
 // forwarded body, so an operation never describes a rewrite that is not on the wire.
-func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx int) bool) (ops []cf.Operation, dropped int) {
+func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx int) bool) (ops []accountant.Operation, dropped int) {
 	countChanged := false
 	for _, r := range rr.Components {
 		if r.Skipped || r.Reverted {
@@ -60,13 +60,13 @@ func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx
 				dropped++
 				continue
 			}
-			ops = append(ops, cf.Operation{
-				Kind:       cf.KindRewrite,
+			ops = append(ops, accountant.Operation{
+				Kind:       accountant.KindRewrite,
 				Operator:   "context-guru." + r.Component,
 				DryRun:     !applied || r.Mode == components.ModeObserve,
-				At:         cf.Position{Section: cf.SectionMessages, Index: wire[c.Idx]},
-				SizeBefore: cf.Size{Bytes: c.BytesBefore},
-				SizeAfter:  cf.Size{Bytes: c.BytesAfter},
+				At:         accountant.Position{Section: accountant.SectionMessages, Index: wire[c.Idx]},
+				SizeBefore: accountant.Size{Bytes: c.BytesBefore},
+				SizeAfter:  accountant.Size{Bytes: c.BytesAfter},
 				ChangeID:   changeID(r.Component, c),
 			})
 		}
@@ -80,23 +80,23 @@ func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx
 // spliceOp maps a run's splice, in req.Input (slot) space, to a MessageSplice operation in wire
 // space. It reports false when the range does not cover whole wire messages: several slots can
 // share one wire message, and a splice that cuts one in two cannot be expressed in messages.
-func spliceOp(r components.Report, c components.Change, wire []int, applied bool) (cf.Operation, bool) {
+func spliceOp(r components.Report, c components.Change, wire []int, applied bool) (accountant.Operation, bool) {
 	sp := c.Splice
 	n := len(wire)
 	if wire == nil || sp.At < 0 || sp.Removed < 0 || sp.Inserted < 0 || sp.At+sp.Removed > n {
-		return cf.Operation{}, false
+		return accountant.Operation{}, false
 	}
 	// A boundary is clean when the slots on either side of it belong to different wire messages.
 	// The range is [At, At+Removed); an insertion (Removed == 0) is the empty range at At.
 	if sp.At > 0 && sp.At < n && wire[sp.At-1] == wire[sp.At] {
-		return cf.Operation{}, false
+		return accountant.Operation{}, false
 	}
 	end := sp.At + sp.Removed
 	if sp.Removed > 0 && end < n && wire[end-1] == wire[end] {
-		return cf.Operation{}, false
+		return accountant.Operation{}, false
 	}
 	if !denseAcross(wire, sp.At, end) {
-		return cf.Operation{}, false
+		return accountant.Operation{}, false
 	}
 	var at, removed int
 	switch {
@@ -112,15 +112,15 @@ func spliceOp(r components.Report, c components.Change, wire []int, applied bool
 			at = wire[n-1] + 1
 		}
 	}
-	op := cf.Operation{
-		Kind:          cf.KindRewrite,
+	op := accountant.Operation{
+		Kind:          accountant.KindRewrite,
 		Operator:      "context-guru." + r.Component,
 		DryRun:        !applied || r.Mode == components.ModeObserve,
-		At:            cf.Position{Section: cf.SectionMessages, Index: at},
-		SizeBefore:    cf.Size{Bytes: c.BytesBefore},
-		SizeAfter:     cf.Size{Bytes: c.BytesAfter},
+		At:            accountant.Position{Section: accountant.SectionMessages, Index: at},
+		SizeBefore:    accountant.Size{Bytes: c.BytesBefore},
+		SizeAfter:     accountant.Size{Bytes: c.BytesAfter},
 		ChangeID:      changeID(r.Component, c),
-		MessageSplice: &cf.MessageSplice{At: at, Removed: removed, Inserted: sp.Inserted},
+		MessageSplice: &accountant.MessageSplice{At: at, Removed: removed, Inserted: sp.Inserted},
 	}
 	return op, true
 }
@@ -170,8 +170,8 @@ func denseAcross(wire []int, at, end int) bool {
 // anchor, a rewritten survivor of a splice) makes it false, and the caller then drops every
 // operation, so the event falls back to the legacy figures rather than publish a figure the bytes
 // do not support.
-func wireSizes(ops []cf.Operation, inLen, outLen func(i int) (int, bool), inTotal, outTotal int) bool {
-	var sp *cf.MessageSplice
+func wireSizes(ops []accountant.Operation, inLen, outLen func(i int) (int, bool), inTotal, outTotal int) bool {
+	var sp *accountant.MessageSplice
 	for _, o := range ops {
 		if o.MessageSplice != nil {
 			sp = o.MessageSplice
@@ -207,7 +207,7 @@ func wireSizes(ops []cf.Operation, inLen, outLen func(i int) (int, bool), inTota
 				}
 				a += n
 			}
-			o.SizeBefore, o.SizeAfter = cf.Size{Bytes: b}, cf.Size{Bytes: a}
+			o.SizeBefore, o.SizeAfter = accountant.Size{Bytes: b}, accountant.Size{Bytes: a}
 			net += b - a
 			continue
 		}
@@ -229,7 +229,7 @@ func wireSizes(ops []cf.Operation, inLen, outLen func(i int) (int, bool), inTota
 			for _, k := range ks {
 				d := ops[k].SizeBefore.Bytes - ops[k].SizeAfter.Bytes
 				next := max(cur-d, 0)
-				ops[k].SizeBefore, ops[k].SizeAfter = cf.Size{Bytes: cur}, cf.Size{Bytes: next}
+				ops[k].SizeBefore, ops[k].SizeAfter = accountant.Size{Bytes: cur}, accountant.Size{Bytes: next}
 				cur = next
 			}
 			continue
@@ -247,7 +247,7 @@ func wireSizes(ops []cf.Operation, inLen, outLen func(i int) (int, bool), inTota
 // chain gives the operations ks, all on one wire message of b bytes before and a bytes after,
 // contiguous wire sizes from b to a, splitting b - a in proportion to their text deltas. With no
 // text delta at all, the whole wire delta goes to the last operation.
-func chain(ops []cf.Operation, ks []int, b, a int) {
+func chain(ops []accountant.Operation, ks []int, b, a int) {
 	t := 0
 	for _, k := range ks {
 		t += ops[k].SizeBefore.Bytes - ops[k].SizeAfter.Bytes
@@ -263,7 +263,7 @@ func chain(ops []cf.Operation, ks []int, b, a int) {
 			}
 			next = max(next, 0)
 		}
-		ops[k].SizeBefore, ops[k].SizeAfter = cf.Size{Bytes: cur}, cf.Size{Bytes: next}
+		ops[k].SizeBefore, ops[k].SizeAfter = accountant.Size{Bytes: cur}, accountant.Size{Bytes: next}
 		cur = next
 	}
 }

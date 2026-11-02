@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-func rewriteOp(change string, at, before, after int) cf.Operation {
-	return cf.Operation{Kind: cf.KindRewrite, Operator: "context-guru.mask", ChangeID: change,
-		At:         cf.Position{Section: cf.SectionMessages, Index: at},
-		SizeBefore: cf.Size{Bytes: before}, SizeAfter: cf.Size{Bytes: after}}
+func rewriteOp(change string, at, before, after int) accountant.Operation {
+	return accountant.Operation{Kind: accountant.KindRewrite, Operator: "context-guru.mask", ChangeID: change,
+		At:         accountant.Position{Section: accountant.SectionMessages, Index: at},
+		SizeBefore: accountant.Size{Bytes: before}, SizeAfter: accountant.Size{Bytes: after}}
 }
 
 // msg builds one message element and its byte length as hashed.
@@ -26,21 +26,21 @@ func msg(role, text string) (string, int) {
 
 func body(msgs ...string) []byte { return []byte(`{"messages":[` + strings.Join(msgs, ",") + `]}`) }
 
-var cfFacts = cf.EntryFacts{TTL: 5 * time.Minute, Lifetime: cf.LifetimeExact}
+var cfFacts = accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeExact}
 
 type cfRun struct {
 	s  *savingsTracker
-	th cf.Thread
+	th accountant.Thread
 }
 
-func (c cfRun) do(n int, client, fwd []byte, usage Usage, ops ...cf.Operation) cf.Result {
-	meta := cf.RequestMeta{RequestID: fmt.Sprint("r", n), Session: "s", At: time.Unix(int64(1000+n*10), 0), Billing: cf.Billing{Mode: cf.BillingAPI}}
+func (c cfRun) do(n int, client, fwd []byte, usage Usage, ops ...accountant.Operation) accountant.Result {
+	meta := accountant.RequestMeta{RequestID: fmt.Sprint("r", n), Session: "s", At: time.Unix(int64(1000+n*10), 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
 	r := c.s.begin(meta, client)
 	c.s.end(r, c.th, fwd, ops, cfFacts)
 	return c.s.compute(r, usage)
 }
 
-func countChange(res cf.Result, id string) (n int, saved int) {
+func countChange(res accountant.Result, id string) (n int, saved int) {
 	for _, o := range res.Ops {
 		if o.ChangeID == id {
 			n++
@@ -51,7 +51,7 @@ func countChange(res cf.Result, id string) (n int, saved int) {
 }
 
 func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
-	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
+	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
@@ -72,8 +72,8 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	// (b) the change is reported again while active: it is added, and the library prices it once.
 	client2 := body(m0, big, m2, mustMsg("user", "next"))
 	fwd2 := body(m0, small, m2, mustMsg("user", "next"))
-	req := c.s.begin(cf.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: cf.Billing{Mode: cf.BillingAPI}}, client2)
-	c.s.end(req, c.th, fwd2, []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
+	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, client2)
+	c.s.end(req, c.th, fwd2, []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("replayed change must be added, req.Ops = %d", len(req.Ops))
 	}
@@ -98,7 +98,7 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 func mustMsg(role, text string) string { s, _ := msg(role, text); return s }
 
 func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
-	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
+	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
@@ -113,8 +113,8 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 	c.do(2, body(m0b, big, m2), body(m0b, big, m2), usage)
 
 	// Request 3 reports the same ChangeID again: it is added and priced (no filter).
-	req := c.s.begin(cf.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: cf.Billing{Mode: cf.BillingAPI}}, body(m0b, big, m2))
-	c.s.end(req, c.th, body(m0b, small, m2), []cf.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
+	req := c.s.begin(accountant.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, body(m0b, big, m2))
+	c.s.end(req, c.th, body(m0b, small, m2), []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("ended change must be re-added, req.Ops = %d", len(req.Ops))
 	}
@@ -129,16 +129,16 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 }
 
 func TestSavings_DryRunAndNonRewriteAlwaysAdded(t *testing.T) {
-	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
+	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("x", 2000))
 	small, nSmall := msg("user", "y")
 	usage := Usage{FreshInput: 10}
 	c.do(1, body(big), body(small), usage, rewriteOp("c1", 0, nBig, nSmall))
 	dry := rewriteOp("c1", 0, nBig, nSmall)
 	dry.DryRun = true
-	spend := cf.Operation{Kind: cf.KindSpend, ChangeID: "c1"}
-	req := c.s.begin(cf.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0)}, body(big))
-	c.s.end(req, c.th, body(big), []cf.Operation{dry, spend}, cfFacts)
+	spend := accountant.Operation{Kind: accountant.KindSpend, ChangeID: "c1"}
+	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0)}, body(big))
+	c.s.end(req, c.th, body(big), []accountant.Operation{dry, spend}, cfFacts)
 	if len(req.Ops) != 2 {
 		t.Fatalf("req.Ops = %d, want 2", len(req.Ops))
 	}
@@ -154,8 +154,8 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			b := body(mustMsg("user", "x"))
-			r := s.begin(cf.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: time.Now(), Billing: cf.Billing{Mode: cf.BillingAPI}}, b)
-			s.end(r, cf.Thread{ID: "main"}, b, nil, cfFacts)
+			r := s.begin(accountant.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: time.Now(), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, b)
+			s.end(r, accountant.Thread{ID: "main"}, b, nil, cfFacts)
 			res := s.compute(r, Usage{FreshInput: 5})
 			mu.Lock()
 			defer mu.Unlock()
@@ -177,7 +177,7 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 // twice the real saving. The sum check catches it, and PriceMode falls back to the legacy figures
 // with reason check_sum, so no inflated override is stored.
 func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
-	c := cfRun{newSavingsTracker(), cf.Thread{ID: "main"}}
+	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")

@@ -7,7 +7,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
@@ -64,7 +64,7 @@ func TestOpsDroppedWhenRestoreInserts(t *testing.T) {
 func TestOpsDroppedWhenRestoreInsertFallsBack(t *testing.T) {
 	orig := []byte(restoreBody)
 	res := Result{Body: []byte(`{"model":"claude-x"}`)}
-	res.Trace.Ops = []cf.Operation{{Kind: cf.KindRewrite, At: cf.Position{Section: cf.SectionMessages, Index: 1}}}
+	res.Trace.Ops = []accountant.Operation{{Kind: accountant.KindRewrite, At: accountant.Position{Section: accountant.SectionMessages, Index: 1}}}
 	res.Trace.OpsDropped = 2
 	plan := restorePlan{{anchor: expand.Anchor{ID: "H1", At: 2}, original: "ORIGINAL OUTPUT"}}
 	got := finishRestore(res, plan, "anthropic", orig, gjson.GetBytes(orig, "messages").Array())

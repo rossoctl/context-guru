@@ -27,7 +27,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -1395,13 +1395,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
 			if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.cfBegin(cf.RequestMeta{
+				cp.cfBegin(accountant.RequestMeta{
 					RequestID: "r" + strconv.FormatUint(h.cfSeq.Add(1), 10),
 					Session:   tr.Session,
 					Model:     gjson.GetBytes(orig, "model").String(),
 					At:        cp.start,
 					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: cf.Billing{Mode: cf.BillingAPI},
+					Billing: accountant.Billing{Mode: accountant.BillingAPI},
 				}, orig)
 			}
 			// A real request has arrived on this session: cancel any pending keep-alive

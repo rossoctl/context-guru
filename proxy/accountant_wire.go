@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	cf "github.com/rossoctl/accountant"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -35,7 +35,7 @@ func cfThreadID(id string) string {
 }
 
 // cfBegin opens the counterfactual record with the body the agent sent. Nil-safe.
-func (c *capture) cfBegin(meta cf.RequestMeta, client []byte) {
+func (c *capture) cfBegin(meta accountant.RequestMeta, client []byte) {
 	if c == nil || c.savings == nil {
 		return
 	}
@@ -46,11 +46,11 @@ func (c *capture) cfBegin(meta cf.RequestMeta, client []byte) {
 // another by content names it as its parent, but starts with no state of its own: accountant carries
 // Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when cfBegin did not open a
 // record.
-func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) {
+func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
 	if c == nil || c.savings == nil || c.cfReq == nil {
 		return
 	}
-	t := cf.Thread{ID: cfThreadID(th.ID)}
+	t := accountant.Thread{ID: cfThreadID(th.ID)}
 	if parent, ok := th.InheritsFrom(); ok {
 		t.Parent = cfThreadID(parent)
 	}
@@ -66,8 +66,8 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []cf.Operation) 
 // effect, only with PingRead, the extent the ping read in forwarded coordinates, and the
 // keeper's report does not carry it. Inventing one would misprice the rescue, so with it nil the
 // library uses LastPing for the gap only.
-func entryFacts(forwarded []byte, pings *PingStore, session string, t cf.Thread) cf.EntryFacts {
-	facts := cf.EntryFacts{TTL: 5 * time.Minute, Lifetime: cf.LifetimeUnknown}
+func entryFacts(forwarded []byte, pings *PingStore, session string, t accountant.Thread) accountant.EntryFacts {
+	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
 	for _, bp := range cfBreakpoints(forwarded) {
 		if bp.TTL == "1h" {
 			facts.TTL = time.Hour
