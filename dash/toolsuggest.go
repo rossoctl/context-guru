@@ -233,7 +233,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		// A one-hour breakpoint precedes every 5-minute one, so a request that wrote any 1h tokens
 		// wrote the declarations at the head at the 1h rate: 2x input. (The same rule as carriedCost.)
 		if cacheWrite1h > 0 {
-			rate = 2 * p.Input
+			rate = p.CacheWrite1h()
 		}
 	default:
 		out.FreshTokens += tok

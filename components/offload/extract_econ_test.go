@@ -673,6 +673,7 @@ func TestAgentRatesBlankWriteFollowsTheModelFamily(t *testing.T) {
 	}{
 		{"claude-sonnet-5", 1.25},
 		{"azure/gpt-5.5", 1.0},
+		{"azure/gpt-5.6-luna", 1.25},
 		{"gemini-3-flash-preview", 1.0},
 	} {
 		c := &components.Ctx{ModelName: tc.model, SelfRates: components.TokenRates{Input: 2e-6, Output: 1e-5}}

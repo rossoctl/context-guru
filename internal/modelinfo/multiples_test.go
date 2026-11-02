@@ -50,3 +50,17 @@ func TestParseTableDefaultsReadTheSharedMultiples(t *testing.T) {
 		t.Errorf("gemini write = %v, want input %v", g.CacheWrite, g.Input)
 	}
 }
+
+// The 1-hour rate is Input x AnthropicCacheWrite1hFrac for every caller. This pins the values
+// the dash callers used as bare `2 * p.Input`, and the premium form `rate1h - rate5m`.
+func TestCacheWrite1hMatchesTheOldBareLiteral(t *testing.T) {
+	for _, in := range []float64{0, 1e-6, 3e-6, 15e-6} {
+		p := Price{Input: in, CacheWrite: in * 1.25}
+		if p.CacheWrite1h() != 2*in {
+			t.Errorf("input %v: CacheWrite1h = %v, want %v", in, p.CacheWrite1h(), 2*in)
+		}
+		if got, want := p.CacheWrite1h()-p.CacheWrite, 2*in-p.CacheWrite; got != want {
+			t.Errorf("input %v: premium = %v, want %v", in, got, want)
+		}
+	}
+}

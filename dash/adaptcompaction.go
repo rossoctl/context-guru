@@ -1033,7 +1033,7 @@ func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 	if r.write > 0 && r.write >= r.fresh {
 		tail = p.CacheWrite
 		if r.write1h >= r.write {
-			tail = 2 * p.Input
+			tail = p.CacheWrite1h()
 		}
 	}
 	return tail, repeat, write
