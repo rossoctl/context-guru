@@ -237,6 +237,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -321,6 +322,29 @@ def normalize_action(value: Any) -> str:
 
 PER_MTOK = 1e6
 DEFAULT_CACHE_READ_MULTIPLE = 0.1
+# Per-model cache-read tiers: port of internal/modelinfo.CacheReadFracFor. Source: the official
+# pricing page, https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02.
+_CACHE_READ_TIERS = (("fable", 5, 1, 0.025), ("mythos", 5, 1, 0.025),
+                     ("opus", 5, 5, 0.05), ("sonnet", 5, 5, 0.05))
+
+
+def _tier_version(full: str, tier: str) -> tuple[int, int] | None:
+    i = full.rfind(tier)
+    if i < 0:
+        return None
+    m = re.match(r"[-._](\d{1,9})(?:[-._](\d{1,9}))?", full[i + len(tier):])
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)) if m.group(2) else -1
+
+
+def cache_read_frac_for(model: str) -> float:
+    """The cache-READ multiple of base input for a model (Go: modelinfo.CacheReadFracFor)."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    for tier, major, minor, frac in _CACHE_READ_TIERS:
+        if _tier_version(full, tier) == (major, minor):
+            return frac
+    return DEFAULT_CACHE_READ_MULTIPLE
 DEFAULT_WRITE_5M_MULTIPLE = 1.25
 DEFAULT_WRITE_1H_MULTIPLE = 2.0
 DEFAULT_PING_INPUT_TOKENS = 1
@@ -343,6 +367,9 @@ class ModelPricing:
     ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS
     source: str = ""
     known: bool = False
+    # True when cache_read was left blank and the file sets no cache_read_frac. _lookup then
+    # fills it from the QUERIED model, as Go's Table.Price does.
+    read_derived: bool = False
 
     def write_rate(self, tier: str) -> float:
         """The creation rate for one tier. TTL_NONE creates nothing, so it is 0 — the
@@ -462,7 +489,12 @@ class PriceBook:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if not isinstance(raw, Mapping):
             raise ValueError(f"{path}: not a mapping")
-        read_frac = float(raw.get("cache_read_frac") or DEFAULT_CACHE_READ_MULTIPLE)
+        # Unset means "per model"; a value is the operator's own gateway multiple and wins.
+        file_read_frac = None
+        if raw.get("cache_read_frac") is not None:
+            file_read_frac = float(raw["cache_read_frac"])
+            if file_read_frac <= 0:
+                raise ValueError(f"{path}: cache_read_frac must be above 0")
         write_frac = float(raw.get("cache_write_frac") or DEFAULT_WRITE_5M_MULTIPLE)
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
@@ -482,7 +514,9 @@ class PriceBook:
                     f"it free")
             price = ModelPricing(
                 model=match, input=in_r / PER_MTOK, output=out_r / PER_MTOK,
-                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * read_frac,
+                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * (
+                    file_read_frac if file_read_frac is not None else cache_read_frac_for(match)),
+                read_derived=(not cr) and file_read_frac is None,
                 write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * write_frac,
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
@@ -544,16 +578,21 @@ class PriceBook:
     def _lookup(self, model: str) -> ModelPricing:
         full = (model or "").strip().lower()
         tail = full.rsplit("/", 1)[-1]
+        def hit(price: ModelPricing) -> ModelPricing:
+            if price.read_derived:
+                price = replace(price, cache_read=price.input * cache_read_frac_for(model))
+            return replace(price, model=model)
+
         for match, _prefix, _qual, price in self._entries:
             if match == full or match == tail:
-                return replace(price, model=model)
+                return hit(price)
         for match, prefix, qualified, price in self._entries:  # longest first
             if prefix:
                 if full.startswith(match) or tail.startswith(match):
-                    return replace(price, model=model)
+                    return hit(price)
                 continue
             if qualified and match in full:
-                return replace(price, model=model)
+                return hit(price)
         return ModelPricing(model=model, ping_input_tokens=self.ping_input_tokens,
                             ping_output_tokens=self.ping_output_tokens)
 

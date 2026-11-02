@@ -2710,7 +2710,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // Agent-model token rates used to VALUE saved tokens at /stats (claude-sonnet-5 class,
-// $3/MTok fresh, 0.1x cache read). Mirrors components/offload/extract_econ.go, which
+// $3/MTok fresh, 0.1x cache read: the Sonnet 4.5/4.6-class list price, where 0.1x is right;
+// the lower per-model tiers of modelinfo.CacheReadFracFor do not apply to a fixed class). Mirrors components/offload/extract_econ.go, which
 // applies the same rates inside the gate; kept as local constants rather than a shared
 // export because the two layers may legitimately be priced differently (the gate prices
 // the traffic it sees; /stats prices the aggregate).

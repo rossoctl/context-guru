@@ -27,7 +27,7 @@ Two sentences from the provider's documentation make this fixable:
 > **The lifetime is measured from the start of the request that writes or reads the cache
 > entry, not from the end of its response.**
 
-So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input where
+So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input (less on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1) where
 re-creating the prefix costs `1.25x`. After a session has been idle for `X` seconds, the
 proxy re-sends that session's last Anthropic request with `max_tokens: 1` — a pure cache read, which
 refreshes the entry. **One ping buys back about 11.5 of itself.**

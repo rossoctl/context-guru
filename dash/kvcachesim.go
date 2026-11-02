@@ -363,8 +363,12 @@ func kvCacheAssumptions(cfg KVCacheSimConfig) KVCacheAssumptions {
 		TimeUnit:         "milliseconds",
 		Horizon5mSeconds: kvcache.Horizon5m.Seconds(),
 		Horizon1hSeconds: kvcache.Horizon1h.Seconds(),
-		Multipliers:      cfg.Multipliers.WithDefaults(),
-		Semantics:        sem,
+		// The read multiple is reported as set: 0 means "unset, each model's own tier", and the
+		// page leaves its placeholder empty. Reporting 0.1 here would invite a user to type it
+		// and pin every model to 0.1x.
+		Multipliers: kvcache.Multipliers{CacheRead: cfg.Multipliers.CacheRead,
+			Write5m: cfg.Multipliers.WithDefaults().Write5m, Write1h: cfg.Multipliers.WithDefaults().Write1h},
+		Semantics: sem,
 		Schedule: KVCacheSchedule{IdleSeconds: idle.Seconds(),
 			IdleSeconds1h: idle1h.Seconds(), MaxPings: k},
 	}
@@ -372,7 +376,8 @@ func kvCacheAssumptions(cfg KVCacheSimConfig) KVCacheAssumptions {
 		{"Uncached input", "input_tokens × input_rate",
 			"A prompt with no cache_control at all: every token billed once, at the fresh rate."},
 		{"Cache read", "cache_read_tokens × cache_read_rate",
-			"A hit. The read rate defaults to 0.1× input, and a read refreshes the entry's " +
+			"A hit. The read rate defaults to 0.1× input, or the model's own tier (0.05× on Opus 5.5 and " +
+				"Sonnet 5.5, 0.025× on Fable 5.1 and Mythos 5.1), and a read refreshes the entry's " +
 				"lifetime for no extra charge."},
 		{"Cache write, 5-minute TTL", "written_tokens × write_5m_rate",
 			"Creating an entry that lives five minutes. Defaults to 1.25× input."},

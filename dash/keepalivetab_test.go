@@ -1250,3 +1250,27 @@ func TestLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
 			grouped[""], led.NetUSD)
 	}
 }
+
+// medianPingUSD turns a row's miss cost into a read cost with the ROW'S model. The same $1.25
+// miss reads as $0.10 on a standard model, $0.05 on Opus 5.5 and $0.025 on Fable 5.1.
+func TestMedianPingUSDFollowsTheRowsModelTier(t *testing.T) {
+	for model, want := range map[string]float64{
+		"aws/claude-sonnet-5":   0.10,
+		"aws/claude-opus-5-5":   0.05,
+		"claude-sonnet-5-5[1m]": 0.05,
+		"claude-fable-5-1":      0.025,
+	} {
+		evs := kaExpiry(2_000_000, "s1", 700, 1.25, 300_000)
+		for _, e := range evs {
+			e.Model = model
+		}
+		fx := newKAFixture(t, evs...)
+		got, err := fx.db.medianPingUSD(Filter{TenantAll: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s: median ping = %v, want %v", model, got, want)
+		}
+	}
+}

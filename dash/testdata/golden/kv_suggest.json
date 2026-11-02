@@ -4,7 +4,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 2.651668499999999,
-   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-5m",
    "best_usd": 2.651668499999999,
    "candidates": [
@@ -313,7 +313,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.2207171999999993,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.578803,
    "candidates": [
@@ -622,7 +622,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 0.4113648,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to 8 keep-alive(s) per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to 8 keep-alive(s) per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-x8",
    "best_usd": 0.3650757,
    "candidates": [
@@ -931,7 +931,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 1.4979551999999998,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 1.1991696,
    "candidates": [
@@ -1240,7 +1240,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.2589636,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 1.8452267999999998,
    "candidates": [
@@ -1549,7 +1549,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 2.0395103999999997,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 1.8551172,
    "candidates": [
@@ -1858,7 +1858,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.3820353,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 1.7388662999999995,
    "candidates": [
@@ -2167,7 +2167,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.4315352999999997,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.282729099999999,
    "candidates": [
@@ -2785,7 +2785,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 4.8635226,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 3.364315799999999,
    "candidates": [
@@ -3094,7 +3094,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 5.2637274,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.7273713999999996,
    "candidates": [
@@ -3403,7 +3403,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.1729469999999993,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.3787959999999995,
    "candidates": [
@@ -3712,7 +3712,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 0.6470909999999999,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 0.4410129000000001,
    "candidates": [
@@ -4021,7 +4021,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 2.54659005,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 2.1276513,
    "candidates": [
@@ -4639,7 +4639,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 2.4080775,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 1.4828219999999999,
    "candidates": [
@@ -4948,7 +4948,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 5.412375750000001,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 3.9757484999999995,
    "candidates": [
@@ -5257,7 +5257,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 0.21773775,
-   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-5m",
    "best_usd": 0.21773775,
    "candidates": [
@@ -5566,7 +5566,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 4.970953499999999,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 4.075799999999998,
    "candidates": [
@@ -6184,7 +6184,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 2.1406125,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less.",
    "best_strategy": "keepalive-5m",
    "best_usd": 1.3858837499999999,
    "candidates": [
@@ -6493,7 +6493,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 1.47442095,
-   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x. Capped to a single keep-alive per idle span, then lets the entry lapse.",
+   "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 0.9676348499999998,
    "candidates": [
@@ -6802,7 +6802,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 3.1498222499999997,
-   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 2.226051600000001,
    "candidates": [
@@ -7111,7 +7111,7 @@
   {
    "baseline": "fixed-5m",
    "baseline_usd": 0.23866845,
-   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read).",
+   "best_description": "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-5m",
    "best_usd": 0.23866845,
    "candidates": [
