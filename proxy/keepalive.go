@@ -546,3 +546,27 @@ func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session strin
 	}
 	return out
 }
+
+// DashWaitPolicy is the dashboard's READ hook for an account's per-wait ping plan settings (#868):
+// keepalive_wait_plan and the three counts. The calculator replays the plan with them. Wired in
+// cmd/context-guru-proxy beside the keep-alive plans.
+func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
+	return func(id string) keepalive.Policy {
+		tn := h.static.Load()
+		if reg := h.registry(); reg != nil && h.opts.Tenants != nil {
+			t, err := reg.Get(id)
+			if err != nil {
+				return dash.DefaultWaitPolicy(0)
+			}
+			if tn, err = h.opts.Tenants.ForTenant(t); err != nil {
+				return dash.DefaultWaitPolicy(0)
+			}
+		}
+		if tn == nil {
+			return dash.DefaultWaitPolicy(0)
+		}
+		c := tn.Cache
+		return keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
+			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings}
+	}
+}

@@ -1,4 +1,8 @@
 {
+ "fixed_k": {
+  "hi_usd": 0.33678400000000003,
+  "lo_usd": 0.22627199999999986
+ },
  "hi_usd": 0.33678400000000003,
  "idle_seconds": 240,
  "keepalive_recorded_from": 1767606380000,
@@ -6,6 +10,7 @@
  "lo_usd": 0.22627199999999986,
  "max_pings": 2,
  "n": 204,
+ "plan": "wait_plan",
  "requests": 591,
  "service_hi_usd": 237,
  "service_lo_usd": 95,

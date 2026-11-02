@@ -18,6 +18,7 @@ import (
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -52,6 +53,9 @@ type API struct {
 	// pingable says per thread whether a manual ping can be sent. nil = never stated.
 	pingable func(tenantID string, allTenants bool, session string) map[string]PingState
 	kaPlans  func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
+	// waitPolicyFn reads a tenant's per-wait ping plan settings for the keep-alive calculator and
+	// recommendation (#868). nil = the shipped plan, on.
+	waitPolicyFn func(tenantID string) keepalive.Policy
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
 	// windows resolves a model's context window, and is separate from pricer because the two

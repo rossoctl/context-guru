@@ -5,7 +5,7 @@
  "keepalive_recorded_from": 1767606380000,
  "keepalive_recorded_rows": 585,
  "model": "m-unpriced",
- "plan": "fixed_k",
+ "plan": "wait_plan",
  "prefix_source": "account_median",
  "prefix_tokens": 30998,
  "priced": false,
@@ -14,9 +14,20 @@
   {
    "convertible_misses": 112,
    "convertible_usd": 0.6000000000000004,
+   "coverage_seconds": 860,
+   "current": true,
+   "max_pings": 2,
+   "pings": 433,
+   "plan": "wait_plan",
+   "share_of_addressable_pct": 70.75471698113208
+  },
+  {
+   "convertible_misses": 112,
+   "convertible_usd": 0.6000000000000004,
    "coverage_seconds": 580,
    "max_pings": 1,
    "pings": 281,
+   "plan": "fixed_k",
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -25,6 +36,7 @@
    "coverage_seconds": 860,
    "max_pings": 2,
    "pings": 433,
+   "plan": "fixed_k",
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -33,6 +45,7 @@
    "coverage_seconds": 1140,
    "max_pings": 3,
    "pings": 585,
+   "plan": "fixed_k",
    "share_of_addressable_pct": 70.75471698113208
   },
   {
@@ -41,6 +54,7 @@
    "coverage_seconds": 1420,
    "max_pings": 4,
    "pings": 737,
+   "plan": "fixed_k",
    "share_of_addressable_pct": 70.75471698113208
   }
  ]

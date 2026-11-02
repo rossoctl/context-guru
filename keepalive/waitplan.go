@@ -95,18 +95,80 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 	// A response that stopped for a tool call waits for that tool, even when the name list missed
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
 	// Whatever the classifier said (open background tasks read "background"), a tool stop gets the tool budget.
-	if len(names) == 0 && toolStop(stopReason) && w != waitcause.WaitingDone && w != waitcause.WaitingRetry {
+	return toolStopWait(w, len(names) == 0, stopReason)
+}
+
+// toolStopWait applies the tool-stop rule: a response that stopped for a tool call and has no tool
+// name waits for that tool, whatever the classifier said, unless the thread is done or the call failed.
+func toolStopWait(w string, noNames bool, stopReason string) string {
+	if noNames && toolStop(stopReason) && w != waitcause.WaitingDone && w != waitcause.WaitingRetry {
 		return waitcause.WaitingOwnTool
 	}
 	return w
 }
 
+// ToolStopReasons are the stop reasons that mean "the response called a tool". The dashboard reads
+// the same list when it looks for the first tool call of a thread in its stored rows.
+var ToolStopReasons = []string{"tool_use", "tool_calls", "function_call"}
+
 func toolStop(stopReason string) bool {
-	switch stopReason {
-	case "tool_use", "tool_calls", "function_call":
-		return true
+	for _, s := range ToolStopReasons {
+		if s == stopReason {
+			return true
+		}
 	}
 	return false
+}
+
+// SpanFacts is what a stored request row says about the idle span that follows it: the facts the
+// plan needs. The dashboard replays the plan from them (Policy.SpanPings).
+type SpanFacts struct {
+	// Cause is the row's stored waiting_for ("" on an old row).
+	Cause string
+	// StopReason is the row's stored stop reason ("" on an old row).
+	StopReason string
+	// Subagent is true for a subagent thread (IsSubagentThread).
+	Subagent bool
+	// ToolSeen is true when this response or an earlier one of the thread called a tool.
+	ToolSeen bool
+	// OpenAI is true for an OpenAI request. The plan does not cover OpenAI: it keeps the base count.
+	OpenAI bool
+	// OneHour is true when the request asked for the 1-hour cache tier. That tier keeps its own
+	// schedule: the base count.
+	OneHour bool
+}
+
+// storedWait is the wait cause the keeper would plan for, from a stored row. A stored row has no
+// tool names, so the keeper's "tool stop with no name" rule is read from the cause: a tool stop that
+// the classifier read as background work or a teammate waits for its tool. A tool stop stored as
+// "human" stays human, because a row cannot tell an ask-a-person tool from a name list that missed
+// the call (the keeper reads the second as a tool wait). That case is rare.
+func storedWait(cause, stopReason string) string {
+	return toolStopWait(cause, cause != waitcause.WaitingHuman && cause != waitcause.WaitingOwnTool, stopReason)
+}
+
+// SpanPings is the ping count the plan gives the idle span after a response, from the facts a stored
+// row holds. It is the keeper's decision in one place, for a replay:
+//
+//   - the count WaitPings gives for the wait cause;
+//   - 0 for a thread with no tool call yet (the no-tool rule);
+//   - 0 for a finished thread (waiting_for done) and for a failed call (retry): the keeper holds nothing for them;
+//   - MaxPings with WaitPlan off, for OpenAI, for the 1-hour tier, and for a row that stored neither a
+//     wait cause nor a stop reason (an old row: nothing to replay from).
+//
+// TestDashboardReplayMatchesTheKeeper (package dash) runs the keeper and this function on the same cases.
+func (p Policy) SpanPings(s SpanFacts) int {
+	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
+		return p.MaxPings
+	}
+	w := storedWait(s.Cause, s.StopReason)
+	if w == waitcause.WaitingDone || w == waitcause.WaitingRetry || !s.ToolSeen {
+		return 0
+	}
+	if s.OneHour {
+		return p.MaxPings
+	}
+	return p.WaitPings(w, s.Subagent)
 }
 
 // calledATool reports whether a response called a tool: a tool_use name or a tool stop reason. A
