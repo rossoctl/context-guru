@@ -7,7 +7,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// The helpers cfagree_test.go reuses. accountant_play_test.go holds same-named ones typed for the
+// The helpers accountant_agree_test.go reuses. accountant_play_test.go holds same-named ones typed for the
 // accountant module's cases, so these carry a CF suffix.
 
 func priceOfCF(r cases.Rate) modelinfo.Price {

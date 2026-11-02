@@ -14,7 +14,7 @@ import (
 // This file plays every cases.Case through the path the proxy uses (Trackers, Request.Add of
 // every op with replays included, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, with
-// the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in cfhelpers_test.go.
+// the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in accountant_agree_helpers_test.go.
 
 // PlayedCF is the proxy path's figure for one step, in micro-dollars.
 type PlayedCF struct {
