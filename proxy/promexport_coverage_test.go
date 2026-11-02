@@ -136,6 +136,7 @@ var notExportedWhy = map[string]string{
 	"TopDiscarded":     `component NAMES; the count is cg_component_runs_total{outcome="discarded"}`,
 	"KeepAlive":        "typed `any`; the host fills it with a ledger this package cannot name",
 	"Savings":          "typed `any`; already cg_tenant_net_saved_usd et al. via promexport's own dash-backed rows",
+	"ToolDefer":        "typed `any`; the host fills it with tool deferral's ledger (#485), /stats only until the feature leaves opt-in",
 
 	// Configured budgets, not measurements: constant for the process's life, so a series
 	// would only ever restate a flag. Read them off /stats when a *_timeouts is non-zero.

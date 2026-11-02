@@ -103,6 +103,7 @@ It's an effort ladder — each tier is everything in the one before it, plus mor
 | `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired | yes |
 | `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full | yes |
 | `xhigh` | `high` plus a periodic deep-adjudication sweep over turns whose prompt cache has gone cold — the deepest cut | yes |
+| `ultrahigh` | `xhigh` plus tool deferral: tools your own history shows you do not use are sent as names only, and the model loads one through search when it needs it. Opt-in; Anthropic models only | yes |
 
 Run the picker any time to switch tiers—it explains each one before asking which to set:
 

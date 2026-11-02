@@ -264,7 +264,7 @@ def read_proxy_options():
 
 
 def save_proxy_options(preset, keepalive):
-    if preset not in {"off", "conservative", "medium", "high", "xhigh"}:
+    if preset not in {"off", "conservative", "medium", "high", "xhigh", "ultrahigh"}:
         raise RuntimeError(f"unknown preset: {preset}")
     path = proxy_config()
     if path.exists() and not path.read_text().startswith(CONFIG_MARKER):
@@ -316,10 +316,34 @@ def configure(args):
         facts(result="refused", detail=error)
         return 2
     restarted = restart_proxy(read_record())
+    extra = {}
+    if restarted and preset == "ultrahigh":
+        extra["probe"] = ask_defer_probe(int(read_record().get("port", 0)))
     facts(result="configured", preset=preset,
           cache_strategy="30-min-ping" if keepalive else "none",
-          proxy_restarted=str(restarted).lower())
+          proxy_restarted=str(restarted).lower(), **extra)
     return 0 if restarted else 1
+
+
+def ask_defer_probe(port):
+    """For ultrahigh: ask the proxy to run tool deferral's provider check at the next request (#485).
+
+    On OpenAI models deferral does not run in v1, so the proxy ignores the ask there; it is sent the
+    same way as in the Claude Code plugin so the two pickers behave alike. Never raises.
+    """
+    if not port:
+        return "no_port"
+    for _ in range(20):
+        if healthy(port):
+            break
+        time.sleep(0.1)
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return "asked" if response.status == 202 else f"status_{response.status}"
+    except Exception:
+        return "unavailable"
 
 
 def service_command(executable, port, upstream=None):
@@ -766,7 +790,7 @@ def main():
     remove.add_argument("--dry-run", action="store_true")
     settings = commands.add_parser("configure")
     settings.add_argument("--show", action="store_true")
-    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh"))
+    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh", "ultrahigh"))
     settings.add_argument("--cache-strategy", choices=("none", "30-min-ping"))
     args = parser.parse_args()
     return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,

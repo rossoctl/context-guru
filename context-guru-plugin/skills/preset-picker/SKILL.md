@@ -1,6 +1,6 @@
 ---
 name: preset-picker
-description: Show the running preset and switch it (`off`, `conservative`, `medium`, `high`, `xhigh`). Use when the user asks which preset is set, to change what context-guru trims, or to carry less context.
+description: Show the running preset and switch it (`off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`). Use when the user asks which preset is set, to change what context-guru trims, or to carry less context.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 
@@ -38,10 +38,11 @@ a fault, just unset.
 | `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired |
 | `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full |
 | `xhigh` | `high` plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut |
+| `ultrahigh` | `xhigh` plus tool deferral: tools your own last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in, Claude models only. Turn it off for one session with `ENABLE_TOOL_SEARCH=false` |
 
 Recommend `conservative` to someone who wants to carry less context but hasn't said they want an
 LLM pass: it is deterministic, so nothing about the request path depends on a model call
-succeeding. `medium`, `high` and `xhigh` are an escalating ladder — each is a strict superset of
+succeeding. `medium`, `high`, `xhigh` and `ultrahigh` are an escalating ladder — each is a strict superset of
 the one below it — so "somewhere in between" usually means one tier up from wherever they are now,
 not a custom mix.
 
@@ -60,6 +61,10 @@ way. Only a project with no routing at all falls back to project-local, since th
 to inherit. Pass `--user-scope` to deliberately diverge from that — a preset the user wants on
 every project even though routing itself is project-scoped.
 
+For `ultrahigh`, the same command also asks the running proxy to start the provider check that
+tool deferral needs, and prints `probe=asked` (or why not: `not_routed`, `unavailable`). The check
+runs at your next request, in the background. The first session after the restart is not deferred.
+
 ## 4. A restart is required
 
 Like a cache-strategy change, this takes effect at the **next proxy start**, not this session.
@@ -73,3 +78,5 @@ restart is the way to confirm it stuck.
 - Do not push someone toward `high` or `xhigh` by default. `medium` is already the first tier that
   makes its own model calls and spends on its own; `high`/`xhigh` use the summary of older turns
   while you work, not only after a cold return. Offer them, don't default to them.
+- Do not suggest `ultrahigh` unless the user asks for it or asks about tool cost. It is opt-in: it
+  changes which tool definitions the model sees at the start, and the model must search to load one.

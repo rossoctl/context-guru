@@ -15,6 +15,10 @@ import (
 // provider told us nothing, in which case a caller must report the request as
 // partially accounted rather than pricing it as free.
 type Usage struct {
+	// Searches and SearchLoaded are the server-side tool searches a streamed response ran and the
+	// tools they loaded, read off the sniffer window for tool deferral's ledger (#485).
+	Searches     int
+	SearchLoaded []string
 	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
 	Live       *LiveFacts
 	FreshInput int64

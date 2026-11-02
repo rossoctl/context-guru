@@ -556,7 +556,7 @@ func perturbations(fd components.Field, cur any) []any {
 		// so a junk entry is a 400 on the settings page rather than a filter that silently
 		// matches nothing). Keyed by the field, because a value valid for both would have to
 		// satisfy two grammars that share nothing.
-		if fd.Key == "remove" {
+		if fd.Key == "remove" || fd.Key == "keep" { // toolfilter's two name lists
 			return []any{[]string{"cg-form-sentinel"}}
 		}
 		return []any{[]string{"schema_version: 1\nfilters:\n  cgsentinel:\n    description: sentinel\n    match: 'cg-form-sentinel'\n"}}

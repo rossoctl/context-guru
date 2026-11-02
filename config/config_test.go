@@ -346,6 +346,57 @@ func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
 	}
 }
 
+// ultrahigh is xhigh plus tool deferral (#485), and only ultrahigh defers. The YAML is a copy of
+// xhigh's plus one toolfilter block, so it is compared block by block: a retune of xhigh that is not
+// copied here fails.
+func TestUltrahighIsXhighPlusDeferral(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	defers := func(c *Config) bool {
+		t.Helper()
+		pipe, err := c.Build(components.NopEmitter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tf, ok := pipe.Find("toolfilter").(interface{ Defers() bool })
+		return ok && tf.Defers()
+	}
+	u, x := load("ultrahigh"), load("xhigh")
+	if !reflect.DeepEqual(u.Pipeline, x.Pipeline) {
+		t.Errorf("ultrahigh pipeline = %v, want xhigh's %v", u.Pipeline, x.Pipeline)
+	}
+	for name, n := range x.Components {
+		var a, b any
+		n.Decode(&a)
+		un := u.Components[name]
+		un.Decode(&b)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("ultrahigh's %s block = %v, want xhigh's %v", name, b, a)
+		}
+	}
+	var tf map[string]any
+	if n := u.Components["toolfilter"]; n.Decode(&tf) != nil || tf["defer"] != "auto" || len(tf) != 1 {
+		t.Errorf("ultrahigh toolfilter block = %v, want exactly defer: auto", tf)
+	}
+	if !defers(u) {
+		t.Error("ultrahigh does not defer")
+	}
+	for name := range presets {
+		if name != "ultrahigh" && defers(load(name)) {
+			t.Errorf("%s defers tools: only ultrahigh may", name)
+		}
+	}
+	if list, ok := PresetPipeline("ultrahigh"); !ok || !reflect.DeepEqual(list, x.Pipeline) {
+		t.Errorf("ultrahigh preset list = %v (ok=%v)", list, ok)
+	}
+}
+
 // head_ttl_min_tokens is deprecated. The gate it set was always bytes/4, so an old value
 // x 4 is the same gate in bytes; head_ttl_min_bytes wins when both are set.
 func TestHeadTTLMinBytesResolution(t *testing.T) {
