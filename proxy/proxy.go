@@ -2720,7 +2720,10 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 // export because the two layers may legitimately be priced differently (the gate prices
 // the traffic it sees; /stats prices the aggregate).
 const (
-	agentFreshPerMTok     = 3.00
+	agentFreshPerMTok = 3.00
+	// A constant, not modelinfo.Price.CacheReadFor: a constant product is exact (0.3), while the
+	// same product at run time is 0.30000000000000004. TestAgentClassRatesMatchPrice pins the
+	// constant to that function for this class, so the two cannot drift.
 	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 )
 

@@ -114,12 +114,12 @@ func DefaultMultipliers() Multipliers { return Multipliers{}.WithDefaults() }
 // A Price with no rates at all yields Known=false, and every dollar figure downstream is
 // then omitted rather than computed as zero.
 func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pricing {
-	// A cache-read multiple the caller set wins. Unset, it follows the model.
-	readFrac := m.CacheRead
-	if readFrac <= 0 {
-		readFrac = modelinfo.CacheReadFracFor(model)
-	}
+	// The caller's multiples ride on the price, and Price decides each blank tier for this model:
+	// a multiple the caller set wins, and an unset read multiple follows the model. The write
+	// multiples always carry a default here, as before.
+	userRead := m.CacheRead
 	m = m.WithDefaults()
+	p.ReadFrac, p.WriteFrac, p.Write1hFrac = userRead, m.Write5m, m.Write1h
 	out := Pricing{
 		Model: model, Input: p.Input, Output: p.Output, CacheRead: p.CacheRead,
 		Write5m: p.CacheWrite, Source: source,
@@ -132,19 +132,14 @@ func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pr
 	out.Known = true
 	// A price list that omitted a cache tier: fill from the multiplier rather than leave a
 	// cached request priced as free.
-	if out.CacheRead == 0 {
-		out.CacheRead = out.Input * readFrac
-	}
-	if out.Write5m == 0 {
-		out.Write5m = out.Input * m.Write5m
-	}
+	out.CacheRead, out.Write5m = p.CacheReadFor(model), p.CacheWrite5mFor(model)
 	// The 1-hour rate. Derived from base input where that is known — the multiplier is
 	// against INPUT, not against the 5m rate, because that is how the provider documents it.
 	// Where input is unknown but a 5m rate is not, scale the 5m rate by the ratio of the two
 	// multipliers, which is the same number by a longer route.
 	switch {
 	case out.Input > 0:
-		out.Write1h = out.Input * m.Write1h
+		out.Write1h = p.CacheWrite1hFor(model)
 	case out.Write5m > 0 && m.Write5m > 0:
 		out.Write1h = out.Write5m * (m.Write1h / m.Write5m)
 	}
