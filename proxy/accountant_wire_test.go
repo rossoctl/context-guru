@@ -22,25 +22,25 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-type cfTap struct {
+type accTap struct {
 	mu  sync.Mutex
 	evs []dash.Event
 }
 
-func (c *cfTap) add(e *dash.Event) { c.mu.Lock(); c.evs = append(c.evs, *e); c.mu.Unlock() }
-func (c *cfTap) all() []dash.Event {
+func (c *accTap) add(e *dash.Event) { c.mu.Lock(); c.evs = append(c.evs, *e); c.mu.Unlock() }
+func (c *accTap) all() []dash.Event {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]dash.Event(nil), c.evs...)
 }
 
-func cfHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *cfTap) {
+func accHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *accTap) {
 	t.Helper()
-	return cfHandlerYAML(t, up, "preset: codesafe\n")
+	return accHandlerYAML(t, up, "preset: codesafe\n")
 }
 
-// cfHandlerYAML is cfHandler with the config document spelled out.
-func cfHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *cfTap) {
+// accHandlerYAML is accHandler with the config document spelled out.
+func accHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *accTap) {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(yaml))
 	if err != nil {
@@ -51,7 +51,7 @@ func cfHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *cf
 	if err != nil {
 		t.Fatal(err)
 	}
-	tap := &cfTap{}
+	tap := &accTap{}
 	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"),
 		BatchSize: 1, FlushInterval: time.Millisecond, Tap: tap.add})
 	if err != nil {
@@ -66,7 +66,7 @@ func cfHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *cf
 	return h, rec, tap
 }
 
-func cfPost(t *testing.T, h *Handler, session string) {
+func accPost(t *testing.T, h *Handler, session string) {
 	t.Helper()
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -86,8 +86,8 @@ func TestNoUsageMeansNoAccountantResult(t *testing.T) {
 		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL)
-	cfPost(t, h, "sess-err")
+	h, rec, tap := accHandler(t, up.URL)
+	accPost(t, h, "sess-err")
 	waitForRows(t, rec, 1)
 	for _, e := range tap.all() {
 		if e.HasAccountant() {
@@ -96,15 +96,15 @@ func TestNoUsageMeansNoAccountantResult(t *testing.T) {
 	}
 }
 
-// cfRunUsage posts two requests through a fake upstream that reports the given prompt usage and
+// accRunUsage posts two requests through a fake upstream that reports the given prompt usage and
 // returns the second recorded event and the byte length of the body the upstream received.
-func cfRunUsage(t *testing.T, in, cr, cw int) ([]dash.Event, int) {
-	evs, fwd := cfRunUsageBody(t, in, cr, cw)
+func accRunUsage(t *testing.T, in, cr, cw int) ([]dash.Event, int) {
+	evs, fwd := accRunUsageBody(t, in, cr, cw)
 	return evs, len(fwd)
 }
 
-// cfRunUsageBody is cfRunUsage returning the forwarded body itself.
-func cfRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
+// accRunUsageBody is accRunUsage returning the forwarded body itself.
+func accRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
 	t.Helper()
 	var fwd atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,11 +117,11 @@ func cfRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
 		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cr, cw)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL)
+	h, rec, tap := accHandler(t, up.URL)
 	// Two requests: the first has no previous request to classify cache breaks against, so the
 	// library leaves it with an unpriced "penalty_unknown" and the event keeps its legacy figures.
-	cfPost(t, h, "sess-cf")
-	cfPost(t, h, "sess-cf")
+	accPost(t, h, "sess-cf")
+	accPost(t, h, "sess-cf")
 	waitForRows(t, rec, 2)
 	b, _ := fwd.Load().([]byte)
 	return tap.all()[1:], b
@@ -151,7 +151,7 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 // body, ~0.14 token per byte (real traffic is 0.25-0.33; what matters is that the usage bills the
 // forwarded body, not a different one). Hand derivation of the extract figure:
 //
-//	positions    = the body's tools, system and messages elements (proxy cfBodies); here only
+//	positions    = the body's tools, system and messages elements (proxy accBodies); here only
 //	               messages, so the envelope (model, max_tokens) is in no position
 //	fwdBytes     = sum of the forwarded message elements' bytes
 //	removed      = client message bytes - forwarded message bytes (one tool_result rewritten)
@@ -165,7 +165,7 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 // It runs through the real proxy path, and the Result must carry no failed check: before the op
 // sizes were wire bytes, the sum check failed on every request (M1).
 func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
-	evs, fwd := cfRunUsageBody(t, 20, 0, 50)
+	evs, fwd := accRunUsageBody(t, 20, 0, 50)
 	if len(evs) != 1 {
 		t.Fatalf("events = %d", len(evs))
 	}
@@ -202,7 +202,7 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 // reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
 // unpriced, so the plausibility bound is what fired, not some earlier gate.
 func TestAbsurdUsageFallsBackToLegacy(t *testing.T) {
-	cfs, _ := cfRunUsage(t, 12, 9000, 1500)
+	cfs, _ := accRunUsage(t, 12, 9000, 1500)
 	leg := legacyOf(cfs[0])
 	got, want := extractRow(t, cfs[0]).SavedUSD, extractRow(t, leg).SavedUSD
 	if got != want || cfs[0].BaselineCostUSD != leg.BaselineCostUSD {
@@ -237,7 +237,7 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 	if h.savings != nil {
 		t.Error("a handler without a dashboard built a savings tracker")
 	}
-	hd, _, _ := cfHandler(t, up.URL)
+	hd, _, _ := accHandler(t, up.URL)
 	if hd.savings == nil {
 		t.Error("a handler with a dashboard must build the tracker")
 	}

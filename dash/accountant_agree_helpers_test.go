@@ -8,9 +8,9 @@ import (
 )
 
 // The helpers accountant_agree_test.go reuses. accountant_play_test.go holds same-named ones typed for the
-// accountant module's cases, so these carry a CF suffix.
+// accountant module's cases, so these carry an Acc suffix.
 
-func priceOfCF(r cases.Rate) modelinfo.Price {
+func priceOfAcc(r cases.Rate) modelinfo.Price {
 	return modelinfo.Price{
 		Input:      float64(r.Input) / 1e12,
 		CacheWrite: float64(r.CacheWrite5m) / 1e12,
@@ -19,17 +19,17 @@ func priceOfCF(r cases.Rate) modelinfo.Price {
 	}
 }
 
-func microsCF(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
+func microsAcc(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
 
-func absCF(x int64) int64 {
+func absAcc(x int64) int64 {
 	if x < 0 {
 		return -x
 	}
 	return x
 }
 
-// expectedCF is the case's expected figure for one step, in micro-dollars.
-func expectedCF(c cases.Case, s cases.Step) (net int64, byChange map[string]int64) {
+// expectedAcc is the case's expected figure for one step, in micro-dollars.
+func expectedAcc(c cases.Case, s cases.Step) (net int64, byChange map[string]int64) {
 	byChange = map[string]int64{}
 	rate := c.StepRate(s)
 	for _, e := range s.Expected.Ops {
@@ -51,9 +51,9 @@ func expectedCF(c cases.Case, s cases.Step) (net int64, byChange map[string]int6
 	return cases.RoundMicros(net), byChange
 }
 
-// diffCF is one disagreement. change is the ChangeID it is about, or "" when it is about a step or
+// diffAcc is one disagreement. change is the ChangeID it is about, or "" when it is about a step or
 // the thread.
-type diffCF struct {
+type diffAcc struct {
 	step   int // -1 for the thread total
 	change string
 	text   string

@@ -19,7 +19,7 @@ func newSavingsTracker() *savingsTracker {
 // begin opens the request record with the client body, before any component ran. The Trackers bound
 // their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	return s.trackers.BeginRequest(meta, cfBodies(client), cfBreakpoints(client))
+	return s.trackers.BeginRequest(meta, accBodies(client), accBreakpoints(client))
 }
 
 // end records the operations, then the thread and the forwarded body. Every op is added, replays
@@ -30,7 +30,7 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 	for _, op := range ops {
 		req.Add(op)
 	}
-	req.EndRequest(th, cfBodies(forwarded), cfBreakpoints(forwarded), facts)
+	req.EndRequest(th, accBodies(forwarded), accBreakpoints(forwarded), facts)
 	if s.onEnd != nil {
 		s.onEnd(req)
 	}

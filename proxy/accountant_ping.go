@@ -75,6 +75,6 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result
 	}
 	ops, facts := accountant.PingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
 	res := accountant.ComputeStandalone(ops)
-	st.put(cfPingKey(r.Session, cfThreadID(r.Thread)), facts)
+	st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
 	return res, true
 }

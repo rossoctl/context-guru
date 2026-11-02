@@ -26,17 +26,17 @@ func msg(role, text string) (string, int) {
 
 func body(msgs ...string) []byte { return []byte(`{"messages":[` + strings.Join(msgs, ",") + `]}`) }
 
-var cfFacts = accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeExact}
+var accFacts = accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeExact}
 
-type cfRun struct {
+type accRun struct {
 	s  *savingsTracker
 	th accountant.Thread
 }
 
-func (c cfRun) do(n int, client, fwd []byte, usage Usage, ops ...accountant.Operation) accountant.Result {
+func (c accRun) do(n int, client, fwd []byte, usage Usage, ops ...accountant.Operation) accountant.Result {
 	meta := accountant.RequestMeta{RequestID: fmt.Sprint("r", n), Session: "s", At: time.Unix(int64(1000+n*10), 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
 	r := c.s.begin(meta, client)
-	c.s.end(r, c.th, fwd, ops, cfFacts)
+	c.s.end(r, c.th, fwd, ops, accFacts)
 	return c.s.compute(r, usage)
 }
 
@@ -51,7 +51,7 @@ func countChange(res accountant.Result, id string) (n int, saved int) {
 }
 
 func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
-	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
@@ -73,7 +73,7 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	client2 := body(m0, big, m2, mustMsg("user", "next"))
 	fwd2 := body(m0, small, m2, mustMsg("user", "next"))
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, client2)
-	c.s.end(req, c.th, fwd2, []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
+	c.s.end(req, c.th, fwd2, []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, accFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("replayed change must be added, req.Ops = %d", len(req.Ops))
 	}
@@ -98,7 +98,7 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 func mustMsg(role, text string) string { s, _ := msg(role, text); return s }
 
 func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
-	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
@@ -114,7 +114,7 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 
 	// Request 3 reports the same ChangeID again: it is added and priced (no filter).
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, body(m0b, big, m2))
-	c.s.end(req, c.th, body(m0b, small, m2), []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, cfFacts)
+	c.s.end(req, c.th, body(m0b, small, m2), []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, accFacts)
 	if len(req.Ops) != 1 {
 		t.Fatalf("ended change must be re-added, req.Ops = %d", len(req.Ops))
 	}
@@ -129,7 +129,7 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 }
 
 func TestSavings_DryRunAndNonRewriteAlwaysAdded(t *testing.T) {
-	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("x", 2000))
 	small, nSmall := msg("user", "y")
 	usage := Usage{FreshInput: 10}
@@ -138,7 +138,7 @@ func TestSavings_DryRunAndNonRewriteAlwaysAdded(t *testing.T) {
 	dry.DryRun = true
 	spend := accountant.Operation{Kind: accountant.KindSpend, ChangeID: "c1"}
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0)}, body(big))
-	c.s.end(req, c.th, body(big), []accountant.Operation{dry, spend}, cfFacts)
+	c.s.end(req, c.th, body(big), []accountant.Operation{dry, spend}, accFacts)
 	if len(req.Ops) != 2 {
 		t.Fatalf("req.Ops = %d, want 2", len(req.Ops))
 	}
@@ -155,7 +155,7 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 			defer wg.Done()
 			b := body(mustMsg("user", "x"))
 			r := s.begin(accountant.RequestMeta{RequestID: fmt.Sprint("r", i), Session: "s", At: time.Now(), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, b)
-			s.end(r, accountant.Thread{ID: "main"}, b, nil, cfFacts)
+			s.end(r, accountant.Thread{ID: "main"}, b, nil, accFacts)
 			res := s.compute(r, Usage{FreshInput: 5})
 			mu.Lock()
 			defer mu.Unlock()
@@ -177,7 +177,7 @@ func TestSavings_ConcurrentRequests(t *testing.T) {
 // twice the real saving. The sum check catches it, and PriceMode falls back to the legacy figures
 // with reason check_sum, so no inflated override is stored.
 func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
-	c := cfRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	big, nBig := msg("user", strings.Repeat("tool result ", 400))
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
@@ -205,9 +205,9 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 		Components: []dash.CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 10, SavedUnique: 10}}}
 	leg := *e
 	leg.Components = append([]dash.CompRow(nil), e.Components...)
-	leg.Price(cfPrice, true)
+	leg.Price(accPrice, true)
 	e.SetAccountant(r2)
-	e.PriceMode(cfPrice, true)
+	e.PriceMode(accPrice, true)
 	if fb := e.AccountantFallback(); fb != dash.FallbackCheckSum {
 		t.Fatalf("fallback = %q, want %q", fb, dash.FallbackCheckSum)
 	}
@@ -217,4 +217,4 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 	}
 }
 
-var cfPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}
+var accPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}

@@ -27,7 +27,7 @@ func TestAccountantSkipsARequestWithExpandRounds(t *testing.T) {
 			`"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL)
+	h, rec, tap := accHandler(t, up.URL)
 	h.store.Put("HASH", []byte(strings.Repeat("the original content that had to come back\n", 20)))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()

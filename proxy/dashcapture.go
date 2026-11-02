@@ -113,16 +113,16 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
-	// savings is the handler's accountant tracker (nil without a dashboard); cfReq is this
-	// request's record (nil when it was skipped); cfDone guards a double finish.
+	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
+	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the accountant figure must not override the legacy figures.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings  *PingStore
-	cfReq  *accountant.Request
-	cfDone bool
+	pings   *PingStore
+	accReq  *accountant.Request
+	accDone bool
 	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
 	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
 	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so
@@ -678,18 +678,18 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
 	// state stays untouched and the event carries no result. Not after several upstream rounds
 	// either (see rounds): no Result is attached, so PriceMode keeps the legacy figures
-	// (cf_fallback reason no_result). The thread state is left as the
+	// (acc_fallback reason no_result). The thread state is left as the
 	// previous request left it; the next request then sees a longer gap, which the library
 	// handles (a phase it cannot prove is unknown and falls back too).
-	if c.cfReq != nil && usageOK && !c.cfDone {
-		c.cfDone = true
+	if c.accReq != nil && usageOK && !c.accDone {
+		c.accDone = true
 		if c.rounds <= 1 {
-			e.SetAccountant(c.savings.compute(c.cfReq, usage))
+			e.SetAccountant(c.savings.compute(c.accReq, usage))
 		}
 	}
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	e.PriceMode(price, usageOK && priced)
-	if c.cfReq != nil && e.AccountantFallback() != "" {
+	if c.accReq != nil && e.AccountantFallback() != "" {
 		logFallback(e)
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
@@ -798,9 +798,9 @@ func (c *capture) noteRounds(n int) {
 	}
 }
 
-// cfDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
-func (c *capture) cfDrop() {
+// accDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
+func (c *capture) accDrop() {
 	if c != nil {
-		c.cfReq = nil
+		c.accReq = nil
 	}
 }

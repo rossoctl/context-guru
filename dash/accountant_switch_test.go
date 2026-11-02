@@ -23,21 +23,21 @@ func switchEvent() *Event {
 func legacyCopy(e *Event) *Event {
 	c := *e
 	c.Components = append([]CompRow(nil), e.Components...)
-	c.Price(cfTestPrice, true)
+	c.Price(accTestPrice, true)
 	return &c
 }
 
 func TestPriceMode_AccountantOverridesComponentsAndBaseline(t *testing.T) {
 	e := switchEvent()
-	e.PriceMode(cfTestPrice, true)
+	e.PriceMode(accTestPrice, true)
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("a qualifying event fell back: %q", fb)
 	}
 	want := 1000 * 0.3e-6
-	if !cfNear(e.Components[0].SavedUSD, want) || e.Components[1].SavedUSD != 0 {
+	if !accNear(e.Components[0].SavedUSD, want) || e.Components[1].SavedUSD != 0 {
 		t.Fatalf("components = %+v, want mask %v", e.Components, want)
 	}
-	if !cfNear(e.BaselineCostUSD-e.CostUSD, want) {
+	if !accNear(e.BaselineCostUSD-e.CostUSD, want) {
 		t.Fatalf("baseline delta = %v want %v", e.BaselineCostUSD-e.CostUSD, want)
 	}
 	var sum float64
@@ -59,11 +59,11 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		mut    func(*Event)
 		reason string
 	}{
-		"no result":   {func(e *Event) { e.cfRes = nil }, FallbackNoResult},
+		"no result":   {func(e *Event) { e.accRes = nil }, FallbackNoResult},
 		"ops dropped": {func(e *Event) { e.SetAccountantContext(1, false) }, FallbackOpsDropped},
 		"observe":     {func(e *Event) { e.SetAccountantContext(0, true) }, FallbackObserve},
 		"unpriced": {func(e *Event) {
-			e.cfRes.Unpriced = []accountant.Unpriced{{OpID: "x", Reason: "r"}}
+			e.accRes.Unpriced = []accountant.Unpriced{{OpID: "x", Reason: "r"}}
 		}, FallbackUnpriced},
 		"acted without figure": {func(e *Event) { e.Components[1].Acted = true }, FallbackActedWithoutFigure},
 		"figure without row":   {func(e *Event) { e.Components = e.Components[1:] }, FallbackFigureWithoutRow},
@@ -73,24 +73,24 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 			e.Components = append(e.Components, CompRow{Component: "mask"})
 		}, FallbackDuplicateName},
 		"check sum": {func(e *Event) {
-			e.cfRes.Checks = []accountant.CheckFailure{{Check: "sum", Detail: "section=messages ops=1800 bodies=900 bytes"}}
+			e.accRes.Checks = []accountant.CheckFailure{{Check: "sum", Detail: "section=messages ops=1800 bodies=900 bytes"}}
 		}, FallbackCheckSum},
 		"check unique_change": {func(e *Event) {
-			e.cfRes.Checks = []accountant.CheckFailure{{Check: "unique_change", Operator: "context-guru.mask"}}
+			e.accRes.Checks = []accountant.CheckFailure{{Check: "unique_change", Operator: "context-guru.mask"}}
 		}, FallbackCheckUniqueChange},
 		"check spans": {func(e *Event) {
-			e.cfRes.Checks = []accountant.CheckFailure{{Check: "spans", Operator: "context-guru.mask"}}
+			e.accRes.Checks = []accountant.CheckFailure{{Check: "spans", Operator: "context-guru.mask"}}
 		}, FallbackCheckSpans},
 	}
 	for name, c := range cases {
 		e := switchEvent()
 		c.mut(e)
 		want := legacyCopy(e)
-		e.PriceMode(cfTestPrice, true)
+		e.PriceMode(accTestPrice, true)
 		if got := e.AccountantFallback(); got != c.reason {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
-		e.cfFallback = "" // the legacy copy carries no reason; every other field must match
+		e.accFallback = "" // the legacy copy carries no reason; every other field must match
 		if !reflect.DeepEqual(e, want) {
 			t.Errorf("%s: event differs from the legacy-priced copy:\n got %+v\nwant %+v", name, e, want)
 		}
@@ -101,9 +101,9 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 // the plausibility bound covers where it matters. It must not gate the override.
 func TestPriceMode_ConservationCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
-	e.cfRes.Checks = []accountant.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
-	e.PriceMode(cfTestPrice, true)
-	if fb := e.AccountantFallback(); fb != "" || !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
+	e.accRes.Checks = []accountant.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" || !accNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
 		t.Fatalf("conservation gated the override: reason %q components %+v", fb, e.Components)
 	}
 }

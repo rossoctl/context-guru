@@ -105,7 +105,7 @@ they sum to baseline minus cost.
 Limits:
 
 - The override is all-or-nothing per event. If the event does not qualify, it keeps its legacy
-  figures and the proxy logs one `cf_fallback` line with the reason. The reasons are `no_result`,
+  figures and the proxy logs one `acc_fallback` line with the reason. The reasons are `no_result`,
   `ops_dropped`, `observe`, `unpriced`, `check_sum`, `check_unique_change`, `check_spans`,
   `size_unknown`, `implausible_size`, `figure_without_row`, `duplicate_name` and
   `acted_without_figure`.

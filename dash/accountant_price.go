@@ -18,9 +18,9 @@ func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 		float64(t.CacheWrite5m)*p.CacheWrite + float64(t.CacheWrite1h)*oneHourWriteInputMultiple*p.Input
 }
 
-// CFFigure is the request's savings in dollars, from the library's tokens. Only dollars are
+// AccFigure is the request's savings in dollars, from the library's tokens. Only dollars are
 // summed; token tiers are never collapsed into one total.
-type CFFigure struct {
+type AccFigure struct {
 	ByComponent map[string]float64 // net of the break each component caused
 	// DeltaUSD is the sum of ByComponent: net of the ATTRIBUTED breaks only. It excludes
 	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
@@ -36,9 +36,9 @@ type CFFigure struct {
 // AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
-func (e *Event) AccountantFigure(p modelinfo.Price) CFFigure {
-	f := CFFigure{ByComponent: map[string]float64{}}
-	if e.cfRes == nil {
+func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
+	f := AccFigure{ByComponent: map[string]float64{}}
+	if e.accRes == nil {
 		return f
 	}
 	// An unpriced op is also in Ops, with zero tokens (compute.go price()/notEnded()). Counting it
@@ -46,11 +46,11 @@ func (e *Event) AccountantFigure(p modelinfo.Price) CFFigure {
 	// duplicated, and an Unpriced entry with an empty OpID can be request-level. So an op is skipped
 	// only when its OpID is in the set AND it carries no tokens: that can never drop a real dollar.
 	unpricedIDs := map[string]bool{}
-	for _, u := range e.cfRes.Unpriced {
+	for _, u := range e.accRes.Unpriced {
 		unpricedIDs[u.OpID] = true
 	}
 	owner := map[string]string{} // ChangeID -> component; empty ChangeIDs are never owners
-	for _, o := range e.cfRes.Ops {
+	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
@@ -68,7 +68,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) CFFigure {
 		f.DeltaUSD += net
 		f.Estimated = f.Estimated || o.Estimated
 	}
-	for _, ce := range e.cfRes.CacheEffects {
+	for _, ce := range e.accRes.CacheEffects {
 		// Sign convention (accountant internal/engine/compute.go): value = tierUSD(Saved) - tierUSD(Caused).
 		//   break:      Saved is the read that did not happen, Caused the write that did: a cost,
 		//               tierUSD(Caused) - tierUSD(Saved) > 0, charged to the owner of ChangeID.
@@ -98,7 +98,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) CFFigure {
 		}
 		f.Estimated = f.Estimated || ce.Estimated
 	}
-	for _, u := range e.cfRes.Unpriced {
+	for _, u := range e.accRes.Unpriced {
 		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
 	}
 	return f
@@ -147,7 +147,7 @@ var gatedChecks = map[string]string{
 
 // AccountantFallback is the reason PriceMode kept the legacy figures, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
-func (e *Event) AccountantFallback() string { return e.cfFallback }
+func (e *Event) AccountantFallback() string { return e.accFallback }
 
 // PriceMode is Price, then an override of each component's
 // SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
@@ -159,24 +159,24 @@ func (e *Event) AccountantFallback() string { return e.cfFallback }
 // gated library check failed; the figure is plausible; and every component that acted has a
 // library figure. Otherwise the legacy figures stand and AccountantFallback says why.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.cfFallback = ""
+	e.accFallback = ""
 	if !e.priceLegacy(p, accountingComplete) {
 		return
 	}
-	e.cfFallback = e.cfOverride(p)
+	e.accFallback = e.accOverride(p)
 }
 
-// cfOverride applies the accountant override, or returns the reason it cannot and changes nothing.
-func (e *Event) cfOverride(p modelinfo.Price) string {
+// accOverride applies the accountant override, or returns the reason it cannot and changes nothing.
+func (e *Event) accOverride(p modelinfo.Price) string {
 	switch {
-	case e.cfRes == nil:
+	case e.accRes == nil:
 		return FallbackNoResult
-	case e.cfOpsDropped != 0:
+	case e.accOpsDropped != 0:
 		return FallbackOpsDropped
-	case e.cfObserve:
+	case e.accObserve:
 		return FallbackObserve
 	}
-	for _, c := range e.cfRes.Checks {
+	for _, c := range e.accRes.Checks {
 		if r, ok := gatedChecks[c.Check]; ok {
 			return r
 		}
@@ -236,7 +236,7 @@ func (e *Event) cfOverride(p modelinfo.Price) string {
 // AccountantFigure.ByComponent: not DryRun, not a spend.
 func (e *Event) countedSavedTokens() int {
 	n := 0
-	for _, o := range e.cfRes.Ops {
+	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
 		}

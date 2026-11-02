@@ -261,8 +261,8 @@ type Handler struct {
 	observeSeq atomic.Uint64
 	// savings is nil without a dashboard recorder: the Result is attached to the recorded event.
 	savings *savingsTracker
-	// cfSeq numbers requests for the accountant RequestMeta.RequestID.
-	cfSeq atomic.Uint64
+	// accSeq numbers requests for the accountant RequestMeta.RequestID.
+	accSeq atomic.Uint64
 	// shadow is observe mode's own state store, separate from the live one. Observe must
 	// not write into the live store — a real request would then replay a decision that was
 	// never enforced — but it also cannot simply discard its writes: offloaders FREEZE a
@@ -1288,7 +1288,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					body = orig
 					// The original goes upstream, so no operation of the savings record is on the
 					// wire: drop the record, and the event keeps its legacy figures.
-					cp.cfDrop()
+					cp.accDrop()
 				}
 			}()
 			// A client that received our own expand tool_use answered it itself, with an
@@ -1382,8 +1382,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
 			if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.cfBegin(accountant.RequestMeta{
-					RequestID: "r" + strconv.FormatUint(h.cfSeq.Add(1), 10),
+				cp.accBegin(accountant.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
 					Session:   tr.Session,
 					Model:     gjson.GetBytes(orig, "model").String(),
 					At:        cp.start,
@@ -1513,7 +1513,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// upstream: the provider bills the injected tool declarations, so the library's
 			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
 			// message moves and the operations' positions stay valid.
-			cp.cfEnd(th, body, tr.Ops)
+			cp.accEnd(th, body, tr.Ops)
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly

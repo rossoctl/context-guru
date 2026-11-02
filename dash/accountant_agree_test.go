@@ -14,24 +14,24 @@ import (
 // This file plays every cases.Case through the path the proxy uses (Trackers, Request.Add of
 // every op with replays included, Compute, Event.SetAccountant, Event.AccountantFigure) and
 // compares the dollars with the case's expected figures. It lives in package dash_test, with
-// the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in accountant_agree_helpers_test.go.
+// the helpers it reuses (priceOfAcc, microsAcc, expectedAcc, absAcc) in accountant_agree_helpers_test.go.
 
-// PlayedCF is the proxy path's figure for one step, in micro-dollars.
-type PlayedCF struct {
+// PlayedAcc is the proxy path's figure for one step, in micro-dollars.
+type PlayedAcc struct {
 	Standalone bool
 	NetMicro   int64
-	// ByComponent is CFFigure.ByComponent in micro-dollars: the ops plus the breaks charged to a
+	// ByComponent is AccFigure.ByComponent in micro-dollars: the ops plus the breaks charged to a
 	// component. A per-ChangeID figure is not derivable from it, so the comparison is per component.
 	ByComponent map[string]int64
 	Unattrib    int64 // the unattributed break, in µ$ (a cost, positive): reported, not in NetMicro
 	Unpriced    []string
 }
 
-// PlayCF drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + SplitUSD + TTLUSD,
+// PlayAcc drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + SplitUSD + TTLUSD,
 // minus every spend op priced with its own model's rate (the host prices spends).
-func PlayCF(c cases.Case) []PlayedCF {
+func PlayAcc(c cases.Case) []PlayedAcc {
 	trackers := accountant.NewTrackers()
-	var out []PlayedCF
+	var out []PlayedAcc
 	for _, s := range c.Steps {
 		if s.IsStandalone() {
 			_ = accountant.ComputeStandalone(*s.Standalone) // the library returns the Call; the host prices it
@@ -41,7 +41,7 @@ func PlayCF(c cases.Case) []PlayedCF {
 					spend += c.ModelRate(op.Call.Model).CallPicos(op.Call.Usage)
 				}
 			}
-			out = append(out, PlayedCF{Standalone: true, NetMicro: -cases.RoundMicros(spend), ByComponent: map[string]int64{}})
+			out = append(out, PlayedAcc{Standalone: true, NetMicro: -cases.RoundMicros(spend), ByComponent: map[string]int64{}})
 			continue
 		}
 		req := trackers.BeginRequest(s.Begin.Meta, s.Begin.Client, s.Begin.ClientBreakpoints)
@@ -56,12 +56,12 @@ func PlayCF(c cases.Case) []PlayedCF {
 		res := req.Compute(s.Usage)
 		e := &dash.Event{}
 		e.SetAccountant(res)
-		fig := e.AccountantFigure(priceOfCF(c.StepRate(s)))
-		p := PlayedCF{ByComponent: map[string]int64{}, Unattrib: microsCF(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
+		fig := e.AccountantFigure(priceOfAcc(c.StepRate(s)))
+		p := PlayedAcc{ByComponent: map[string]int64{}, Unattrib: microsAcc(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
 		for k, v := range fig.ByComponent {
-			p.ByComponent[k] = microsCF(v)
+			p.ByComponent[k] = microsAcc(v)
 		}
-		p.NetMicro = microsCF(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - cases.RoundMicros(spend)
+		p.NetMicro = microsAcc(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - cases.RoundMicros(spend)
 		out = append(out, p)
 	}
 	return out
@@ -119,10 +119,10 @@ func sharedComp(c cases.Case, comp string) bool {
 	return false
 }
 
-// expectedByComponent is the case's expected figure of each component, the way CFFigure.ByComponent
+// expectedByComponent is the case's expected figure of each component, the way AccFigure.ByComponent
 // builds it: the priced rewrite and setting ops (a spend is priced by the host, so it is left out)
 // plus the counted breaks whose ChangeID a component owns. Rescue, split and TTL effects are their
-// own CFFigure fields, not component figures; a break nobody owns is UnattributedBreakUSD.
+// own AccFigure fields, not component figures; a break nobody owns is UnattributedBreakUSD.
 func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) map[string]int64 {
 	picos := map[string]int64{}
 	rate := c.StepRate(s)
@@ -149,22 +149,22 @@ func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) ma
 	return out
 }
 
-// CompareCF lists the disagreements: the step net, the thread total, and the figure of each
-// component. The legacy baseline bill is not compared: CFFigure has none. A per-ChangeID figure is
-// not derivable from CFFigure (it sums by component), so the expected per-ChangeID figures are
+// CompareAcc lists the disagreements: the step net, the thread total, and the figure of each
+// component. The legacy baseline bill is not compared: AccFigure has none. A per-ChangeID figure is
+// not derivable from AccFigure (it sums by component), so the expected per-ChangeID figures are
 // summed to their component, and a ChangeID that names no component (a keep-alive window, a
 // spend) is skipped.
-func CompareCF(c cases.Case, played []PlayedCF) (diffs []diffCF) {
+func CompareAcc(c cases.Case, played []PlayedAcc) (diffs []diffAcc) {
 	comps := componentsOf(c)
 	var wantTotal, gotTotal int64
 	for i, s := range c.Steps {
-		want, _ := expectedCF(c, s)
+		want, _ := expectedAcc(c, s)
 		wantComp := expectedByComponent(c, s, comps)
 		got := played[i]
 		wantTotal += want
 		gotTotal += got.NetMicro
-		if absCF(got.NetMicro-want) > 1 {
-			diffs = append(diffs, diffCF{i, "", fmt.Sprintf("step %d: expected %d µ$, proxy path %d µ$", i, want, got.NetMicro)})
+		if absAcc(got.NetMicro-want) > 1 {
+			diffs = append(diffs, diffAcc{i, "", fmt.Sprintf("step %d: expected %d µ$, proxy path %d µ$", i, want, got.NetMicro)})
 		}
 		names := map[string]bool{}
 		for k := range wantComp {
@@ -182,82 +182,82 @@ func CompareCF(c cases.Case, played []PlayedCF) (diffs []diffCF) {
 			if sharedComp(c, k) {
 				continue // see componentsOf
 			}
-			if absCF(got.ByComponent[k]-wantComp[k]) > 1 {
-				diffs = append(diffs, diffCF{i, k, fmt.Sprintf("step %d component %s: expected %d µ$, proxy path %d µ$", i, k, wantComp[k], got.ByComponent[k])})
+			if absAcc(got.ByComponent[k]-wantComp[k]) > 1 {
+				diffs = append(diffs, diffAcc{i, k, fmt.Sprintf("step %d component %s: expected %d µ$, proxy path %d µ$", i, k, wantComp[k], got.ByComponent[k])})
 			}
 		}
 	}
-	if absCF(gotTotal-wantTotal) > 1 {
-		diffs = append(diffs, diffCF{-1, "", fmt.Sprintf("thread total: expected %d µ$, proxy path %d µ$", wantTotal, gotTotal)})
+	if absAcc(gotTotal-wantTotal) > 1 {
+		diffs = append(diffs, diffAcc{-1, "", fmt.Sprintf("thread total: expected %d µ$, proxy path %d µ$", wantTotal, gotTotal)})
 	}
 	return diffs
 }
 
-// cfPlace is a step and a component ("" for the step net). Step -1 is the thread total.
-type cfPlace struct {
+// accPlace is a step and a component ("" for the step net). Step -1 is the thread total.
+type accPlace struct {
 	step int
 	comp string
 }
 
-// cfKnownDifferences are the places where AccountantFigure deliberately differs from a case.
+// accKnownDifferences are the places where AccountantFigure deliberately differs from a case.
 // The test tolerates exactly these places and fails if one stops differing.
-var cfKnownDifferences = map[string]struct {
+var accKnownDifferences = map[string]struct {
 	Reason string
-	At     []cfPlace
-	// Unattrib asserts that the step net differs by exactly the unattributed break CFFigure reports
-	// (a cost the case counts in its net and CFFigure shows apart): the steps listed here.
+	At     []accPlace
+	// Unattrib asserts that the step net differs by exactly the unattributed break AccFigure reports
+	// (a cost the case counts in its net and AccFigure shows apart): the steps listed here.
 	Unattrib []int
 }{
 	"rewrite/decision-flips-inside-prefix/hot/5m": {
 		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
-		At:       []cfPlace{{3, ""}},
+		At:       []accPlace{{3, ""}},
 		Unattrib: []int{3},
 	},
 	"rewrite/restore-in-place/hot/5m": {
 		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
-		At:       []cfPlace{{2, ""}},
+		At:       []accPlace{{2, ""}},
 		Unattrib: []int{2},
 	},
 	"setting/nil-position/penalty-unknown": {
 		Reason:   "the setting is unpriced, so it owns nothing and its break is UnattributedBreakUSD (an unpriced op is not a zero saving)",
-		At:       []cfPlace{{1, ""}, {1, "inference-router"}},
+		At:       []accPlace{{1, ""}, {1, "inference-router"}},
 		Unattrib: []int{1},
 	},
 }
 
-// cfLibraryDisagrees are cases where Compute itself returns something other than the case expects.
+// accLibraryDisagrees are cases where Compute itself returns something other than the case expects.
 // They are skipped, with the reason, so the suite stays green and the finding stays visible.
-var cfLibraryDisagrees = map[string]string{}
+var accLibraryDisagrees = map[string]string{}
 
 func TestProxyPathMatchesTheAccountantCases(t *testing.T) {
 	for _, c := range cases.All() {
 		t.Run(c.ID, func(t *testing.T) {
-			diffs := CompareCF(c, PlayCF(c))
-			if why, ok := cfLibraryDisagrees[c.ID]; ok {
+			diffs := CompareAcc(c, PlayAcc(c))
+			if why, ok := accLibraryDisagrees[c.ID]; ok {
 				t.Skipf("library disagrees with its own case: %s", why)
 			}
-			known, listed := cfKnownDifferences[c.ID]
-			allowed := map[cfPlace]bool{}
+			known, listed := accKnownDifferences[c.ID]
+			allowed := map[accPlace]bool{}
 			for _, p := range known.At {
-				allowed[cfPlace{p.step, p.comp}] = true
+				allowed[accPlace{p.step, p.comp}] = true
 			}
-			played := PlayCF(c)
+			played := PlayAcc(c)
 			// Where a case is listed, the gap at each Unattrib step must be exactly the unattributed
-			// break CFFigure reports, and the thread total may differ only by the sum of those.
+			// break AccFigure reports, and the thread total may differ only by the sum of those.
 			var wantTotalGap int64
 			for _, st := range known.Unattrib {
-				want, _ := expectedCF(c, c.Steps[st])
+				want, _ := expectedAcc(c, c.Steps[st])
 				gap := played[st].NetMicro - want
-				if gap == 0 || absCF(gap) <= 1 && played[st].Unattrib == 0 {
+				if gap == 0 || absAcc(gap) <= 1 && played[st].Unattrib == 0 {
 					t.Errorf("step %d is listed as unattributed but the net agrees: remove it", st)
-				} else if absCF(gap-played[st].Unattrib) > 1 {
+				} else if absAcc(gap-played[st].Unattrib) > 1 {
 					t.Errorf("step %d: net gap %d µ$ is not the unattributed break %d µ$", st, gap, played[st].Unattrib)
 				}
 				wantTotalGap += played[st].Unattrib
 			}
-			used := map[cfPlace]bool{}
+			used := map[accPlace]bool{}
 			for _, x := range diffs {
-				pl := cfPlace{x.step, x.change}
+				pl := accPlace{x.step, x.change}
 				if listed && (allowed[pl] || x.step == -1 && len(known.Unattrib) > 0) {
 					used[pl] = true
 					t.Logf("known difference (%s): %s", known.Reason, x.text)
@@ -268,11 +268,11 @@ func TestProxyPathMatchesTheAccountantCases(t *testing.T) {
 			if listed && len(known.Unattrib) > 0 {
 				var wantT, gotT int64
 				for i, st := range c.Steps {
-					w, _ := expectedCF(c, st)
+					w, _ := expectedAcc(c, st)
 					wantT += w
 					gotT += played[i].NetMicro
 				}
-				if absCF((gotT-wantT)-wantTotalGap) > 1 {
+				if absAcc((gotT-wantT)-wantTotalGap) > 1 {
 					t.Errorf("thread total gap %d µ$ is not the unattributed sum %d µ$", gotT-wantT, wantTotalGap)
 				}
 			}

@@ -19,7 +19,7 @@ import (
 // M4: the savings record ends with the body that goes upstream, AFTER expand.Inject and
 // adjudicate.Inject appended their tool declarations: the provider bills those bytes, so the
 // library's bytes-to-tokens ratio must count them. Asserted by comparing the Forwarded body the
-// library was given with cfBodies of the bytes the upstream received, and its breakpoints with the
+// library was given with accBodies of the bytes the upstream received, and its breakpoints with the
 // upstream body's cache_control marks.
 func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	var fwd atomic.Value
@@ -31,7 +31,7 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 			`"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":1,"cache_creation_input_tokens":50}}`)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandlerYAML(t, up.URL, "pipeline: [extract, extract_llm_sweep]\n")
+	h, rec, tap := accHandlerYAML(t, up.URL, "pipeline: [extract, extract_llm_sweep]\n")
 	var got atomic.Pointer[accountant.Request]
 	h.savings.onEnd = func(r *accountant.Request) { got.Store(r) }
 	srv := httptest.NewServer(h.Mux())
@@ -59,19 +59,19 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	if r == nil {
 		t.Fatal("the savings record never ended")
 	}
-	if want := cfBodies(sent); fmt.Sprint(r.Forwarded) != fmt.Sprint(want) {
+	if want := accBodies(sent); fmt.Sprint(r.Forwarded) != fmt.Sprint(want) {
 		t.Fatalf("Forwarded given to the library differs from the body sent upstream:\n got %+v\nwant %+v", r.Forwarded, want)
 	}
 	if len(r.Forwarded.Pos) == 0 || r.Forwarded.Start[1] != 3 {
 		t.Fatalf("the forwarded tools section must hold the client tool and the two injected ones: %+v", r.Forwarded.Start)
 	}
-	if fmt.Sprint(r.Breakpoints) != fmt.Sprint(cfBreakpoints(sent)) || len(r.Breakpoints) == 0 {
-		t.Fatalf("breakpoints %+v, want %+v", r.Breakpoints, cfBreakpoints(sent))
+	if fmt.Sprint(r.Breakpoints) != fmt.Sprint(accBreakpoints(sent)) || len(r.Breakpoints) == 0 {
+		t.Fatalf("breakpoints %+v, want %+v", r.Breakpoints, accBreakpoints(sent))
 	}
 	// KNOWN LIMIT, pinned: no operation describes the injected declarations, so the tools section
 	// differs between the client and forwarded bodies with no op to explain it. The library's sum
 	// check fails there, and the event keeps the legacy figures (check_sum). Safe, and the
-	// reason is visible in cf_fallback.
+	// reason is visible in acc_fallback.
 	waitForRows(t, rec, 1)
 	e := tap.all()[0]
 	res, _ := e.AccountantResult()

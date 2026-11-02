@@ -7,36 +7,36 @@ import (
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
-// cfThreadID maps the primary thread to "main", the library's name for it.
-func cfThreadID(id string) string {
+// accThreadID maps the primary thread to "main", the library's name for it.
+func accThreadID(id string) string {
 	if id == thread.Primary {
 		return "main"
 	}
 	return id
 }
 
-// cfBegin opens the accountant record with the body the agent sent. Nil-safe.
-func (c *capture) cfBegin(meta accountant.RequestMeta, client []byte) {
+// accBegin opens the accountant record with the body the agent sent. Nil-safe.
+func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
 	if c == nil || c.savings == nil {
 		return
 	}
-	c.cfReq = c.savings.begin(meta, client)
+	c.accReq = c.savings.begin(meta, client)
 }
 
-// cfEnd records the thread, the forwarded body and the operations. A thread that continues
+// accEnd records the thread, the forwarded body and the operations. A thread that continues
 // another by content names it as its parent, but starts with no state of its own: accountant carries
-// Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when cfBegin did not open a
+// Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when accBegin did not open a
 // record.
-func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
-	if c == nil || c.savings == nil || c.cfReq == nil {
+func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
+	if c == nil || c.savings == nil || c.accReq == nil {
 		return
 	}
-	t := accountant.Thread{ID: cfThreadID(th.ID)}
+	t := accountant.Thread{ID: accThreadID(th.ID)}
 	if parent, ok := th.InheritsFrom(); ok {
-		t.Parent = cfThreadID(parent)
+		t.Parent = accThreadID(parent)
 	}
 	// PingRead is left nil: see the LIMITATION note on entryFacts.
-	c.savings.end(c.cfReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.cfReq.Meta.Session, t))
+	c.savings.end(c.accReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.accReq.Meta.Session, t))
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
@@ -49,18 +49,18 @@ func (c *capture) cfEnd(th thread.Result, forwarded []byte, ops []accountant.Ope
 // library uses LastPing for the gap only.
 func entryFacts(forwarded []byte, pings *PingStore, session string, t accountant.Thread) accountant.EntryFacts {
 	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
-	for _, bp := range cfBreakpoints(forwarded) {
+	for _, bp := range accBreakpoints(forwarded) {
 		if bp.TTL == "1h" {
 			facts.TTL = time.Hour
 			break
 		}
 	}
-	if pf, ok := pings.take(cfPingKey(session, t.ID)); ok {
+	if pf, ok := pings.take(accPingKey(session, t.ID)); ok {
 		facts.LastPing, facts.PingWindow = pf.LastPing, pf.PingWindow
 	}
 	return facts
 }
 
-// cfPingKey is the key the ping store keeps one thread's ping facts under: the session and the
+// accPingKey is the key the ping store keeps one thread's ping facts under: the session and the
 // thread id as the accountant sees it ("main" for the primary thread).
-func cfPingKey(session, threadID string) string { return session + "\x00" + threadID }
+func accPingKey(session, threadID string) string { return session + "\x00" + threadID }

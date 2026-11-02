@@ -121,13 +121,13 @@ type WaitCauseResult struct {
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
-	// cfRes is the accountant Result (see accountant_event.go). Unexported: not serialized.
-	cfRes *accountant.Result
-	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
-	cfOpsDropped int
-	cfObserve    bool
-	// cfFallback is why PriceMode kept the legacy figures (see AccountantFallback).
-	cfFallback string
+	// accRes is the accountant Result (see accountant_event.go). Unexported: not serialized.
+	accRes *accountant.Result
+	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
+	accOpsDropped int
+	accObserve    bool
+	// accFallback is why PriceMode kept the legacy figures (see AccountantFallback).
+	accFallback string
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
@@ -816,7 +816,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked
 // partial/missing: a cost we cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.cfFallback = ""
+	e.accFallback = ""
 	e.priceLegacy(p, accountingComplete)
 }
 

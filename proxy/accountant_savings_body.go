@@ -6,11 +6,11 @@ import (
 	"github.com/rossoctl/accountant"
 )
 
-// cfBodies hashes a request body in the provider's order: tools, system, messages. A string
+// accBodies hashes a request body in the provider's order: tools, system, messages. A string
 // system prompt is one block. Raw JSON is hashed as sent, so two hosts hash the same bytes alike.
 // Each element of messages is one position, so Position{messages, i} is the wire message index.
 // A body without messages (or with invalid JSON) gives an empty Body.
-func cfBodies(raw []byte) accountant.Body {
+func accBodies(raw []byte) accountant.Body {
 	if !gjson.GetBytes(raw, "messages").IsArray() {
 		return accountant.NewBody(nil, nil, nil)
 	}
@@ -31,12 +31,12 @@ func cfBodies(raw []byte) accountant.Body {
 	return accountant.NewBody(tools, system, msgs)
 }
 
-// cfBreakpoints lists the cache_control marks, as positions in the same space as cfBodies, one per
+// accBreakpoints lists the cache_control marks, as positions in the same space as accBodies, one per
 // position. A mark inside a message's content blocks belongs to that message, so an element mark
 // and a block mark (or two block marks) can fall on one position: it is listed once, with the
 // longer TTL (1h over 5m), because the provider keeps the entry for the longest TTL asked for at
 // it. ttl defaults to "5m".
-func cfBreakpoints(raw []byte) []accountant.Breakpoint {
+func accBreakpoints(raw []byte) []accountant.Breakpoint {
 	if !gjson.GetBytes(raw, "messages").IsArray() {
 		return nil
 	}

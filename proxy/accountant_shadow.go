@@ -8,11 +8,11 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 )
 
-// logFallback writes the cf_fallback line for an event whose figures stayed on the legacy rules,
+// logFallback writes the acc_fallback line for an event whose figures stayed on the legacy rules,
 // with the reason (dash.Fallback*).
 func logFallback(e *dash.Event) {
 	r, _ := e.AccountantResult()
-	slog.Info("cf_fallback", "session", e.SessionID, "thread", e.ThreadID,
+	slog.Info("acc_fallback", "session", e.SessionID, "thread", e.ThreadID,
 		"reason", e.AccountantFallback(), "checks", checkNames(r), "recomputed", r.Recomputed)
 }
 

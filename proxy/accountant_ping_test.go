@@ -36,7 +36,7 @@ func TestPingSavingsPricesAndStoresFacts(t *testing.T) {
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
 		t.Fatalf("ok=%v res=%+v", ok, res)
 	}
-	f, ok := st.take(cfPingKey("s", "main"))
+	f, ok := st.take(accPingKey("s", "main"))
 	if !ok || f.PingWindow == "" || !f.LastPing.Equal(time.UnixMilli(pingAt.UnixMilli())) {
 		t.Fatalf("facts %+v ok=%v", f, ok)
 	}
