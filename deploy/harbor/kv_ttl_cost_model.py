@@ -346,6 +346,35 @@ def cache_read_frac_for(model: str) -> float:
             return frac
     return DEFAULT_CACHE_READ_MULTIPLE
 DEFAULT_WRITE_5M_MULTIPLE = 1.25
+
+
+def _gpt_56_or_later(model: str) -> bool:
+    """Go: modelinfo.GPT56OrLater. The last "gpt-" token picks the model."""
+    m = (model or "").lower()
+    i = m.rfind("gpt-")
+    if i < 0:
+        return False
+    mt = re.match(r"(\d+)(.*)", m[i + 4:])
+    if not mt:
+        return False
+    major, rest = int(mt.group(1)), mt.group(2)
+    if major != 5:
+        return major > 5
+    mm = re.match(r"\.(\d+)", rest)
+    return bool(mm) and int(mm.group(1)) >= 6
+
+
+def charges_cache_write_premium(model: str) -> bool:
+    """Go: modelinfo.chargesCacheWritePremium. Only Claude/Anthropic and GPT-5.6+ bill a
+    cache-creation premium. Every other family writes at the fresh input rate."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    return "claude" in full or "anthropic" in full or _gpt_56_or_later(model)
+
+
+def cache_write_frac_for(model: str, file_frac: float = DEFAULT_WRITE_5M_MULTIPLE) -> float:
+    """The 5-minute cache-WRITE multiple of base input for a model (Go: CacheWriteFracFor, with
+    the operator's cache_write_frac in place of 1.25 for a family that charges a premium)."""
+    return file_frac if charges_cache_write_premium(model) else 1.0
 DEFAULT_WRITE_1H_MULTIPLE = 2.0
 DEFAULT_PING_INPUT_TOKENS = 1
 DEFAULT_PING_OUTPUT_TOKENS = 1
@@ -496,6 +525,8 @@ class PriceBook:
             if file_read_frac <= 0:
                 raise ValueError(f"{path}: cache_read_frac must be above 0")
         write_frac = float(raw.get("cache_write_frac") or DEFAULT_WRITE_5M_MULTIPLE)
+        if write_frac < 0:
+            raise ValueError(f"{path}: cache_write_frac must not be negative")
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
         for i, m in enumerate(raw.get("models") or ()):
@@ -517,7 +548,7 @@ class PriceBook:
                 cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * (
                     file_read_frac if file_read_frac is not None else cache_read_frac_for(match)),
                 read_derived=(not cr) and file_read_frac is None,
-                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * write_frac,
+                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * cache_write_frac_for(match, write_frac),
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
                 source=SOURCE_PRICE_LIST, known=True)

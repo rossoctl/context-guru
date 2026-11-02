@@ -1824,12 +1824,13 @@ func (d *DB) medianPingUSD(f Filter) (float64, error) {
 			return 0, err
 		}
 		if prefix > 0 && usd > 0 {
-			// A row with no model keeps the Anthropic 1.25x write multiple it always used.
-			writeFrac := modelinfo.AnthropicCacheWrite5mFrac
-			if model != "" {
-				writeFrac = modelinfo.CacheWriteFracFor(model)
+			// Price decides both tiers for the row's model. A row with no model keeps the
+			// Anthropic 1.25x write multiple it always used.
+			unit := modelinfo.Price{Input: 1}
+			if model == "" {
+				unit.WriteFrac = modelinfo.AnthropicCacheWrite5mFrac
 			}
-			xs = append(xs, usd/writeFrac*modelinfo.CacheReadFracFor(model))
+			xs = append(xs, usd/unit.CacheWrite5mFor(model)*unit.CacheReadFor(model))
 		}
 	}
 	if err := rows.Err(); err != nil {

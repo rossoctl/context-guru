@@ -216,11 +216,14 @@ func (l *LiteLLM) fetch(ctx context.Context) (map[string]int, map[string]modelin
 		// 1.25x is Anthropic's published premium and no other family charges one. See
 		// CacheWriteFracFor — a flat 1.25x here put a fabricated 25% premium on every
 		// OpenAI and Gemini row's SAVINGS.
-		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * modelinfo.CacheReadFracFor(k)
+		p = p.Resolved(k)
+		// A negative stated rate is invalid data. Keep it as it was before the refactor, so no
+		// price changes: only a zero (absent) tier is filled.
+		if v.CacheReadCost < 0 {
+			p.CacheRead = v.CacheReadCost
 		}
-		if p.CacheWrite == 0 {
-			p.CacheWrite = p.Input * modelinfo.CacheWriteFracFor(k)
+		if v.CacheCreateCost < 0 {
+			p.CacheWrite = v.CacheCreateCost
 		}
 		pm[full] = p
 		if _, ok := pm[tail]; !ok {

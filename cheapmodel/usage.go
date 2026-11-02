@@ -219,7 +219,9 @@ type Pricing struct {
 // HaikuPricing is the default: claude-haiku-4-5 list rates ($1/$5 per MTok), with the
 // standard Anthropic cache multipliers (write 1.25x input, read 0.1x input).
 func HaikuPricing() Pricing {
-	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: 1.00 * modelinfo.AnthropicCacheWrite5mFrac, CacheReadPerMTok: 1.00 * modelinfo.AnthropicCacheReadFrac}
+	const id = "claude-haiku-4-5"
+	p := modelinfo.Price{Input: 1.00}
+	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: p.CacheWrite5mFor(id), CacheReadPerMTok: p.CacheReadFor(id)}
 }
 
 // PricingConfigured reports whether the operator priced the cheap model at all, i.e. whether

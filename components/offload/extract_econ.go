@@ -104,6 +104,9 @@ const (
 	// Sonnet 4.5/4.6-class list prices ($3 fresh), and 0.1x is right for that class. The lower
 	// Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 tiers apply only where the request's own
 	// model is known: see agentRates and modelinfo.CacheReadFracFor.
+	// A constant, not modelinfo.Price.CacheReadFor: a constant product is exact (0.3), while the
+	// same product at run time is 0.30000000000000004. TestAgentClassRatesMatchPrice pins the
+	// constant to that function for this class, so the two cannot drift.
 	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 	// agentCacheWritePerMTok is 1.25x fresh, the standard cache-WRITE multiplier, and it is
 	// what a token is worth on a turn whose cache has expired.
@@ -130,16 +133,11 @@ func agentRates(c *components.Ctx) (fresh, read, write float64) {
 		if c.SelfRates.Input > 0 {
 			fresh = c.SelfRates.Input
 		}
-		read, write = c.SelfRates.CacheRead, c.SelfRates.CacheWrite
-		if read <= 0 {
-			read = fresh * modelinfo.CacheReadFracFor(c.ModelName)
-		}
-		if write <= 0 {
-			// The blank write tier follows the model's family: only Anthropic and GPT-5.6+
-			// charge a creation premium. Other families write at the fresh rate, the same
-			// answer ParseTable and the price feed give.
-			write = fresh * modelinfo.CacheWriteFracFor(c.ModelName)
-		}
+		// A blank tier follows the model (Price decides it): only Anthropic and GPT-5.6+
+		// charge a creation premium. Other families write at the fresh rate, the same
+		// answer ParseTable and the price feed give.
+		p := modelinfo.Price{Input: fresh, CacheRead: c.SelfRates.CacheRead, CacheWrite: c.SelfRates.CacheWrite}
+		read, write = p.CacheReadFor(c.ModelName), p.CacheWrite5mFor(c.ModelName)
 	}
 	return fresh, read, write
 }

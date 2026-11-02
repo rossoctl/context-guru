@@ -37,11 +37,6 @@ type tableEntry struct {
 	qualified bool
 	price     Price
 	window    int
-	// readDerived means cache_read was left blank and the file sets no cache_read_frac. Price
-	// then fills it from the QUERIED model (CacheReadFracFor), not from the match pattern: a
-	// family entry such as `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5`
-	// on `aws/claude-sonnet-5-5`, serves models with different read tiers.
-	readDerived bool
 }
 
 // tableFile is the on-disk shape.
@@ -99,6 +94,9 @@ func ParseTable(b []byte) (*Table, error) {
 	if f.CacheReadFrac != nil && *f.CacheReadFrac <= 0 {
 		return nil, fmt.Errorf("model price list: cache_read_frac must be above 0")
 	}
+	if f.CacheWriteFrac < 0 {
+		return nil, fmt.Errorf("model price list: cache_write_frac must not be negative")
+	}
 	if f.CacheWriteFrac == 0 {
 		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
@@ -120,31 +118,22 @@ func ParseTable(b []byte) (*Table, error) {
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
 		}
-		readDerived := false
-		if p.CacheRead == 0 {
-			// A file-level cache_read_frac is the operator's own gateway multiple and wins.
-			// Unset, the multiple follows the model (CacheReadFracFor).
-			frac := CacheReadFracFor(match)
-			if f.CacheReadFrac != nil {
-				frac = *f.CacheReadFrac
-			}
-			p.CacheRead = p.Input * frac
-			readDerived = f.CacheReadFrac == nil
+		// A blank tier is filled at lookup, when the model is known (Price.CacheReadFor). The
+		// file-level multiples travel with the entry. A cache_read_frac the file leaves unset
+		// stays 0, so the queried model decides.
+		if f.CacheReadFrac != nil {
+			p.ReadFrac = *f.CacheReadFrac
 		}
-		if p.CacheWrite == 0 {
-			// The file-level cache_write_frac is documented in prices.example.yaml as "the
-			// Anthropic-family multiples", so it is applied to the Anthropic family and not
-			// to models whose provider charges no creation premium at all. An entry that
-			// states its own cache_write is honoured above and never reaches this line.
-			frac := f.CacheWriteFrac
-			if !chargesCacheWritePremium(match) {
-				frac = 1.0
-			}
-			p.CacheWrite = p.Input * frac
+		// The file-level cache_write_frac is documented in prices.example.yaml as "the
+		// Anthropic-family multiples", so it is applied to the Anthropic family and not
+		// to models whose provider charges no creation premium at all. The family is that of
+		// the entry's own match, as before.
+		p.WriteFrac = f.CacheWriteFrac
+		if !chargesCacheWritePremium(match) {
+			p.WriteFrac = 1.0
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window,
-			readDerived: readDerived})
+			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -212,11 +201,10 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	if !ok {
 		return Price{}, false
 	}
-	p := e.price
-	if e.readDerived {
-		p.CacheRead = p.Input * CacheReadFracFor(model)
-	}
-	return p, true
+	// The fill uses the QUERIED model, not the match pattern: a family entry such as
+	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
+	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
+	return e.price.Resolved(model), true
 }
 
 // Window returns an operator-supplied context window, for models the public map

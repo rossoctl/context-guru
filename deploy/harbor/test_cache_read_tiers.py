@@ -63,6 +63,10 @@ class Reader(unittest.TestCase):
         self.assertAlmostEqual(read(book(DOC), "aws/claude-fable-5-1"), 0.7)
         self.assertAlmostEqual(read(book("cache_read_frac: 0.1\n" + DOC), "aws/claude-fable-5-1"), 0.7)
 
+    def test_negative_write_frac_is_rejected(self):
+        with self.assertRaises(ValueError):
+            book("cache_write_frac: -1\n" + DOC)
+
     def test_file_level_value_wins(self):
         b = book("cache_read_frac: 0.1\n" + DOC)
         self.assertAlmostEqual(read(b, "claude-opus-5-5"), 0.5)

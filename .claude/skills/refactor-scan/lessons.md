@@ -5,6 +5,10 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 
 ### The fix can repeat the bug
 
+- **Centralize the decision, not the constant.** #849 moved the multiples into one constant, but 6
+  callers still filled a blank rate themselves, at different times. When the rate became per
+  model (#855), each fill site had to change, and review found them one at a time. One function
+  that answers the question for a given input is the fix. A shared number is not.
 - **A rule added in one reader only is a new duplicate.** PR #819 hid stale rows in the narrow SQL
   path. At 250 or more sessions the report reads a different path, so the bug came back at
   production size. Write the rule once, in Go, where the facts are built, and call it from every

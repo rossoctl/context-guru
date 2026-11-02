@@ -30,7 +30,7 @@ Two sentences from the provider's documentation make this fixable:
 So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input (less on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1) where
 re-creating the prefix costs `1.25x`. After a session has been idle for `X` seconds, the
 proxy re-sends that session's last Anthropic request with `max_tokens: 1` — a pure cache read, which
-refreshes the entry. **One ping buys back about 11.5 of itself.**
+refreshes the entry. **One ping buys back about 11.5 times its own cost at a `0.1x` read rate.** The ratio is higher on a lower tier: about 24 times at `0.05x` (Opus 5.5, Sonnet 5.5) and about 49 times at `0.025x` (Fable 5.1, Mythos 5.1).
 
 Nothing else about the request changes. The prefix hash is cumulative over
 `tools` → `system` → `messages`, so a ping that altered any of it would *create* an entry
@@ -216,7 +216,7 @@ one governs writing content to **disk**, where a manager can read it and a reten
 applies. This is memory only, masked, overwritten on release, never persisted, and gone
 within about 12 minutes. It cannot be reduced further — the prefix hash covers the whole
 `tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
-cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
+cache and cost 12.5x instead of saving 11.5x (at a `0.1x` read rate), which is the mechanism inverted.
 
 Controls, because this is the one place the service holds a caller's credential beyond the life
 of a request:

@@ -67,6 +67,54 @@ type Price struct {
 	Output     float64 `json:"output"`      // completion per token
 	CacheRead  float64 `json:"cache_read"`  // cache-hit input per token
 	CacheWrite float64 `json:"cache_write"` // cache-creation input per token
+
+	// The operator's multiples of Input for a tier the entry leaves blank. 0 means the operator
+	// set none, so the model decides (see CacheReadFor). They are not part of the wire form.
+	ReadFrac    float64 `json:"-"`
+	WriteFrac   float64 `json:"-"`
+	Write1hFrac float64 `json:"-"`
+}
+
+// CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.
+// In order: a rate the entry states, then the operator's ReadFrac, then CacheReadFracFor(model).
+func (p Price) CacheReadFor(model string) float64 {
+	if p.CacheRead > 0 {
+		return p.CacheRead
+	}
+	if p.ReadFrac > 0 {
+		return p.Input * p.ReadFrac
+	}
+	return p.Input * CacheReadFracFor(model)
+}
+
+// CacheWrite5mFor is the 5-minute cache-WRITE rate per token for a model. Same order as
+// CacheReadFor: stated rate, then the operator's WriteFrac, then CacheWriteFracFor(model).
+func (p Price) CacheWrite5mFor(model string) float64 {
+	if p.CacheWrite > 0 {
+		return p.CacheWrite
+	}
+	if p.WriteFrac > 0 {
+		return p.Input * p.WriteFrac
+	}
+	return p.Input * CacheWriteFracFor(model)
+}
+
+// CacheWrite1hFor is the 1-hour cache-WRITE rate per token. No gateway states it, so it is always
+// derived: the operator's Write1hFrac, else AnthropicCacheWrite1hFrac, times the fresh input rate.
+// The model is part of the signature so a per-model rule can arrive without a caller change.
+func (p Price) CacheWrite1hFor(_ string) float64 {
+	if p.Write1hFrac > 0 {
+		return p.Input * p.Write1hFrac
+	}
+	return p.Input * AnthropicCacheWrite1hFrac
+}
+
+// Resolved returns the price with both cache tiers filled for the model and the multiples
+// cleared. A price source calls it once the model is known. Callers then read the fields.
+func (p Price) Resolved(model string) Price {
+	p.CacheRead, p.CacheWrite = p.CacheReadFor(model), p.CacheWrite5mFor(model)
+	p.ReadFrac, p.WriteFrac, p.Write1hFrac = 0, 0, 0
+	return p
 }
 
 // Cost prices one request's four token tiers in USD.
@@ -97,9 +145,9 @@ func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheW
 	return cost
 }
 
-// CacheWrite1h is the per-token rate of a ONE-HOUR cache write: AnthropicCacheWrite1hFrac x the
-// fresh input rate. No gateway publishes it, so it is always derived.
-func (p Price) CacheWrite1h() float64 { return p.Input * AnthropicCacheWrite1hFrac }
+// CacheWrite1h is the per-token rate of a ONE-HOUR cache write. No gateway publishes it, so it is
+// always derived. See CacheWrite1hFor.
+func (p Price) CacheWrite1h() float64 { return p.CacheWrite1hFor("") }
 
 // Zero reports whether no rate at all is known (so a cost figure would be a lie).
 func (p Price) Zero() bool {

@@ -6535,7 +6535,7 @@ function loadSettings() {
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' pings. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
         'A cache read costs 0.1x base input (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1); re-creating a lapsed prefix costs 1.25x, so one '
-        + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
+        + 'ping buys back about 11.5 times its own cost at a 0.1x read rate (about 24 times at 0.05x, about 49 times at 0.025x). On this service\u2019s traffic, requests that '
         + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
         + 'to be spent. Every ping is a row on your Requests tab marked cache strategy with its own '
