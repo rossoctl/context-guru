@@ -18,7 +18,8 @@ type Opts struct {
 	Provider bschemas.ModelProvider
 	Body     []byte
 	// API identifies the wire envelope. Empty means Chat Completions / Messages;
-	// "responses" selects OpenAI's native Responses instructions+input shape.
+	// "responses" (or the upstream path "/v1/responses") selects OpenAI's native Responses
+	// instructions+input shape. schema.WireFor reads it.
 	API string
 	// Session is the host-supplied session id ("" => content hash).
 	Session string

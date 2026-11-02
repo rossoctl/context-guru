@@ -498,7 +498,7 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
   tenant_id  TEXT    NOT NULL DEFAULT '',
   session_id TEXT    NOT NULL DEFAULT '',
   digest     TEXT    NOT NULL DEFAULT '',   -- identity of the declaration SET
-  kind       TEXT    NOT NULL DEFAULT '',   -- tool|mcp_tool|server_tool|skill|skill_listing
+  kind       TEXT    NOT NULL DEFAULT '',   -- tool|mcp_tool|server_tool|skill|skill_listing|system_prompt|deferred_listing
   name       TEXT    NOT NULL DEFAULT '',
   server     TEXT    NOT NULL DEFAULT '',   -- MCP server half of mcp__<server>__<tool>
   tokens     INTEGER NOT NULL DEFAULT 0,    -- BPE cost of carrying this declaration

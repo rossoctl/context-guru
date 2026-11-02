@@ -52,7 +52,7 @@ func anchorKey(session string) string { return store.RestorePrefix + session }
 // MessagesField is the body field where a dialect keeps its transcript: Responses `input`,
 // every other dialect `messages`. The one definition the anchor code and apply share.
 func MessagesField(wire string) string {
-	if wire == "responses" {
+	if schema.IsResponses(wire) {
 		return "input"
 	}
 	return "messages"
@@ -183,7 +183,7 @@ func stripCacheControl(v any) any {
 // the turn that expanded — will sit in the client's next request. body is the request as the
 // client sent it. ok is false when the transcript is not one an anchor can be stated in.
 func AnchorPoint(wire string, body []byte) (at int, fp string, ok bool) {
-	if wire == "responses" && gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.IsResponses(wire) && gjson.GetBytes(body, "previous_response_id").String() != "" {
 		return 0, "", false // history held upstream: these items are not the transcript
 	}
 	msgs := gjson.GetBytes(body, MessagesField(wire)).Array()
@@ -283,11 +283,11 @@ func CallSites(wire string, body []byte) []CallSite {
 	answers := map[string]string{} // call id -> result text
 	for _, m := range msgs {
 		switch {
-		case wire == "responses":
+		case schema.IsResponses(wire):
 			if t := m.Get("type").String(); t == "function_call_output" || t == "custom_tool_call_output" {
 				answers[m.Get("call_id").String()] = schema.ContentText(m.Get("output"))
 			}
-		case wire == "anthropic":
+		case wire == schema.WireAnthropic:
 			for _, blk := range m.Get("content").Array() {
 				if blk.Get("type").String() == "tool_result" {
 					answers[blk.Get("tool_use_id").String()] = schema.ToolResultText(blk)
@@ -314,7 +314,7 @@ func CallSites(wire string, body []byte) []CallSite {
 	}
 	for i, m := range msgs {
 		switch {
-		case wire == "responses":
+		case schema.IsResponses(wire):
 			if t := m.Get("type").String(); (t == "function_call" || t == "custom_tool_call") && m.Get("name").String() == ToolName {
 				args := m.Get("arguments").String()
 				if t == "custom_tool_call" {
@@ -322,7 +322,7 @@ func CallSites(wire string, body []byte) []CallSite {
 				}
 				add(i, m.Get("call_id").String(), gjson.Get(args, "id").String())
 			}
-		case wire == "anthropic":
+		case wire == schema.WireAnthropic:
 			for _, blk := range m.Get("content").Array() {
 				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
 					add(i, blk.Get("id").String(), blk.Get("input.id").String())
@@ -425,5 +425,5 @@ func itemSpan(original string) bool {
 
 // Restorable reports whether original can be restored as a text message on wire.
 func Restorable(wire, original string) bool {
-	return original != "" && !(wire == "responses" && itemSpan(original))
+	return original != "" && !(schema.IsResponses(wire) && itemSpan(original))
 }

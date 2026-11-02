@@ -319,6 +319,11 @@ type ToolReport struct {
 	Tools   []ToolStat   `json:"tools"`
 	Servers []ServerStat `json:"servers"`
 	Skills  SkillStat    `json:"skills"`
+	// DeferredState is "unknown" when a session in scope carried a deferred tools list this scan
+	// did not read, so the MCP tools above may be missing deferred ones. Empty otherwise. A reader
+	// must not translate unknown into "no deferred tools".
+	DeferredState           string `json:"deferred_state,omitempty"`
+	DeferredUnknownSessions int    `json:"deferred_unknown_sessions,omitempty"`
 	// Aside is everything declared that is NOT the reader's to remove, in the same row shape:
 	// Claude Code's own tools (Builtin true), a third-party agent's or SDK application's client
 	// tools, and the provider's server-side tools.
@@ -580,7 +585,7 @@ func (d *DB) toolReportFor(f Filter, price func(string) (modelinfo.Price, bool),
 	g.Go(func() error {
 		var err error
 		carryRes, err = d.carriedCost(f, price, func(_, kind, name, _ string) string {
-			if kind == KindSkillListing {
+			if kind == KindSkillListing || kind == KindDeferredListing {
 				return ""
 			}
 			return kind + "\x00" + name
@@ -718,6 +723,9 @@ func unusedKeyOf(usedIn map[string]map[statKey]int) func(session, kind, name, se
 			}
 			return ""
 		}
+		if kind == KindDeferredListing {
+			return "" // a note, not a declaration
+		}
 		if usedIn[s][statKey{kind, name}] > 0 {
 			return ""
 		}
@@ -736,6 +744,15 @@ type declRow struct {
 	// this one", and one stored copy is enough to answer yes.
 	hasText bool
 }
+
+// dropStaleDecls applies the stale-kind rule (stalekind.go) to declaration rows. A row carries no
+// tenant, so the rule runs per session here, as the grouping of these readers does.
+func dropStaleDecls(rows []declRow) []declRow {
+	return dropStale(rows, func(r *declRow) (string, string, string, string, string, int64) {
+		return "", r.session, r.kind, r.name, r.server, r.ts
+	})
+}
+
 type useRow struct {
 	session, name, skill string
 	calls                int
@@ -774,7 +791,10 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 		r.hasText = hasText == 1
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return dropStaleDecls(out), nil
 }
 
 // scopedUses reads the invocations of the sessions the filter selects.
@@ -873,11 +893,18 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	asideTok := map[string]int{}
 	listingTok, listingSessions, unknownListings := 0, 0, 0
 	skillsSeen := false
+	deferredUnknown := 0
 	for _, dr := range decls {
 		captured[dr.session] = true
 		sc := sessions[dr.session]
 		if sc == nil {
 			continue // not in scope (defensive: the query joined on scope)
+		}
+		if dr.kind == KindDeferredListing {
+			// Not a declaration and not a region: a note that a deferred list was present and not
+			// read. Not counted in the prompt coverage.
+			deferredUnknown++
+			continue
 		}
 		rep.Prompt.Rows++
 		if dr.hasText {
@@ -897,8 +924,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		}
 		if dr.kind == KindSkillListing {
 			skillsSeen = true
-			listingTok += dr.tokens
-			listingSessions++
+			// A listing that was not read at all (a Responses body, 0 tokens) has no size to
+			// average in; it still counts as seen and as unknown below.
+			if dr.tokens > 0 {
+				listingTok += dr.tokens
+				listingSessions++
+			}
 			if dr.server == SkillsUnknown {
 				unknownListings++
 			}
@@ -913,6 +944,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 				}
 			}
 			continue
+		}
+		if dr.kind == KindSkill {
+			// A real skill fact proves a listing was read. A session stored before and after the
+			// listing was read holds its skills but may have lost its OK marker row to the
+			// primary-key conflict (same digest), so the marker alone cannot set this.
+			skillsSeen = true
 		}
 		k := statKey{dr.kind, dr.name}
 		st := stats[k]
@@ -1104,6 +1141,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		rep.Skills.State = SkillsOK
 	}
 	rep.Skills.UnknownSessions = unknownListings
+	if deferredUnknown > 0 {
+		rep.DeferredState, rep.DeferredUnknownSessions = SkillsUnknown, deferredUnknown
+	}
 	if listingSessions > 0 {
 		rep.Skills.ListingTokens = listingTok / listingSessions
 	}
@@ -1488,6 +1528,9 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		dargs = append(dargs, f.Tenant)
 	}
 	dq += ` GROUP BY tenant_id, session_id, kind, name, server`
+	// No stale-kind rule here (stalekind.go): only `mcp_tool` and `skill` facts become candidates
+	// below, and a stale `server_tool` fact sets no cohort flag. Adding ts to this SELECT would
+	// also take the query off its covering index (see the invariant below).
 	drows, err := d.sql.QueryContext(d.readCtx(), dq, dargs...)
 	if err != nil {
 		return nil, err

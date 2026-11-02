@@ -538,6 +538,40 @@ type carriedSession struct {
 	sets map[string]*adaptToolsSet
 }
 
+// addCarriedRow adds one declaration row to the sets of its session: the set's first time, its
+// tool count and, when keyOf bills the row, its interned key and weight.
+func addCarriedRow(sets map[string]map[string]*adaptToolsSet, ids map[string]int32, keys *[]string,
+	keyOf func(session, kind, name, server string) string,
+	sk, session, digest, kind, name, server string, tok int, ts int64) {
+	sess := sets[sk]
+	if sess == nil {
+		sess = map[string]*adaptToolsSet{}
+		sets[sk] = sess
+	}
+	st := sess[digest]
+	if st == nil {
+		st = &adaptToolsSet{first: ts}
+		sess[digest] = st
+	}
+	if ts < st.first {
+		st.first = ts
+	}
+	// The listing markers are notes, not declarations. (The slice query reads only the kinds
+	// below, so the deferred marker never gets here.)
+	if kind != KindSkill && kind != KindSkillListing {
+		st.ntools++
+	}
+	if key := keyOf(session, kind, name, server); key != "" {
+		id, ok := ids[key]
+		if !ok {
+			id = int32(len(*keys))
+			ids[key] = id
+			*keys = append(*keys, key)
+		}
+		st.items = append(st.items, setItem{id, int32(tok)})
+	}
+}
+
 // carriedSets reads the in-scope declaration sets, and returns them with the key names their
 // interned ids stand for. Read the way scanDecls reads (declfacts.go): concurrent rowid slices
 // with no ORDER BY, grouped in Go, because sorting the table costs seconds that a sequential
@@ -562,9 +596,18 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 	if !lo.Valid {
 		return nil, nil, nil
 	}
+	type pendingRow struct {
+		sk, session, digest, kind, name, server string
+		tok                                     int
+		ts                                      int64
+	}
 	type part struct {
 		sets map[string]map[string]*adaptToolsSet
 		keys []string
+		// server_tool rows and unknown skills markers wait until every slice has been read: the stale-kind rule
+		// (stalekind.go) needs the session's newer tool facts, which may sit in another slice.
+		pending []pendingRow
+		rules   *staleRules
 	}
 	// A narrow scope reads in one query: every slice is a new connection, and a handful of
 	// sessions does not pay for sixteen (the same threshold scanDecls is used above).
@@ -592,6 +635,8 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 			defer rows.Close()
 			sets, ids := map[string]map[string]*adaptToolsSet{}, map[string]int32{}
 			var keys []string
+			rules := newStaleRules()
+			var pending []pendingRow
 			for rows.Next() {
 				var t, s, dg, kind, name, server string
 				var tok int
@@ -603,33 +648,14 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 				if reqs[sk] == nil {
 					continue // not in scope; reqs is only read here
 				}
-				sess := sets[sk]
-				if sess == nil {
-					sess = map[string]*adaptToolsSet{}
-					sets[sk] = sess
+				if kind == KindServerTool || (kind == KindSkillListing && server == SkillsUnknown) {
+					pending = append(pending, pendingRow{sk, s, dg, kind, name, server, tok, ts})
+					continue
 				}
-				st := sess[dg]
-				if st == nil {
-					st = &adaptToolsSet{first: ts}
-					sess[dg] = st
-				}
-				if ts < st.first {
-					st.first = ts
-				}
-				if kind != KindSkill && kind != KindSkillListing {
-					st.ntools++
-				}
-				if key := keyOf(s, kind, name, server); key != "" {
-					id, ok := ids[key]
-					if !ok {
-						id = int32(len(keys))
-						ids[key] = id
-						keys = append(keys, key)
-					}
-					st.items = append(st.items, setItem{id, int32(tok)})
-				}
+				rules.observe(t, s, kind, name, ts)
+				addCarriedRow(sets, ids, &keys, keyOf, sk, s, dg, kind, name, server, tok, ts)
 			}
-			parts[k] = part{sets, keys}
+			parts[k] = part{sets, keys, pending, rules}
 			return rows.Err()
 		})
 	}
@@ -671,6 +697,20 @@ func (d *DB) carriedSets(f Filter, reqs map[string][]adaptToolsReq,
 					dst[dg] = st
 				}
 			}
+		}
+	}
+	// The server_tool rows, now that every slice's tool facts are known.
+	rules := newStaleRules()
+	for _, p := range parts {
+		rules.merge(p.rules)
+	}
+	for _, p := range parts {
+		for _, r := range p.pending {
+			tenant := r.sk[:len(r.sk)-len(r.session)-1]
+			if rules.stale(tenant, r.session, r.kind, r.name, r.server, r.ts) {
+				continue
+			}
+			addCarriedRow(merged, ids, &keys, keyOf, r.sk, r.session, r.digest, r.kind, r.name, r.server, r.tok, r.ts)
 		}
 	}
 	out := make([]carriedSession, 0, len(merged))

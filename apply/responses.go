@@ -92,21 +92,7 @@ func (responsesEnvelopeAdapter) pendingCallFor(body []byte, names, servers map[s
 }
 
 func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
-	if !bytes.Contains(body, []byte(skills.Header)) {
-		return "", ""
-	}
-	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.Contains(instructions.String(), skills.Header) {
-		return "instructions", instructions.String()
-	}
-	path, text := "", ""
-	gjson.GetBytes(body, "input").ForEach(func(idx, item gjson.Result) bool {
-		if role := item.Get("role").String(); role != "system" && role != "developer" {
-			return true
-		}
-		path, text = skills.LocateIn(item.Get("content"), "input."+idx.String()+".content")
-		return path == ""
-	})
-	return path, text
+	return skills.LocateResponses(body) // the one rule, shared with dash's reader
 }
 
 // responseInputIndex resolves a normalized slot to its containing wire item.

@@ -3,10 +3,10 @@ package expand
 import (
 	"strconv"
 
-	"github.com/rossoctl/context-guru/schema"
-
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Unavailable is what a caller substitutes for an id the store no longer holds. One string
@@ -59,7 +59,7 @@ func RestoredInPlace(hashID string) string {
 // so the same transcript arrives needing the same repair on every later turn, and repairing
 // it to the same bytes each time is what keeps the provider's prefix cache warm.
 func RepairToolResults(provider string, body []byte, resolve func(id string) (string, bool)) (out []byte, restored []string) {
-	if provider == "responses" {
+	if schema.IsResponses(provider) {
 		return repairResponsesToolResults(body, resolve)
 	}
 	msgs := gjson.GetBytes(body, "messages")
@@ -72,7 +72,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	// assistant turn it answers called context_guru_expand.
 	ours := map[string]string{}
 	for _, m := range msgs.Array() {
-		if provider == "anthropic" {
+		if provider == schema.WireAnthropic {
 			for _, blk := range m.Get("content").Array() {
 				// An id-less tool_use would make "" a live key, and then a tool_result that
 				// carries no tool_use_id — someone else's block — matches it and is
@@ -98,7 +98,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	}
 	out = body
 	for mi, m := range msgs.Array() {
-		if provider != "anthropic" {
+		if provider != schema.WireAnthropic {
 			if m.Get("role").String() != "tool" {
 				continue
 			}

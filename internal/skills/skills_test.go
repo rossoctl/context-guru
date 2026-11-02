@@ -256,3 +256,18 @@ func TestLocateFindsTheFirstStringHoldingTheHeader(t *testing.T) {
 		t.Errorf("no header matched: %q", p)
 	}
 }
+
+func TestLocateResponses(t *testing.T) {
+	l := Header + `\n- a: b\n`
+	for name, c := range map[string]struct{ body, path string }{
+		"instructions": {`{"instructions":"` + l + `","input":[]}`, "instructions"},
+		"input string": {`{"input":[{"role":"developer","content":"` + l + `"}]}`, "input.0.content"},
+		"input block":  {`{"input":[{"role":"user","content":"x"},{"role":"system","content":[{"type":"input_text","text":"` + l + `"}]}]}`, "input.1.content.0.text"},
+		"tool result":  {`{"input":[{"type":"function_call_output","output":"` + l + `"}]}`, ""},
+		"user item":    {`{"input":[{"role":"user","content":"` + l + `"}]}`, ""},
+	} {
+		if path, text := LocateResponses([]byte(c.body)); path != c.path || (path != "") != (text != "") {
+			t.Errorf("%s: path = %q (text %d bytes), want %q", name, path, len(text), c.path)
+		}
+	}
+}

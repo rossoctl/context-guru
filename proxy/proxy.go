@@ -1243,15 +1243,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		cp.noteProject(apply.ProjectFor(provider, body))
 		// Which tools, MCP servers and skills the request DECLARED, and which its last turn
 		// called — off the same pristine body, memoized by declaration-set digest.
-		cp.noteInventory(string(provider), body)
+		wire := schema.WireFor(string(provider), api)
+		cp.noteInventory(wire, body)
 		// Fail open around the whole pre-forward rewrite (pipeline + expand injection): a
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
 		orig := body
-		wire := string(provider)
-		if api == "responses" {
-			wire = "responses"
-		}
 		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
 		var added time.Duration // hoisted with tr: the lifecycle log line reads both
 		var threadID string     // hoisted with it: serve hands it to the keeper
@@ -1476,7 +1473,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				//
 				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
 				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || api == "responses") && tn.Pipe.Has("extract_llm_sweep") {
+				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
 			}
@@ -1689,10 +1686,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx) {
-	wire := string(provider)
-	if up.path == "/v1/responses" {
-		wire = "responses"
-	}
+	wire := schema.WireFor(string(provider), up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -2080,7 +2074,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					recIncomplete = record.IncompleteRetainCap
 				}
 			}
-		case isSSE && wire == "responses" && expand.HasMarkersInMessages(body):
+		case isSSE && schema.IsResponses(wire) && expand.HasMarkersInMessages(body):
 			// Responses' terminal event includes the complete output array. Buffer
 			// only when a model-visible marker exists: advertising stays stable
 			// across turns, while marker-free ordinary traffic keeps streaming.

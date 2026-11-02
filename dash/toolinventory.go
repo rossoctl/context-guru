@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -83,6 +84,11 @@ const (
 	// scoped by the same tenant_id. A second table would have bought a second eviction path
 	// to forget about.
 	KindSystemPrompt = "system_prompt"
+	// KindDeferredListing is ONE marker row per declaration set whose body carried a deferred
+	// tools list that this scan did not read (today: a Responses body, whose transcript is in
+	// `input`). Its Server is SkillsUnknown. Like the skills marker, it keeps "not read" from
+	// reading as "no deferred tools". It has no name and no weight, and it is not a declaration.
+	KindDeferredListing = "deferred_listing"
 )
 
 // Skill-listing parse states, stored in the marker row's Server column.
@@ -192,10 +198,12 @@ const (
 // no inventory, and a phantom row for it would make "nothing declared" and "nothing
 // captured" the same number.
 //
-// provider selects the dialect: Anthropic names tools at `tools.#.name` and calls them
-// in `tool_use` content blocks; OpenAI nests both a level deeper
-// (`tools.#.function.name`, `tool_calls.#.function.name`).
-func ScanInventory(provider string, body []byte) *Inventory {
+// wire is the request's dialect, from schema.WireFor (the provider alone does not say):
+//   - Anthropic names tools at `tools.#.name` and calls them in `tool_use` content blocks.
+//   - OpenAI Chat nests both a level deeper (`tools.#.function.name`, `tool_calls.#.function.name`).
+//   - OpenAI Responses declares a function tool flat (`tools.#.name`, type "function") and calls
+//     it with a `function_call` item in `input`.
+func ScanInventory(wire string, body []byte) *Inventory {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || tools.Get("#").Int() == 0 {
 		return nil
@@ -214,28 +222,50 @@ func ScanInventory(provider string, body []byte) *Inventory {
 	deferred := hashDeferred(&h, body)
 	digest := h.Sum64()
 
+	// Digest is wire-independent on purpose: it is the stored identity, and stored digests must
+	// keep matching. A session that switches wire mid-session keeps the rows of the first wire
+	// it was stored under (the writer dedupes by digest).
+	// The memo key also names the wire: the same tools array reads differently on another one.
+	// The stored Digest does not, so digests already on disk keep matching.
+	key := digest
+	if !isAnthropicWire(wire) {
+		key ^= maphash.String(declSeed, wire)
+	}
 	declMu.Lock()
-	decls, hit := declCache[digest]
+	decls, hit := declCache[key]
 	declMu.Unlock()
 	if !hit {
-		decls = declsFrom(provider, tools)
+		decls = declsFrom(wire, tools)
 		if deferred {
-			decls = mergeDeferred(decls, deferredDecls(body))
+			if texts := deferredTexts(wire, body); len(texts) > 0 {
+				decls = mergeDeferred(decls, deferredDeclsFrom(texts))
+			} else if schema.IsResponses(wire) {
+				// The header is in the body but no user, system or developer text holds it (a
+				// tool result, say). Say "not read", not "no deferred tools".
+				decls = append(decls, Decl{Kind: KindDeferredListing, Server: SkillsUnknown})
+			}
 		}
 		if region != "" {
-			decls = append(decls, skillDecls(skillsText(body))...)
+			text := skillsText(wire, body)
+			if text == "" && schema.IsResponses(wire) {
+				// The header is in the body, but not in `instructions` or a system or developer
+				// item. Say "not read", not "no listing".
+				decls = append(decls, Decl{Kind: KindSkillListing, Server: SkillsUnknown})
+			} else {
+				decls = append(decls, skillDecls(text)...)
+			}
 		}
 		declMu.Lock()
 		if len(declCache) >= declCacheCap || declBytes >= declCacheBytes {
 			declCache, declBytes = map[uint64][]Decl{}, 0
 		}
-		declCache[digest] = decls
+		declCache[key] = decls
 		declBytes += declsSize(decls)
 		declMu.Unlock()
 	}
 	inv := &Inventory{Digest: strconv.FormatUint(digest, 16), Decls: decls}
-	inv.System = scanSystem(body)
-	inv.Used, inv.UseFingerprint = usedFrom(provider, body)
+	inv.System = scanSystem(wire, body)
+	inv.Used, inv.UseFingerprint = usedFrom(wire, body)
 	return inv
 }
 
@@ -253,9 +283,9 @@ func declsSize(decls []Decl) int {
 // carry. The token weight is the WHOLE element (name, description and schema), because
 // that is what the request pays for and what removing it would give back — measured
 // with the repo's own BPE tokenizer, not a chars/4 estimate.
-func declsFrom(provider string, tools gjson.Result) []Decl {
+func declsFrom(wire string, tools gjson.Result) []Decl {
 	nameField := "function.name"
-	if provider == "anthropic" || provider == "" {
+	if isAnthropicWire(wire) || schema.IsResponses(wire) {
 		nameField = "name"
 	}
 	var out []Decl
@@ -263,12 +293,22 @@ func declsFrom(provider string, tools gjson.Result) []Decl {
 		name := t.Get(nameField).String()
 		kind := KindTool
 		switch {
+		case isClientToolType(wire, t.Get("type").String()):
+			// An OpenAI function tool always carries type "function" (Chat nests the name
+			// under `function`, Responses puts it flat), and a Responses custom tool is
+			// client-side too. Only Anthropic marks a provider-side tool by having a type.
+			if name == "" {
+				continue
+			}
 		case t.Get("type").Exists():
 			// A provider-side tool. The mcp_toolset connector form declares a whole
 			// server in one element and names it here rather than per tool.
 			kind = KindServerTool
 			if name == "" {
 				name = t.Get("mcp_server_name").String()
+			}
+			if name == "" {
+				name = t.Get("server_label").String() // a Responses `mcp` tool
 			}
 			if name == "" {
 				name = t.Get("type").String()
@@ -364,9 +404,22 @@ const maxListing = 256 << 10
 // skillsText returns the UNESCAPED listing text. Only called on a digest miss (once per
 // distinct declaration set). The finder is internal/skills's, the one the declaration filter
 // uses, so the page and the filter read the same string.
-func skillsText(body []byte) string {
+func skillsText(wire string, body []byte) string {
+	if schema.IsResponses(wire) {
+		_, text := skills.LocateResponses(body)
+		return text
+	}
 	_, text := skills.Locate(body)
 	return text
+}
+
+// deferredTexts is the text that can hold a deferred list: the finder of the wire, in
+// internal/deferred.
+func deferredTexts(wire string, body []byte) []string {
+	if schema.IsResponses(wire) {
+		return deferred.TextsResponses(body)
+	}
+	return deferred.Texts(body)
 }
 
 // skillDecls parses the skill listing out of a {"role":"system"} message.
@@ -429,7 +482,7 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 	return len(regions) > 0
 }
 
-// deferredDecls parses the deferred lists. Only called on a digest miss.
+// deferredDeclsFrom parses the deferred lists. Only called on a digest miss.
 //
 // Fail-safe, like skillDecls, because a user can quote the header:
 //
@@ -443,10 +496,11 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 // APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
 // name costs a little more than a short one. Removing a tool gives back its own line, not the
 // header, so an equal share of the whole is a fair bound, not an exact figure.
-func deferredDecls(body []byte) []Decl {
+// deferredDeclsFrom parses the lists in texts, from either wire's finder (deferredTexts).
+func deferredDeclsFrom(texts []string) []Decl {
 	var out []Decl
 	seen := map[string]bool{}
-	for _, text := range deferred.Texts(body) {
+	for _, text := range texts {
 		out = appendDeferred(out, seen, text)
 	}
 	return out
@@ -516,14 +570,17 @@ const maxCanonFingerprint = 8 << 10
 // all of it would multiply every session's call counts by its request count. The
 // fingerprint lets the writer recognise the same turn arriving again on the next
 // request and skip it.
-func usedFrom(provider string, body []byte) ([]Used, uint64) {
-	oai := !(provider == "anthropic" || provider == "")
+func usedFrom(wire string, body []byte) ([]Used, uint64) {
+	if schema.IsResponses(wire) {
+		return usedFromResponses(body)
+	}
+	oai := !isAnthropicWire(wire)
 	marker := `"tool_use"`
 	if oai {
 		marker = `"tool_calls"`
 	}
 	last := ""
-	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
+	gjson.GetBytes(body, expand.MessagesField(wire)).ForEach(func(_, m gjson.Result) bool {
 		if strings.Contains(m.Raw, marker) {
 			last = m.Raw
 		}
@@ -586,12 +643,77 @@ func usedFrom(provider string, body []byte) ([]Used, uint64) {
 			return true
 		})
 	}
+	return usedList(byKey), fp
+}
+
+// usedFromResponses is usedFrom for the Responses dialect. The transcript is the flat `input`
+// array, and a tool call is its own `function_call` item (name, and arguments as a JSON string).
+// The last tool-using turn is the last run of consecutive function_call items.
+func usedFromResponses(body []byte) ([]Used, uint64) {
+	// A turn is a run of consecutive call items, as the Chat path takes the calls of one message.
+	// Only an input item ends a run: a tool output, or a user message. `reasoning` items and
+	// assistant messages sit between the calls of one turn and do not split it.
+	// Not read: `mcp_call` and `local_shell_call` items. The repo has no fixture for them.
+	var last, run []gjson.Result
+	gjson.GetBytes(body, expand.MessagesField(schema.WireResponses)).ForEach(func(_, it gjson.Result) bool {
+		typ := it.Get("type").String()
+		switch {
+		case !it.IsObject():
+		case typ == "function_call" || typ == "custom_tool_call":
+			run = append(run, it)
+			last = run
+		case strings.HasSuffix(typ, "_output") || it.Get("role").String() == "user":
+			run = nil
+		}
+		return true
+	})
+	if len(last) == 0 {
+		return nil, 0
+	}
+	var h maphash.Hash
+	h.SetSeed(declSeed)
+	for _, it := range last {
+		h.WriteString(it.Raw)
+	}
+	byKey := map[Used]int{}
+	for _, it := range last {
+		name := it.Get("name").String()
+		if name == "" {
+			continue
+		}
+		// A function_call carries its arguments as a JSON string. A custom_tool_call carries
+		// free text in `input`, which has no skill argument to read.
+		skill := ""
+		if it.Get("type").String() == "function_call" {
+			skill = skillArg(name, gjson.Parse(it.Get("arguments").String()))
+		}
+		u := Used{Name: identName(name), Skill: skill}
+		if server, _, ok := SplitMCPName(name); ok {
+			u.Server = identName(server)
+		}
+		byKey[u]++
+	}
+	return usedList(byKey), h.Sum64()
+}
+
+func usedList(byKey map[Used]int) []Used {
 	out := make([]Used, 0, len(byKey))
 	for u, n := range byKey {
 		u.Calls = n
 		out = append(out, u)
 	}
-	return out, fp
+	return out
+}
+
+func isAnthropicWire(wire string) bool { return wire == schema.WireAnthropic || wire == "" }
+
+// isClientToolType reports whether a tool's `type` marks an ordinary client-side tool on the
+// OpenAI dialects.
+func isClientToolType(wire, typ string) bool {
+	if isAnthropicWire(wire) {
+		return false
+	}
+	return typ == "function" || (schema.IsResponses(wire) && typ == "custom")
 }
 
 // skillArg reads the invoked skill's name off a Skill call. The Skill tool's own
@@ -991,8 +1113,12 @@ var (
 // Anthropic's blocks or bare string.
 // OpenAI has no top-level system prompt at all (it is a role=system message), so an OpenAI
 // request simply has none, and the UI says so rather than inventing one.
-func scanSystem(body []byte) *SystemPrompt {
-	raw := gjson.GetBytes(body, "system")
+func scanSystem(wire string, body []byte) *SystemPrompt {
+	field := "system"
+	if schema.IsResponses(wire) {
+		field = "instructions" // a Responses body keeps its system prompt here
+	}
+	raw := gjson.GetBytes(body, field)
 	if !raw.Exists() || len(raw.Raw) == 0 || len(raw.Raw) > maxSystemPrompt {
 		return nil
 	}

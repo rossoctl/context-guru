@@ -7,6 +7,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // AggregateSSE reconstructs the final provider message JSON from a buffered
@@ -18,10 +20,10 @@ import (
 // Only the Anthropic Messages event stream is reconstructed (the streaming coding
 // agents in scope use it). For other dialects it returns ok=false.
 func AggregateSSE(provider string, raw []byte) (msg []byte, ok bool) {
-	if provider == "responses" {
+	if schema.IsResponses(provider) {
 		return aggregateResponsesSSE(raw)
 	}
-	if provider != "anthropic" {
+	if provider != schema.WireAnthropic {
 		return nil, false
 	}
 	return aggregateAnthropicSSE(raw)
