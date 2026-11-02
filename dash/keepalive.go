@@ -1803,13 +1803,15 @@ func bootstrapCI(units []string, value func(string) float64) (lo, hi float64) {
 
 // medianPingUSD is the account's own median cost of one ping on the prefix that lapses,
 // back-derived from what its requests actually paid. Used only by the bootstrap, which needs a
-// per-session cost and cannot carry a per-row model rate through a resample.
+// per-session cost and cannot carry a per-row model rate through a resample. Each row's own model
+// sets its read multiple (modelinfo.CacheReadFracFor); an empty or unknown model reads 0.1x.
 func (d *DB) medianPingUSD(f Filter) (float64, error) {
 	aCond, aArgs := addressable(f)
-	// cost_usd on an addressable miss is dominated by the re-creation of prev_prefix at 1.25x
-	// base input, so cost/prefix/1.25 recovers the base rate and 0.1x of it is the read.
+	// cost_usd on an addressable miss is dominated by the re-creation of prev_prefix at the
+	// model's write multiple (1.25x on Anthropic) of base input,
+	// so cost/prefix/write-multiple recovers the base rate, and the model's read multiple gives the read.
 	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT cost_usd, COALESCE(prev_prefix,0) FROM addressable WHERE prev_prefix > 0`, aArgs...)
+		SELECT cost_usd, COALESCE(prev_prefix,0), COALESCE(model,'') FROM addressable WHERE prev_prefix > 0`, aArgs...)
 	if err != nil {
 		return 0, err
 	}
@@ -1817,11 +1819,17 @@ func (d *DB) medianPingUSD(f Filter) (float64, error) {
 	var xs []float64
 	for rows.Next() {
 		var usd, prefix float64
-		if err := rows.Scan(&usd, &prefix); err != nil {
+		var model string
+		if err := rows.Scan(&usd, &prefix, &model); err != nil {
 			return 0, err
 		}
 		if prefix > 0 && usd > 0 {
-			xs = append(xs, usd/modelinfo.AnthropicCacheWrite5mFrac*modelinfo.AnthropicCacheReadFrac)
+			// A row with no model keeps the Anthropic 1.25x write multiple it always used.
+			writeFrac := modelinfo.AnthropicCacheWrite5mFrac
+			if model != "" {
+				writeFrac = modelinfo.CacheWriteFracFor(model)
+			}
+			xs = append(xs, usd/writeFrac*modelinfo.CacheReadFracFor(model))
 		}
 	}
 	if err := rows.Err(); err != nil {

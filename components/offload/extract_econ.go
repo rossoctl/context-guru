@@ -99,8 +99,12 @@ type tokenValue struct {
 // list prices for models this deployment does not bill at. A literal cannot be right for
 // every operator, so the literal is now only what we use when the table said nothing.
 const (
-	agentFreshPerMTok     = 3.00
-	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac // 0.1x fresh, the standard Anthropic cache-read multiplier
+	agentFreshPerMTok = 3.00
+	// agentCacheReadPerMTok stays at the standard 0.1x on purpose. The literal agent rates are the
+	// Sonnet 4.5/4.6-class list prices ($3 fresh), and 0.1x is right for that class. The lower
+	// Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 tiers apply only where the request's own
+	// model is known: see agentRates and modelinfo.CacheReadFracFor.
+	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 	// agentCacheWritePerMTok is 1.25x fresh, the standard cache-WRITE multiplier, and it is
 	// what a token is worth on a turn whose cache has expired.
 	//
@@ -128,7 +132,7 @@ func agentRates(c *components.Ctx) (fresh, read, write float64) {
 		}
 		read, write = c.SelfRates.CacheRead, c.SelfRates.CacheWrite
 		if read <= 0 {
-			read = fresh * modelinfo.AnthropicCacheReadFrac
+			read = fresh * modelinfo.CacheReadFracFor(c.ModelName)
 		}
 		if write <= 0 {
 			// The blank write tier follows the model's family: only Anthropic and GPT-5.6+

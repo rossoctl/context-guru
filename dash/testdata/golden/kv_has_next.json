@@ -9,7 +9,7 @@
    {
     "formula": "cache_read_tokens × cache_read_rate",
     "name": "Cache read",
-    "note": "A hit. The read rate defaults to 0.1× input, and a read refreshes the entry's lifetime for no extra charge."
+    "note": "A hit. The read rate defaults to 0.1× input, or the model's own tier (0.05× on Opus 5.5 and Sonnet 5.5, 0.025× on Fable 5.1 and Mythos 5.1), and a read refreshes the entry's lifetime for no extra charge."
    },
    {
     "formula": "written_tokens × write_5m_rate",
@@ -80,7 +80,7 @@
   "horizon_1h_seconds": 3600,
   "horizon_5m_seconds": 300,
   "multipliers": {
-   "cache_read": 0.1,
+   "cache_read": 0,
    "write_1h": 2,
    "write_5m": 1.25
   },
@@ -467,7 +467,7 @@
    }
   ],
   "multipliers": {
-   "cache_read": 0.1,
+   "cache_read": 0,
    "write_1h": 2,
    "write_5m": 1.25
   }

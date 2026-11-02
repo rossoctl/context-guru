@@ -61,7 +61,10 @@ type Pricing struct {
 // The documented Anthropic-family multiples, as named defaults rather than literals spread
 // across a cost function. Overridable per deployment through Multipliers.
 const (
-	// DefaultCacheReadMultiple is a cache hit's rate as a multiple of base input.
+	// DefaultCacheReadMultiple is a cache hit's rate as a multiple of base input: the standard
+	// 0.1x. The simulator knows the model of each row, so FromPrice fills a blank read rate with
+	// modelinfo.CacheReadFracFor(model) unless the caller set Multipliers.CacheRead. This constant
+	// stays the answer for a caller with no model and the value Multipliers.WithDefaults reports.
 	DefaultCacheReadMultiple = modelinfo.AnthropicCacheReadFrac
 	// DefaultWrite5mMultiple is a 5-minute cache write as a multiple of base input.
 	DefaultWrite5mMultiple = modelinfo.AnthropicCacheWrite5mFrac
@@ -111,6 +114,11 @@ func DefaultMultipliers() Multipliers { return Multipliers{}.WithDefaults() }
 // A Price with no rates at all yields Known=false, and every dollar figure downstream is
 // then omitted rather than computed as zero.
 func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pricing {
+	// A cache-read multiple the caller set wins. Unset, it follows the model.
+	readFrac := m.CacheRead
+	if readFrac <= 0 {
+		readFrac = modelinfo.CacheReadFracFor(model)
+	}
 	m = m.WithDefaults()
 	out := Pricing{
 		Model: model, Input: p.Input, Output: p.Output, CacheRead: p.CacheRead,
@@ -125,7 +133,7 @@ func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pr
 	// A price list that omitted a cache tier: fill from the multiplier rather than leave a
 	// cached request priced as free.
 	if out.CacheRead == 0 {
-		out.CacheRead = out.Input * m.CacheRead
+		out.CacheRead = out.Input * readFrac
 	}
 	if out.Write5m == 0 {
 		out.Write5m = out.Input * m.Write5m
@@ -222,8 +230,12 @@ const OverrideAll = "*"
 // per-model rate always wins over a blanket one.
 func NewPriceList(ctx context.Context, models []string, p modelinfo.Pricer, m Multipliers,
 	overrides map[string]Override) *PriceList {
+	userMult := m
 	m = m.WithDefaults()
-	out := &PriceList{Multipliers: m, Models: []Pricing{}, byModel: map[string]Pricing{}}
+	// The read multiple is stored as the caller set it: 0 means "each model's own tier", so one
+	// payload never states 0.1 beside a row priced at 0.05. The write multiples carry their defaults.
+	out := &PriceList{Multipliers: Multipliers{CacheRead: userMult.CacheRead, Write5m: m.Write5m,
+		Write1h: m.Write1h}, Models: []Pricing{}, byModel: map[string]Pricing{}}
 	seen := map[string]bool{}
 	uniq := make([]string, 0, len(models))
 	for _, name := range models {
@@ -242,7 +254,7 @@ func NewPriceList(ctx context.Context, models []string, p modelinfo.Pricer, m Mu
 				pr, source = got, SourcePriceList
 			}
 		}
-		row := FromPrice(name, pr, m, source)
+		row := FromPrice(name, pr, userMult, source)
 		if ov, ok := overrides[OverrideAll]; ok {
 			row = ov.Apply(row)
 		}

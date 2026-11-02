@@ -899,7 +899,8 @@ A gateway does not have to charge that, and two things go wrong when it does not
 which carries the whole litellm-gateway table:
 
 ```yaml
-cache_read_frac: 0.1     # fills cache_read where an entry omits it
+# cache_read_frac: 0.1  # optional: one read multiple for every model. Unset, it follows the model
+                         # (0.1x; 0.05x Opus/Sonnet 5.5; 0.025x Fable/Mythos 5.1)
 cache_write_frac: 1.25   # …and cache_write
 models:
   - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}

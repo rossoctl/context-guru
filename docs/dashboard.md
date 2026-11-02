@@ -256,7 +256,7 @@ Cost model (every rate is per-provider/model and editable in the page):
 
 ```text
 uncached input        input_tokens   × input_rate
-cache read             cache_read     × cache_read_rate      (default 0.1× input)
+cache read             cache_read     × cache_read_rate      (default 0.1× input; 0.05× Opus/Sonnet 5.5, 0.025× Fable/Mythos 5.1)
 cache write, 5m        written_tokens × write_5m_rate         (default 1.25× input)
 cache write, 1h        written_tokens × write_1h_rate         (default 2.0× input)
 cache premium          total_cost − uncached_cost   (negative = the cache paid for itself)

@@ -13,7 +13,10 @@
 #
 # Rates here are LIST PRICES, not credentials. Nothing in this file is a secret.
 #
-# `in`/`out` are required. `cache_read` defaults to 0.1x of `in`.
+# `in`/`out` are required. `cache_read` defaults to a per-model multiple of `in`: 0.1x,
+# except 0.05x on Claude Opus 5.5 and Sonnet 5.5, and 0.025x on Claude Fable 5.1 and
+# Mythos 5.1 (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02).
+# Set `cache_read_frac` below to use one multiple for every model instead.
 # `cache_write` defaults to 1.25x for Claude and GPT-5.6+, and 1x for older
 # OpenAI and Gemini models. State either rate explicitly when this gateway bills
 # differently.
@@ -21,7 +24,7 @@
 # A trailing `*` matches a family. The longest match wins, so a specific id always
 # beats the family it belongs to regardless of order in this file.
 
-cache_read_frac: 0.1
+# cache_read_frac is NOT set here: the per-model tiers above apply while the key is unset.
 cache_write_frac: 1.25
 
 models:

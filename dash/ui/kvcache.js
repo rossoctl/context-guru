@@ -832,7 +832,7 @@ function renderKVPricing() {
   const mult = v.assumptions.multipliers || {};
   const sched = v.assumptions.schedule || {};
   host.appendChild(el('div', { class: 'kv-controls', 'data-testid': 'kv-price-knobs' },
-    kvNumberInput('Cache-read × input', kvc.mult.read, mult.cache_read,
+    kvNumberInput('Cache-read × input (blank: per model)', kvc.mult.read, mult.cache_read || null,
       (val) => { kvc.mult.read = val; kvReload(); }, 'kv-mult-read'),
     kvNumberInput('5m write × input', kvc.mult.w5m, mult.write_5m,
       (val) => { kvc.mult.w5m = val; kvReload(); }, 'kv-mult-w5m'),

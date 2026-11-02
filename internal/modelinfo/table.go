@@ -37,14 +37,22 @@ type tableEntry struct {
 	qualified bool
 	price     Price
 	window    int
+	// readDerived means cache_read was left blank and the file sets no cache_read_frac. Price
+	// then fills it from the QUERIED model (CacheReadFracFor), not from the match pattern: a
+	// family entry such as `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5`
+	// on `aws/claude-sonnet-5-5`, serves models with different read tiers.
+	readDerived bool
 }
 
 // tableFile is the on-disk shape.
 type tableFile struct {
 	// CacheReadFrac/CacheWriteFrac fill in the two cache tiers for entries that do
 	// not state them. Defaults follow the Anthropic-family multiples the rest of
-	// this package already assumes (0.1x a read, 1.25x a write).
-	CacheReadFrac  float64          `yaml:"cache_read_frac"`
+	// this package already assumes (1.25x a write; a read per model, see CacheReadFracFor).
+	//
+	// CacheReadFrac is a pointer: nil (key unset) means "per model", and a value, even 0.1,
+	// is the operator's gateway multiple and wins for every entry.
+	CacheReadFrac  *float64         `yaml:"cache_read_frac"`
 	CacheWriteFrac float64          `yaml:"cache_write_frac"`
 	Models         []tableFileModel `yaml:"models"`
 }
@@ -88,8 +96,8 @@ func ParseTable(b []byte) (*Table, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("model price list: %w", err)
 	}
-	if f.CacheReadFrac == 0 {
-		f.CacheReadFrac = AnthropicCacheReadFrac
+	if f.CacheReadFrac != nil && *f.CacheReadFrac <= 0 {
+		return nil, fmt.Errorf("model price list: cache_read_frac must be above 0")
 	}
 	if f.CacheWriteFrac == 0 {
 		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
@@ -112,8 +120,16 @@ func ParseTable(b []byte) (*Table, error) {
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
 		}
+		readDerived := false
 		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * f.CacheReadFrac
+			// A file-level cache_read_frac is the operator's own gateway multiple and wins.
+			// Unset, the multiple follows the model (CacheReadFracFor).
+			frac := CacheReadFracFor(match)
+			if f.CacheReadFrac != nil {
+				frac = *f.CacheReadFrac
+			}
+			p.CacheRead = p.Input * frac
+			readDerived = f.CacheReadFrac == nil
 		}
 		if p.CacheWrite == 0 {
 			// The file-level cache_write_frac is documented in prices.example.yaml as "the
@@ -127,7 +143,8 @@ func ParseTable(b []byte) (*Table, error) {
 			p.CacheWrite = p.Input * frac
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
+			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window,
+			readDerived: readDerived})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -195,7 +212,11 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	if !ok {
 		return Price{}, false
 	}
-	return e.price, true
+	p := e.price
+	if e.readDerived {
+		p.CacheRead = p.Input * CacheReadFracFor(model)
+	}
+	return p, true
 }
 
 // Window returns an operator-supplied context window, for models the public map

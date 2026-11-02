@@ -217,7 +217,7 @@ func (l *LiteLLM) fetch(ctx context.Context) (map[string]int, map[string]modelin
 		// CacheWriteFracFor — a flat 1.25x here put a fabricated 25% premium on every
 		// OpenAI and Gemini row's SAVINGS.
 		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * modelinfo.AnthropicCacheReadFrac
+			p.CacheRead = p.Input * modelinfo.CacheReadFracFor(k)
 		}
 		if p.CacheWrite == 0 {
 			p.CacheWrite = p.Input * modelinfo.CacheWriteFracFor(k)

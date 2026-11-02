@@ -67,3 +67,56 @@ func TestFabricatedPremiumDoesNotReachNonAnthropicSavings(t *testing.T) {
 		t.Fatalf("expected the old flat multiple to over-report, got %v", over)
 	}
 }
+
+// TestCacheReadFracFor pins the per-model cache-read multiple against the official pricing page
+// (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02). The prefix-trap ids
+// matter most: "claude-opus-5" is a prefix of "claude-opus-5-5".
+func TestCacheReadFracFor(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		want  float64
+	}{
+		// 0.025x
+		{"claude-fable-5-1", 0.025},
+		{"claude-fable-5.1", 0.025},
+		{"claude-mythos-5-1", 0.025},
+		{"claude-mythos-5.1", 0.025},
+		{"claude-fable-5-1[1m]", 0.025},
+		{"aws/claude-fable-5-1", 0.025},
+		{"us.anthropic.claude-mythos-5-1-v1:0", 0.025},
+		// 0.05x
+		{"claude-opus-5-5", 0.05},
+		{"claude-sonnet-5-5", 0.05},
+		{"claude-opus-5.5", 0.05},
+		{"Claude-Sonnet-5-5", 0.05},
+		{"claude-opus-5-5[1m]", 0.05},
+		{"aws/claude-opus-5-5", 0.05},
+		{"anthropic.claude-sonnet-5-5-v1:0", 0.05},
+		{"us.anthropic.claude-opus-5-5-v1:0", 0.05},
+		{"vertex_ai/claude-sonnet-5-5@20261101", 0.05},
+		// 0.1x: the prefix trap and the neighbours
+		{"claude-opus-5", 0.1},
+		{"claude-sonnet-5", 0.1},
+		{"claude-fable-5", 0.1},
+		{"claude-mythos-5", 0.1},
+		{"aws/claude-opus-5", 0.1},
+		{"claude-opus-5[1m]", 0.1},
+		{"claude-opus-5-20261101", 0.1},
+		{"claude-haiku-5-5", 0.1},
+		{"claude-haiku-4-5", 0.1},
+		{"claude-opus-4-8", 0.1},
+		{"claude-sonnet-4-5", 0.1},
+		{"claude-opus-5-1", 0.1},
+		{"claude-fable-5-5", 0.1},
+		{"claude-opus-5-50", 0.1},
+		// not Anthropic, or unknown
+		{"azure/gpt-5.5", 0.1},
+		{"gemini-3-flash-preview", 0.1},
+		{"premium", 0.1},
+		{"", 0.1},
+	} {
+		if got := CacheReadFracFor(tc.model); got != tc.want {
+			t.Errorf("CacheReadFracFor(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
