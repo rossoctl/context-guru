@@ -131,7 +131,10 @@ func agentRates(c *components.Ctx) (fresh, read, write float64) {
 			read = fresh * modelinfo.AnthropicCacheReadFrac
 		}
 		if write <= 0 {
-			write = fresh * modelinfo.AnthropicCacheWrite5mFrac
+			// The blank write tier follows the model's family: only Anthropic and GPT-5.6+
+			// charge a creation premium. Other families write at the fresh rate, the same
+			// answer ParseTable and the price feed give.
+			write = fresh * modelinfo.CacheWriteFracFor(c.ModelName)
 		}
 	}
 	return fresh, read, write

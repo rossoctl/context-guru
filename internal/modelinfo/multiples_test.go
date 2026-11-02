@@ -1,6 +1,9 @@
 package modelinfo
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // TestCacheMultiplesKeepTheirShippedValues pins the three Anthropic multiples. Every cost
 // figure in the repo reads them. A change here moves dollars on every page.
@@ -38,11 +41,11 @@ func TestParseTableDefaultsReadTheSharedMultiples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, _ := tb.Price(nil, "claude-x")
+	c, _ := tb.Price(context.Background(), "claude-x")
 	if c.CacheRead != c.Input*AnthropicCacheReadFrac || c.CacheWrite != c.Input*AnthropicCacheWrite5mFrac {
 		t.Errorf("claude row = %+v", c)
 	}
-	g, _ := tb.Price(nil, "gemini-x")
+	g, _ := tb.Price(context.Background(), "gemini-x")
 	if g.CacheWrite != g.Input {
 		t.Errorf("gemini write = %v, want input %v", g.CacheWrite, g.Input)
 	}

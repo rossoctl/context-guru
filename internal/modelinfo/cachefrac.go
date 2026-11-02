@@ -70,7 +70,6 @@ const (
 	AnthropicCacheWrite1hFrac = 2.0
 )
 
-
 // chargesCacheWritePremium reports whether this model bills a per-token surcharge
 // to create a prompt-cache entry.
 func chargesCacheWritePremium(model string) bool {
