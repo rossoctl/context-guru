@@ -94,7 +94,8 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 		names, stopReason, false, usageOK, bg, tm)
 	// A response that stopped for a tool call waits for that tool, even when the name list missed
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
-	if len(names) == 0 && w == waitcause.WaitingHuman && toolStop(stopReason) {
+	// Whatever the classifier said (open background tasks read "background"), a tool stop gets the tool budget.
+	if len(names) == 0 && toolStop(stopReason) && w != waitcause.WaitingDone && w != waitcause.WaitingRetry {
 		return waitcause.WaitingOwnTool
 	}
 	return w
@@ -117,3 +118,14 @@ func calledATool(names []string, incomplete bool, stopReason string) bool {
 
 // toolWait reports whether this entry's pings were planned for a wait on the thread's own tool.
 func (e *kaEntry) toolWait() bool { return e.wait == waitcause.WaitingOwnTool }
+
+// ToolSeen reports whether a response of the thread has called a tool (#858). Cheap: one map read under
+// the keeper lock. The host uses it to keep nothing for a thread that the plan will not ping.
+func (k *Keeper) ToolSeen(key Key) bool {
+	if k == nil {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.toolSeen[key.id()]
+}

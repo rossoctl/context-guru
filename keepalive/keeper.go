@@ -895,7 +895,7 @@ func (k *Keeper) Record(r Record) {
 		pol = pol.ForOneHour()
 	}
 	// The per-wait ping plan (#858): the count follows what the thread waits for. The wait cause is read
-	// for every thread the plan covers (the sweep gate and the dashboard use it); the COUNT changes only
+	// for every thread the plan covers (the sweep gate uses it); the COUNT changes only
 	// on the 5-minute tier. A 1-hour thread keeps its own bounded schedule, and OpenAI pings 28 minutes
 	// apart, so more pings would hold the credential for hours. A strategy that asks for the 1-hour head
 	// tier carries a 1-hour Idle even when the gateway granted 5 minutes; its count is the manager's.

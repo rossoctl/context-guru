@@ -72,7 +72,10 @@ func (k *keeper) clockNow() time.Time {
 // bestStrategyFor resolves the highest-priority ACTIVE strategy matching tenantID at
 // `now`, if any — the one matching walk both applyStrategy (the ping-scheduling half,
 // resolved at record time) and resolveHeadTTL (the write-tier half, resolved on the
-// request path) need, so the two can never disagree about which strategy won.
+// request path) need. They resolve at the same instant, so they agree on which strategy won, with one
+// exception since #858: for a wait that is not for a person, applyStrategyWindows ignores the windows
+// (bestStrategy), while resolveHeadTTL still respects them. The split is wanted: the head-TTL write tier
+// is a cost decision taken at write time, before the response, and a tool wait does not change it.
 func (k *keeper) bestStrategyFor(tenantID string, now time.Time) *tenant.Strategy {
 	return k.bestStrategy(tenantID, now, false)
 }

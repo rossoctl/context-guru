@@ -968,7 +968,7 @@ const TILE_INFO = {
   },
   'ka-rec-policy': {
     what: 'The idle interval and ping count suggested for this account.',
-    how: 'The shipped default, offered only when your own history can tell its effect apart '
+    how: 'A fixed policy (240 s, 2 pings, the setting with the per-wait plan off), offered only when your own history can tell its effect apart '
       + 'from zero: at least 20 addressable cache expiries, at least 200 requests, and a 90% '
       + 'interval that excludes no-change.',
     catch: 'One ping is never suggested. Not because it loses money \u2014 it does not \u2014 '
@@ -9597,10 +9597,12 @@ async function loadKACalc() {
   host.appendChild(el('p', { class: 'hint' },
     'Each row is one cap on pings. Reading across: how many of your expiries it would have caught, ' +
     'what they cost, and what the pings cost. A replay of your past gaps, not a forecast. ' +
-    'Catching grows sharply from one ping to two, then flattens while ping cost keeps climbing.'));
+    'Catching grows sharply from one ping to two, then flattens while ping cost keeps climbing. ' +
+    'Every rung is a fixed count. The live policy picks its count from what each thread waits for ' +
+    '(up to 8 for a tool wait), so no rung is marked as the current one.'));
   host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
     el('p', {},
-    'PINGS is every ping the shipped policy would have sent over this window, gated as the ' +
+    'PINGS is every ping a fixed-count policy would have sent over this window, gated as the ' +
     'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
     'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
     'session has ended and sends its full K anyway. It counts only expiries that were ' +

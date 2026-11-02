@@ -61,6 +61,8 @@ func TestWaitPlanPingBudgetPerWaitCause(t *testing.T) {
 		wantEntry bool
 	}{
 		{"main, own tool", sess1, []resp{toolCall, toolCall}, 0, 0, 8, true},
+		{"tool stop, no names (spliced window)", sess1, []resp{toolCall, {nil, "tool_use"}}, 0, 0, 8, true},
+		{"tool stop, no names, open background", sess1, []resp{toolCall, {nil, "tool_use"}}, 1, 0, 8, true},
 		{"subagent, own tool", sub, []resp{toolCall, toolCall}, 0, 0, 8, true},
 		{"main, end_turn, background", sess1, []resp{toolCall, endTurn}, 1, 0, 5, true},
 		{"main, end_turn, a person", sess1, []resp{toolCall, endTurn}, 0, 0, 3, true},
@@ -323,5 +325,23 @@ func TestWaitPlanShowsInThePlanTheDashboardReads(t *testing.T) {
 	recordSeq(k2, sess1, planPolicy(), kaBody, clock2.now(), endTurn, endTurn)
 	if len(k2.Plans("t1", false, "sess-1")) != 0 {
 		t.Error("a thread with no tool call yet shows a plan")
+	}
+}
+
+// A response whose name list may be incomplete (a spliced sniff window) counts as a tool call: the thread is
+// pinged as before #858, not refused as "no tool call yet".
+func TestWaitPlanIncompleteNamesCountAsAToolCall(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	pol := planPolicy()
+	for i, ts := range []time.Time{clock.now().Add(-time.Second), clock.now()} {
+		k.Record(Record{Key: sess1, StartedAt: ts, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"},
+			ToolUseIncomplete: i == 1, UsageOK: true, Policy: pol, Header: kaHeader(), Hold: fakeOf(k).hold(sess1)})
+	}
+	if !k.ToolSeen(sess1) {
+		t.Fatal("an incomplete name list did not count as a tool call")
+	}
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 || fd.n() != 1 {
+		t.Fatalf("pings = %d/%d, want 1", n, fd.n())
 	}
 }

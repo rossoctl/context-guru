@@ -507,9 +507,15 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	if g3 > g1 {
 		t.Errorf("the ladder does not flatten: K1->K2 gains %d, K3->K4 gains %d", g1, g3)
 	}
-	// And the current row is marked, which is what the panel emphasises.
-	if !out.Rows[1].Current {
-		t.Error("K=2 was not marked as the current policy")
+	// No rung is marked current (#858): the live policy picks its count per wait, and the ladder
+	// models the fixed-K (plan off) policy, which it says on the wire.
+	for _, r := range out.Rows {
+		if r.Current {
+			t.Errorf("K=%d is marked current; no fixed-K rung is the live policy", r.MaxPings)
+		}
+	}
+	if out.Plan != "fixed_k" {
+		t.Errorf("plan = %q, want fixed_k", out.Plan)
 	}
 }
 
@@ -822,12 +828,12 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	sec := func(n int64) int64 { return n * 1000 }
 	evs := []*Event{
-		// A gated session: prefix 100k throughout (above the 80k floor). turn 0, then a 300 s gap, then a 1000 s gap,
+		// A gated session: prefix 100k throughout (above the 20k floor). turn 0, then a 300 s gap, then a 1000 s gap,
 		// then nothing — the last request opens a span a live policy pings in and never closes.
 		bigPrefix(kaAgent(t0, "big", 0.10)),
 		bigPrefix(kaAgent(t0+sec(300), "big", 0.10)),
 		bigPrefix(kaAgent(t0+sec(1300), "big", 0.10)),
-		// Below the 80k prefix floor: the shipped gate never pings this session at all.
+		// Below the 20k prefix floor: the shipped gate never pings this session at all.
 		smallPrefix(kaAgent(t0, "small", 0.10)),
 		smallPrefix(kaAgent(t0+sec(1000), "small", 0.10)),
 	}

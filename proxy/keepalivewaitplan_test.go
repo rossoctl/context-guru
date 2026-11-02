@@ -119,3 +119,59 @@ func TestBestStrategyIgnoringWindowsKeepsPriorityAndTarget(t *testing.T) {
 		t.Errorf("no strategies: got %+v", b)
 	}
 }
+
+// #858 review: canPing keeps the windows, so a thread that will not be pinged keeps no sweep copy. A
+// person wait outside the window, and a thread with no tool call yet, register nothing.
+func TestCanPingKeepsWindowsAndRefusesAThreadWithNoToolCall(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	k.setStrategies([]tenant.Strategy{{
+		ID: "s", Active: true, IdleSeconds: 240, MaxPings: 2, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
+		Windows: []tenant.Window{{Start: "00:00", End: "00:01"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+	}})
+	acct := &Tenancy{ID: "t1", Cache: CachePolicy{WaitPlan: true}} // keep-alive off on the account
+	if k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("window closed, account off: canPing = true, so a copy would be kept for a thread that never pings")
+	}
+	// Open window, but no tool call yet on the thread.
+	k.setStrategies([]tenant.Strategy{{
+		ID: "s", Active: true, IdleSeconds: 240, MaxPings: 2, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+	}})
+	if k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("no tool call yet: canPing = true")
+	}
+	recordResp(t, k, CachePolicy{WaitPlan: true}, "", now, Usage{StopReason: "tool_use", ToolUseNames: []string{"Bash"}})
+	if !k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("a tool call was seen and the window is open: canPing = false")
+	}
+	// The plan off: the guard is off too, as before #858.
+	k.Keeper.Forget("t1")
+	if !k.canPing(&Tenancy{ID: "t1", Cache: CachePolicy{}}, "sess-1", "", bschemas.Anthropic) {
+		t.Error("plan off, strategy matching: canPing = false")
+	}
+}
+
+// #858 review: a strategy whose window is closed never displaces an active campaign.
+func TestClosedWindowStrategyDoesNotDisplaceACampaign(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	k.setStrategies([]tenant.Strategy{{
+		ID: "s", Active: true, IdleSeconds: 240, MaxPings: 4, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
+		Windows: []tenant.Window{{Start: "00:00", End: "00:01"}},
+		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
+	}})
+	tn := &Tenancy{ID: "t1", Cache: CachePolicy{WaitPlan: true, Idle: 240 * time.Second, MaxPings: 2}}
+	pdec := predDecision{campaign: &predCampaign{}, k: 3, active: true}
+	_, applied := k.resolvePolicyWindows(tn, "sess-1", bschemas.Anthropic, tn.Cache, pdec, true, true)
+	if applied == "s" || applied == "" {
+		t.Fatalf("applied = %q, want the campaign", applied)
+	}
+	// With no campaign the strategy applies at any hour, as designed.
+	_, applied = k.resolvePolicyWindows(tn, "sess-1", bschemas.Anthropic, tn.Cache, predDecision{}, false, true)
+	if applied != "s" {
+		t.Fatalf("no campaign: applied = %q, want s", applied)
+	}
+}

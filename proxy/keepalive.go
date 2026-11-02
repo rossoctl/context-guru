@@ -410,14 +410,23 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 // record-time gate, evaluated before the request goes out and without a campaign decision (that one
 // needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
 // the safe direction: nothing extra is kept for it.
-func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelProvider) bool {
+func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
 	if k == nil || tn == nil || k.h == nil || k.h.rec == nil || keepAliveDisabled() ||
 		provider == bschemas.OpenAI || session == "" {
 		return false
 	}
-	// Windows are ignored: the wait cause is not known yet, and a non-person wait is pinged at any hour (#858).
-	pol, _ := k.resolvePolicyWindows(tn, session, provider, tn.Cache, predDecision{}, false, tn.Cache.WaitPlan)
-	return pol.On()
+	// The wait cause is not known yet, so the windows count, as before #858: for an unknown wait the
+	// pessimistic answer is the safe one. A tool wait outside a window then registers no conversation copy
+	// and still gets its plain ping; it loses only the sweep substitute. A copy is content kept in memory.
+	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
+	if !pol.On() {
+		return false
+	}
+	// A thread with no tool call yet is not pinged (#858), so it keeps no copy either.
+	if pol.WaitPlan && !k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}) {
+		return false
+	}
+	return true
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own
@@ -437,7 +446,13 @@ func (k *keeper) resolvePolicyWindows(tn *Tenancy, session string, provider bsch
 	// override, which still wins on top and still cannot widen MaxUSDPerPing.
 	applied := ""
 	if provider != bschemas.OpenAI {
-		pol, applied = k.applyStrategyWindows(tn.ID, pol, k.now(), ignoreWindows)
+		account := pol
+		pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), false)
+		// A strategy that matches only because its window was ignored (#858) never displaces an active
+		// campaign: with a campaign and a closed window, the campaign wins, as before #858.
+		if applied == "" && ignoreWindows && !(pdecOK && pdec.active) {
+			pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), true)
+		}
 		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
 		// explicit instruction). The campaign owns the count, so the per-wait plan is off for it (#858).
 		if pdecOK && applied == "" && pdec.active {

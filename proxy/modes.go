@@ -69,7 +69,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		// Whether the keep-alive can ping this thread, so a component that prepares something for a
 		// ping keeps nothing for a thread that will never get one. See keeper.canPing.
 		CanKeepAlive: func(session, thread string) bool {
-			return h.keeper.canPing(r.tn, session, r.provider)
+			return h.keeper.canPing(r.tn, session, thread, r.provider)
 		},
 	})
 	added := time.Since(start)
