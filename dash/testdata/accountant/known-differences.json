@@ -495,5 +495,50 @@
    }
   ],
   "total": true
+ },
+ {
+  "case": "keepalive/shared-head-sibling/exact/5m",
+  "kind": "notCovered",
+  "reason": "design R54 (spec.md) and \u00a74.4: a sibling thread of the session read part of what the ping read inside the TTL, so that part was warm without the ping and the rescue leaves it out. The host reports it in EntryFacts.SharedWarm. dash.Event.keepAliveSavedUSD (event.go, the KeepAliveRefreshed cap) credits the whole of what the last ping read and has no sibling-thread input, so it credits the rescue in full. A sibling read the system block (2,000 tokens), so the accountant credits 8,000 tokens and cg credits 10,000: cg is 6,900 \u00b5$ higher.",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "ka:main:w1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "keepalive/shared-past-ping-read/exact/5m",
+  "kind": "notCovered",
+  "reason": "design R54 (spec.md) and \u00a74.4: a sibling thread of the session read part of what the ping read inside the TTL, so that part was warm without the ping and the rescue leaves it out. The host reports it in EntryFacts.SharedWarm. dash.Event.keepAliveSavedUSD (event.go, the KeepAliveRefreshed cap) credits the whole of what the last ping read and has no sibling-thread input, so it credits the rescue in full. A sibling kept warm more than the ping read, so the accountant credits nothing and cg credits the rescue in full.",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "ka:main:w1"
+   }
+  ],
+  "total": true
+ },
+ {
+  "case": "keepalive/shared-prefix-all-sibling/exact/5m",
+  "kind": "notCovered",
+  "reason": "design R54 (spec.md) and \u00a74.4: a sibling thread of the session read part of what the ping read inside the TTL, so that part was warm without the ping and the rescue leaves it out. The host reports it in EntryFacts.SharedWarm. dash.Event.keepAliveSavedUSD (event.go, the KeepAliveRefreshed cap) credits the whole of what the last ping read and has no sibling-thread input, so it credits the rescue in full. A sibling read everything the ping read, so the accountant credits no rescue (the ping stays a cost) and cg credits it in full: cg is 34,500 \u00b5$ higher.",
+  "allow": [
+   {
+    "step": 2
+   },
+   {
+    "step": 2,
+    "change": "ka:main:w1"
+   }
+  ],
+  "total": true
  }
 ]

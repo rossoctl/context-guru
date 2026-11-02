@@ -5,6 +5,11 @@ branch `docs/context-operations-spec`. The cases, the spec and the design are in
 `github.com/rossoctl/accountant` (v0.1.0).
 **Reproduce:** `go test ./dash/ -run TestCasesAgreeWithCurrentLogic -v` from the repo root.
 
+**Update, accountant `c628f22` (2026-11-02).** The tables and figures below come from the 63-case run on
+accountant v0.1.0 and are not recalculated. Accountant has since added R54 and three cases, so the
+harness now plays **66 cases, and 30 differ** (20 `differs`, 10 `notCovered`). The three new cases
+are in section "Cause 9" at the end. The branch named above was closed without merging.
+
 This file explains each of the root causes in cg's logic (`dash.Event.Price`). The case list,
 the per-case figures and the limits of the method are in `cg-differences.md`. All figures here come
 from the same run (63 cases, 27 differ).
@@ -169,3 +174,21 @@ another session, is new there. Three cases show it:
 2. Fix the adapter for cause 6 before judging it. Cause 5 is resolved.
 3. Decide cause 4 as a product question, not a bug.
 4. Decide cause 8 together with the fork rule in the accountant library.
+
+## Cause 9: no sibling-thread input to the keep-alive rescue
+
+Added after the run above. Accountant's R54 says a sibling thread of the session that read part of what
+a ping read, inside the TTL, kept that part warm without the ping, so the rescue leaves it out. The
+host reports it in `EntryFacts.SharedWarm`. `dash.Event.keepAliveSavedUSD` caps the credit by what the
+last ping read (`KeepAliveRefreshed`) and has no sibling-thread input, so it credits the rescue in full.
+
+| Case | Accountant | cg | Gap (µ$) |
+|---|---|---|---:|
+| `keepalive/shared-head-sibling/exact/5m` | credits 8,000 tokens | credits 10,000 | 6,900 |
+| `keepalive/shared-past-ping-read/exact/5m` | credits nothing | credits in full | see the test output |
+| `keepalive/shared-prefix-all-sibling/exact/5m` | no rescue, the ping stays a cost | credits in full | 34,500 |
+
+They are listed in `dash/testdata/accountant/known-differences.json` as `notCovered`: cg prices
+something the model does not. Whether cg should learn about sibling threads is open. The proxy path does
+not report `SharedWarm` either, so `TestProxyPathMatchesTheAccountantCases` passes on these cases only
+because it plays the case's own facts.
