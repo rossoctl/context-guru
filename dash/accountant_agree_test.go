@@ -209,12 +209,12 @@ var cfKnownDifferences = map[string]struct {
 	Unattrib []int
 }{
 	"rewrite/decision-flips-inside-prefix/hot/5m": {
-		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (cfprice.go: ownerless breaks are shown, never charged)",
+		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
 		At:       []cfPlace{{3, ""}},
 		Unattrib: []int{3},
 	},
 	"rewrite/restore-in-place/hot/5m": {
-		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (cfprice.go: ownerless breaks are shown, never charged)",
+		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
 		At:       []cfPlace{{2, ""}},
 		Unattrib: []int{2},
 	},

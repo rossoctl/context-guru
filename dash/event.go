@@ -121,7 +121,7 @@ type WaitCauseResult struct {
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
-	// cfRes is the counterfactual Result (see cfevent.go). Unexported: not serialized.
+	// cfRes is the counterfactual Result (see accountant_event.go). Unexported: not serialized.
 	cfRes *cf.Result
 	// cfOpsDropped and cfObserve qualify cfRes (see PriceMode). Unexported: not serialized.
 	cfOpsDropped int
