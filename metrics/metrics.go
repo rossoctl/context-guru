@@ -1091,6 +1091,11 @@ type Snapshot struct {
 	// deployment or a proxy with no dashboard, same reasoning as KeepAlive above.
 	Savings any `json:"savings,omitempty"`
 
+	// ToolDefer is tool deferral's ledger (#485): the NET saving (deferred tokens at the tier each
+	// request was billed at, minus the names list and every search turn), and its counters. Filled by
+	// the host. Omitted when deferral never ran in this process.
+	ToolDefer any `json:"tool_defer,omitempty"`
+
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,
 	// never renamed or removed (see the golden shape test).

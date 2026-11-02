@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -97,9 +98,48 @@ func TestSignalHookSendsSessionStartSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	ss := cfg.Hooks["SessionStart"]
-	if len(ss) != 2 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
-		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") {
+	if len(ss) != 3 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
+		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") || ss[2].Matcher != "startup|fork" ||
+		!strings.Contains(ss[2].Hooks[0].Command, "signal.sh") {
 		t.Errorf("SessionStart hooks = %+v", ss)
+	}
+}
+
+// A plain session start sends nothing, unless the user set ENABLE_TOOL_SEARCH=false: then the hook
+// sends the session id and the raw value to /tool-search, so the proxy turns tool deferral off for the
+// session (#485). Nothing else of the payload goes.
+func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
+	ch := make(chan map[string]any, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]any
+		json.NewDecoder(r.Body).Decode(&got)
+		got["path"] = r.URL.Path
+		ch <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	payload := `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"startup"}`
+	base := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k"}
+	for _, v := range []string{"", "ENABLE_TOOL_SEARCH=auto", "ENABLE_TOOL_SEARCH=true"} {
+		env := base
+		if v != "" {
+			env = append(append([]string{}, base...), v)
+		}
+		runSignal(t, env, payload)
+	}
+	runSignal(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=FALSE"), payload)
+	select {
+	case got := <-ch:
+		if len(got) != 3 || got["session"] != "abc-123" || got["enable_tool_search"] != "FALSE" || got["path"] != "/tool-search" {
+			t.Errorf("body = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ENABLE_TOOL_SEARCH=false did not reach the server")
+	}
+	select {
+	case got := <-ch:
+		t.Errorf("a second event was sent: %v", got)
+	case <-time.After(1500 * time.Millisecond):
 	}
 }
 
@@ -198,5 +238,70 @@ func TestSignalHookAutoSendsToARemoteURLOnlyWithTheHostedToken(t *testing.T) {
 	runSignal(t, []string{base, "ANTHROPIC_API_KEY=sk-ant-x", "ANTHROPIC_CUSTOM_HEADERS=x-context-guru-token: cg_live_abc"}, end)
 	if n := hits.Load(); n != 1 {
 		t.Errorf("%d hosted sends, want 1 (only the one with the token header)", n)
+	}
+}
+
+// Every SessionStart source that can start a new session id carries the opt-out to /tool-search, so
+// a resume, fork or clear does not lose it. resume and clear still send their keep-alive event to
+// /signal too; startup and fork send only the opt-out. Without the opt-out, startup and fork send
+// nothing.
+func TestSignalHookSendsToolSearchOffOnEverySessionStart(t *testing.T) {
+	for _, tc := range []struct {
+		source   string
+		wantPath []string // sorted
+	}{
+		{"startup", []string{"/tool-search"}},
+		{"fork", []string{"/tool-search"}},
+		{"resume", []string{"/signal", "/tool-search"}},
+		{"clear", []string{"/signal", "/tool-search"}},
+		{"compact", []string{"/signal"}}, // compaction keeps the session id
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			ch := make(chan map[string]any, 8)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var got map[string]any
+				json.NewDecoder(r.Body).Decode(&got)
+				got["path"] = r.URL.Path
+				ch <- got
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			payload := `{"session_id":"sid-` + tc.source + `","hook_event_name":"SessionStart","source":"` + tc.source + `"}`
+			env := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k", "ENABLE_TOOL_SEARCH=off"}
+			runSignal(t, env, payload)
+			var paths []string
+			for range tc.wantPath {
+				select {
+				case got := <-ch:
+					p := got["path"].(string)
+					paths = append(paths, p)
+					if p == "/tool-search" && (got["session"] != "sid-"+tc.source || got["enable_tool_search"] != "off" || len(got) != 3) {
+						t.Errorf("/tool-search body = %v", got)
+					}
+					if p == "/signal" && got["kind"] != tc.source {
+						t.Errorf("/signal body = %v", got)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("got %v, want %v", paths, tc.wantPath)
+				}
+			}
+			select {
+			case got := <-ch:
+				t.Errorf("an extra request: %v", got)
+			case <-time.After(1200 * time.Millisecond):
+			}
+			sort.Strings(paths)
+			if strings.Join(paths, ",") != strings.Join(tc.wantPath, ",") {
+				t.Errorf("paths = %v, want %v", paths, tc.wantPath)
+			}
+			if tc.source == "startup" || tc.source == "fork" {
+				runSignal(t, env[:3], payload) // no opt-out: nothing at all
+				select {
+				case got := <-ch:
+					t.Errorf("%s without the opt-out sent %v", tc.source, got)
+				case <-time.After(1200 * time.Millisecond):
+				}
+			}
+		})
 	}
 }

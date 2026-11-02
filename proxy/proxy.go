@@ -11,6 +11,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ import (
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
@@ -120,6 +122,13 @@ type Options struct {
 	// transcripts to a fresh proxy wants, so it measures compaction, not the grace.
 	// Startup setting, not a live knob.
 	RestartGrace *bool
+	// ToolDeferPath is where tool deferral keeps its own on-disk state (#485): the per-thread
+	// records for a session store that does not survive a restart, and the history when there is
+	// no dashboard database. Opened at the first ultrahigh request that needs it. "": there is no
+	// such place, and ultrahigh defers only with a durable session store. ToolDeferRetention bounds
+	// a row's age there (0: store.DefaultDiskRetention).
+	ToolDeferPath      string
+	ToolDeferRetention time.Duration
 	// Prices resolves a model's per-token rates so the dashboard can price each
 	// request AT WRITE TIME (so history does not reprice when a rate changes). nil =
 	// no pricing, and every captured row is marked partially accounted rather than
@@ -336,6 +345,9 @@ type Handler struct {
 	// never on the keep-alive ping path, so a ping can never make itself "current".
 	// Empty until the first real request arrives.
 	lastSession string
+
+	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
+	defer_ deferHost
 }
 
 // upstreamTransport is the default upstream client's transport, and the reason there is no
@@ -479,6 +491,7 @@ func (h *Handler) Close() {
 	// credentials. Stopping it drops both, which is why this is not optional on a host that
 	// builds and discards handlers.
 	h.keeper.Stop()
+	h.closeToolDefer() // flushes the tool history
 }
 
 // Mux wires the routes: chat proxying + health/stats/expand management.
@@ -505,6 +518,8 @@ func (h *Handler) Mux() *http.ServeMux {
 	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("POST /signal", h.clientSignal)
+	m.HandleFunc("POST /tool-search", h.toolSearchSignal)
+	m.HandleFunc("POST /tool-defer/probe", h.toolDeferProbe)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
 	// would otherwise answer it with a 401 — putting a red error in the console of every
@@ -1271,6 +1286,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
 		var anchor *expand.Anchor
+		// Tool deferral's facts for this request (#485), nil when it did not change the request.
+		var di *deferInfo
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1480,6 +1497,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
+				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
+				// the never-defer list, and the names list must see the tools as they go upstream.
+				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
+				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
 			}
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve
@@ -1491,7 +1512,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(r, provider, orig, tn))
+			h.newRecCtx(r, provider, orig, tn), di)
 	}
 }
 
@@ -1689,7 +1710,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo) {
 	wire := schema.WireFor(string(provider), up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
@@ -1723,6 +1744,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// can never delay or fail a request.
 	var usage Usage
 	var usageOK bool
+	// deferMsg is the last round's response message, when this loop parsed one: tool deferral's
+	// ledger reads its searches from it (#485).
+	var deferMsg []byte
 	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
 	// benign, three a measurement outage — and nothing distinguished them, so a run that had
 	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
@@ -1800,6 +1824,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		h.deferLedger(r.Context(), di, usage, usageOK && status == http.StatusOK, deferMsg)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that
@@ -1945,6 +1970,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		upStart := time.Now()
 		lastUpStart = upStart
 		resp, err := h.doUpstream(r, up, body)
+		// Tool deferral changed this request and the provider refused it: the client must never see
+		// that 400 (Claude Code would turn its own search off for the session). Send the request
+		// without deferral, once, before answering. Round 0 only: a later round is the proxy's own.
+		if round == 0 && err == nil && resp != nil && di != nil &&
+			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+			resp.Body.Close()
+			refused := resp.StatusCode
+			body = di.orig
+			resp, err = h.doUpstream(r, up, body)
+			ok := err == nil && resp != nil && resp.StatusCode < 400
+			h.deferRetry(di, refused, errBody, ok)
+			di = nil
+		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
 			// anywhere earlier because only what was ACTUALLY forwarded and accepted is a valid
@@ -2189,6 +2228,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
+		deferMsg = msg
 		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName)
 		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
 		// called PROXY tools only: by the time the request-path repair runs, the client has already
@@ -2460,7 +2500,13 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	// whole JSON document. The sniffer says whether it spliced, so responseUsageWhy reports a
 	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
 	// block that was present but rejected stays a dialect finding, whatever the window did.
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes(), sn.spliced())
+	win := sn.bytes()
+	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
+	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
+	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
+	if bytes.Contains(win, []byte(tooldefer.SearchName)) {
+		u.Searches, u.SearchLoaded = tooldefer.SearchesInSSE(win)
+	}
 	return firstByte, u, why, ok
 }
 
@@ -2710,6 +2756,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	if s := h.savingsStats(); s != nil && (s.Current != nil || s.Live != nil || s.All != nil) {
 		snap.Savings = s
 	}
+	snap.ToolDefer = h.deferStats()
 	json.NewEncoder(w).Encode(snap)
 }
 

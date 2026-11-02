@@ -80,7 +80,8 @@ type DiskOptions struct {
 // output text.
 var metadataPrefixes = []string{
 	BilledPrefix, BilledThreadPrefix, LenPrefix, TTLPrefix, SeenPrefix,
-	SweepDropPrefix, SweepKeepPrefix, SweepExpandPrefix, RestorePrefix, UsagePrefix,
+	SweepDropPrefix, SweepKeepPrefix, SweepExpandPrefix, RestorePrefix, UsagePrefix, ToolDeferPrefix,
+	ToolSearchOffPrefix,
 }
 
 // contentPrefixes hold text the proxy made or kept: the summary, extract_llm's rewrite, a frozen
@@ -531,4 +532,38 @@ func (m *Memory) getGlobal(key string) ([]byte, bool) {
 	}
 	m.putLocked(key, v)
 	return v, true
+}
+
+// DropPrefix removes every key that starts with prefix from memory, and every write of such a key
+// still waiting for the disk. The rows already on disk are the caller's to delete (a purge). It
+// returns how many keys left memory.
+func (m *Memory) DropPrefix(prefix string) int {
+	if m == nil || prefix == "" {
+		return 0
+	}
+	m.mu.Lock()
+	n := 0
+	for k, el := range m.items {
+		if strings.HasPrefix(k, prefix) {
+			// Not m.remove: that books a pinned key as LOST, and a purge is not a loss.
+			if e := el.Value.(*entry); e.pinned {
+				m.pinnedN--
+			}
+			m.ll.Remove(el)
+			delete(m.items, k)
+			n++
+		}
+	}
+	d := m.disk
+	m.mu.Unlock()
+	if d != nil {
+		d.mu.Lock()
+		for k := range d.pending {
+			if strings.HasPrefix(k, prefix) {
+				delete(d.pending, k)
+			}
+		}
+		d.mu.Unlock()
+	}
+	return n
 }

@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/tooldefer"
 )
 
 // listenAndAnnounce binds addr and, ONLY once the bind succeeded, logs the line an operator, a
@@ -647,6 +649,13 @@ func main() {
 				"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
 		}
 	}
+	// Tool deferral's own file (#485), next to the dashboard database path. The proxy opens it only
+	// at the first ultrahigh request, and only when it needs it (see proxy.Options.ToolDeferPath), so
+	// a setup that never defers creates no file.
+	tdPath := ""
+	if *dashDB != "" && *dashDB != ":memory:" {
+		tdPath = filepath.Join(filepath.Dir(*dashDB), tooldefer.FileName)
+	}
 	h := proxy.New(pipe, pstore, agg, proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
@@ -683,6 +692,9 @@ func main() {
 		// true, the grace on), so pass it through as-is — including an explicit false, which
 		// turns the grace off for benchmark runs.
 		RestartGrace: restartGrace,
+		// Tool deferral's own file and its row lifetime (#485).
+		ToolDeferPath:      tdPath,
+		ToolDeferRetention: *sessionStateRetention,
 		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
 		Cache: cachePolicy(cfg.Cache),
