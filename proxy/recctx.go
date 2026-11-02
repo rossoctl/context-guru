@@ -94,8 +94,9 @@ func (h *Handler) recordFor(tn *Tenancy) bool {
 // files by, which is what makes the two recorders joinable per session, and session.ExplicitID
 // documents it as stable across compaction where the content-hash fallback is not. The derived
 // key is the fallback, and it is PREFIXED so an analyst can see at a glance that a file is not
-// keyed on a real session.
-func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, orig []byte, tn *Tenancy) recCtx {
+// keyed on a real session. explicitSess is the chat handler's explicit id (explicitSessionOf).
+// So a Bob IDE file is keyed on its X-Task-Id, like the pipeline's session.
+func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string) recCtx {
 	if !h.recordFor(tn) {
 		return recCtx{}
 	}
@@ -105,7 +106,7 @@ func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, or
 		// prefixed and possibly a content hash, so it can flip at compaction -- acceptable as
 		// a fallback, not as the primary.
 		if tn != nil {
-			id = apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"), provider, orig)
+			id = apply.SessionIDFor(tn.ID, explicitSess, provider, orig)
 		}
 		if id != "" {
 			id = "cg-derived-" + id

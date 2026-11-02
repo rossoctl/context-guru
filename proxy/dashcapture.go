@@ -650,6 +650,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// rows carry none — and the closure answers '' when the alias is the request's own id
 	// (a headerless turn, or no body to derive from: /compact never stashes one), which
 	// observe() above already touched or nothing can.
+	//
+	// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the alias
+	// of a Bob IDE session is the content hash.
 	if e.SessionID != "" {
 		pipe, api, bypass := c.aliasPipe, c.aliasAPI, c.aliasBypass
 		e.AliasFn = func() string {

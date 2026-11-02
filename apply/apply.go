@@ -332,9 +332,11 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
-// explicitSession resolves the explicit session id for one request: the header wins,
-// then the metadata fields (session.Explicit), then "" (Scoped's derived-hash fallback).
+// ExplicitSession resolves the explicit session id for one request: the header wins,
+// then the metadata fields, then the host ids, then "" (Scoped's derived-hash fallback).
 // The rule lives in session.Explicit; this only reads the fields off the raw body.
+// The proxy's Bob route calls it with the X-Task-Id header as a host id. It passes the
+// result back as Opts.Session.
 //
 // gjson scans, so this costs no second unmarshal of the body on the request path. A
 // `metadata` that is absent, null, a scalar or an array yields a non-existent result, and a
@@ -343,12 +345,12 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 // `metadata` is fetched ONCE and the fields read off it, rather than a full-body query per
 // field: on a real 600 KB request `metadata` sits behind `messages`, so each query walked
 // the whole transcript to reach it.
-func explicitSession(header string, body []byte) string {
+func ExplicitSession(header string, body []byte, host ...string) string {
 	md := gjson.GetBytes(body, "metadata")
 	return session.Explicit(header, func(k string) (string, bool) {
 		r := md.Get(k)
 		return r.Str, r.Type == gjson.String
-	})
+	}, host...)
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -500,7 +502,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// even when the host changes the head before sending (tool deferral, #902). With no explicit
 	// session id it IS the session id, so the head is not hashed twice.
 	alias := sessionID
-	if explicitSession(o.Session, body) != "" {
+	if ExplicitSession(o.Session, body) != "" {
 		sys, firstUser := schema.SessionHead(norm)
 		alias = session.Scoped(o.Tenant, "", sys, firstUser)
 	}
@@ -569,8 +571,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// runs under — the metadata session id when the body carries one, else the content
 			// hash — and it is the ONE rule the record side also derives (graceAliasID), so
 			// the keys the grace asks for and the keys the recorder warms cannot drift apart.
-			// alias below stays the bare content hash: it keys the cold decision's own clocks
-			// (aliasSeen, sessionTTL, RecordCacheTouch), which this change does not touch.
+			// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the
+			// grace alias of a Bob IDE session is the content hash.
+			// alias (above) is always the bare content hash. It keys the cold decision's own
+			// clocks (aliasSeen, sessionTTL, RecordCacheTouch).
 			graceAlias := graceAliasID(o.Tenant, body, norm)
 			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
 			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
@@ -621,7 +625,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// Under both rather than under the alias alone, because neither id is reliable by
 			// itself: the alias splits when the header comes and goes, and it ALSO changes when
 			// the agent compacts its own context (session.Explicit survives that, the derived
-			// sha256(system+firstUser) does not — see explicitSession). Passing the already
+			// sha256(system+firstUser) does not — see ExplicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
 			if lifetimeKind == CacheLifetimeExact {
 				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
@@ -777,7 +781,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 
 	// From here on, everything this request logs carries the RESOLVED session. The
 	// caller (the proxy) already put tenant and route on the context logger; the session
-	// is only knowable here, after explicitSession + session.Scoped have run, which is
+	// is only knowable here, after ExplicitSession + session.Scoped have run, which is
 	// exactly why the logger travels in the context instead of being passed in whole.
 	lg := logging.From(ctx).With("session", sessionID)
 	debug := logging.Debugging(ctx)
@@ -1398,7 +1402,7 @@ func NormalizeMessages(provider bschemas.ModelProvider, body []byte) []bschemas.
 // implementations of it are two different sessions the moment either changes.
 func sessionIDFrom(tenant, explicitSess string, body []byte, norm []bschemas.ChatMessage) string {
 	sys, firstUser := schema.SessionHead(norm)
-	return session.Scoped(tenant, explicitSession(explicitSess, body), sys, firstUser)
+	return session.Scoped(tenant, ExplicitSession(explicitSess, body), sys, firstUser)
 }
 
 // graceAliasID is the ONE rule for the restart grace's alias id (#766): the id a turn of

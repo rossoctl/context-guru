@@ -62,7 +62,7 @@ package apply
 //     The old argument was that the region is the text schema.SessionHead feeds to
 //     session.Scoped, so a change to it would already be a different session. That is FALSE:
 //     it only holds when the session id is DERIVED, and Claude Code sends an explicit one
-//     (metadata.user_id), which wins in explicitSession, so the region could move while the
+//     (metadata.user_id), which wins in ExplicitSession, so the region could move while the
 //     session id did not. MEASURED on a real 35-request Claude Code session
 //     (bench/long.jsonl): `messages.0` changed twice — the agent's own
 //     auto-compaction rewrites the first user message into a conversation SUMMARY, taking

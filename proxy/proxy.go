@@ -612,9 +612,9 @@ func (h *Handler) Mux() *http.ServeMux {
 	// it only receives what nothing else matched. Enabled only when BobUpstream is
 	// set, so default proxy behavior (unknown path => 404) is unchanged.
 	if h.opts.BobUpstream != "" || h.opts.Tenants != nil {
-		m.HandleFunc("POST /inference/v1/chat/completions", h.chat(bschemas.OpenAI, upstream{
+		m.HandleFunc("POST "+bobModelPath, h.chat(bschemas.OpenAI, upstream{
 			base: h.opts.BobUpstream,
-			path: "/inference/v1/chat/completions",
+			path: bobModelPath,
 			// setKey nil in single-tenant mode: pass Bob's own auth (BOBSHELL key)
 			// straight through. In hosted mode upstreamFor always injects, because the
 			// client's header holds OUR token, which must not leave the box.
@@ -697,6 +697,25 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // bobProfilePath is the profile route Bob's CLI calls before anything else, and the
 // one response the catch-all does not forward verbatim. See forwardBobProfile.
 const bobProfilePath = "/admin/v1/profile"
+
+// bobModelPath is Bob's model route. Only a request on it may take its session from
+// X-Task-Id (see explicitSessionOf).
+const bobModelPath = "/inference/v1/chat/completions"
+
+// explicitSessionOf is the explicit session id a chat request gives to apply. Every place that
+// derives this request's session calls it. So the pipeline, the expand repair, the observe
+// record and the wire recorder use the same id.
+//
+// The Bob IDE sends its task id only in the X-Task-Id header. The header has no vendor prefix,
+// so any client can send it. So only the Bob model route reads it. It comes after every other
+// id (session.Explicit). Other routes get the session header unchanged.
+func explicitSessionOf(r *http.Request, upPath string, body []byte) string {
+	sess := r.Header.Get("x-context-guru-session")
+	if upPath != bobModelPath {
+		return sess
+	}
+	return apply.ExplicitSession(sess, body, r.Header.Get("X-Task-Id"))
+}
 
 func isBobProfile(r *http.Request) bool {
 	return r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, bobProfilePath)
@@ -1270,6 +1289,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// external evaluator can REPLAY the exact traffic through any pipeline via
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
+		// Once, so the pipeline, the expand repair and the wire recorder use one id.
+		explicitSess := explicitSessionOf(r, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -1378,7 +1399,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				var repaired int
 				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
 					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
-					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"), api, provider, bypassed, b)
+					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSess, api, provider, bypassed, b)
 				})
 				if repaired > 0 {
 					// A rewrite of the client's own transcript must never be silent: this is
@@ -1437,7 +1458,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				provider:    provider,
 				api:         api,
 				body:        body,
-				session:     r.Header.Get("x-context-guru-session"),
+				session:     explicitSess,
 				bypassed:    bypassed,
 				models:      models,
 				window:      window,
@@ -1585,7 +1606,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(r, provider, orig, tn), di, tr.TouchAlias)
+			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
 	}
 }
 
@@ -1962,7 +1983,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSessionOf(r, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
