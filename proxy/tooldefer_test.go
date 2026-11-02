@@ -455,3 +455,37 @@ func TestToolDeferProbeAskInXhigh(t *testing.T) {
 		t.Fatalf("xhigh deferred: %s", got)
 	}
 }
+
+// The operator's CONTEXT_GURU_CLIENT_SIGNALS=off turns both tool deferral routes off (404, nothing
+// changed). Keep-alive off with the switch on leaves them working.
+func TestToolDeferRoutesObeyTheClientSignalsSwitch(t *testing.T) {
+	h := tdHandler(t, "ultrahigh", "http://127.0.0.1:1")
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	post := func(path, body string) int {
+		r, err := http.Post(srv.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "off")
+	if c := post("/tool-search", `{"session":"s1","enable_tool_search":"false"}`); c != http.StatusNotFound {
+		t.Errorf("/tool-search with the switch off = %d", c)
+	}
+	if c := post("/tool-defer/probe", `{}`); c != http.StatusNotFound {
+		t.Errorf("/tool-defer/probe with the switch off = %d", c)
+	}
+	if h.deferGate().SearchOff("s1") || h.takeProbeAsk(&Tenancy{}) {
+		t.Fatal("a route changed state with the switch off")
+	}
+	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
+	t.Setenv("CONTEXT_GURU_KEEPALIVE", "off")
+	if c := post("/tool-search", `{"session":"s1","enable_tool_search":"false"}`); c != http.StatusNoContent || !h.deferGate().SearchOff("s1") {
+		t.Errorf("/tool-search with keep-alive off = %d", c)
+	}
+	if c := post("/tool-defer/probe", `{}`); c != http.StatusAccepted || !h.takeProbeAsk(&Tenancy{}) {
+		t.Errorf("/tool-defer/probe with keep-alive off = %d", c)
+	}
+}

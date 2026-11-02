@@ -63,11 +63,19 @@ const maxLifecycleBody = 4096
 const compactRaceMargin = 2 * time.Second
 
 func clientSignalEnabled() bool {
+	return clientSignalsSwitchOn() && !keepAliveDisabled()
+}
+
+// clientSignalsSwitchOn is the operator's switch alone (CONTEXT_GURU_CLIENT_SIGNALS off/0/false
+// turns every client hook route off), without clientSignalEnabled's keep-alive half. The tool
+// deferral routes (/tool-search, /tool-defer/probe) use it: they are not about keep-alive, and must
+// still obey the operator.
+func clientSignalsSwitchOn() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_CLIENT_SIGNALS"))) {
 	case "off", "0", "false":
 		return false
 	}
-	return !keepAliveDisabled()
+	return true
 }
 
 // clientSessionAlias is the tenant-scoped id a client's hooks name this session by, when the proxy
@@ -206,9 +214,13 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 // toolSearchSignal receives the raw ENABLE_TOOL_SEARCH value of one session, from the plugin's
 // session-start hook (#485). A value that turns search off (tooldefer.SearchOffValue) turns tool
 // deferral off for that session. Its own route, because /signal is off with keep-alive and this flag
-// is not about keep-alive. The same checks as /signal: JSON only, the same authentication, the same
-// tenant-scoped session id. 204 on accept.
+// is not about keep-alive. The same checks as /signal: the operator's CONTEXT_GURU_CLIENT_SIGNALS
+// switch, JSON only, the same authentication, the same tenant-scoped session id. 204 on accept.
 func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
+	if !clientSignalsSwitchOn() {
+		http.NotFound(w, r)
+		return
+	}
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
 		http.Error(w, "tool-search signals are application/json", http.StatusUnsupportedMediaType)
 		return
@@ -245,8 +257,12 @@ func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
 // provider check of tool deferral to start at this account's next request, so the probe runs at once
 // instead of waiting for deferral to need it. It returns 202 at once and holds no credential: the
 // probe runs in the background through the prober, with that next request's own upstream, model and
-// credential. The same checks as /signal.
+// credential. The same checks as /signal, the operator's switch included.
 func (h *Handler) toolDeferProbe(w http.ResponseWriter, r *http.Request) {
+	if !clientSignalsSwitchOn() {
+		http.NotFound(w, r)
+		return
+	}
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
 		http.Error(w, "tool-defer probe asks are application/json", http.StatusUnsupportedMediaType)
 		return

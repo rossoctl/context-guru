@@ -32,7 +32,7 @@
         ]
       },
       {
-        "matcher": "startup",
+        "matcher": "startup|fork",
         "hooks": [
           {
             "type": "command",

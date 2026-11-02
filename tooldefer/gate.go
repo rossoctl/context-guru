@@ -19,7 +19,8 @@ type Gate struct {
 	now    func() time.Time
 
 	// Counters, for /stats.
-	Retries   atomic.Int64 // a 400/422 on a changed request, answered with the original request
+	Retries   atomic.Int64 // every 400/422 on a changed request answered with the original, any cause
+	TurnedOff atomic.Int64 // the Retries whose message named a deferral cause (Break)
 	Deferred  atomic.Int64 // requests that carried deferred tools
 	Decisions atomic.Int64 // threads decided
 	Rebuilds  atomic.Int64 // threads whose set was rebuilt after a store miss
@@ -92,6 +93,7 @@ func (g *Gate) Break(tenant, model string) {
 		return
 	}
 	g.Retries.Add(1)
+	g.TurnedOff.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if len(g.broken) >= maxGate {

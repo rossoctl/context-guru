@@ -255,11 +255,14 @@ func (h *Handler) deferStats() any {
 	}
 	pass, fail := ds.prober.Runs()
 	return map[string]any{
-		"ledger":       ds.ledger.Snapshot(),
-		"decisions":    g.Decisions.Load(),
-		"rebuilds":     g.Rebuilds.Load(),
-		"requests":     g.Deferred.Load(),
+		"ledger":    ds.ledger.Snapshot(),
+		"decisions": g.Decisions.Load(),
+		"rebuilds":  g.Rebuilds.Load(),
+		"requests":  g.Deferred.Load(),
+		// Every 400/422 to a changed request that the proxy answered with the original, whatever
+		// the cause; "turned_off" counts only those that named a deferral cause and turned it off.
 		"retries_400":  g.Retries.Load(),
+		"turned_off":   g.TurnedOff.Load(),
 		"probes_pass":  pass,
 		"probes_fail":  fail,
 		"history_live": ds.hist.Ready(),
