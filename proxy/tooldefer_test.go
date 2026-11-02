@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -661,4 +662,69 @@ func (p tdPricesOnly) Price(_ context.Context, model string) (modelinfo.Price, b
 		return modelinfo.Price{}, false
 	}
 	return modelinfo.Price{Input: 3e-6, Output: 15e-6}, true
+}
+
+// Round 4 (#861). A purge after a restart, with no ultrahigh request since (so this process never
+// opened tool deferral's file), still deletes the tenant's rows in the file and reports them. A
+// purge with no file creates none.
+func TestToolDeferPurgeReachesAnUnopenedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), tooldefer.FileName)
+	f, err := tooldefer.OpenFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooldefer.Save(f.Store, "acct:s1", "", tooldefer.Record{Deferred: []string{"Workflow"}})
+	tooldefer.SetSearchOff(f.Store, "acct:s1", true)
+	tooldefer.Save(f.Store, "other:s1", "", tooldefer.Record{Deferred: []string{"Workflow"}})
+	m := tooldefer.NewMem(f.DB)
+	stop := m.Open(time.Hour, nil)
+	for i := 0; i < 200 && !m.Ready(); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.Observe("acct", "acct:s1", "/w", tdBody(), time.Now().UnixMilli())
+	stop() // flushes the history
+	f.Close()
+
+	// The restarted proxy: no ultrahigh request, so the file is not open.
+	cfg, _ := config.LoadBytes([]byte("preset: ultrahigh\n"))
+	agg := metrics.NewAggregator()
+	pipe, _ := cfg.Build(agg)
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: "http://127.0.0.1:1", ToolDeferPath: path})
+	defer h.Close()
+	if h.defer_.file != nil {
+		t.Fatal("fixture: the file is open before any request")
+	}
+	n, err := h.purgeToolDefer(context.Background(), "acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 3 { // 1 record, 1 flag, at least 1 history row
+		t.Fatalf("the purge reported %d rows", n)
+	}
+	if h.defer_.file != nil {
+		t.Fatal("the purge left the file open as the deferral state")
+	}
+	db, err := tooldefer.OpenForPurge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var hist, mine, other int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_defer_history WHERE tenant_id = 'acct'`).Scan(&hist)
+	db.QueryRow(`SELECT COUNT(*) FROM session_state WHERE key >= ? AND key < ?`, []byte("cg:tdf:acct:"), []byte("cg:tdf:acct;")).Scan(&mine)
+	db.QueryRow(`SELECT COUNT(*) FROM session_state WHERE key >= ? AND key < ?`, []byte("cg:tdf:other:"), []byte("cg:tdf:other;")).Scan(&other)
+	if hist != 0 || mine != 0 || other != 1 {
+		t.Fatalf("after the purge: history %d, records %d (want 0), other tenant %d (want 1)", hist, mine, other)
+	}
+
+	// No file at the path: the purge creates none.
+	none := filepath.Join(t.TempDir(), tooldefer.FileName)
+	h2 := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: "http://127.0.0.1:1", ToolDeferPath: none})
+	defer h2.Close()
+	if n, err := h2.purgeToolDefer(context.Background(), "acct"); err != nil || n != 0 {
+		t.Fatalf("purge with no file: %d, %v", n, err)
+	}
+	if _, err := os.Stat(none); !os.IsNotExist(err) {
+		t.Fatalf("the purge created the file: %v", err)
+	}
 }

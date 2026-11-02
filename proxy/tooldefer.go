@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -149,17 +150,26 @@ func (h *Handler) deferEnv(tn *Tenancy) tooldefer.Env {
 	return tooldefer.Env{Store: tn.Store, Fallback: h.deferFallback(), History: ds.hist, Gate: h.deferGate(), Prober: ds.prober}
 }
 
-// noDurableOnce logs, once per process, that ultrahigh defers nothing for want of a durable place.
-var noDurableOnce sync.Once
+// noDurableOnce and noPricesOnce log, once per process, why ultrahigh defers nothing.
+var noDurableOnce, noPricesOnce sync.Once
 
-// purgeToolDefer forgets tenantID's tool deferral state: in memory (history, opt-outs, turn-offs)
-// and in tool deferral's own file. The dashboard purge deletes the dashboard database's rows.
+// purgeToolDefer forgets tenantID's tool deferral state: in memory (history, opt-outs, turn-offs,
+// and the record and flag keys held in the process session store) and in tool deferral's own file.
+// The dashboard purge deletes the dashboard database's rows.
+//
+// The file is purged even when this process has not opened it (no ultrahigh request since the
+// start, or the session state off): a file that exists at Options.ToolDeferPath is opened for the
+// purge only, and closed. A path with no file is skipped, so a purge never creates one.
 func (h *Handler) purgeToolDefer(ctx context.Context, tenantID string) (int64, error) {
 	if ds, g := h.deferPeek(); ds != nil || g != nil {
 		if ds != nil {
 			ds.hist.DropTenant(tenantID)
 		}
 		g.DropTenant(tenantID)
+	}
+	if mem, ok := h.store.(*store.Memory); ok {
+		mem.DropPrefix(store.ToolDeferPrefix + tenantID + ":")
+		mem.DropPrefix(store.ToolSearchOffPrefix + tenantID + ":")
 	}
 	h.defer_.mu.Lock()
 	f := h.defer_.file
@@ -169,7 +179,22 @@ func (h *Handler) purgeToolDefer(ctx context.Context, tenantID string) (int64, e
 		f.Store.DropPrefix(store.ToolSearchOffPrefix + tenantID + ":")
 		return dash.PurgeToolDefer(ctx, f.DB, tenantID)
 	}
-	return 0, nil
+	path := h.opts.ToolDeferPath
+	if path == "" {
+		return 0, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // no file: nothing to purge, and none is created
+		}
+		return 0, err
+	}
+	db, err := tooldefer.OpenForPurge(path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	return dash.PurgeToolDefer(ctx, db, tenantID)
 }
 
 // deferPeek returns the state and the gate when they exist, without building anything.
@@ -274,6 +299,9 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	// Only a model the price table knows: the name comes from the client, and a probe spends a
 	// credential. An unknown model is never probed, so it is never deferred.
 	if h.opts.Prices == nil {
+		noPricesOnce.Do(func() {
+			slog.Warn("context-guru: ultrahigh defers no tools: the host has no price table, so no model is probed")
+		})
 		return
 	}
 	if p, ok := h.opts.Prices.Price(r.Context(), key.Model); !ok || p.Zero() {

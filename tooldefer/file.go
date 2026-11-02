@@ -72,6 +72,20 @@ func OpenFile(path string, retention time.Duration) (*File, error) {
 	return &File{DB: db, Store: mem, disk: d}, nil
 }
 
+// OpenForPurge opens an EXISTING file for a purge only: a plain connection, with no store.Disk
+// writer and no write test, and it never creates the file (mode=rw). The caller closes it.
+func OpenForPurge(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=rw&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 // Close flushes and closes the file.
 func (f *File) Close() error {
 	if f == nil {

@@ -483,7 +483,8 @@ func TestApplyDecidesOnceAndKeepsTheSet(t *testing.T) {
 	}
 }
 
-// A thread first seen mid-way without a record and without a probe verdict sends the original.
+// A thread first seen mid-way without a record and without a probe verdict is a first request
+// (N11), decided "nothing" for its life, so it sends the original.
 func TestApplyMidThreadUnknownProbeSendsOriginal(t *testing.T) {
 	e := env(t, threeUnused())
 	later := body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`)
