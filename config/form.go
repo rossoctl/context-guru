@@ -112,6 +112,10 @@ type Form struct {
 	// and with the YAML box gone there is no other way to correct the document from the
 	// page. Fixing it needs the account editor, which still takes a document.
 	ParseError string `json:"parse_error,omitempty"`
+	// CacheReset names cache tuning keys (for example "keepalive_max_pings") that a save deletes, so
+	// the key falls back to its default. A tuning field of 0 means "not stated" and leaves the
+	// stored key alone; this is how the form says "back to the default".
+	CacheReset []string `json:"cache_reset,omitempty"`
 }
 
 // CacheForm is the settings page's view of the `cache:` block.
@@ -397,31 +401,32 @@ func ApplyForm(doc string, f Form) (string, error) {
 		cb := child(m, "cache")
 		cb["keepalive"] = f.Cache.KeepAlive
 		cb["head_ttl_1h"] = f.Cache.HeadTTL1h
-		for k, v := range map[string]int{
-			"keepalive_idle_seconds":        f.Cache.KeepAliveIdleSeconds,
-			"keepalive_openai_idle_seconds": f.Cache.KeepAliveOpenAIIdleSeconds,
-			"keepalive_max_pings":           f.Cache.KeepAliveMaxPings,
-			"keepalive_min_prefix_tokens":   f.Cache.KeepAliveMinPrefixTokens,
+		// ONE rule for every tuning key. A value above 0 is written. 0 means "the form did not state
+		// it" (the settings page posts only keepalive and head_ttl_1h), so the stored key is LEFT
+		// ALONE: deleting it would erase a value tuned on the account page on every settings save.
+		// 0 is also the default for each key, so "back to the default" cannot be said by 0. It is
+		// said by naming the key in Form.CacheReset, which deletes it.
+		reset := map[string]bool{}
+		for _, k := range f.CacheReset {
+			reset[k] = true
+		}
+		for k, v := range map[string]float64{
+			"keepalive_idle_seconds":        float64(f.Cache.KeepAliveIdleSeconds),
+			"keepalive_openai_idle_seconds": float64(f.Cache.KeepAliveOpenAIIdleSeconds),
+			"keepalive_max_pings":           float64(f.Cache.KeepAliveMaxPings),
+			"keepalive_min_prefix_tokens":   float64(f.Cache.KeepAliveMinPrefixTokens),
+			"keepalive_max_usd_per_ping":    f.Cache.KeepAliveMaxUSDPerPing,
+			"head_ttl_min_bytes":            float64(f.Cache.HeadTTLMinBytes),
+			"head_ttl_min_tokens":           float64(f.Cache.HeadTTLMinTokens),
 		} {
-			if v > 0 {
+			switch {
+			case v > 0 && k == "keepalive_max_usd_per_ping":
 				cb[k] = v
-			} else {
+			case v > 0:
+				cb[k] = int(v)
+			case reset[k]:
 				delete(cb, k)
 			}
-		}
-		// The head-gate keys are written when the form states them and otherwise LEFT ALONE. The
-		// settings page posts only keepalive and head_ttl_1h, and a zero here means "not sent", so
-		// deleting them would erase a gate tuned on the account page on every settings save.
-		if f.Cache.HeadTTLMinBytes > 0 {
-			cb["head_ttl_min_bytes"] = f.Cache.HeadTTLMinBytes
-		}
-		if f.Cache.HeadTTLMinTokens > 0 {
-			cb["head_ttl_min_tokens"] = f.Cache.HeadTTLMinTokens
-		}
-		if f.Cache.KeepAliveMaxUSDPerPing > 0 {
-			cb["keepalive_max_usd_per_ping"] = f.Cache.KeepAliveMaxUSDPerPing
-		} else {
-			delete(cb, "keepalive_max_usd_per_ping")
 		}
 	}
 
