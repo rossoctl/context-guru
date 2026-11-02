@@ -53,19 +53,21 @@ func OpenAI30MinuteCache(provider, model string) bool {
 // not invent value is the safe one. A feed that states a real rate never reaches this function.
 func CacheWriteFracFor(model string) float64 {
 	if chargesCacheWritePremium(model) {
-		return anthropicCacheWriteFrac
+		return AnthropicCacheWrite5mFrac
 	}
 	return 1.0
 }
 
-// anthropicCacheWriteFrac / anthropicCacheReadFrac are the Anthropic family's published
-// multiples, named rather than repeated as bare literals in three files.
+// The Anthropic family's published cache multiples of the fresh input rate. This is the ONE place
+// they are written. kvcache, dash, components/offload, cheapmodel and proxy all read them.
 const (
-	anthropicCacheWriteFrac = 1.25
-	// AnthropicCacheReadFrac is the Anthropic family's published cache-READ multiple of the fresh
-	// input rate. Exported for internal/modelinfo/litellm's fallback when a price feed states no
-	// cache-read rate of its own.
+	// AnthropicCacheReadFrac is the cache-READ multiple.
 	AnthropicCacheReadFrac = 0.1
+	// AnthropicCacheWrite5mFrac is the 5-minute cache-WRITE multiple.
+	AnthropicCacheWrite5mFrac = 1.25
+	// AnthropicCacheWrite1hFrac is the 1-hour cache-WRITE multiple. It is taken from the fresh
+	// input rate, not from the 5-minute write rate, because that is how the provider documents it.
+	AnthropicCacheWrite1hFrac = 2.0
 )
 
 // chargesCacheWritePremium reports whether this model bills a per-token surcharge

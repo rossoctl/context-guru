@@ -90,12 +90,16 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {
-		if premium := 2*p.Input - p.CacheWrite; premium > 0 {
+		if premium := p.CacheWrite1h() - p.CacheWrite; premium > 0 {
 			cost += float64(cacheWrite1h) * premium
 		}
 	}
 	return cost
 }
+
+// CacheWrite1h is the per-token rate of a ONE-HOUR cache write: AnthropicCacheWrite1hFrac x the
+// fresh input rate. No gateway publishes it, so it is always derived.
+func (p Price) CacheWrite1h() float64 { return p.Input * AnthropicCacheWrite1hFrac }
 
 // Zero reports whether no rate at all is known (so a cost figure would be a lie).
 func (p Price) Zero() bool {

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"sync/atomic"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // Usage tracks cumulative token usage of the cheap (config-source) model across
@@ -217,7 +219,7 @@ type Pricing struct {
 // HaikuPricing is the default: claude-haiku-4-5 list rates ($1/$5 per MTok), with the
 // standard Anthropic cache multipliers (write 1.25x input, read 0.1x input).
 func HaikuPricing() Pricing {
-	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: 1.25, CacheReadPerMTok: 0.10}
+	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: 1.00 * modelinfo.AnthropicCacheWrite5mFrac, CacheReadPerMTok: 1.00 * modelinfo.AnthropicCacheReadFrac}
 }
 
 // PricingConfigured reports whether the operator priced the cheap model at all, i.e. whether

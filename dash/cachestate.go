@@ -372,7 +372,7 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 // so the "kept warm" credit is the cold figure the status line already showed.
 func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
 	if ttlS == 3600 {
-		return float64(tokens) * p.CacheRead, float64(tokens) * p.Input * 2.0
+		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
 	}
 	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
 }

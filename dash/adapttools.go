@@ -478,7 +478,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
 			// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
 			if r.cacheWrite1h > 0 {
-				rate = 2 * p.Input
+				rate = p.CacheWrite1h()
 			}
 		}
 		if ok {

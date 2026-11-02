@@ -663,3 +663,26 @@ func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
 			"extraction spend)", got)
 	}
 }
+
+// A price table that leaves the write tier blank gets the family's write multiple. Before, every
+// family got 1.25x here, while ParseTable and the price feed gave 1.0x to a family with no premium.
+func TestAgentRatesBlankWriteFollowsTheModelFamily(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		frac  float64
+	}{
+		{"claude-sonnet-5", 1.25},
+		{"azure/gpt-5.5", 1.0},
+		{"azure/gpt-5.6-luna", 1.25},
+		{"gemini-3-flash-preview", 1.0},
+	} {
+		c := &components.Ctx{ModelName: tc.model, SelfRates: components.TokenRates{Input: 2e-6, Output: 1e-5}}
+		fresh, read, write := agentRates(c)
+		if want := fresh * tc.frac; write != want {
+			t.Errorf("%s: write = %v, want %v", tc.model, write, want)
+		}
+		if want := fresh * 0.1; read != want {
+			t.Errorf("%s: read = %v, want %v", tc.model, read, want)
+		}
+	}
+}

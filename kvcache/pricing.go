@@ -62,11 +62,11 @@ type Pricing struct {
 // across a cost function. Overridable per deployment through Multipliers.
 const (
 	// DefaultCacheReadMultiple is a cache hit's rate as a multiple of base input.
-	DefaultCacheReadMultiple = 0.1
+	DefaultCacheReadMultiple = modelinfo.AnthropicCacheReadFrac
 	// DefaultWrite5mMultiple is a 5-minute cache write as a multiple of base input.
-	DefaultWrite5mMultiple = 1.25
+	DefaultWrite5mMultiple = modelinfo.AnthropicCacheWrite5mFrac
 	// DefaultWrite1hMultiple is a 1-hour cache write as a multiple of base input.
-	DefaultWrite1hMultiple = 2.0
+	DefaultWrite1hMultiple = modelinfo.AnthropicCacheWrite1hFrac
 	// DefaultPingOutputTokens is the smallest generation Anthropic's Messages API accepts.
 	DefaultPingOutputTokens = 1
 	// DefaultPingInputTokens is the fresh input a ping carries beyond the cached prefix —

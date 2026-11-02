@@ -89,10 +89,10 @@ func ParseTable(b []byte) (*Table, error) {
 		return nil, fmt.Errorf("model price list: %w", err)
 	}
 	if f.CacheReadFrac == 0 {
-		f.CacheReadFrac = 0.1
+		f.CacheReadFrac = AnthropicCacheReadFrac
 	}
 	if f.CacheWriteFrac == 0 {
-		f.CacheWriteFrac = 1.25
+		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
 	t := &Table{}
 	for i, m := range f.Models {
