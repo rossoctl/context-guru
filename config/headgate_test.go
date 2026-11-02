@@ -73,3 +73,12 @@ func TestApplyFormCacheResetDeletesNamedKeysOnly(t *testing.T) {
 		t.Errorf("an unnamed key was deleted:\n%s", out)
 	}
 }
+
+// A typo in cache_reset must fail, not report success. The handler returns this error as a 400.
+func TestApplyFormRejectsAnUnknownCacheResetName(t *testing.T) {
+	doc := "preset: off\ncache:\n  keepalive_max_pings: 3\n"
+	_, err := ApplyForm(doc, Form{Cache: &CacheForm{}, CacheReset: []string{"keepalive_max_ping"}})
+	if err == nil || !strings.Contains(err.Error(), "keepalive_max_ping") || !strings.Contains(err.Error(), "keepalive_max_pings") {
+		t.Fatalf("want an error naming the typo and the valid keys, got %v", err)
+	}
+}

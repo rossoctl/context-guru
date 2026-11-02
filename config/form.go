@@ -133,6 +133,20 @@ type CacheForm struct {
 	HeadTTLMinTokens int `json:"head_ttl_min_tokens,omitempty"`
 }
 
+// tuningValues is the ONE list of cache tuning keys the form writes, with the value the form states
+// for each (0 = not stated). ApplyForm's write loop and CacheReset's validation both read it.
+func (c *CacheForm) tuningValues() map[string]float64 {
+	return map[string]float64{
+		"keepalive_idle_seconds":        float64(c.KeepAliveIdleSeconds),
+		"keepalive_openai_idle_seconds": float64(c.KeepAliveOpenAIIdleSeconds),
+		"keepalive_max_pings":           float64(c.KeepAliveMaxPings),
+		"keepalive_min_prefix_tokens":   float64(c.KeepAliveMinPrefixTokens),
+		"keepalive_max_usd_per_ping":    c.KeepAliveMaxUSDPerPing,
+		"head_ttl_min_bytes":            float64(c.HeadTTLMinBytes),
+		"head_ttl_min_tokens":           float64(c.HeadTTLMinTokens),
+	}
+}
+
 // ExtractLLMForm is the RECOMMENDED prefill for the compaction-model component — a policy
 // layer, deliberately not the same thing as the component's own defaults.
 //
@@ -410,15 +424,7 @@ func ApplyForm(doc string, f Form) (string, error) {
 		for _, k := range f.CacheReset {
 			reset[k] = true
 		}
-		for k, v := range map[string]float64{
-			"keepalive_idle_seconds":        float64(f.Cache.KeepAliveIdleSeconds),
-			"keepalive_openai_idle_seconds": float64(f.Cache.KeepAliveOpenAIIdleSeconds),
-			"keepalive_max_pings":           float64(f.Cache.KeepAliveMaxPings),
-			"keepalive_min_prefix_tokens":   float64(f.Cache.KeepAliveMinPrefixTokens),
-			"keepalive_max_usd_per_ping":    f.Cache.KeepAliveMaxUSDPerPing,
-			"head_ttl_min_bytes":            float64(f.Cache.HeadTTLMinBytes),
-			"head_ttl_min_tokens":           float64(f.Cache.HeadTTLMinTokens),
-		} {
+		for k, v := range f.Cache.tuningValues() {
 			switch {
 			case v > 0 && k == "keepalive_max_usd_per_ping":
 				cb[k] = v
@@ -591,6 +597,17 @@ func (f *Form) normalize() {
 func (f Form) validate() error {
 	if f.Mode != "" && f.Mode != "sync" && f.Mode != "observe" {
 		return fmt.Errorf("config: mode %q is not sync or observe", f.Mode)
+	}
+	known := (&CacheForm{}).tuningValues()
+	for _, k := range f.CacheReset {
+		if _, ok := known[k]; !ok {
+			names := make([]string, 0, len(known))
+			for n := range known {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			return fmt.Errorf("config: cache_reset: %q is not a cache tuning key (one of %s)", k, strings.Join(names, ", "))
+		}
 	}
 	if f.Cache != nil {
 		if err := (CacheConfig{
