@@ -1262,9 +1262,9 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 }
 
 // kaGateMinPrefix is the billed-prefix floor a replay gates on: the shipped default, mirroring
-// config.DefaultKeepAliveMinPrefix, which this package may not import. Pinned by
+// config.DefaultKeepAliveMinPrefix (20000 since #858), which this package may not import. Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
-const kaGateMinPrefix = 80000
+const kaGateMinPrefix = 20000
 
 // pingSpan is one idle span a live keep-alive would send pings in.
 type pingSpan struct {

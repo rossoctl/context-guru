@@ -879,8 +879,8 @@ func smallPrefix(e *Event) *Event {
 // The replay gate is the request path's gate. A drift here is a calculator modelling a policy
 // nobody runs, which is the whole of F5.
 func TestTheReplayGateMatchesTheShippedPolicy(t *testing.T) {
-	if kaGateMinPrefix != 80000 {
-		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 80000 and the replay "+
+	if kaGateMinPrefix != 20000 {
+		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 20000 and the replay "+
 			"has to gate on what the request path gates on", kaGateMinPrefix)
 	}
 }

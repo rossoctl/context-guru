@@ -1158,25 +1158,39 @@ func buildHostedTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfi
 // The mapping lives here rather than in `proxy` for the reason ConfigBuilder exists: the
 // proxy package does not depend on the configuration loader.
 func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
+	r := c.Resolved()
+	// The per-wait ping plan (#858) rides on EVERY policy, a parked one too, because a manager
+	// strategy can switch the keep-alive on for an account whose own block has it off, and the plan
+	// then still has to apply. These fields alone never turn the keep-alive on (Policy.On reads
+	// KeepAlive).
+	plan := proxy.CachePolicy{
+		WaitPlan:             c.WaitPlanOn(),
+		ToolWaitMaxPings:     r.KeepAliveToolWaitMaxPings,
+		BackgroundExtraPings: r.KeepAliveBackgroundExtraPings,
+		HumanExtraPings:      r.KeepAliveHumanExtraPings,
+	}
 	// Resolve the defaults only when something is actually switched on. A parked block
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
 	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
 	// nothing rather than asking on every request.
 	if !c.KeepAlive && !c.HeadTTL1h {
-		return proxy.CachePolicy{}
+		return plan
 	}
-	r := c.Resolved()
 	return proxy.CachePolicy{
-		KeepAlive:       c.KeepAlive,
-		Idle:            time.Duration(r.KeepAliveIdleSeconds) * time.Second,
-		OpenAIIdle:      time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
-		MaxPings:        r.KeepAliveMaxPings,
-		Idle1h:          time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
-		MaxPings1h:      r.KeepAliveMaxPings1h,
-		MaxUSDPerPing:   r.KeepAliveMaxUSDPerPing,
-		MinPrefixTokens: r.KeepAliveMinPrefixTokens,
-		HeadTTL1h:       c.HeadTTL1h,
-		HeadTTLMinBytes: headTTLMin(c.HeadTTL1h, r.HeadTTLMinBytes),
+		WaitPlan:             plan.WaitPlan,
+		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
+		BackgroundExtraPings: plan.BackgroundExtraPings,
+		HumanExtraPings:      plan.HumanExtraPings,
+		KeepAlive:            c.KeepAlive,
+		Idle:                 time.Duration(r.KeepAliveIdleSeconds) * time.Second,
+		OpenAIIdle:           time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
+		MaxPings:             r.KeepAliveMaxPings,
+		Idle1h:               time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
+		MaxPings1h:           r.KeepAliveMaxPings1h,
+		MaxUSDPerPing:        r.KeepAliveMaxUSDPerPing,
+		MinPrefixTokens:      r.KeepAliveMinPrefixTokens,
+		HeadTTL1h:            c.HeadTTL1h,
+		HeadTTLMinBytes:      headTTLMin(c.HeadTTL1h, r.HeadTTLMinBytes),
 	}
 }
 

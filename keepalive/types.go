@@ -159,6 +159,18 @@ type Policy struct {
 	// PredictorThreshold is the minimum probability PredictorID must return. Ignored
 	// while PredictorID is "".
 	PredictorThreshold float64
+	// WaitPlan turns on the per-wait ping plan (waitplan.go, #858): the ping count follows what the
+	// thread waits for, time windows apply only to a wait for a person, the sweep question is not
+	// asked during a tool wait, and a thread with no tool call yet is not pinged. False is the
+	// behavior before #858: MaxPings for every wait. The zero Policy has it off, so a host that builds a
+	// Policy by hand keeps the old behavior until it asks.
+	WaitPlan bool
+	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
+	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
+	// while WaitPlan is on.
+	ToolWaitMaxPings     int
+	BackgroundExtraPings int
+	HumanExtraPings      int
 	// ManualHold is the host's reading of an opt-in on THIS request (the proxy: the
 	// x-context-guru-ping header): keep this thread for the Ping button even though no automatic
 	// ping will be sent for it. It never turns the schedule on, and never widens what is held: the

@@ -74,13 +74,24 @@ func (k *keeper) clockNow() time.Time {
 // resolved at record time) and resolveHeadTTL (the write-tier half, resolved on the
 // request path) need, so the two can never disagree about which strategy won.
 func (k *keeper) bestStrategyFor(tenantID string, now time.Time) *tenant.Strategy {
+	return k.bestStrategy(tenantID, now, false)
+}
+
+// bestStrategy is bestStrategyFor with the time windows optionally ignored (#858): the
+// highest-priority ACTIVE strategy that targets tenantID, as if its window matched. The same
+// priority rule (betterStrategy) picks among them.
+func (k *keeper) bestStrategy(tenantID string, now time.Time, ignoreWindows bool) *tenant.Strategy {
 	k.mu.Lock()
 	strategies := k.strategies
 	k.mu.Unlock()
 	var best *tenant.Strategy
 	for i := range strategies {
 		s := &strategies[i]
-		if !s.Matches(now, tenantID) {
+		if ignoreWindows {
+			if !s.Active || !s.Target.Covers(tenantID) {
+				continue
+			}
+		} else if !s.Matches(now, tenantID) {
 			continue
 		}
 		if best == nil || betterStrategy(s, best) {
@@ -121,7 +132,16 @@ func (k *keeper) strategyTZFor(tenantID string) string {
 // for its whole lifetime, exactly as overrideFor's own resolution already is: a strategy
 // whose window closes mid-hold does not retroactively un-arm a ping already scheduled.
 func (k *keeper) applyStrategy(tenantID string, pol CachePolicy, now time.Time) (CachePolicy, string) {
-	best := k.bestStrategyFor(tenantID, now)
+	return k.applyStrategyWindows(tenantID, pol, now, false)
+}
+
+// applyStrategyWindows is applyStrategy with the time windows optionally ignored (#858). Windows
+// describe when a person answers, so they gate only a wait for a person. For any other wait the
+// caller passes ignoreWindows, and the strategy that targets the tenant applies at any hour; with no
+// such strategy the account config applies, as before. The wait cause is known here because the
+// strategy is resolved at record time, from the response that ended the turn.
+func (k *keeper) applyStrategyWindows(tenantID string, pol CachePolicy, now time.Time, ignoreWindows bool) (CachePolicy, string) {
+	best := k.bestStrategy(tenantID, now, ignoreWindows)
 	if best == nil {
 		return pol, ""
 	}

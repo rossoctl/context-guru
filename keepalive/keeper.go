@@ -134,6 +134,11 @@ type kaEntry struct {
 	usageOK      bool
 	// terminal is Options.TerminalTools as of record time (#857).
 	terminal []string
+	// wait is the wait cause this entry's pings were planned for (waitplan.go, #858). "" when the
+	// plan did not apply (plan off, a 1-hour thread, OpenAI). The sweep question reads it.
+	wait string
+	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
+	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
 	// (endsAtTextTurn, #776): roles and block types only. Never on OpenAI: its cache has no breakpoints
 	// and no text-turn rule, so a substitute there renews the prefix like a ping. Then the sweep's question cannot renew the
@@ -322,6 +327,10 @@ func (e *kaEntry) pingable() bool {
 	if e.isDone() {
 		return false
 	}
+	// A thread with no tool call yet is not pinged (#858): it may be a side call.
+	if e.noTool {
+		return false
+	}
 	if e.pol.PredictorID == "" {
 		return true
 	}
@@ -456,6 +465,9 @@ type Keeper struct {
 	// turn that only READS the cache bills no write, so it carries no tier of its own and
 	// inherits this. Written beside turns, so it is bounded and reset exactly as turns is.
 	tier1h map[string]bool
+	// toolSeen remembers, per THREAD (keyed like live), that a response of it called a tool (#858).
+	// Bounded and reset exactly as turns is.
+	toolSeen map[string]bool
 	// lastVary is, per THREAD (keyed like live), the output-budget step of the last ping actually
 	// handed to the Dispatcher. It outlives the entry, as turns does, so a new entry on the same
 	// thread never repeats the step its predecessor last sent (#706, #712 review). Bounded and reset
@@ -552,7 +564,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -629,6 +641,7 @@ func (k *Keeper) Shutdown() {
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
+	k.toolSeen = map[string]bool{}
 	k.lastVary = map[string]int{}
 }
 
@@ -881,6 +894,20 @@ func (k *Keeper) Record(r Record) {
 	if ttl1h && pol.On() {
 		pol = pol.ForOneHour()
 	}
+	// The per-wait ping plan (#858): the count follows what the thread waits for. The wait cause is read
+	// for every thread the plan covers (the sweep gate and the dashboard use it); the COUNT changes only
+	// on the 5-minute tier. A 1-hour thread keeps its own bounded schedule, and OpenAI pings 28 minutes
+	// apart, so more pings would hold the credential for hours. A strategy that asks for the 1-hour head
+	// tier carries a 1-hour Idle even when the gateway granted 5 minutes; its count is the manager's.
+	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
+	planned := guard && !ttl1h && pol.Idle < 300*time.Second
+	wait := ""
+	if guard {
+		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+	}
+	if planned {
+		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
+	}
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
 	// overwrite the bytes on release without corrupting anything else that might still read
@@ -905,6 +932,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
+		wait:         wait,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -917,6 +945,9 @@ func (k *Keeper) Record(r Record) {
 	// what lets a session's second request be recognised as such.
 	k.turns[key]++
 	e.turn = k.turns[key] - 1
+	seen := k.toolSeen[key] || calledATool(r.ToolUseNames, r.ToolUseIncomplete, u.StopReason)
+	k.toolSeen[key] = seen
+	e.noTool = guard && !seen
 	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
 	if usageOK && (u.CacheWrite > 0 || ttl1h) {
 		k.tier1h[key] = ttl1h
@@ -926,6 +957,7 @@ func (k *Keeper) Record(r Record) {
 		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
+		k.toolSeen = map[string]bool{key: seen}
 		// Keep the step of every thread that still holds a live entry, and of this one: a live
 		// thread that lost its step would send its next ping at step 0, the same bytes as a ping 1
 		// it may have just sent (#712 review). k.live is bounded, so this stays bounded too.
@@ -1157,6 +1189,7 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.live, key)
 		delete(k.turns, key)
 		delete(k.tier1h, key)
+		delete(k.toolSeen, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	// Every step the tenant's threads left, including threads with no live entry: lastVary has no
@@ -2079,7 +2112,7 @@ func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
 	}
 	tk := thread.Key(e.session, e.thread)
 	_, _, hasSummary := offload.KeepAliveCandidateState(tk)
-	return hasSummary || offload.HasSweepPingCandidate(tk)
+	return hasSummary || (!e.toolWait() && offload.HasSweepPingCandidate(tk))
 }
 
 // fireExtra sends the one extra request (kaEntry.extraDue) under the same claim, ceilings and latches

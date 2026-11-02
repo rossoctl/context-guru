@@ -369,7 +369,15 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
 				string(provider), startedAt, body, r.UserAgent(), u)
 		}
-		pol, applied = k.resolvePolicy(tn, session, provider, pol, pdec, pdecOK)
+		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
+		// cause of the response that ended this turn.
+		ignoreWindows := false
+		if pol.WaitPlan && tracked {
+			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
+				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
+			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
+		}
+		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
@@ -407,7 +415,8 @@ func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelPro
 		provider == bschemas.OpenAI || session == "" {
 		return false
 	}
-	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
+	// Windows are ignored: the wait cause is not known yet, and a non-person wait is pinged at any hour (#858).
+	pol, _ := k.resolvePolicyWindows(tn, session, provider, tn.Cache, predDecision{}, false, tn.Cache.WaitPlan)
 	return pol.On()
 }
 
@@ -415,6 +424,12 @@ func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelPro
 // policy — the old record's policy block, unchanged.
 func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.ModelProvider,
 	pol CachePolicy, pdec predDecision, pdecOK bool) (CachePolicy, string) {
+	return k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, false)
+}
+
+// resolvePolicyWindows is resolvePolicy with the strategy's time windows optionally ignored (#858).
+func (k *keeper) resolvePolicyWindows(tn *Tenancy, session string, provider bschemas.ModelProvider,
+	pol CachePolicy, pdec predDecision, pdecOK bool, ignoreWindows bool) (CachePolicy, string) {
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
 	// A matching ACTIVE strategy forces KeepAlive on and replaces Idle/MaxPings/
@@ -422,11 +437,12 @@ func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.Mo
 	// override, which still wins on top and still cannot widen MaxUSDPerPing.
 	applied := ""
 	if provider != bschemas.OpenAI {
-		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		pol, applied = k.applyStrategyWindows(tn.ID, pol, k.now(), ignoreWindows)
 		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
-		// explicit instruction).
+		// explicit instruction). The campaign owns the count, so the per-wait plan is off for it (#858).
 		if pdecOK && applied == "" && pdec.active {
 			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+			pol.WaitPlan = false
 		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads

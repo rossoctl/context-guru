@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
 )
 
 const docWithKey = "preset: off\ncache:\n  keepalive_terminal_tools: []\n"
@@ -32,5 +33,19 @@ func TestTenantDocumentRefusesTerminalTools(t *testing.T) {
 func TestHostConfigWithTerminalToolsStillBuilds(t *testing.T) {
 	if _, err := buildTenantConfig([]byte(docWithKey), components.NopEmitter{}); err != nil {
 		t.Fatalf("local rebuild of a host config with the key: %v", err)
+	}
+}
+
+// #858: the wait-plan fields reach the policy, also for a parked account block (a manager strategy can
+// switch the keep-alive on for it), and the off switch reaches it.
+func TestCachePolicyCarriesTheWaitPlan(t *testing.T) {
+	p := cachePolicy(config.CacheConfig{})
+	if !p.WaitPlan || p.On() || p.ToolWaitMaxPings != 8 || p.BackgroundExtraPings != 3 || p.HumanExtraPings != 1 {
+		t.Errorf("parked block: %+v", p)
+	}
+	off := false
+	p = cachePolicy(config.CacheConfig{KeepAlive: true, KeepAliveWaitPlan: &off})
+	if p.WaitPlan || !p.On() || p.MinPrefixTokens != 20000 {
+		t.Errorf("switch off: %+v", p)
 	}
 }

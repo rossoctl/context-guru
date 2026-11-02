@@ -60,12 +60,47 @@ cache:
   keepalive_idle_seconds: 240          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
-  keepalive_min_prefix_tokens: 80000   # the gate
+  keepalive_min_prefix_tokens: 20000   # the gate (80000 before #858)
   keepalive_max_usd_per_ping: 0.50
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
   keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
+  keepalive_wait_plan: true            # false: one fixed K for every wait, as before #858
+  keepalive_tool_wait_max_pings: 8     # a tool wait: ping until the result comes, at most this many
+  keepalive_background_extra_pings: 3  # end_turn, waiting for background work: K + 3
+  keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
+
+### The ping count follows what the thread waits for
+
+When a turn ends, the proxy picks the ping count from what the thread waits for (#858). "K" is
+`keepalive_max_pings` (2 by default). It reads only metadata: the stop reason, the tool names, the
+open-task counts, and whether the thread id starts with `a:` (a subagent).
+
+| The thread waits for | Pings | Time windows apply? |
+|---|---|---|
+| Its own tool (main or subagent) | until the result comes, at most 8 | No |
+| Main, `end_turn`, background work | K + 3 | No |
+| Main, `end_turn`, a teammate | K | No |
+| Subagent, `end_turn` or `SubagentHandback` (its main agent) | K | No |
+| Main, `end_turn`, a person | K + 1 | **Yes, only this row** |
+| Finished (`done`, #857), or **no tool call yet on the thread** | 0 | - |
+
+- **Time windows** (manager strategies) describe when a person answers. They gate only a wait for a
+  person. For any other wait, the highest-priority active strategy that targets the tenant applies at any
+  hour. With no such strategy, the account config applies, as before.
+- **The sweep question** is not asked while a thread waits for its own tool. That span stays warm until
+  the result comes back, so a cut can never follow. It is asked on a span that began with `end_turn`.
+  The rule "keep-alive never shortens the cache strategy" is unchanged.
+- **The hold limit** is still `(K+1) x X` with K at most 11 and X under 290 s, so at most 58 minutes. A
+  tool wait of 8 pings at 240 to 280 s holds at most 42 minutes. The plan never goes above 11 pings, unless
+  K itself is higher, and it never lowers K.
+- **Not covered:** a 1-hour thread keeps its own schedule. A session override or an active learned
+  campaign sets its own count, and the plan does not change it.
+- **One switch:** `keepalive_wait_plan: false` brings back one fixed K for every wait, time windows for
+  every wait, sweep questions as before, and pings for a thread with no tool call yet. It does not bring
+  back the 80,000 minimum prefix. The default is now 20,000 (`keepalive_min_prefix_tokens`). A value set
+  by a user or a strategy is not changed.
 
 ### No pings after the final answer
 
