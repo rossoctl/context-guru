@@ -61,6 +61,8 @@ func TestProbeVerdicts(t *testing.T) {
 		}}, Fail, false},
 		"400 unknown variant": {&fakeD{status: 400, resp: func([]byte) []byte { return []byte(`{"error":{}}`) }}, Fail, false},
 		"429 is no verdict":   {&fakeD{status: 429, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"401 is no verdict":   {&fakeD{status: 401, resp: func([]byte) []byte { return nil }}, Unknown, true},
+		"403 is no verdict":   {&fakeD{status: 403, resp: func([]byte) []byte { return nil }}, Unknown, true},
 		"transport error":     {&fakeD{err: errors.New("boom")}, Unknown, true},
 	} {
 		v, err := RunProbe(context.Background(), tc.d, "r", "", "claude-sonnet-5-5")
@@ -327,6 +329,7 @@ func TestProbeVerdictPersists(t *testing.T) {
 		t.Fatal("verdict not seeded after a restart")
 	}
 	p.Persist = m.SaveVerdict
+	p.Go = func(fn func()) { fn() } // run the background removal inline
 	p.Forget(k)
 	p2 := NewProber()
 	m.LoadVerdicts(p2)
@@ -384,6 +387,68 @@ func TestHistoryUserSessionsReturnsCopies(t *testing.T) {
 	if after := len(got[0].Used) + len(got[1].Used) + len(got[2].Used); after != before {
 		t.Fatalf("UserSessions returned live maps: %d uses before a later Observe, %d after", before, after)
 	}
+}
+
+// A Fail verdict is re-probed once it is older than ProbeTTL: one bad answer must not keep
+// deferral off forever (it is also kept across restarts).
+func TestStaleFailVerdictIsReprobed(t *testing.T) {
+	e := env(threeUnused())
+	k := ProbeKey{"u", "m", "r"}
+	now := time.Unix(5000, 0)
+	e.Prober.now = func() time.Time { return now }
+	e.Prober.Seed(k, Fail, now)
+	o := Apply(e, req(body(catalogue(), "")))
+	if o.Changed || o.NeedProbe {
+		t.Fatalf("a fresh Fail: %s", show(o))
+	}
+	now = now.Add(ProbeTTL + time.Minute)
+	if !e.Prober.Stale(k) {
+		t.Fatal("not stale after ProbeTTL")
+	}
+	r := req(body(catalogue(), ""))
+	r.Session = "s2"
+	if o = Apply(e, r); !o.NeedProbe {
+		t.Fatalf("a stale Fail asked for no re-probe: %s", show(o))
+	}
+	// The re-probe passes: the next new thread defers.
+	e.Prober.Ensure(k, func(context.Context) (Verdict, error) { return Pass, nil })
+	r.Session = "s3"
+	if o = Apply(e, r); !o.Changed || o.NeedProbe {
+		t.Fatalf("after a passing re-probe: %s", show(o))
+	}
+}
+
+// Forget runs on the request path: it must not wait on the kept copy.
+func TestForgetDoesNotPersistOnTheCaller(t *testing.T) {
+	p := NewProber()
+	var ran func()
+	p.Go = func(fn func()) { ran = fn } // the background runner, held
+	block := make(chan struct{})
+	called := make(chan struct{}, 1)
+	p.Persist = func(ProbeKey, Verdict, time.Time) { called <- struct{}{}; <-block }
+	k := ProbeKey{"u", "m", "r"}
+	p.Seed(k, Pass, time.Now())
+	done := make(chan struct{})
+	go func() { p.Forget(k); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Forget waited on Persist")
+	}
+	if p.Verdict(k) != Unknown {
+		t.Fatal("Forget kept the verdict in memory")
+	}
+	select {
+	case <-called:
+		t.Fatal("Persist ran on the caller")
+	default:
+	}
+	if ran == nil {
+		t.Fatal("the kept copy is never removed")
+	}
+	close(block)
+	go ran()
+	<-called
 }
 
 func TestNormProject(t *testing.T) {

@@ -46,7 +46,7 @@ type Outcome struct {
 	// Decided is true on the request that made the thread's decision; Rebuilt when the decision
 	// came from Rebuild after a store miss.
 	Decided, Rebuilt bool
-	// NeedProbe asks the host to start a probe for Req.Probe (the verdict is unknown).
+	// NeedProbe asks the host to start a probe for Req.Probe (no verdict, or a stale one).
 	NeedProbe bool
 }
 
@@ -96,13 +96,15 @@ func Apply(env Env, r Req) (o Outcome) {
 		v := Pass
 		if env.Prober != nil {
 			v = env.Prober.Verdict(r.Probe)
+			// No verdict, or one older than ProbeTTL (a Pass or a Fail): ask the host to re-probe. A
+			// stale verdict is still used until the new one lands; a Fail must not last forever.
+			o.NeedProbe = v == Unknown || env.Prober.Stale(r.Probe)
 		}
 		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep}
 		switch {
 		case !HasAssistantTurn(r.Orig):
 			// The thread's first request: it writes the cache anyway, so this is when to decide.
 			if v != Pass {
-				o.NeedProbe = v == Unknown
 				o.Why = "probe_" + v.String()
 				rec = Record{} // decided: nothing, for this whole thread
 			} else {
@@ -115,7 +117,6 @@ func Apply(env Env, r Req) (o Outcome) {
 			o.Decided, o.Rebuilt = true, true
 		default:
 			// Mid-thread, no record and no proof the provider supports deferral: send the original.
-			o.NeedProbe = v == Unknown
 			o.Why = "probe_" + v.String()
 			rec = Record{}
 			o.Decided = true

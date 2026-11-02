@@ -115,6 +115,14 @@ func (p *Prober) Verdict(k ProbeKey) Verdict {
 	return Unknown
 }
 
+// Stale reports whether k's verdict is older than ProbeTTL. False when there is none.
+func (p *Prober) Stale(k ProbeKey) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.m[k]
+	return e != nil && e.v != Unknown && p.now().Sub(e.at) > ProbeTTL
+}
+
 // Ensure starts a probe for k in the background when none is fresh and none is running. send is
 // called once, off the request path.
 func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, error)) {
@@ -153,12 +161,17 @@ func (p *Prober) Ensure(k ProbeKey, send func(ctx context.Context) (Verdict, err
 
 // Forget drops k's verdict, so the next request probes again. Called after a 4xx on a changed
 // request.
+//
+// It runs on the request path, before the retry of the original request, so it only clears the
+// memory. The kept copy is removed on the background runner (Go): a database write here would make
+// the client wait on exactly the path that exists to hide the 400.
 func (p *Prober) Forget(k ProbeKey) {
 	p.mu.Lock()
 	delete(p.m, k)
+	now := p.now()
 	p.mu.Unlock()
-	if p.Persist != nil {
-		p.Persist(k, Unknown, p.now())
+	if persist := p.Persist; persist != nil {
+		p.Go(func() { persist(k, Unknown, now) })
 	}
 }
 
@@ -230,7 +243,10 @@ func RunProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path
 	if err != nil {
 		return Unknown, err
 	}
-	if resp.Status == http.StatusTooManyRequests || resp.Status >= 500 {
+	// No verdict for a rate limit, a server error, or a credential the gateway refused (401/403):
+	// none of them says whether the provider supports deferral.
+	if resp.Status == http.StatusTooManyRequests || resp.Status >= 500 ||
+		resp.Status == http.StatusUnauthorized || resp.Status == http.StatusForbidden {
 		return Unknown, errStatus(resp.Status)
 	}
 	if resp.Status != http.StatusOK {
