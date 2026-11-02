@@ -131,9 +131,12 @@ func TestCanPingKeepsWindowsAndRefusesAThreadWithNoToolCall(t *testing.T) {
 		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
 	}})
 	acct := &Tenancy{ID: "t1", Cache: CachePolicy{WaitPlan: true}} // keep-alive off on the account
+	// A tool call was seen, so only the window decides here.
+	recordResp(t, k, CachePolicy{WaitPlan: true}, "", now, Usage{StopReason: "tool_use", ToolUseNames: []string{"Bash"}})
 	if k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
 		t.Error("window closed, account off: canPing = true, so a copy would be kept for a thread that never pings")
 	}
+	k.Keeper.Forget("t1")
 	// Open window, but no tool call yet on the thread.
 	k.setStrategies([]tenant.Strategy{{
 		ID: "s", Active: true, IdleSeconds: 240, MaxPings: 2, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
