@@ -13,8 +13,8 @@ import (
 
 // This file plays every opscases.Case through the path the proxy uses (Trackers, Request.Add of
 // every op with replays included, Compute, Event.SetCounterfactual, Event.CounterfactualFigure) and
-// compares the dollars with the case's expected figures. It lives in package dash_test, beside
-// Play, because the helpers it reuses (priceOf, micros, expected, abs) are in that package.
+// compares the dollars with the case's expected figures. It lives in package dash_test, with
+// the helpers it reuses (priceOfCF, microsCF, expectedCF, absCF) in cfhelpers_test.go.
 
 // PlayedCF is the proxy path's figure for one step, in micro-dollars.
 type PlayedCF struct {
@@ -56,12 +56,12 @@ func PlayCF(c opscases.Case) []PlayedCF {
 		res := req.Compute(s.Usage)
 		e := &dash.Event{}
 		e.SetCounterfactual(res)
-		fig := e.CounterfactualFigure(priceOf(c.StepRate(s)))
-		p := PlayedCF{ByComponent: map[string]int64{}, Unattrib: micros(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
+		fig := e.CounterfactualFigure(priceOfCF(c.StepRate(s)))
+		p := PlayedCF{ByComponent: map[string]int64{}, Unattrib: microsCF(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
 		for k, v := range fig.ByComponent {
-			p.ByComponent[k] = micros(v)
+			p.ByComponent[k] = microsCF(v)
 		}
-		p.NetMicro = micros(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - opscases.RoundMicros(spend)
+		p.NetMicro = microsCF(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - opscases.RoundMicros(spend)
 		out = append(out, p)
 	}
 	return out
@@ -154,17 +154,17 @@ func expectedByComponent(c opscases.Case, s opscases.Step, comps map[string]stri
 // not derivable from CFFigure (it sums by component), so the expected per-ChangeID figures are
 // summed to their component, and a ChangeID that names no component (a keep-alive window, a
 // spend) is skipped.
-func CompareCF(c opscases.Case, played []PlayedCF) (diffs []diff) {
+func CompareCF(c opscases.Case, played []PlayedCF) (diffs []diffCF) {
 	comps := componentsOf(c)
 	var wantTotal, gotTotal int64
 	for i, s := range c.Steps {
-		want, _ := expected(c, s)
+		want, _ := expectedCF(c, s)
 		wantComp := expectedByComponent(c, s, comps)
 		got := played[i]
 		wantTotal += want
 		gotTotal += got.NetMicro
-		if abs(got.NetMicro-want) > 1 {
-			diffs = append(diffs, diff{i, "", fmt.Sprintf("step %d: expected %d µ$, proxy path %d µ$", i, want, got.NetMicro)})
+		if absCF(got.NetMicro-want) > 1 {
+			diffs = append(diffs, diffCF{i, "", fmt.Sprintf("step %d: expected %d µ$, proxy path %d µ$", i, want, got.NetMicro)})
 		}
 		names := map[string]bool{}
 		for k := range wantComp {
@@ -182,13 +182,13 @@ func CompareCF(c opscases.Case, played []PlayedCF) (diffs []diff) {
 			if sharedComp(c, k) {
 				continue // see componentsOf
 			}
-			if abs(got.ByComponent[k]-wantComp[k]) > 1 {
-				diffs = append(diffs, diff{i, k, fmt.Sprintf("step %d component %s: expected %d µ$, proxy path %d µ$", i, k, wantComp[k], got.ByComponent[k])})
+			if absCF(got.ByComponent[k]-wantComp[k]) > 1 {
+				diffs = append(diffs, diffCF{i, k, fmt.Sprintf("step %d component %s: expected %d µ$, proxy path %d µ$", i, k, wantComp[k], got.ByComponent[k])})
 			}
 		}
 	}
-	if abs(gotTotal-wantTotal) > 1 {
-		diffs = append(diffs, diff{-1, "", fmt.Sprintf("thread total: expected %d µ$, proxy path %d µ$", wantTotal, gotTotal)})
+	if absCF(gotTotal-wantTotal) > 1 {
+		diffs = append(diffs, diffCF{-1, "", fmt.Sprintf("thread total: expected %d µ$, proxy path %d µ$", wantTotal, gotTotal)})
 	}
 	return diffs
 }
@@ -246,11 +246,11 @@ func TestProxyPathMatchesOpscases(t *testing.T) {
 			// break CFFigure reports, and the thread total may differ only by the sum of those.
 			var wantTotalGap int64
 			for _, st := range known.Unattrib {
-				want, _ := expected(c, c.Steps[st])
+				want, _ := expectedCF(c, c.Steps[st])
 				gap := played[st].NetMicro - want
-				if gap == 0 || abs(gap) <= 1 && played[st].Unattrib == 0 {
+				if gap == 0 || absCF(gap) <= 1 && played[st].Unattrib == 0 {
 					t.Errorf("step %d is listed as unattributed but the net agrees: remove it", st)
-				} else if abs(gap-played[st].Unattrib) > 1 {
+				} else if absCF(gap-played[st].Unattrib) > 1 {
 					t.Errorf("step %d: net gap %d µ$ is not the unattributed break %d µ$", st, gap, played[st].Unattrib)
 				}
 				wantTotalGap += played[st].Unattrib
@@ -268,11 +268,11 @@ func TestProxyPathMatchesOpscases(t *testing.T) {
 			if listed && len(known.Unattrib) > 0 {
 				var wantT, gotT int64
 				for i, st := range c.Steps {
-					w, _ := expected(c, st)
+					w, _ := expectedCF(c, st)
 					wantT += w
 					gotT += played[i].NetMicro
 				}
-				if abs((gotT-wantT)-wantTotalGap) > 1 {
+				if absCF((gotT-wantT)-wantTotalGap) > 1 {
 					t.Errorf("thread total gap %d µ$ is not the unattributed sum %d µ$", gotT-wantT, wantTotalGap)
 				}
 			}

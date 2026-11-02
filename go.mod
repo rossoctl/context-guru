@@ -12,6 +12,9 @@ require github.com/rossoctl/context-guru/counterfactual v0.0.0
 
 replace github.com/rossoctl/context-guru/counterfactual => ./counterfactual
 
+// accountant prices context operations. This module's tests import it and its shared test cases.
+require github.com/rossoctl/accountant v0.1.0
+
 require (
 	github.com/alexaandru/go-sitter-forest/c v1.9.4
 	github.com/alexaandru/go-sitter-forest/c_sharp v1.9.6
