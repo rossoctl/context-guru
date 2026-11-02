@@ -428,6 +428,11 @@ func TestAgentClassification(t *testing.T) {
 		"Gemini-CLI/1.0":                    "gemini-cli",
 		"":                                  "unknown",
 		"curl/8.5.0":                        "curl",
+		"codex_exec/0.160.1":                "codex",
+		// Bob's real User-Agents, seen live 2026-11-02 (IDE 2.3.0, Bob Shell 2.2.1).
+		"IBM Bob/2.3.0": "bob",
+		"ai-sdk/openai-compatible/3.0.36 ai-sdk/provider-utils/5.0.29 runtime/node.js/v24.15.0 IBM Bob/2.3.0": "bob",
+		"bob-shell/2.2.1": "bob",
 		"SomeVeryLongUnknownAgentNameWithNoDelimiterAtAllThatKeepsGoingForever": "someverylongunknownagentnamewith",
 	}
 	for ua, want := range cases {

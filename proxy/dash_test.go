@@ -278,6 +278,49 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 	}
 }
 
+// The dashboard and insights group rows by agent. Bob's real User-Agents (seen live
+// 2026-11-02) must land as "bob" through the capture path, and others must stay as they are.
+func TestDashboardLabelsBobUserAgentsAsBob(t *testing.T) {
+	cases := map[string]string{
+		"IBM Bob/2.3.0": "bob",
+		"ai-sdk/openai-compatible/3.0.36 ai-sdk/provider-utils/5.0.29 runtime/node.js/v24.15.0 IBM Bob/2.3.0": "bob",
+		"bob-shell/2.2.1":                   "bob",
+		"claude-cli/2.0.14 (external, cli)": "claude-cli",
+		"codex_exec/0.160.1":                "codex",
+	}
+	for ua, want := range cases {
+		t.Run(ua, func(t *testing.T) {
+			up := fakeUpstream(t)
+			defer up.Close()
+			h, rec := dashHandler(t, up.URL, dash.Options{})
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+				strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", ua)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			waitForRows(t, rec, 1)
+
+			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if page.Total != 1 {
+				t.Fatalf("captured %d rows; want 1", page.Total)
+			}
+			if got := page.Requests[0].Agent; got != want {
+				t.Errorf("agent = %q; want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestDashboardCapturesABypassedRequest(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
