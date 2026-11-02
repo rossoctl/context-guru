@@ -67,3 +67,31 @@ func TestCustomTerminalList(t *testing.T) {
 		t.Fatalf("custom terminal tool was pinged (%d)", n)
 	}
 }
+
+// A spliced sniff window may hide the true last call: the thread is never done then (#857).
+func TestIncompleteToolNamesAreNeverDone(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	start := clock.now()
+	for i, ts := range []time.Time{start.Add(-time.Second), start} {
+		r := Record{Key: sess1, StartedAt: ts, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: http.StatusOK,
+			Usage:   Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "tool_use"},
+			UsageOK: true, Policy: kaPolicy(), Header: kaHeader(), Hold: fakeOf(k).hold(sess1)}
+		if i == 1 {
+			r.ToolUseNames, r.ToolUseIncomplete = []string{"StructuredOutput"}, true
+		}
+		k.Record(r)
+	}
+	if n := k.Sweep(start.Add(280 * time.Second)); n != 1 {
+		t.Fatalf("a thread with an incomplete name list was not pinged (%d)", n)
+	}
+}
+
+// A done thread is refused with its own reason, not "below limits".
+func TestDoneThreadHasItsOwnRefuseReason(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	recordWithTools(k, clock.now(), []string{"StructuredOutput"})
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonDone {
+		t.Fatalf("got %+v, want reason %q", st, ReasonDone)
+	}
+}

@@ -59,6 +59,7 @@ const (
 	ReasonPingsUsed   = "pings used"   // the planned pings ran out and the keeper let go of the thread
 	ReasonStopped     = "stopped"      // the keeper stopped the thread after a miss, a refused ping or a failure
 	ReasonBelowLimits = "below limits" // the automatic gates refused it: first request, under the minimum prefix, or the predictor
+	ReasonDone        = "done"         // the thread's last response ended with a terminal tool (#857): the agent is finished, so nothing is pinged
 	ReasonNoEntry     = "no entry"     // nothing is known about the thread: a restart, or no request since
 	ReasonUnavailable = "unavailable"  // the route is failing in a row, or the provider refused this credential
 )

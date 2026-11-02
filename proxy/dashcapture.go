@@ -506,6 +506,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	if usage.ToolUseIncomplete {
+		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
+	}
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.

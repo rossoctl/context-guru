@@ -41,30 +41,31 @@ const (
 	WaitingBackground = "background"
 	WaitingTeammate   = "teammate"
 	WaitingRetry      = "retry"
-	// WaitingDone: the response's LAST tool_use is a terminal tool (DefaultTerminalTools). The
+	// WaitingDone: the response's LAST tool_use is a terminal tool (the shipped list). The
 	// thread has finished and no tool result will come back (#857).
 	WaitingDone    = "done"
 	WaitingUnknown = "unknown"
 )
 
-// DefaultTerminalTools are the tools whose call ENDS an agent: after one, no tool_result ever
+// defaultTerminalTools are the tools whose call ENDS an agent: after one, no tool_result ever
 // comes back (#857). Measured on the hosted proxy: every thread whose last call was
 // StructuredOutput stopped there (226 of 226). A short list is safer than a guess, so a name joins
 // it only with evidence.
-var DefaultTerminalTools = []string{"StructuredOutput"}
+var defaultTerminalTools = []string{"StructuredOutput"}
+
+// DefaultTerminalTools returns a copy of the shipped terminal-tool list.
+func DefaultTerminalTools() []string { return append([]string(nil), defaultTerminalTools...) }
+
+// defaultTerminalSet is the shipped list as a lookup, built once.
+var defaultTerminalSet = terminalSet(defaultTerminalTools)
 
 // handbackTools are tools that hand work back to the main agent. The subagent then waits for its
 // main agent, not for a tool, so they classify like end_turn with nothing open (#857). They are
 // not terminal: in 34 of 60 cases the main agent sent more work.
 var handbackTools = map[string]bool{"SubagentHandback": true}
 
-// terminalSet turns a configured list into a lookup. nil means DefaultTerminalTools. A non-nil,
-// empty list means the feature is OFF: no tool is terminal and SubagentHandback keeps the
-// pre-#857 reading (own_tool).
+// terminalSet turns a list into a lookup, dropping empty names.
 func terminalSet(list []string) map[string]bool {
-	if list == nil {
-		list = DefaultTerminalTools
-	}
 	m := make(map[string]bool, len(list))
 	for _, n := range list {
 		if n != "" {
@@ -74,19 +75,25 @@ func terminalSet(list []string) map[string]bool {
 	return m
 }
 
-// IsDone reports whether the LAST tool_use name is in the terminal list (nil list: the default
-// list; empty list: never). Only the last name counts: a terminal tool earlier in the response
-// is followed by another call, so the thread is not finished. Metadata only: tool names.
-func IsDone(toolUseNames []string, terminal []string) (done bool) {
-	defer func() {
-		if recover() != nil {
-			done = false // fail open: keep today's behavior
-		}
-	}()
+// resolveTerminal is the lookup for a configured list. nil means the shipped list. A non-nil list
+// with no usable name (empty, or only empty strings) means the rule is OFF: the set is empty.
+func resolveTerminal(list []string) map[string]bool {
+	if list == nil {
+		return defaultTerminalSet
+	}
+	return terminalSet(list)
+}
+
+// IsDone reports whether the LAST tool_use name is in the terminal list (nil list: the shipped
+// list; a list with no usable name: never). Only the last name counts: a terminal tool earlier in
+// the response is followed by another call, so the thread is not finished. Metadata only: tool
+// names. A host that knows the name list may be incomplete (a spliced sniff window) must pass an
+// empty non-nil list, so the answer is false.
+func IsDone(toolUseNames []string, terminal []string) bool {
 	if len(toolUseNames) == 0 {
 		return false
 	}
-	return terminalSet(terminal)[toolUseNames[len(toolUseNames)-1]]
+	return resolveTerminal(terminal)[toolUseNames[len(toolUseNames)-1]]
 }
 
 // WakeCause values: what ended a wait, read off the request that ends it.
@@ -125,7 +132,8 @@ const teammateWaitCap = 56 * time.Minute
 // ping budget this later work could choose would still be paying for itself).
 const noExpiryCap = teammateWaitCap
 
-// ClassifyWaitingFor turns one response's own facts into a WaitingFor value and, for
+// ClassifyWaitingFor turns one response's own facts into a WaitingFor value, applying the shipped
+// terminal-tool list (#857), and, for
 // WaitingOwnTool, the LAST tool_use block's name (issue #424: "also store the last tool_use's
 // tool name"). toolUseNames is every tool_use/function-call name the response carried, in the
 // order they appeared.
@@ -140,15 +148,17 @@ func ClassifyWaitingFor(toolUseNames []string, stopReason string, failed, usageO
 }
 
 // ClassifyWaitingForTerminal is ClassifyWaitingFor with the terminal-tool list (#857). nil is
-// DefaultTerminalTools; an empty non-nil list switches the #857 rules off. When the LAST tool_use
+// the shipped list; a list with no usable name switches the #857 rules off. When the LAST tool_use
 // is terminal the answer is WaitingDone. When it is a handback tool the answer is the one for an
 // end_turn with nothing else open.
 func ClassifyWaitingForTerminal(terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
 	if failed {
 		return WaitingRetry, ""
 	}
-	if len(terminal) > 0 || terminal == nil {
-		if IsDone(toolUseNames, terminal) {
+	if set := resolveTerminal(terminal); len(set) > 0 {
+		// done wins over open background tasks and teammates: a finished subagent gets no later
+		// notification on its own thread, so nothing it waits on can wake it.
+		if len(toolUseNames) > 0 && set[toolUseNames[len(toolUseNames)-1]] {
 			return WaitingDone, ""
 		}
 		if len(toolUseNames) > 0 && handbackTools[toolUseNames[len(toolUseNames)-1]] {

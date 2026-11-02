@@ -165,7 +165,7 @@ type Options struct {
 	// mixed-TTL head). In hosted mode each tenant's own `cache:` block is used instead.
 	Cache CachePolicy
 	// TerminalTools names the tools whose call ends an agent (#857): the keep-alive plans no pings
-	// for such a thread and its wait cause reads "done". nil: waitcause.DefaultTerminalTools. A
+	// for such a thread and its wait cause reads "done". nil: the shipped list. A
 	// non-nil empty list turns the rule off. Process-wide, also in hosted mode.
 	TerminalTools []string
 	// AuthMode selects how a human authenticates to the control plane. The zero value is

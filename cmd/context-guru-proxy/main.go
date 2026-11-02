@@ -1110,6 +1110,11 @@ func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, err
 	if err != nil {
 		return proxy.BuiltConfig{}, err
 	}
+	// The terminal-tool list is host config only (#857): it is read once for the whole process.
+	// A tenant document that sets it would be ignored, so refuse it with a clear error.
+	if cfg.Cache.KeepAliveTerminalTools != nil {
+		return proxy.BuiltConfig{}, fmt.Errorf("cache.keepalive_terminal_tools is host configuration; a tenant document cannot set it")
+	}
 	preset := cfg.Preset
 	if preset == "" {
 		preset = "custom" // an explicit pipeline list; labelled so the dashboard can group it

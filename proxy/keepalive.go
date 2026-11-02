@@ -389,7 +389,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	recorded = true

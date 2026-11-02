@@ -56,6 +56,9 @@ type Usage struct {
 	// case this is best-effort, not exhaustive, and the row reads a weaker signal
 	// (background/teammate/human from open state) rather than own_tool, never a guess).
 	ToolUseNames []string
+	// ToolUseIncomplete is true when ToolUseNames may miss the true last call, because the bytes
+	// read were a spliced head+tail sniff window. The terminal-tool rule never applies then (#857).
+	ToolUseIncomplete bool
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -367,6 +370,7 @@ func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, usa
 	}
 	u.StopReason = responseStopReason(sse, body)
 	u.ToolUseNames = responseToolUseNames(sse, body)
+	u.ToolUseIncomplete = spliced
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.
 	if counter, alertable := usageCounters[why]; alertable {

@@ -269,6 +269,18 @@ func ResolveTier(body []byte, u Usage, usageOK, prev bool) bool {
 	return prev
 }
 
+// terminalFor is the terminal-tool list for one response: the configured one, or an empty one
+// (rule off) when the response's name list may be incomplete (#857).
+func terminalFor(configured []string, incomplete bool) []string {
+	if incomplete {
+		return []string{}
+	}
+	return configured
+}
+
+// isDone: the establishing response ended with a terminal tool (#857).
+func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.terminal) }
+
 // pingable reports whether this session is worth holding state for at all. Every condition is
 // known when the request finishes, which is why it is checked there.
 //
@@ -307,7 +319,7 @@ func (e *kaEntry) pingable() bool {
 	}
 	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
 	// request follows, so a ping only spends money (#857). Tool names only.
-	if waitcause.IsDone(e.toolUseNames, e.terminal) {
+	if e.isDone() {
 		return false
 	}
 	if e.pol.PredictorID == "" {
@@ -340,7 +352,7 @@ type Options struct {
 	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
 	OpenTasks func(tenant, session, thread string) (background, teammate int)
 	// TerminalTools names the tools whose call ends an agent (#857). A thread whose last response
-	// ends with one is done: it is never pinged. nil: waitcause.DefaultTerminalTools. A non-nil
+	// ends with one is done: it is never pinged. nil: the shipped list. A non-nil
 	// empty list turns the rule off, which is the behavior before #857.
 	TerminalTools []string
 }
@@ -370,13 +382,16 @@ type Record struct {
 	// the thread is about to wait on (waitcause.ClassifyWaitingFor), which the sweep's held answer
 	// stores (#404, #453). A field of Record, not of Usage, so Usage stays comparable.
 	ToolUseNames []string
-	Policy       Policy // resolved by the host
-	Tag          string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent        string
-	Preset       string
-	Header       http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store        store.Store
-	Emitter      components.Emitter // nil: components.NopEmitter{}
+	// ToolUseIncomplete: ToolUseNames may miss the true last call (a spliced sniff window). The
+	// terminal-tool rule is then off for this response, so the thread is pinged as before (#857).
+	ToolUseIncomplete bool
+	Policy            Policy // resolved by the host
+	Tag               string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent             string
+	Preset            string
+	Header            http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store             store.Store
+	Emitter           components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -890,7 +905,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: k.o.TerminalTools, endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
+		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
@@ -944,6 +959,9 @@ func (k *Keeper) Record(r Record) {
 			reason := ReasonBelowLimits
 			if e.pingUSD > pol.Ceiling() {
 				reason = ReasonOverBudget
+			}
+			if pol.On() && e.isDone() {
+				reason = ReasonDone
 			}
 			k.setReasonLocked(r.Key, reason)
 			k.skipped.Add(1)
