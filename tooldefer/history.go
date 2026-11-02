@@ -372,7 +372,10 @@ func (m *Mem) UserSessions(tenant, exclude string, n int) []Session {
 		if s.id == exclude {
 			continue
 		}
-		out = append(out, Session{Declared: s.declared, Used: s.used})
+		// Copies, built under the lock: Decide reads them after it returns, while Observe may be
+		// writing the live maps for another request. Live maps here crashed the process
+		// (concurrent map read and map write), which no recover catches.
+		out = append(out, Session{Declared: copySet(s.declared), Used: copySet(s.used)})
 		if len(out) == n {
 			break
 		}
@@ -471,6 +474,14 @@ func (m *Mem) flush() {
 	if err := tx.Commit(); err != nil {
 		slog.Debug("tooldefer: history flush", "err", err)
 	}
+}
+
+func copySet(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func b2i(b bool) int {

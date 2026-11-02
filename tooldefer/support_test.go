@@ -6,7 +6,9 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -330,6 +332,57 @@ func TestProbeVerdictPersists(t *testing.T) {
 	m.LoadVerdicts(p2)
 	if p2.Verdict(k) != Unknown {
 		t.Fatal("Forget left the kept verdict")
+	}
+}
+
+// Observe and Decide run on concurrent requests. UserSessions once returned the live maps, and a
+// Decide reading them while an Observe wrote them was a fatal "concurrent map read and map write".
+func TestHistoryConcurrentObserveAndDecide(t *testing.T) {
+	m := NewMem(nil)
+	m.Open(0, nil)
+	for i, sid := range []string{"a", "b", "c"} {
+		m.Observe("t", sid, "/w", body(catalogue(), ""), int64(i))
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for g := 0; g < 8; g++ {
+		wg.Add(2)
+		go func(g int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 300; i++ {
+				use := fmt.Sprintf(`{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"T%d_%d","input":{}}]}`, g, i)
+				m.Observe("t", "a", "/w", body(catalogue(), "", use), int64(100+i))
+			}
+		}(g)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 300; i++ {
+				Decide(m, Input{Tenant: "t", Session: "z", Project: "/w", Body: body(catalogue(), "")})
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// The deterministic half of the guard above: what UserSessions hands out must not change when the
+// history is written afterwards. Live maps would, and a reader of live maps races every writer.
+func TestHistoryUserSessionsReturnsCopies(t *testing.T) {
+	m := NewMem(nil)
+	m.Open(0, nil)
+	for i, sid := range []string{"a", "b", "c"} {
+		m.Observe("t", sid, "/w", body(catalogue(), ""), int64(i))
+	}
+	got := m.UserSessions("t", "", 3)
+	before := len(got[0].Used) + len(got[1].Used) + len(got[2].Used)
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Fresh","input":{}}]}`
+	for _, sid := range []string{"a", "b", "c"} {
+		m.Observe("t", sid, "/w", body(catalogue(), "", use), 50)
+	}
+	if after := len(got[0].Used) + len(got[1].Used) + len(got[2].Used); after != before {
+		t.Fatalf("UserSessions returned live maps: %d uses before a later Observe, %d after", before, after)
 	}
 }
 
