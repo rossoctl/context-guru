@@ -1274,3 +1274,18 @@ func TestMedianPingUSDFollowsTheRowsModelTier(t *testing.T) {
 		}
 	}
 }
+
+// A row with no model keeps the 1.25x write multiple the back-derivation always used.
+func TestMedianPingUSDEmptyModelKeepsTheOldWriteMultiple(t *testing.T) {
+	evs := kaExpiry(2_000_000, "s1", 700, 1.25, 300_000)
+	for _, e := range evs {
+		e.Model = ""
+	}
+	got, err := newKAFixture(t, evs...).db.medianPingUSD(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-0.10) > 1e-9 {
+		t.Errorf("median ping with no model = %v, want 0.10", got)
+	}
+}

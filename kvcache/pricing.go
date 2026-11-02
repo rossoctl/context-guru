@@ -232,7 +232,10 @@ func NewPriceList(ctx context.Context, models []string, p modelinfo.Pricer, m Mu
 	overrides map[string]Override) *PriceList {
 	userMult := m
 	m = m.WithDefaults()
-	out := &PriceList{Multipliers: m, Models: []Pricing{}, byModel: map[string]Pricing{}}
+	// The read multiple is stored as the caller set it: 0 means "each model's own tier", so one
+	// payload never states 0.1 beside a row priced at 0.05. The write multiples carry their defaults.
+	out := &PriceList{Multipliers: Multipliers{CacheRead: userMult.CacheRead, Write5m: m.Write5m,
+		Write1h: m.Write1h}, Models: []Pricing{}, byModel: map[string]Pricing{}}
 	seen := map[string]bool{}
 	uniq := make([]string, 0, len(models))
 	for _, name := range models {

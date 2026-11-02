@@ -217,3 +217,17 @@ func TestFromPriceBlankReadFollowsTheModelTier(t *testing.T) {
 		t.Errorf("NewPriceList cache_read = %v, want 0.05x", got)
 	}
 }
+
+// PriceList.Multipliers states the read multiple as set (0 = per model), never a 0.1 that the
+// rows contradict.
+func TestPriceListStatesTheReadMultipleAsSet(t *testing.T) {
+	in := modelinfo.Price{Input: 10e-6, Output: 50e-6}
+	l := NewPriceList(context.Background(), []string{"claude-opus-5-5"}, stubPricer{"claude-opus-5-5": in}, Multipliers{}, nil)
+	if l.Multipliers.CacheRead != 0 || l.Multipliers.Write5m != 1.25 || l.Multipliers.Write1h != 2.0 {
+		t.Errorf("multipliers = %+v", l.Multipliers)
+	}
+	l = NewPriceList(context.Background(), []string{"m"}, stubPricer{"m": in}, Multipliers{CacheRead: 0.2}, nil)
+	if l.Multipliers.CacheRead != 0.2 {
+		t.Errorf("a set read multiple was lost: %+v", l.Multipliers)
+	}
+}
