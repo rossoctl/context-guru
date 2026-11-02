@@ -29,7 +29,10 @@ func legacyCopy(e *Event) *Event {
 
 func TestPriceMode_CounterfactualOverridesComponentsAndBaseline(t *testing.T) {
 	e := switchEvent()
-	e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
+	e.PriceMode(cfTestPrice, true)
+	if fb := e.CounterfactualFallback(); fb != "" {
+		t.Fatalf("a qualifying event fell back: %q", fb)
+	}
 	want := 1000 * 0.3e-6
 	if !cfNear(e.Components[0].SavedUSD, want) || e.Components[1].SavedUSD != 0 {
 		t.Fatalf("components = %+v, want mask %v", e.Components, want)
@@ -83,7 +86,7 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 		e := switchEvent()
 		c.mut(e)
 		want := legacyCopy(e)
-		e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
+		e.PriceMode(cfTestPrice, true)
 		if got := e.CounterfactualFallback(); got != c.reason {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
@@ -99,42 +102,8 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 func TestPriceMode_ConservationCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
 	e.cfRes.Checks = []accountant.CheckFailure{{Check: "conservation", Detail: "bill difference=10 ops=5 tokens"}}
-	e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
+	e.PriceMode(cfTestPrice, true)
 	if fb := e.CounterfactualFallback(); fb != "" || !cfNear(e.Components[0].SavedUSD, 1000*0.3e-6) {
 		t.Fatalf("conservation gated the override: reason %q components %+v", fb, e.Components)
-	}
-}
-
-func TestPriceMode_FallbackReasonPerMode(t *testing.T) {
-	// legacy: never a reason. shadow: the reason counterfactual mode would give, figures untouched.
-	e := switchEvent()
-	e.cfRes = nil
-	e.PriceMode(cfTestPrice, true, SavingsLegacy)
-	if fb := e.CounterfactualFallback(); fb != "" {
-		t.Errorf("legacy: fallback %q, want none", fb)
-	}
-	e = switchEvent()
-	e.cfRes.Checks = []accountant.CheckFailure{{Check: "sum"}}
-	want := legacyCopy(e)
-	e.PriceMode(cfTestPrice, true, SavingsShadow)
-	if fb := e.CounterfactualFallback(); fb != FallbackCheckSum {
-		t.Errorf("shadow: fallback %q, want %q", fb, FallbackCheckSum)
-	}
-	e.cfFallback = ""
-	if !reflect.DeepEqual(e, want) {
-		t.Error("shadow changed a figure")
-	}
-	// shadow with a Result that qualifies: no reason, and still the legacy figures.
-	e = switchEvent()
-	want = legacyCopy(e)
-	e.PriceMode(cfTestPrice, true, SavingsShadow)
-	if fb := e.CounterfactualFallback(); fb != "" || !reflect.DeepEqual(e, want) {
-		t.Errorf("shadow on a qualifying event: fallback %q, figures equal %v", fb, reflect.DeepEqual(e, want))
-	}
-	// counterfactual applying: no reason.
-	e = switchEvent()
-	e.PriceMode(cfTestPrice, true, SavingsCounterfactual)
-	if fb := e.CounterfactualFallback(); fb != "" {
-		t.Errorf("counterfactual applied: fallback %q, want none", fb)
 	}
 }

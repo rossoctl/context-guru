@@ -90,10 +90,9 @@ func main() {
 			"how long an upstream may take to send its FIRST byte before we treat it as gone. "+
 				"Not a cap on a streaming response's duration; it is the whole budget for a "+
 				"non-streaming one, whose headers arrive only once it is generated")
-		bob         = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
-		storeFlag   = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
-		savingsFlag = flag.String("savings", envOr("SAVINGS", "legacy"), "where the savings figure comes from: legacy (default) | shadow (also run counterfactual.Compute and attach its result to each dashboard event; the legacy figure is unchanged) | counterfactual (store the library's per-component savings and baseline for events that qualify; keep-alive and cachesplit figures stay on the legacy rules, and an event whose operation list is partial, observe-mode or unpriced keeps its legacy figures). shadow and counterfactual need --dashboard: without a recorder there is no event to attach to")
-		modeFlag    = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
+		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
+		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
 		// The tracker's records die with the process; the provider's cache entries do not.
 		// Within the grace — this request's own cache lifetime, per thread — the first request
 		// of an unknown thread is forwarded unchanged, so a live thread's cached prefix
@@ -295,9 +294,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	if _, err := proxy.ParseSavings(*savingsFlag); err != nil {
-		log.Fatalf("%v", err)
-	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
 	}
@@ -323,7 +319,7 @@ func main() {
 	// `windows` is resolved — rather than reordering boot around a Recorder nothing else here
 	// needs yet. A pointer, so the SAME object threaded into `emitter` right now keeps
 	// working once both fields are set.
-	kaKeepAlive := &dashEmitter{savings: *savingsFlag, pings: proxy.NewPingStore()}
+	kaKeepAlive := &dashEmitter{pings: proxy.NewPingStore()}
 	// metrics.Slog is deliberately NOT wired in here any more. It emitted one line per
 	// component plus one per run, at INFO, with no tenant and no session on any of them —
 	// so a busy proxy buried its own request lifecycle, and none of it could be correlated
@@ -694,7 +690,6 @@ func main() {
 		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:    cfg.Preset,
 		Dashboard: rec, // nil unless --dashboard
-		Savings:   *savingsFlag,
 		Pings:     kaKeepAlive.pings,
 		Record:    traceRec, // nil unless --record
 		Mode:      mode,     // sync (default) | observe — explicit, never inferred
@@ -945,11 +940,9 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer
-	// savings is the proxy's savings mode and pings the store shared with the Handler
-	// (proxy.Options.Pings). In shadow or counterfactual mode each converted ping carries a
-	// counterfactual Result on its event; in legacy mode the event is exactly as before.
-	savings string
-	pings   *proxy.PingStore
+	// pings is the store shared with the Handler (proxy.Options.Pings). Each converted ping
+	// carries an accountant Result on its event.
+	pings *proxy.PingStore
 }
 
 // Component and Run are no-ops: dashEmitter exists only to be tee'd in for its
@@ -1000,10 +993,8 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
-	if d.savings == proxy.SavingsShadow || d.savings == proxy.SavingsCounterfactual {
-		if res, ok := proxy.PingSavings(r, d.pings); ok {
-			ev.SetCounterfactual(res)
-		}
+	if res, ok := proxy.PingSavings(r, d.pings); ok {
+		ev.SetCounterfactual(res)
 	}
 	d.rec.Record(ev)
 }

@@ -92,48 +92,47 @@ SQLite (pure Go, no C toolchain), in WAL mode. Retention is bounded by both **ag
 blow past the limit and a quiet week can't erase itself. `--dashboard-db :memory:`
 runs with no persistence at all.
 
-## Savings source (`--savings`)
+## Savings source
 
-`--savings` picks where the stored savings figures come from. `shadow` and `counterfactual`
-need `--dashboard`.
+The stored savings figures come from the accountant library when an event qualifies, and from the
+dashboard's own pricing rules when it does not. It needs `--dashboard`: the library's result is
+attached to the recorded event, so without a recorder nothing runs.
 
-- `legacy` (the default): the dashboard's own pricing rules. Nothing else runs.
-- `shadow`: the legacy figures are stored unchanged. The proxy also runs `counterfactual.Compute`
-  per request and logs one `cf_shadow` line beside the legacy figure, so the two can be compared.
-  The line also carries `recomputed`, the failed library `checks`, and `fallback`: the reason
-  `counterfactual` mode would keep the legacy figures for that event (empty when it would not).
-- `counterfactual`: each component's saved dollars and the baseline cost are stored from the
-  library's result. The component figures are net of the cache break each component caused, and
-  they sum to baseline minus cost.
+When the event qualifies, each component's saved dollars and the baseline cost are stored from the
+library's result. The component figures are net of the cache break each component caused, and
+they sum to baseline minus cost.
 
-Limits of `counterfactual`:
+Limits:
 
 - The override is all-or-nothing per event. If the event does not qualify, it keeps its legacy
   figures and the proxy logs one `cf_fallback` line with the reason. The reasons are `no_result`,
   `ops_dropped`, `observe`, `unpriced`, `check_sum`, `check_unique_change`, `check_spans`,
   `size_unknown`, `implausible_size`, `figure_without_row`, `duplicate_name` and
   `acted_without_figure`.
-- So a dashboard total in this mode mixes the two methods: some events are priced by the library,
-  the rest by the legacy rules.
+- So a dashboard total mixes the two methods: some events are priced by the library, the rest by
+  the legacy rules.
 - The first request of a thread falls back (`unpriced`): there is no previous request to classify a
   cache break against. A request after a gap longer than the cache TTL falls back for the same
   reason.
 - A request whose response called `context_guru_expand` (more than one upstream round) falls back
-  (`no_result`): the usage is billed on the expanded body, which the library did not see. Shadow
-  mode logs `cf_shadow_skipped` instead of a figure.
-- The thread state lives in memory. After a restart, and for a thread idle for more than 2 hours
-  (or evicted by the 10,000-thread cap), the next request of the thread falls back until the state
-  is rebuilt.
+  (`no_result`): the usage is billed on the expanded body, which the library did not see.
+- The thread state lives in memory. After a restart, and for a thread dropped by the library's cap
+  of 10,000 threads (the oldest go first), the next request of the thread falls back until the
+  state is rebuilt. There is no idle timeout: a keep-alive ping keeps a thread's cache alive after
+  its last request, and the library learns of a ping only at the thread's next request.
 - The keep-alive and cachesplit figures stay on the legacy rules. The library cannot yet price
   keep-alive, because the keeper report carries no read extent.
+- The proxy does not tell the library which part of the cache a sibling thread kept warm
+  (`EntryFacts.SharedWarm`, accountant R54). On a session with sibling threads, a keep-alive
+  rescue is credited in full.
 - The cache-saved and cost figures are not changed.
-- The counterfactual figures are estimates. The library converts the removed bytes to tokens with
-  the request's own billed-token ratio. A figure that implies more removed tokens than the request
-  had (a ratio that does not fit the usage) is rejected, and the event keeps its legacy figures.
+- The figures are estimates. The library converts the removed bytes to tokens with the request's
+  own billed-token ratio. A figure that implies more removed tokens than the request had (a ratio
+  that does not fit the usage) is rejected, and the event keeps its legacy figures.
 - They can differ from the legacy figures: the library prices removed tokens at the tier their
   position falls in, and legacy prices them at the rate the request paid.
 - Rows stored under the legacy rule are still repriced with the legacy rule at read time.
-- The proxy computes the operations on every request, also in `legacy` mode. That cost is accepted.
+- The proxy computes the operations on every request when a dashboard is on. That cost is accepted.
 
 ## Tool inventory panel
 

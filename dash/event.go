@@ -816,7 +816,8 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked
 // partial/missing: a cost we cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.PriceMode(p, accountingComplete, SavingsLegacy)
+	e.cfFallback = ""
+	e.priceLegacy(p, accountingComplete)
 }
 
 func (e *Event) priceLegacy(p modelinfo.Price, accountingComplete bool) bool {

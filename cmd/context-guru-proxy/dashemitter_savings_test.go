@@ -18,9 +18,9 @@ func pingReport() components.KeepAliveReport {
 		TS: now.UnixMilli(), Window: now.Add(-4 * time.Minute)}
 }
 
-// tapped runs one ping through a dashEmitter in the given mode and returns the recorded event as
-// the recorder's tap saw it (the tap, unlike the store, keeps the counterfactual Result).
-func tapped(t *testing.T, mode string) dash.Event {
+// tapped runs one ping through a dashEmitter and returns the recorded event as the recorder's tap
+// saw it (the tap, unlike the store, keeps the accountant Result).
+func tapped(t *testing.T) dash.Event {
 	t.Helper()
 	var mu sync.Mutex
 	var got []dash.Event
@@ -31,7 +31,7 @@ func tapped(t *testing.T, mode string) dash.Event {
 		t.Fatal(err)
 	}
 	defer rec.Close()
-	em := &dashEmitter{rec: rec, savings: mode, pings: proxy.NewPingStore()}
+	em := &dashEmitter{rec: rec, pings: proxy.NewPingStore()}
 	em.KeepAlivePing(pingReport())
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		mu.Lock()
@@ -44,25 +44,20 @@ func tapped(t *testing.T, mode string) dash.Event {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 {
-		t.Fatalf("%s: events = %d", mode, len(got))
+		t.Fatalf("events = %d", len(got))
 	}
 	return got[0]
 }
 
-func TestDashEmitterPingSavingsByMode(t *testing.T) {
-	legacy := tapped(t, proxy.SavingsLegacy)
-	if legacy.HasCounterfactual() {
-		t.Fatal("legacy mode must attach no counterfactual result")
+func TestDashEmitterAttachesTheAccountantResultToAPing(t *testing.T) {
+	ev := tapped(t)
+	res, ok := ev.Counterfactual()
+	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
+		t.Fatalf("result %+v ok=%v, want one spend with its call", res, ok)
 	}
-	for _, mode := range []string{proxy.SavingsShadow, proxy.SavingsCounterfactual} {
-		ev := tapped(t, mode)
-		res, ok := ev.Counterfactual()
-		if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
-			t.Fatalf("%s: result %+v ok=%v", mode, res, ok)
-		}
-		if ev.CostUSD != legacy.CostUSD || ev.CacheRead != legacy.CacheRead ||
-			ev.BaselineCostUSD != legacy.BaselineCostUSD || ev.KeepAliveSavedUSD != legacy.KeepAliveSavedUSD {
-			t.Errorf("%s changed the legacy figures", mode)
-		}
+	// The override changes components and the baseline of a REQUEST; a ping is not one, so the
+	// legacy figures stay as Price set them.
+	if ev.CostUSD != pingReport().CostUSD || ev.CacheRead != pingReport().CacheRead {
+		t.Errorf("a ping's cost or cache read changed: cost %v read %v", ev.CostUSD, ev.CacheRead)
 	}
 }

@@ -144,14 +144,6 @@ type Options struct {
 	// its help text and at startup.
 	Record *sessionRecorder
 
-	// Savings selects where the savings figure comes from: "legacy" (the default, also ""),
-	// "shadow" (the legacy figure stays; counterfactual.Compute also runs on every request
-	// that completes with usage and its Result is attached to the dashboard event) or
-	// "counterfactual". It has an effect only with a Dashboard, because the Result is
-	// attached to the recorded event; without one the tracker is not built. Any other value
-	// is refused by ParseSavings (main) and makes New panic.
-	Savings string
-
 	// Pings is the store the keep-alive emitter writes ping facts to and the next request of the
 	// same thread reads them from (see PingSavings). It must be the same instance on both sides.
 	// nil = none, and pings then feed no request.
@@ -267,7 +259,7 @@ type Handler struct {
 	pool *modes.Pool
 	// observeSeq numbers observations so each request enqueues one.
 	observeSeq atomic.Uint64
-	// savings is nil in legacy mode and without a dashboard recorder (see Options.Savings).
+	// savings is nil without a dashboard recorder: the Result is attached to the recorded event.
 	savings *savingsTracker
 	// cfSeq numbers requests for the counterfactual RequestMeta.RequestID.
 	cfSeq atomic.Uint64
@@ -407,16 +399,11 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
-	sv, err := ParseSavings(opts.Savings)
-	if err != nil {
-		// New has no error return; main validates the flag with ParseSavings first.
-		panic("proxy.New: " + err.Error())
-	}
-	opts.Savings = sv
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
-	if sv != SavingsLegacy && opts.Dashboard != nil {
+	// The tracker needs a dashboard: the Result is attached to the recorded event.
+	if opts.Dashboard != nil {
 		h.savings = newSavingsTracker()
 	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or

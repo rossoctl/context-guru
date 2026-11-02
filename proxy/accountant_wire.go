@@ -1,30 +1,11 @@
 package proxy
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
-
-// The values of Options.Savings.
-const (
-	SavingsLegacy         = "legacy"
-	SavingsShadow         = "shadow"
-	SavingsCounterfactual = "counterfactual"
-)
-
-// ParseSavings normalizes "" to legacy and refuses any value that is not one of the three modes.
-func ParseSavings(v string) (string, error) {
-	switch v {
-	case "", SavingsLegacy:
-		return SavingsLegacy, nil
-	case SavingsShadow, SavingsCounterfactual:
-		return v, nil
-	}
-	return "", fmt.Errorf("savings: unknown mode %q (want legacy, shadow or counterfactual)", v)
-}
 
 // cfThreadID maps the primary thread to "main", the library's name for it.
 func cfThreadID(id string) string {

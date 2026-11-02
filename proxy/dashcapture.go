@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -114,11 +113,9 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
-	// savings is the handler's counterfactual tracker (nil in legacy mode); cfReq is this
+	// savings is the handler's accountant tracker (nil without a dashboard); cfReq is this
 	// request's record (nil when it was skipped); cfDone guards a double finish.
 	savings *savingsTracker
-	// mode is Options.Savings: only "shadow" logs the two figures at finish.
-	mode string
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the counterfactual must not override the legacy figures.
 	observe bool
@@ -153,7 +150,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		llm:     &cheapmodel.Sink{},
 		unique:  map[string]int{},
 		waits:   h.waits,
-		savings: h.savings, mode: h.opts.Savings, pings: h.opts.Pings,
+		savings: h.savings, pings: h.opts.Pings,
 		observe: tn.Mode == components.ModeObserve,
 	}
 }
@@ -681,25 +678,18 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Run the counterfactual BEFORE the event is priced. Only with usage: without it the thread
 	// state stays untouched and the event carries no result. Not after several upstream rounds
 	// either (see rounds): no Result is attached, so PriceMode keeps the legacy figures
-	// (cf_fallback reason no_result) and shadow logs no figure. The thread state is left as the
+	// (cf_fallback reason no_result). The thread state is left as the
 	// previous request left it; the next request then sees a longer gap, which the library
 	// handles (a phase it cannot prove is unknown and falls back too).
 	if c.cfReq != nil && usageOK && !c.cfDone {
 		c.cfDone = true
-		if c.rounds > 1 {
-			if c.mode == SavingsShadow {
-				slog.Info("cf_shadow_skipped", "session", c.cfReq.Meta.Session, "reason", "expand_rounds", "rounds", c.rounds)
-			}
-		} else {
+		if c.rounds <= 1 {
 			e.SetCounterfactual(c.savings.compute(c.cfReq, usage))
 		}
 	}
 	e.SetCounterfactualContext(c.trace.OpsDropped, c.observe)
-	e.PriceMode(price, usageOK && priced, dashSavingsMode(c.mode))
-	if c.mode == SavingsShadow && e.HasCounterfactual() {
-		logShadow(e, price)
-	}
-	if c.mode == SavingsCounterfactual && e.CounterfactualFallback() != "" {
+	e.PriceMode(price, usageOK && priced)
+	if c.cfReq != nil && e.CounterfactualFallback() != "" {
 		logFallback(e)
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
@@ -799,18 +789,6 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
 		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
-}
-
-// dashSavingsMode maps a ParseSavings value to the dash pricing mode. Anything but shadow and
-// counterfactual is legacy.
-func dashSavingsMode(m string) dash.SavingsMode {
-	switch m {
-	case SavingsShadow:
-		return dash.SavingsShadow
-	case SavingsCounterfactual:
-		return dash.SavingsCounterfactual
-	}
-	return dash.SavingsLegacy
 }
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.

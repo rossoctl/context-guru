@@ -31,7 +31,7 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 			`"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":1,"cache_creation_input_tokens":50}}`)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandlerYAML(t, up.URL, "shadow", "pipeline: [extract, extract_llm_sweep]\n")
+	h, rec, tap := cfHandlerYAML(t, up.URL, "pipeline: [extract, extract_llm_sweep]\n")
 	var got atomic.Pointer[accountant.Request]
 	h.savings.onEnd = func(r *accountant.Request) { got.Store(r) }
 	srv := httptest.NewServer(h.Mux())
@@ -70,8 +70,8 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	}
 	// KNOWN LIMIT, pinned: no operation describes the injected declarations, so the tools section
 	// differs between the client and forwarded bodies with no op to explain it. The library's sum
-	// check fails there, and counterfactual mode keeps the legacy figures (check_sum). Safe, and the
-	// reason is visible in cf_shadow / cf_fallback.
+	// check fails there, and the event keeps the legacy figures (check_sum). Safe, and the
+	// reason is visible in cf_fallback.
 	waitForRows(t, rec, 1)
 	e := tap.all()[0]
 	res, _ := e.Counterfactual()

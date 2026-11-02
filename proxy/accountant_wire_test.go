@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -33,13 +34,13 @@ func (c *cfTap) all() []dash.Event {
 	return append([]dash.Event(nil), c.evs...)
 }
 
-func cfHandler(t *testing.T, up, savings string) (*Handler, *dash.Recorder, *cfTap) {
+func cfHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *cfTap) {
 	t.Helper()
-	return cfHandlerYAML(t, up, savings, "preset: codesafe\n")
+	return cfHandlerYAML(t, up, "preset: codesafe\n")
 }
 
 // cfHandlerYAML is cfHandler with the config document spelled out.
-func cfHandlerYAML(t *testing.T, up, savings, yaml string) (*Handler, *dash.Recorder, *cfTap) {
+func cfHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *cfTap) {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(yaml))
 	if err != nil {
@@ -59,7 +60,7 @@ func cfHandlerYAML(t *testing.T, up, savings, yaml string) (*Handler, *dash.Reco
 	t.Cleanup(func() { rec.Close() })
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		AnthropicUpstream: up, OpenAIUpstream: up, Preset: cfg.Preset,
-		Dashboard: rec, Prices: fixedPricer{}, Savings: savings,
+		Dashboard: rec, Prices: fixedPricer{},
 	})
 	t.Cleanup(h.Close)
 	return h, rec, tap
@@ -80,96 +81,30 @@ func cfPost(t *testing.T, h *Handler, session string) {
 	resp.Body.Close()
 }
 
-func cfTwoRequests(t *testing.T, savings string) []dash.Event {
-	up := fakeUpstream(t)
-	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL, savings)
-	cfPost(t, h, "sess-cf")
-	cfPost(t, h, "sess-cf")
-	waitForRows(t, rec, 2)
-	return tap.all()
-}
-
-func TestShadowAttachesCounterfactualAndKeepsLegacyFigures(t *testing.T) {
-	shadow, legacy := cfTwoRequests(t, "shadow"), cfTwoRequests(t, "legacy")
-	if len(shadow) != 2 || len(legacy) != 2 {
-		t.Fatalf("events: shadow %d legacy %d", len(shadow), len(legacy))
-	}
-	for i := range shadow {
-		if !shadow[i].HasCounterfactual() {
-			t.Errorf("shadow event %d has no counterfactual result", i)
-		}
-		if legacy[i].HasCounterfactual() {
-			t.Errorf("legacy event %d has a counterfactual result", i)
-		}
-		if shadow[i].CostUSD != legacy[i].CostUSD || shadow[i].BaselineCostUSD != legacy[i].BaselineCostUSD {
-			t.Errorf("event %d legacy figures changed: %v/%v vs %v/%v", i,
-				shadow[i].CostUSD, shadow[i].BaselineCostUSD, legacy[i].CostUSD, legacy[i].BaselineCostUSD)
-		}
-		if len(shadow[i].Components) != len(legacy[i].Components) {
-			t.Fatalf("event %d component count differs", i)
-		}
-		for j := range shadow[i].Components {
-			if shadow[i].Components[j].SavedUSD != legacy[i].Components[j].SavedUSD {
-				t.Errorf("event %d component %d SavedUSD changed", i, j)
-			}
-		}
-	}
-}
-
-func TestLegacyModeBuildsNoTracker(t *testing.T) {
-	up := fakeUpstream(t)
-	defer up.Close()
-	for _, s := range []string{"", "legacy"} {
-		h, _, _ := cfHandler(t, up.URL, s)
-		if h.savings != nil || h.opts.Savings != "legacy" {
-			t.Errorf("Savings %q: savings=%v opts=%q", s, h.savings, h.opts.Savings)
-		}
-	}
-	h, _, _ := cfHandler(t, up.URL, "counterfactual")
-	if h.savings == nil {
-		t.Error("counterfactual mode must build the tracker")
-	}
-}
-
-func TestUnknownSavingsValueIsRejected(t *testing.T) {
-	if _, err := ParseSavings("bogus"); err == nil {
-		t.Fatal("ParseSavings accepted bogus")
-	}
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New accepted an unknown Savings value")
-		}
-	}()
-	up := fakeUpstream(t)
-	defer up.Close()
-	cfHandler(t, up.URL, "bogus")
-}
-
-func TestNoUsageMeansNoCounterfactualResult(t *testing.T) {
+func TestNoUsageMeansNoAccountantResult(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL, "shadow")
+	h, rec, tap := cfHandler(t, up.URL)
 	cfPost(t, h, "sess-err")
 	waitForRows(t, rec, 1)
 	for _, e := range tap.all() {
 		if e.HasCounterfactual() {
-			t.Error("an event without usage carries a counterfactual result")
+			t.Error("an event without usage carries an accountant result")
 		}
 	}
 }
 
 // cfRunUsage posts two requests through a fake upstream that reports the given prompt usage and
 // returns the second recorded event and the byte length of the body the upstream received.
-func cfRunUsage(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, int) {
-	evs, fwd := cfRunUsageBody(t, mode, in, cr, cw)
+func cfRunUsage(t *testing.T, in, cr, cw int) ([]dash.Event, int) {
+	evs, fwd := cfRunUsageBody(t, in, cr, cw)
 	return evs, len(fwd)
 }
 
 // cfRunUsageBody is cfRunUsage returning the forwarded body itself.
-func cfRunUsageBody(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, []byte) {
+func cfRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
 	t.Helper()
 	var fwd atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +117,7 @@ func cfRunUsageBody(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, []
 		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cr, cw)
 	}))
 	defer up.Close()
-	h, rec, tap := cfHandler(t, up.URL, mode)
+	h, rec, tap := cfHandler(t, up.URL)
 	// Two requests: the first has no previous request to classify cache breaks against, so the
 	// library leaves it with an unpriced "penalty_unknown" and the event keeps its legacy figures.
 	cfPost(t, h, "sess-cf")
@@ -190,6 +125,15 @@ func cfRunUsageBody(t *testing.T, mode string, in, cr, cw int) ([]dash.Event, []
 	waitForRows(t, rec, 2)
 	b, _ := fwd.Load().([]byte)
 	return tap.all()[1:], b
+}
+
+// legacyOf prices a copy of a recorded event with the legacy rules alone: what the event would
+// carry had no accountant Result overridden it. Event.Price is that path.
+func legacyOf(e dash.Event) dash.Event {
+	e.Components = append([]dash.CompRow(nil), e.Components...)
+	p, _ := fixedPricer{}.Price(context.Background(), e.Model)
+	e.Price(p, true)
+	return e
 }
 
 func extractRow(t *testing.T, e dash.Event) dash.CompRow {
@@ -220,8 +164,8 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 // The op sizes are wire bytes, so the derivation is exact up to the two floors (1 token).
 // It runs through the real proxy path, and the Result must carry no failed check: before the op
 // sizes were wire bytes, the sum check failed on every request (M1).
-func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
-	evs, fwd := cfRunUsageBody(t, "counterfactual", 20, 0, 50)
+func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
+	evs, fwd := cfRunUsageBody(t, 20, 0, 50)
 	if len(evs) != 1 {
 		t.Fatalf("events = %d", len(evs))
 	}
@@ -246,8 +190,7 @@ func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
 	if math.Abs(got-want) > 2*2e-6 {
 		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d message bytes)", got, want, client, fb)
 	}
-	legacy, _ := cfRunUsage(t, "legacy", 20, 0, 50)
-	lg := extractRow(t, legacy[0]).SavedUSD
+	lg := extractRow(t, legacyOf(e)).SavedUSD
 	if lg <= 0 || got/lg > 20 || lg/got > 20 {
 		t.Fatalf("library %v and legacy %v differ by more than 20x", got, lg)
 	}
@@ -258,13 +201,13 @@ func TestCounterfactualModeRealisticUsageMatchesHandDerivation(t *testing.T) {
 // token figure then exceeds the request's size, so PriceMode must fall back to legacy, and for that
 // reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
 // unpriced, so the plausibility bound is what fired, not some earlier gate.
-func TestCounterfactualModeAbsurdUsageFallsBackToLegacy(t *testing.T) {
-	cfs, _ := cfRunUsage(t, "counterfactual", 12, 9000, 1500)
-	leg, _ := cfRunUsage(t, "legacy", 12, 9000, 1500)
-	got, want := extractRow(t, cfs[0]).SavedUSD, extractRow(t, leg[0]).SavedUSD
-	if got != want || cfs[0].BaselineCostUSD != leg[0].BaselineCostUSD {
+func TestAbsurdUsageFallsBackToLegacy(t *testing.T) {
+	cfs, _ := cfRunUsage(t, 12, 9000, 1500)
+	leg := legacyOf(cfs[0])
+	got, want := extractRow(t, cfs[0]).SavedUSD, extractRow(t, leg).SavedUSD
+	if got != want || cfs[0].BaselineCostUSD != leg.BaselineCostUSD {
 		t.Fatalf("absurd usage did not fall back: component %v vs legacy %v, baseline %v vs %v",
-			got, want, cfs[0].BaselineCostUSD, leg[0].BaselineCostUSD)
+			got, want, cfs[0].BaselineCostUSD, leg.BaselineCostUSD)
 	}
 	r, ok := cfs[0].Counterfactual()
 	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {
@@ -281,5 +224,21 @@ func TestCounterfactualModeAbsurdUsageFallsBackToLegacy(t *testing.T) {
 	}
 	if fb := cfs[0].CounterfactualFallback(); fb != dash.FallbackImplausibleSize {
 		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackImplausibleSize)
+	}
+}
+
+// The tracker needs a dashboard: the Result is attached to the recorded event, so without a
+// recorder there is nowhere to put it and nothing is built.
+func TestNoDashboardBuildsNoTracker(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h := New(nil, store.NewMemory(store.Options{}), nil, Options{AnthropicUpstream: up.URL, Prices: fixedPricer{}})
+	defer h.Close()
+	if h.savings != nil {
+		t.Error("a handler without a dashboard built a savings tracker")
+	}
+	hd, _, _ := cfHandler(t, up.URL)
+	if hd.savings == nil {
+		t.Error("a handler with a dashboard must build the tracker")
 	}
 }

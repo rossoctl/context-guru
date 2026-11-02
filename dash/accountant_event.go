@@ -2,8 +2,8 @@ package dash
 
 import "github.com/rossoctl/accountant"
 
-// The counterfactual Result of the request, set by the proxy when it runs with --savings=shadow
-// or counterfactual. It is unexported, so neither JSON nor the SQLite writer sees it.
+// The accountant Result of the request, set by the proxy when a dashboard is on. It is unexported,
+// so neither JSON nor the SQLite writer sees it.
 
 // SetCounterfactual attaches the library's Result to the event.
 func (e *Event) SetCounterfactual(r accountant.Result) { e.cfRes = &r }

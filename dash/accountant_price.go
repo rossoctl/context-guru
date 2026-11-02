@@ -104,18 +104,8 @@ func (e *Event) CounterfactualFigure(p modelinfo.Price) CFFigure {
 	return f
 }
 
-// SavingsMode picks where the stored per-component savings and the baseline come from.
-type SavingsMode int
-
-const (
-	SavingsLegacy         SavingsMode = iota // the rules in this package
-	SavingsShadow                            // legacy figures; the host logs the library's beside them
-	SavingsCounterfactual                    // the library's figures, when the event qualifies
-)
-
-// Fallback reasons: why PriceMode kept the legacy figures of an event in SavingsCounterfactual
-// mode. CounterfactualFallback returns one of them ("" when the override applied, or in any other
-// mode).
+// Fallback reasons: why PriceMode kept the legacy figures of an event. CounterfactualFallback
+// returns one of them ("" when the override applied).
 const (
 	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
 	FallbackOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
@@ -133,7 +123,7 @@ const (
 
 // gatedChecks maps each library check (accountant internal/engine/compute.go checks() and conservation()) that
 // means "the operation list or its attribution is wrong" to its fallback reason. A check not in the
-// map is informational: it is logged in cf_shadow and never gates.
+// map is informational: it never gates.
 //
 //   - sum: the operations' byte changes per section do not equal the client-minus-forwarded body
 //     bytes. The op list is wrong (an op missing, a change reported twice under two ChangeIDs, sizes
@@ -155,13 +145,11 @@ var gatedChecks = map[string]string{
 	"spans":         FallbackCheckSpans,
 }
 
-// CounterfactualFallback is the reason PriceMode kept the legacy figures in SavingsCounterfactual
-// mode, or "" when the override applied. In SavingsShadow mode it is the reason counterfactual mode
-// WOULD have fallen back (the figures are not touched), so the shadow log can show it. "" in
-// legacy mode.
+// CounterfactualFallback is the reason PriceMode kept the legacy figures, or "" when the override
+// applied. It is "" too on an event priced with Price alone, which never tries the override.
 func (e *Event) CounterfactualFallback() string { return e.cfFallback }
 
-// PriceMode is Price, then, in SavingsCounterfactual mode, an override of each component's
+// PriceMode is Price, then an override of each component's
 // SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
 // CacheSavedUSD, CostUSD and CGLLMCostUSD always stay as Price set them.
 //
@@ -170,17 +158,16 @@ func (e *Event) CounterfactualFallback() string { return e.cfFallback }
 // from the operation list; the run was not observe mode; no operation or effect is unpriced; no
 // gated library check failed; the figure is plausible; and every component that acted has a
 // library figure. Otherwise the legacy figures stand and CounterfactualFallback says why.
-func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool, mode SavingsMode) {
+func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.cfFallback = ""
-	if !e.priceLegacy(p, accountingComplete) || mode == SavingsLegacy {
+	if !e.priceLegacy(p, accountingComplete) {
 		return
 	}
-	e.cfFallback = e.cfOverride(p, mode == SavingsCounterfactual)
+	e.cfFallback = e.cfOverride(p)
 }
 
-// cfOverride applies the counterfactual override when apply is true, or returns the reason it
-// cannot. With apply false it only returns the reason ("" = it would apply) and changes nothing.
-func (e *Event) cfOverride(p modelinfo.Price, apply bool) string {
+// cfOverride applies the accountant override, or returns the reason it cannot and changes nothing.
+func (e *Event) cfOverride(p modelinfo.Price) string {
 	switch {
 	case e.cfRes == nil:
 		return FallbackNoResult
@@ -237,9 +224,6 @@ func (e *Event) cfOverride(p modelinfo.Price, apply bool) string {
 			return FallbackActedWithoutFigure
 		}
 		saved[i] = v
-	}
-	if !apply {
-		return ""
 	}
 	for i := range e.Components {
 		e.Components[i].SavedUSD = saved[i]
