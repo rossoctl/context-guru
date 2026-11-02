@@ -29,7 +29,7 @@ const (
 	DefaultBackgroundExtraPings = 3
 	DefaultHumanExtraPings      = 1
 	// MaxWaitPings bounds any plan result unless the base itself is higher. It equals the highest
-	// strategy ping count, so the credential hold stays at (11+1) x 290 s = 58 min or less.
+	// strategy ping count, so the credential hold stays at (11+1) x 299 s = 60 min or less.
 	MaxWaitPings = 11
 )
 

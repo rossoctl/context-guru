@@ -307,7 +307,7 @@ func TestWindowsApply(t *testing.T) {
 }
 
 // The plan the dashboard reads (Plans: pings_left, next ping) is the per-wait one. The hold of the
-// longest plan stays inside the strategy bound: (8+1) x 240 s = 36 min; at the cap of 11 and 290 s, 58 min.
+// longest plan stays inside the strategy bound: (8+1) x 240 s = 36 min; at the cap of 11 and 299 s, 60 min.
 func TestWaitPlanShowsInThePlanTheDashboardReads(t *testing.T) {
 	k, _, clock := testKeeper(t)
 	start := clock.now()
@@ -316,7 +316,7 @@ func TestWaitPlanShowsInThePlanTheDashboardReads(t *testing.T) {
 	if pl.PingsLeft != 8 || !pl.NextPing.Equal(start.Add(280*time.Second)) {
 		t.Fatalf("plan = %+v, want 8 pings left", pl)
 	}
-	if h := time.Duration(MaxWaitPings+1) * 290 * time.Second; h > time.Hour {
+	if h := time.Duration(MaxWaitPings+1) * 299 * time.Second; h > time.Hour {
 		t.Errorf("longest plan holds %v, over the 1 h override ceiling", h)
 	}
 	k2, _, clock2 := testKeeper(t)

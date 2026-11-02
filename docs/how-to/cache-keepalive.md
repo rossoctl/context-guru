@@ -92,7 +92,7 @@ open-task counts, and whether the thread id starts with `a:` (a subagent).
 - **The sweep question** is not asked while a thread waits for its own tool. That span stays warm until
   the result comes back, so a cut can never follow. It is asked on a span that began with `end_turn`.
   The rule "keep-alive never shortens the cache strategy" is unchanged.
-- **The hold limit** is still `(K+1) x X` with K at most 11 and X under 290 s, so at most 58 minutes. A
+- **The hold limit** is still `(K+1) x X` with the plan at most 11 pings (unless K itself is higher) and X under 300 s, so at most 60 minutes. A
   tool wait of 8 pings at 240 to 280 s holds at most 42 minutes. The plan never goes above 11 pings, unless
   K itself is higher, and it never lowers K.
 - **Not covered:** a 1-hour thread keeps its own schedule. A session override or an active learned
