@@ -1,6 +1,7 @@
 ---
 name: fill
 description: How full the context window is, what is filling it, and how long until it is full.
+disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tv.py" fill:*)
 ---
 

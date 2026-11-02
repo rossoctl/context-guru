@@ -131,6 +131,9 @@ effort ladder) add components that edit the request body too — see
 
 ## Then
 
+You type these commands yourself: Claude does not run them on its own. See
+[Who runs a command](../plugin/commands.md#who-runs-a-command).
+
 - `/context-guru:status` — is it routed, is it up, and what has it saved.
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — `/context-guru:status` names the port, which is
   this project's own and usually not 8787.

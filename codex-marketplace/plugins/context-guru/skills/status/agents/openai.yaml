@@ -1,0 +1,4 @@
+# Codex reads this file next to SKILL.md. With implicit invocation off, Codex leaves the skill
+# out of the model's skills list; the user still runs it by name.
+policy:
+  allow_implicit_invocation: false

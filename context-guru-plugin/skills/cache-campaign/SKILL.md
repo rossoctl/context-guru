@@ -1,6 +1,6 @@
 ---
 name: cache-campaign
-description: Build a cache plan from your own history, compare it with what you do today, and switch it on in shadow or live mode. Manager login needed; an older proxy gets a labelled example.
+description: Build a cache plan from your own history, compare it with today, and switch it on in shadow or live mode. Manager login needed. Use when a manager asks for a keep-alive plan built from their history.
 argument-hint: "[build [--builder auto] [--session-end] | show ID [details] | mode ID off|shadow|active]"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache-campaign), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache-campaign details), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" cache-campaign show:*)
 ---

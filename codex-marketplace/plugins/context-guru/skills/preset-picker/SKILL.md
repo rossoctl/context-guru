@@ -1,6 +1,6 @@
 ---
 name: context-guru-preset-picker
-description: Inspect or change how aggressively context-guru reduces Codex context.
+description: Inspect or change how aggressively context-guru reduces Codex context. Use when asked which preset is set or to change what it trims.
 ---
 
 # Choose a context-reduction preset

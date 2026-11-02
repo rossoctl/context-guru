@@ -1,6 +1,6 @@
 ---
 name: context-guru-remove-mcp-and-skills
-description: Find the MCP servers, MCP tools and skills you carry but never use (never built-in tools), show their cost and what earlier removals saved, and filter them after one yes.
+description: Find the MCP servers, MCP tools and skills you carry but never use, show their cost, and filter them after one yes. Use when asked what to remove or what is unused.
 ---
 
 Run this from this skill directory and print its output exactly as it is in one code block:

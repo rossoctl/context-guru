@@ -1,6 +1,7 @@
 ---
 name: status
-description: Home screen. Whether the local context-guru proxy is running and this project is routed through it, then dollars saved, today against yesterday, and the top three things to do next. Use when the user asks how context-guru is doing, about its status, or whether the proxy is working. Accepts --stats to write the raw /stats JSON to a file and reply with its path instead of the interpreted report.
+description: Home screen. Is the proxy running and this project routed, dollars saved, and the top three things to do next. --stats writes the raw /stats JSON to a file.
+disable-model-invocation: true
 
 ---
 

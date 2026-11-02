@@ -1,6 +1,7 @@
 ---
 name: dashboard
-description: Open context-guru's dashboard in the browser on the Cleanup page, for deciding what to remove yourself — what carrying each unused capability has really cost since install, with a command builder. Use when the user wants to see the dashboard, look at the data themselves, deep-dive, browse their usage, or decide for themselves what to remove. Accepts --no-open to print the URL without opening a browser.
+description: Open the dashboard in the browser on the Cleanup page, to decide yourself what to remove. --no-open prints the URL and opens nothing.
+disable-model-invocation: true
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dashboard.sh), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dashboard.sh --no-open)
 ---
 

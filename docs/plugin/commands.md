@@ -3,6 +3,20 @@
 Every Claude Code plugin command, in one place. Each command opens with one line that answers its question, then a
 small picture; add `details` for the tables.
 
+## Who runs a command
+
+Some commands only show you something. Claude does not run them by itself; you type them. They are `status`,
+`dashboard`, `doctor`, `session`, `statusline`, `uninstall`, `update` and the five terminal views (`watch`,
+`timeline`, `chart`, `heatmap`, `fill`). Their skill files set `disable-model-invocation: true`, so they are not in
+the model's skills list and cost no tokens there. If Claude tries one, Claude Code tells it to ask you to run
+`/context-guru:<name>`.
+
+Claude can still offer the others by itself when your question fits: `insights`, `save-more`,
+`remove-mcp-and-skills`, `preset-picker`, `cache-strategy-picker`, `install` and `cache-campaign`.
+
+In Codex the same commands that exist there (all of the above except `dashboard`, `doctor` and `statusline`) set
+`allow_implicit_invocation: false` in their `agents/openai.yaml`. You run them as `$context-guru-<name>`.
+
 | Command | The question | Example first line |
 |---|---|---|
 | `/context-guru:status` | Is it working, how am I doing, what next? | Saved $41.20 in 7 days (4.6% of what the same work would have cost). |

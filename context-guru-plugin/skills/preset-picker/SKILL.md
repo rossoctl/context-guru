@@ -1,6 +1,6 @@
 ---
 name: preset-picker
-description: Show which preset is running and switch between them - `off`, `conservative` (the recommended default for "carry less"), `medium`, `high`, `xhigh`. Use when the user asks which preset is set, to change what context-guru trims, to carry less context, or says /plugin configure is awkward for this.
+description: Show the running preset and switch it (`off`, `conservative`, `medium`, `high`, `xhigh`). Use when the user asks which preset is set, to change what context-guru trims, or to carry less context.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 

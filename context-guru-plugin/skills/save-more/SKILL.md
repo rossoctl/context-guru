@@ -1,6 +1,6 @@
 ---
 name: save-more
-description: Replay your own past sessions under every config Context Guru ships (each preset) and every keep-alive strategy, show what each would have saved, recommend the best, and apply it after a yes. It also lists client settings that cost money (`settings` alone shows only that). `config` or `cache` for one of them; `--custom` also searches custom combinations of components. Use when asked how to save more, which preset or cache strategy is cheapest for them, or to apply or undo such a change.
+description: Replay your past sessions under each preset and keep-alive strategy, show what each would have saved, and apply the best after a yes. Use when asked how to save more or which preset or strategy is cheapest.
 argument-hint: "[config|cache|settings] [details] [--custom] [--days N]  |  apply <config|cache> <option>@<basis>  |  revert <config|cache>  |  apply|revert settings <check-id>"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" save-more:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run save-more)
 ---

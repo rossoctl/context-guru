@@ -55,6 +55,10 @@ the other setting and restart the owned proxy. `$context-guru-insights` shows sa
 applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
 MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
 
+The views that only show something (`status`, `session`, `timeline`, `watch`, `chart`, `heatmap`, `fill`,
+`update`, `uninstall`) set `allow_implicit_invocation: false` in their `agents/openai.yaml`. Codex leaves them out
+of the model's skills list, so the model does not run them on its own; you run them as `$context-guru-<name>`.
+
 The older `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste` and
 `$context-guru-insights-capabilities`/`-components`/`-idle` still work for one release and point to `$context-guru-insights`.
 
