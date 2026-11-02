@@ -266,12 +266,12 @@ func TestPresetLadderSummarizerModes(t *testing.T) {
 	}
 }
 
-// The recommended keep-alive policy (#435, B-policy-r2) is the default; pin the four knobs.
+// The recommended keep-alive policy (#435, B-policy-r2; floor 20000 since #858) is the default; pin the four knobs.
 func TestKeepAliveRecommendedDefaults(t *testing.T) {
 	r := CacheConfig{}.Resolved()
 	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
-		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
-		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 80000, 0.50",
+		r.KeepAliveMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 20000, 0.50",
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }

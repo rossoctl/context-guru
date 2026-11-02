@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 func TestPolicyCeilingResolvesZeroToTheDefault(t *testing.T) {
@@ -44,5 +46,15 @@ func TestDisabledReadsTheKillSwitch(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_KEEPALIVE", "")
 	if Disabled() {
 		t.Error("empty CONTEXT_GURU_KEEPALIVE disabled the keep-alive")
+	}
+}
+
+// The wait-plan defaults mirror config's; keepalive may not import config.
+func TestWaitPlanDefaultsMatchConfig(t *testing.T) {
+	if DefaultToolWaitMaxPings != config.DefaultKeepAliveToolWaitMaxPings ||
+		DefaultBackgroundExtraPings != config.DefaultKeepAliveBackgroundExtraPings ||
+		DefaultHumanExtraPings != config.DefaultKeepAliveHumanExtraPings ||
+		MaxWaitPings != config.MaxKeepAliveWaitPings {
+		t.Error("the keepalive and config wait-plan defaults drifted")
 	}
 }

@@ -413,6 +413,13 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 			substituted = false
 		}
 	}()
+	// No sweep question while the thread waits for its own tool (#858): that span stays warm until the
+	// result comes back, so a cut can never follow. The ordinary ping goes out.
+	if j.e.toolWait() {
+		slog.Debug("context-guru: sweep keep-alive question not offered: the thread waits for its own tool",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread)
+		return false
+	}
 	dispatch, info, reason, ok := offload.SweepPingSubstitute(thread.Key(j.session, j.thread))
 	if !ok {
 		slog.Debug("context-guru: sweep keep-alive question not offered",

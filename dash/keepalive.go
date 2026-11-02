@@ -550,7 +550,7 @@ type KeepAliveBehaviour struct {
 	Gaps        []AccountGaps `json:"account_gaps"`
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
 	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
-	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is now 80k), and the panel says so.
+	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is 20k since #858), and the panel says so.
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -570,7 +570,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate (the shipped floor is now 80,000).
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate and is the shipped floor again since #858 (80,000 in between).
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -1262,9 +1262,9 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 }
 
 // kaGateMinPrefix is the billed-prefix floor a replay gates on: the shipped default, mirroring
-// config.DefaultKeepAliveMinPrefix, which this package may not import. Pinned by
+// config.DefaultKeepAliveMinPrefix (20000 since #858), which this package may not import. Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
-const kaGateMinPrefix = 80000
+const kaGateMinPrefix = 20000
 
 // pingSpan is one idle span a live keep-alive would send pings in.
 type pingSpan struct {
@@ -1306,9 +1306,15 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at 20k (the pre-#435 default; the shipped floor is now 80k) and not at the account's own configured floor, because this
+// gates at 20k (the shipped default since #858) and not at the account's own configured floor, because this
 // package does not read tenant configuration — an account that tuned its floor sees a replay of
-// the default policy, and the panel's copy names 80k so the page stays self-consistent.
+// the default policy, and the panel's copy names 20k so the page stays self-consistent.
+//
+// THE COUNT IS A FIXED K (#858). The live policy now picks the count per wait (keepalive.Policy.WaitPings:
+// a tool wait up to 8, background K+3, a person K+1, no tool call yet 0). This replay does not model
+// that: it charges one K per span. So the ladder and the recommendation describe the PLAN-OFF policy
+// (keepalive_wait_plan: false), and no rung is marked "current". Modelling the plan needs the wait cause
+// and tool history of each span and of each expiry's previous request; that is a follow-up.
 func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
@@ -1377,6 +1383,8 @@ type KeepAliveCalc struct {
 	Addressable    int64     `json:"addressable_misses"`
 	AddressableUSD float64   `json:"addressable_usd"`
 	Rows           []CalcRow `json:"rows"`
+	// Plan says which policy the ladder models: "fixed_k", the policy with keepalive_wait_plan off (#858).
+	Plan string `json:"plan"`
 	// PrefixSource says where the prefill came from, so nobody reads a number as measured when
 	// it was typed: "session", "account_median" or "given".
 	PrefixSource string `json:"prefix_source,omitempty"`
@@ -1393,11 +1401,11 @@ type KeepAliveCalc struct {
 // The rates themselves are the operator's price list; a model missing from it leaves every
 // dollar field omitted (Priced above).
 func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model string,
-	price func(string) (modelinfo.Price, bool), currentPings int) (*KeepAliveCalc, error) {
+	price func(string) (modelinfo.Price, bool), _ int) (*KeepAliveCalc, error) {
 	if idleSeconds <= 0 {
 		idleSeconds = recIdleSeconds
 	}
-	out := &KeepAliveCalc{IdleSeconds: idleSeconds, Prefix: prefix, Model: model, Rows: []CalcRow{}}
+	out := &KeepAliveCalc{IdleSeconds: idleSeconds, Prefix: prefix, Model: model, Rows: []CalcRow{}, Plan: "fixed_k"}
 	var p modelinfo.Price
 	if price != nil && model != "" {
 		if pr, ok := price(model); ok && !pr.Zero() {
@@ -1460,7 +1468,8 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		// Coverage is the account-wide policy figure (the 5-minute default, no row). The test
 		// below uses each expiry's OWN lifetime, so a GPT-5.6 gap is judged against its 30 min.
 		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k),
-			Current: k == currentPings}
+			// Never marked: the live policy picks its count per wait (#858), so no fixed-K rung is it.
+			Current: false}
 		for i, g := range gaps {
 			if g > idleSeconds && g <= CoverageSecondsFor(idleSeconds, k, lifetimes[i]) {
 				row.Convertible++
@@ -1604,7 +1613,8 @@ type KeepAliveRecommendation struct {
 	KeepAliveCoverage
 }
 
-// The shipped policy, which is also what is recommended when the rule admits an account.
+// The fixed-count policy the recommendation models (240 s, K=2): the policy with keepalive_wait_plan off.
+// The live default picks its count per wait (#858) and is not modelled here.
 const (
 	recIdleSeconds = 240
 	recMaxPings    = 2

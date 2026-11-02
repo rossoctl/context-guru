@@ -171,6 +171,26 @@ type CacheConfig struct {
 	// (StructuredOutput). An empty list (`keepalive_terminal_tools: []`) turns the rule off, which
 	// is the behavior before #857: such a thread gets its pings.
 	KeepAliveTerminalTools []string `yaml:"keepalive_terminal_tools"`
+	// KeepAliveWaitPlan turns on the per-wait ping plan (#858). Absent: on. `false` is the one switch
+	// that brings back the behavior before #858: MaxPings for every wait, time windows for every wait,
+	// sweep questions during tool waits, and pings for a thread with no tool call yet. It does not
+	// bring back the 80k minimum prefix, which is only a default (keepalive_min_prefix_tokens).
+	//
+	// With the plan on, the ping count follows what the thread waits for. "Base" is
+	// keepalive_max_pings:
+	//   - its own tool (main or subagent): keep pinging until the result comes, at most
+	//     keepalive_tool_wait_max_pings (default 8);
+	//   - main, end_turn, background work: base + keepalive_background_extra_pings (default 3);
+	//   - main, end_turn, a person: base + keepalive_human_extra_pings (default 1);
+	//   - main waiting for a teammate, or a subagent waiting for its main agent: base;
+	//   - a finished thread, or one with no tool call yet: 0.
+	// Manager-strategy time windows then apply only to a wait for a person, and the sweep question is
+	// not asked while a thread waits for its own tool. It applies to the 5-minute tier. 0 on the three
+	// counts means the default. The three counts are at most 11, the highest strategy ping count.
+	KeepAliveWaitPlan             *bool `yaml:"keepalive_wait_plan"`
+	KeepAliveToolWaitMaxPings     int   `yaml:"keepalive_tool_wait_max_pings"`
+	KeepAliveBackgroundExtraPings int   `yaml:"keepalive_background_extra_pings"`
+	KeepAliveHumanExtraPings      int   `yaml:"keepalive_human_extra_pings"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -236,8 +256,17 @@ const (
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
-	DefaultKeepAliveMinPrefix     = 80000
-	DefaultHeadTTLMinBytes        = 200000
+	// DefaultKeepAliveMinPrefix is 20000 since #858. No long subagent idle span had a prefix under
+	// 20k, so any floor at or under 20k gives the same result there. It was 80000 (#435).
+	DefaultKeepAliveMinPrefix = 20000
+	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
+	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.
+	DefaultKeepAliveToolWaitMaxPings     = 8
+	DefaultKeepAliveBackgroundExtraPings = 3
+	DefaultKeepAliveHumanExtraPings      = 1
+	// MaxKeepAliveWaitPings bounds each of the three counts: the highest strategy ping count.
+	MaxKeepAliveWaitPings  = 11
+	DefaultHeadTTLMinBytes = 200000
 	// DefaultHeadTTLMinTokens is DEPRECATED, kept for old callers: the old default of 50,000.
 	DefaultHeadTTLMinTokens = DefaultHeadTTLMinBytes / HeadTTLBytesPerToken
 	// HeadTTLBytesPerToken converts the deprecated head_ttl_min_tokens into bytes. It is the
@@ -279,6 +308,15 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
+	if c.KeepAliveToolWaitMaxPings <= 0 {
+		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
+	}
+	if c.KeepAliveBackgroundExtraPings <= 0 {
+		c.KeepAliveBackgroundExtraPings = DefaultKeepAliveBackgroundExtraPings
+	}
+	if c.KeepAliveHumanExtraPings <= 0 {
+		c.KeepAliveHumanExtraPings = DefaultKeepAliveHumanExtraPings
+	}
 	if c.HeadTTLMinBytes <= 0 {
 		if c.HeadTTLMinTokens > 0 {
 			c.HeadTTLMinBytes = c.HeadTTLMinTokens * HeadTTLBytesPerToken
@@ -298,8 +336,15 @@ func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
-		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
+		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
+	}
+	if c.KeepAliveToolWaitMaxPings > MaxKeepAliveWaitPings || c.KeepAliveBackgroundExtraPings > MaxKeepAliveWaitPings ||
+		c.KeepAliveHumanExtraPings > MaxKeepAliveWaitPings {
+		return fmt.Errorf("config: cache: keepalive_tool_wait_max_pings, keepalive_background_extra_pings and "+
+			"keepalive_human_extra_pings must be at most %d (the credential hold is (K+1) x the idle time)",
+			MaxKeepAliveWaitPings)
 	}
 	if c.HeadTTLMinBytes > MaxHeadTTLMinBytes || c.HeadTTLMinTokens > MaxHeadTTLMinBytes/HeadTTLBytesPerToken {
 		return fmt.Errorf("config: cache: head_ttl_min_bytes must be at most %d (head_ttl_min_tokens at most %d)",
@@ -1011,3 +1056,6 @@ func (c *Config) NewStore() store.Store {
 	}
 	return store.NewMemory(c.Store)
 }
+
+// WaitPlanOn reports whether the per-wait ping plan is on (#858). Absent is on.
+func (c CacheConfig) WaitPlanOn() bool { return c.KeepAliveWaitPlan == nil || *c.KeepAliveWaitPlan }

@@ -653,23 +653,23 @@ func TestCanPingFollowsTheKeepAlivePolicy(t *testing.T) {
 	offPol.KeepAlive = false
 	off := &Tenancy{ID: "t1", Cache: offPol}
 	k, _, _ := testKeeper(t, Limits{})
-	if !k.canPing(on, "sess-1", bschemas.Anthropic) {
+	if !k.canPing(on, "sess-1", "", bschemas.Anthropic) {
 		t.Error("keep-alive on: canPing = false")
 	}
-	if k.canPing(off, "sess-1", bschemas.Anthropic) {
+	if k.canPing(off, "sess-1", "", bschemas.Anthropic) {
 		t.Error("keep-alive off: canPing = true, so a conversation copy would be kept for nothing")
 	}
-	if k.canPing(on, "", bschemas.Anthropic) {
+	if k.canPing(on, "", "", bschemas.Anthropic) {
 		t.Error("no session: canPing = true")
 	}
-	if k.canPing(on, "sess-1", bschemas.OpenAI) {
+	if k.canPing(on, "sess-1", "", bschemas.OpenAI) {
 		t.Error("OpenAI: the sweep's question is Anthropic only")
 	}
-	if k.canPing(nil, "sess-1", bschemas.Anthropic) {
+	if k.canPing(nil, "sess-1", "", bschemas.Anthropic) {
 		t.Error("nil tenancy: canPing = true")
 	}
 	k.h.rec = nil
-	if k.canPing(on, "sess-1", bschemas.Anthropic) {
+	if k.canPing(on, "sess-1", "", bschemas.Anthropic) {
 		t.Error("no audit sink: canPing = true, but the keeper holds nothing without one")
 	}
 }

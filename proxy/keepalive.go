@@ -369,7 +369,15 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
 				string(provider), startedAt, body, r.UserAgent(), u)
 		}
-		pol, applied = k.resolvePolicy(tn, session, provider, pol, pdec, pdecOK)
+		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
+		// cause of the response that ended this turn.
+		ignoreWindows := false
+		if pol.WaitPlan && tracked {
+			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
+				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
+			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
+		}
+		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
@@ -402,19 +410,35 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 // record-time gate, evaluated before the request goes out and without a campaign decision (that one
 // needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
 // the safe direction: nothing extra is kept for it.
-func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelProvider) bool {
+func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
 	if k == nil || tn == nil || k.h == nil || k.h.rec == nil || keepAliveDisabled() ||
 		provider == bschemas.OpenAI || session == "" {
 		return false
 	}
+	// The wait cause is not known yet, so the windows count, as before #858: for an unknown wait the
+	// pessimistic answer is the safe one. A tool wait outside a window then registers no conversation copy
+	// and still gets its plain ping; it loses only the sweep substitute. A copy is content kept in memory.
 	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
-	return pol.On()
+	if !pol.On() {
+		return false
+	}
+	// A thread with no tool call yet is not pinged (#858), so it keeps no copy either.
+	if pol.WaitPlan && !k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}) {
+		return false
+	}
+	return true
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own
 // policy — the old record's policy block, unchanged.
 func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.ModelProvider,
 	pol CachePolicy, pdec predDecision, pdecOK bool) (CachePolicy, string) {
+	return k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, false)
+}
+
+// resolvePolicyWindows is resolvePolicy with the strategy's time windows optionally ignored (#858).
+func (k *keeper) resolvePolicyWindows(tn *Tenancy, session string, provider bschemas.ModelProvider,
+	pol CachePolicy, pdec predDecision, pdecOK bool, ignoreWindows bool) (CachePolicy, string) {
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
 	// A matching ACTIVE strategy forces KeepAlive on and replaces Idle/MaxPings/
@@ -422,11 +446,18 @@ func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.Mo
 	// override, which still wins on top and still cannot widen MaxUSDPerPing.
 	applied := ""
 	if provider != bschemas.OpenAI {
-		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		account := pol
+		pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), false)
+		// A strategy that matches only because its window was ignored (#858) never displaces an active
+		// campaign: with a campaign and a closed window, the campaign wins, as before #858.
+		if applied == "" && ignoreWindows && !(pdecOK && pdec.active) {
+			pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), true)
+		}
 		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
-		// explicit instruction).
+		// explicit instruction). The campaign owns the count, so the per-wait plan is off for it (#858).
 		if pdecOK && applied == "" && pdec.active {
 			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+			pol.WaitPlan = false
 		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads

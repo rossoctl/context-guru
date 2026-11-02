@@ -184,6 +184,9 @@ func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePol
 	pol.KeepAlive = true
 	pol.Idle, pol.MaxPings = o.pol.Idle, o.pol.MaxPings
 	pol.MinPrefixTokens = o.pol.MinPrefixTokens
+	// The person armed this exact count and was shown the hold it buys: the per-wait plan (#858)
+	// does not change it.
+	pol.WaitPlan = false
 	// The override's ping count bounds a 1-hour thread too, but only downward: its 60-290 s band
 	// cannot express an hour, so the 1-hour timing stays the account's, and the hold the person was
 	// shown is then (K+1) x 59 min at most. 0 means the proxy default, which is resolved here so
