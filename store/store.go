@@ -256,13 +256,19 @@ const (
 	// back to kept-verbatim, which reverts the original to its full form inside the cached prefix —
 	// the very cache-write fixed restore exists to avoid — and drops the inserted copy as well.
 	RestorePrefix = "cg:rst:"
+	// ToolDeferPrefix is tooldefer's per-thread decision (#485): the names of the tools deferred
+	// at the thread's first request. Metadata (tool names only), so the disk store keeps it under
+	// every storage level. PINNED, because losing it moves tools between loaded and deferred inside
+	// the cached prefix, which rewrites the whole prefix.
+	ToolDeferPrefix = "cg:tdf:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix}
+	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
+	ToolDeferPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
