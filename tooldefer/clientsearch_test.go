@@ -349,3 +349,25 @@ func TestSearchArgsLoneString(t *testing.T) {
 		t.Fatalf("names as a string = %q", got)
 	}
 }
+
+// A chained Responses turn that omits `tools` is sent as it is: the provider then declares no tools
+// at all (it does not carry turn 1's tools over; checked live on gpt-5.5), so no call to our search
+// can come back. The next chained turn that sends `tools` again gets turn 1's tools bytes.
+func TestApplySearchChainedTurnWithoutTools(t *testing.T) {
+	e := env(t, unusedHist())
+	o, _ := ApplySearch(e, cgschema.WireResponses, sreq(respBody()))
+	if !o.Changed {
+		t.Fatalf("first: %s", show(o))
+	}
+	bare := []byte(`{"model":"gpt-5.5","previous_response_id":"resp_1","input":[{"role":"user","content":"next"}]}`)
+	o2, _ := ApplySearch(e, cgschema.WireResponses, sreq(bare))
+	if o2.Changed || o2.Why != "no_tools" || string(o2.Body) != string(bare) {
+		t.Fatalf("no-tools turn: %s", show(o2))
+	}
+	chained := []byte(strings.Replace(string(respBody()), `"input":[{"role":"user","content":"hi"}]`,
+		`"previous_response_id":"resp_2","input":[{"role":"user","content":"more"}]`, 1))
+	o3, _ := ApplySearch(e, cgschema.WireResponses, sreq(chained))
+	if !o3.Changed || gjson.GetBytes(o3.Body, "tools").Raw != gjson.GetBytes(o.Body, "tools").Raw {
+		t.Fatalf("next chained turn: %s", show(o3))
+	}
+}

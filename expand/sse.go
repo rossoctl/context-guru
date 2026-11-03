@@ -199,7 +199,10 @@ func aggregateChatSSE(raw []byte) ([]byte, bool) {
 		}
 		ev := gjson.Parse(p)
 		if !ev.Get("choices").Exists() {
-			continue // not a Chat Completions chunk
+			// Not a Chat Completions chunk. One small change from the copy this replaced, which
+			// counted any data line: a stream with no chunk now returns ok=false instead of an
+			// empty message. serve bails on both, so the client gets the same bytes.
+			continue
 		}
 		seen = true
 		if id == "" {

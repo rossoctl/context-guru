@@ -367,3 +367,26 @@ func TestClientSearchChainedResponsesTurn(t *testing.T) {
 		t.Fatalf("follow-up has no answer: %s", gjson.GetBytes(follow, "input").Raw)
 	}
 }
+
+// A search call the client gets at the round cap is kept by call id, so a chained Responses turn
+// that carries only the client's answer is repaired.
+func TestClientSearchRoundCapKeepsTheCall(t *testing.T) {
+	search := func(id string) string {
+		return csCalls(csCall(id, "context_guru_expand", `{"id":"nope"}`), csCall(id+"s", tooldefer.ClientSearchName, `{"names":["Monitor"]}`))
+	}
+	// Every round calls expand and our search: the loop answers both until the cap, then bails.
+	up := &csUpstream{script: []string{search("a")}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	_, out := csPost(t, srv, "s1", csBody("s1"))
+	if !strings.Contains(out, tooldefer.ClientSearchName) {
+		t.Fatalf("the cap did not hand the call over: %d rounds, %s", len(up.all()), out)
+	}
+	rec, ok := tooldefer.LoadSearch(h.deferEnv(h.static.Load()).RecordStore(), "s1", "")
+	if !ok || len(rec.Calls["as"]) != 1 || rec.Calls["as"][0] != "Monitor" {
+		t.Fatalf("the leaked call is not kept: %+v", rec)
+	}
+}

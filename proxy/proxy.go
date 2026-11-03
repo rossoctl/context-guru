@@ -2260,6 +2260,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// The cap is reached, so this call cannot be answered — the client gets it, and
 			// bail is what counts that. Withholding first and handing back is the same bytes
 			// as streaming the round whole, and it is the only way the leak is visible.
+			if searchOn && di != nil {
+				// A call to our search that reaches the client here is kept by call id, so a
+				// chained Responses turn, which carries only the client's answer, is repaired.
+				h.noteLeakedSearches(tn, di, wire, isSSE, respBody)
+			}
 			bail()
 			return
 		}

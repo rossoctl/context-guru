@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -512,6 +513,25 @@ func (h *Handler) searchLoad(tn *Tenancy, di *deferInfo, names []string) (set ma
 // noteSearchCalls keeps the searches the client received in di's thread record.
 func (h *Handler) noteSearchCalls(tn *Tenancy, di *deferInfo, calls []tooldefer.SearchCall) {
 	tooldefer.NoteCalls(h.deferEnv(tn).RecordStore(), di.session, di.thread, calls)
+}
+
+// noteLeakedSearches keeps the calls to our search in a response the client gets whole (the round
+// cap), so a later request can answer them (tooldefer.NoteCalls).
+func (h *Handler) noteLeakedSearches(tn *Tenancy, di *deferInfo, wire string, sse bool, resp []byte) {
+	if !bytes.Contains(resp, []byte(tooldefer.ClientSearchName)) {
+		return
+	}
+	msg := resp
+	if sse {
+		agg, ok := expand.AggregateSSE(wire, resp)
+		if !ok {
+			return
+		}
+		msg = agg
+	}
+	if calls, _ := tooldefer.SearchCalls(wire, msg); len(calls) > 0 {
+		h.noteSearchCalls(tn, di, calls)
+	}
 }
 
 // startProbe runs a probe in the background, through the host's Dispatcher, with the caller's own
