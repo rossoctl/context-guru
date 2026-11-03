@@ -10,6 +10,7 @@
 | `/context-guru:save-more config` | every shipped preset; `--custom` also searches single components, their combinations and their order |
 | `/context-guru:save-more cache` | every keep-alive strategy, with the savings by day of week and hour |
 | `/context-guru:save-more settings` | only the "Settings that cost you money" card |
+| `/context-guru:save-more tools` | every tool, MCP server and skill: its state under tool deferral, its use, what carrying it cost, and why (see [Tools](#tools)) |
 | `/context-guru:save-more apply <config\|cache> <option>@<basis>` | make a change the screen offered (after a yes) |
 | `/context-guru:save-more revert <config\|cache>` | undo the last change made here |
 
@@ -215,6 +216,27 @@ Apply anyway, although that check failed: /context-guru:save-more apply cache by
 ```
 
 The words may come in either order (`apply cache X` or `apply X cache`). A change typed under a read command (`save-more revert config`, `config revert`) is not run; the command prints the exact one to run instead.
+
+## Tools
+
+`/context-guru:save-more tools` lists each tool, MCP server and skill you carry, most costly first (#485, decision D3). It replaces `/context-guru:remove-mcp-and-skills` once the owner agrees to remove that command.
+
+| Column | What it says |
+|---|---|
+| state | `loaded`, `deferred by CG` (Context Guru's tool deferral holds it back from your own history), `deferred by Claude Code` (Claude Code sends only its name), or `removed` (on your removal list) |
+| used | the sessions that used it, of the sessions that carried it. A tool loaded through search counts as used |
+| cost | what carrying it cost over the window, used or not; `n/a` when a model had no price |
+
+`details` adds the reason for each state. There is no recommendation: deferral decides per tool, and this view is for overriding it. Each change is one command, run after a yes:
+
+| Change | Command |
+|---|---|
+| keep a tool loaded (never defer it) | `/context-guru:save-more apply deferral keep:<name>@<basis>` |
+| take it off the keep list | `/context-guru:save-more apply deferral unkeep:<name>@<basis>` |
+| tool search on or off for your account | `/context-guru:save-more apply deferral search_on@<basis>` (or `search_off`) |
+| undo the last of these changes | `/context-guru:save-more revert deferral` |
+
+A change reaches new threads only: a thread keeps the set of tools it decided at its first request, so its cached prefix stays the same. The keep list is toolfilter's `keep`, and search is toolfilter's `defer: auto` or `off`. The routes are `GET /api/save-more/tools` and `POST /api/save-more/tools/apply`, with the same token and loopback rules as the other reports.
 
 ## Settings that cost you money
 

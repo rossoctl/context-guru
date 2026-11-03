@@ -1,0 +1,28 @@
+{
+ "kind": "save_more_tools",
+ "search_on": true,
+ "keep": ["Bash"],
+ "writable": true,
+ "window": {"since": 1788881400000, "until": 1791473400000, "sessions": 42, "requests": 1830},
+ "rows": [
+  {"kind": "tool", "name": "Bash", "state": "loaded", "reason": "never deferred: a core tool", "builtin": true, "kept": true,
+   "tokens": 2900, "sessions_declared": 42, "sessions_used": 41, "calls": 610, "carry_usd": 9.12, "carry_priced": true, "actions": ["unkeep:Bash"]},
+  {"kind": "mcp_server", "name": "mcp__playwright", "server": "playwright", "state": "deferred_cg",
+   "reason": "Context Guru defers it: declared and not used in your last 3 sessions",
+   "tokens": 11200, "sessions_declared": 40, "sessions_used": 1, "calls": 3, "carry_usd": 6.40, "carry_priced": true, "actions": ["keep:mcp__playwright"]},
+  {"kind": "tool", "name": "WebFetch", "state": "loaded", "reason": "used or loaded in your last 3 sessions", "builtin": true,
+   "tokens": 900, "sessions_declared": 42, "sessions_used": 9, "calls": 14, "carry_usd": 1.10, "carry_priced": true, "actions": ["keep:WebFetch"]},
+  {"kind": "tool", "name": "Monitor", "state": "deferred_client", "reason": "Claude Code defers it: only its name is sent until the model searches for it",
+   "builtin": true, "tokens": 0, "sessions_declared": 42, "sessions_used": 2, "calls": 2, "carry_usd": 0, "carry_priced": true, "actions": ["keep:Monitor"]},
+  {"kind": "skill", "name": "dataviz", "state": "loaded", "reason": "skills are listed by name and description; tool deferral does not change them",
+   "tokens": 60, "sessions_declared": 42, "sessions_used": 0, "calls": 0, "carry_usd": 0.31, "carry_priced": false, "actions": []}
+ ],
+ "options": [
+  {"id": "unkeep:Bash", "label": "take Bash off the keep list", "action": "unkeep", "name": "Bash"},
+  {"id": "keep:mcp__playwright", "label": "never defer mcp__playwright", "action": "keep", "name": "mcp__playwright"},
+  {"id": "keep:WebFetch", "label": "never defer WebFetch", "action": "keep", "name": "WebFetch"},
+  {"id": "keep:Monitor", "label": "never defer Monitor", "action": "keep", "name": "Monitor"},
+  {"id": "search_off", "label": "turn tool search off for your account: every tool is sent in full", "action": "search_off"}
+ ],
+ "basis_id": "9d4e2a7c"
+}

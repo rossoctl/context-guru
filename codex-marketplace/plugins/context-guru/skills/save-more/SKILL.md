@@ -10,7 +10,7 @@ directory and print its output exactly as it is in one code block:
 python3 ../../scripts/cg.py save-more
 ```
 
-Append `config`, `cache` or `settings` if the user named one (`settings` lists client settings that cost money; it replays nothing), `--custom` to also search custom combinations, `details` for more.
+Append `config`, `cache`, `settings` or `tools` if the user named one (`settings` lists client settings that cost money; it replays nothing; `tools` lists each tool, MCP server and skill under tool deferral, with no recommendation), `--custom` to also search custom combinations, `details` for more.
 In the output, read `/context-guru:save-more` as this skill.
 
 If the output has no `Apply it?` line, stop. Otherwise, after printing it, ask ONE question and wait: with two
