@@ -124,7 +124,7 @@ type Options struct {
 	RestartGrace *bool
 	// ToolDeferPath is where tool deferral keeps its own on-disk state (#485): the per-thread
 	// records for a session store that does not survive a restart, and the history when there is
-	// no dashboard database. Opened at the first ultrahigh request that needs it. "": there is no
+	// no dashboard database. Opened at start when a configuration turns deferral on. "": there is no
 	// such place, and ultrahigh defers only with a durable session store. ToolDeferRetention bounds
 	// a row's age there (0: store.DefaultDiskRetention).
 	ToolDeferPath      string
@@ -450,6 +450,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	}
 	h.keeper = newKeeper(h)
 	h.keeper.start()
+	// Tool deferral's stored state, loaded before the first request when a config turns it on.
+	h.startToolDefer()
 	h.threads = thread.New()
 	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
