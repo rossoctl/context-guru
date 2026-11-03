@@ -529,8 +529,9 @@ func declares(body []byte, name string) bool {
 
 // deferLedger books one finished request in the net-saving ledger. The searches are the ones the
 // stream-through path read off its window (u.Searches) plus the ones serve's loop read off each
-// round it held (st): every path counts them, the SSE splice included (#871, defect 2).
-func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, st searchTally) {
+// round it held (st): every path counts them, the SSE splice included (#871, defect 2). The same
+// facts go to the dashboard row (cp), for the per-account, per-day net-saving panel (#869).
+func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u Usage, usageOK bool, st searchTally) {
 	if di == nil || !usageOK {
 		return
 	}
@@ -547,6 +548,20 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 		p, _ = h.opts.Prices.Price(ctx, di.model)
 	}
 	h.toolDefer().ledger.Add(r, p)
+	// The dashboard row takes the same r the ledger booked, so /stats and the panel agree (#869).
+	m, _ := tooldefer.Price(r, p)
+	cp.noteDefer(r, m, distinctLoads(loaded))
+}
+
+// distinctLoads is how many different tools the searches of one response loaded.
+func distinctLoads(loaded []string) int {
+	seen := map[string]bool{}
+	for _, n := range loaded {
+		if n != "" {
+			seen[n] = true
+		}
+	}
+	return len(seen)
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

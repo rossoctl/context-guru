@@ -1,0 +1,22 @@
+Not applied: the numbers changed since you saw them. Here they are again; nothing was written.
+
+╭─ Save more: tools ──────────────────────────────────────────────────────────────────────────────╮
+│ Tool search is on for your account: Context Guru defers 1 of these 5 items, from your own       │
+│ history.                                                                                        │
+│ Claude Code defers 1 itself. Carrying all of them cost at least $16.62 over the last 30 days; 1 │
+│ item had no price.                                                                              │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+Your items, most costly first:
+  kind         name             state                        used   cost
+  tool (kept)  Bash             loaded                   41 of 42  $9.12
+  MCP server   mcp__playwright  deferred by CG            1 of 40  $6.40
+  tool         WebFetch         loaded                    9 of 42  $1.10
+  tool         Monitor          deferred by Claude Code   2 of 42     $0
+  skill        dataviz          loaded                    0 of 42    n/a
+
+  2026-09-08..2026-10-08 · 42 sessions, 1,830 requests
+  Not available yet: always defer a tool (toolfilter has no list for it yet) (#878).
+Keep a tool loaded (never defer it), after a yes: /context-guru:save-more apply deferral 'keep:<name>@9d4e2a7c'
+Turn tool search off for your account, after a yes: /context-guru:save-more apply deferral search_off@9d4e2a7c
+Undo the last of these changes: /context-guru:save-more revert deferral

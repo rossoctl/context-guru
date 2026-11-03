@@ -36,8 +36,8 @@ type ToolStat struct {
 	Kind   string `json:"kind"`
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
-	// Deferred: some session carried it as a deferred MCP tool, which the proxy filter cannot
-	// remove (see Decl.Deferred).
+	// Deferred: some session carried it as a deferred tool (MCP, or a built-in Claude Code
+	// defers), which the proxy filter cannot remove (see Decl.Deferred).
 	Deferred bool `json:"deferred,omitempty"`
 	// Tokens is what carrying this declaration costs on ONE request.
 	Tokens int `json:"tokens"`
@@ -1309,6 +1309,8 @@ func (a *API) toolRoutes() []route {
 		{"GET /api/adapt/tools", scopeTenant, a.adaptTools},
 		// What the client settings that cost money have cost: counts and dollars of rows by request shape (costlysettings.go).
 		{"GET /api/adapt/settings", scopeTenant, a.costlySettings},
+		// Tool deferral's net saving per account and per day, from the request rows (tooldeferpanel.go).
+		{"GET /api/tool-defer", scopeTenant, a.toolDefer},
 	}
 }
 

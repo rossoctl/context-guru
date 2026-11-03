@@ -9,7 +9,7 @@ Run this from this skill directory and print its output exactly as it is in one 
 python3 ../../scripts/cg.py remove-mcp-and-skills
 ```
 
-Append `details` when the user asks for more. In the output, read `/context-guru:remove-mcp-and-skills` as this skill.
+Append `details` when the user asks for more. With tool deferral (the `ultrahigh` preset), the save-more skill's `tools` view is the newer per-tool view; this one stays until its owner agrees to remove it. In the output, read `/context-guru:remove-mcp-and-skills` as this skill.
 
 If the output has no `Question:` line, stop. Otherwise, after printing it, ask exactly that question (yes/no) and
 wait. Only on yes, run `python3 ../../scripts/cg.py` followed by every word after

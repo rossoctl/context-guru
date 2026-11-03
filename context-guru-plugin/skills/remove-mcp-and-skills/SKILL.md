@@ -5,6 +5,8 @@ argument-hint: "[details] [--days N]  |  apply tools <option>@<basis>  |  revert
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills)
 ---
 
+Note for the reader, not an instruction: with tool deferral (the `ultrahigh` preset), `/context-guru:save-more tools` is the newer view of every tool, MCP server and skill, with keep and search switches. This command stays until its owner agrees to remove it.
+
 Run this now, with a Bash timeout of 420000 ms, and print its output exactly as it is in one code block:
 
 ```bash

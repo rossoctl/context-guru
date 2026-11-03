@@ -63,6 +63,20 @@ func cgProxyStub(t *testing.T, cache string) string {
 	mux.HandleFunc("GET /api/adapt/cache", file("adapt_cache"))
 	mux.HandleFunc("GET /api/adapt/tools", file("adapt_tools"))
 	mux.HandleFunc("GET /api/adapt/compaction", file("adapt_compaction"))
+	mux.HandleFunc("GET /api/save-more/tools", file("save_more_tools"))
+	mux.HandleFunc("POST /api/save-more/tools/apply", func(w http.ResponseWriter, r *http.Request) {
+		var b struct{ Option, Basis string }
+		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
+		switch {
+		case b.Option == "revert" && b.Basis == "":
+			w.Write([]byte(`{"ok":true,"applied":"revert","previous":"current","kind":"tools","effective":"next_session","note":"restored the configuration from before the last save-more tools change"}`))
+		case b.Option == "keep:mcp__playwright" && b.Basis == "9d4e2a7c":
+			w.Write([]byte(`{"ok":true,"applied":"keep:mcp__playwright","previous":"current","kind":"tools","effective":"next_session","note":"never deferring mcp__playwright","undo":{"option":"revert"}}`))
+		default:
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"that option is not in a current report; run the report again"}`))
+		}
+	})
 	mux.HandleFunc("POST /api/adapt/compaction/apply", func(w http.ResponseWriter, r *http.Request) {
 		var b struct{ Option, Basis string }
 		json.NewDecoder(r.Body).Decode(&b) //nolint:errcheck
@@ -204,6 +218,12 @@ func TestCGGoldens(t *testing.T) {
 		{"save-more-config-details", warm, []string{"save-more", "config", "details"}, 0},
 		{"save-more-cache", warm, []string{"save-more", "cache"}, 0},
 		{"save-more-cache-details", warm, []string{"save-more", "cache", "details"}, 0},
+		{"save-more-tools", warm, []string{"save-more", "tools"}, 0},
+		{"save-more-tools-details", warm, []string{"save-more", "tools", "details"}, 0},
+		{"apply-deferral", warm, []string{"apply", "deferral", "keep:mcp__playwright@9d4e2a7c"}, 0},
+		{"apply-deferral-stale", warm, []string{"apply", "deferral", "keep:Bash@000000"}, 1},
+		{"apply-deferral-under-read", warm, []string{"save-more", "apply", "deferral", "keep:WebFetch@9d4e2a7c"}, 1},
+		{"revert-deferral", warm, []string{"revert", "deferral"}, 0},
 		{"remove-mcp-and-skills", warm, []string{"remove-mcp-and-skills"}, 0},
 		{"remove-mcp-and-skills-details", warm, []string{"remove-mcp-and-skills", "details"}, 0},
 		{"remove-mcp-and-skills-edge", warm, []string{"remove-mcp-and-skills", "--fixture", filepath.Join("testdata", "cg", "fx_tools_edge.json")}, 0},

@@ -573,6 +573,9 @@ func (h *Handler) Mux() *http.ServeMux {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
 		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+		// save-more tools (#869): tool deferral's per-tool view and its keep / search actions.
+		m.HandleFunc("GET /api/save-more/tools", h.saveMoreToolsReport)
+		m.HandleFunc("POST /api/save-more/tools/apply", h.saveMoreToolsApply)
 		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
 		h.mountManualPing(m)
 	}
@@ -1843,7 +1846,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
-		h.deferLedger(r.Context(), di, usage, usageOK && status == http.StatusOK, deferSearches)
+		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that
