@@ -107,3 +107,77 @@ func TestPriceMode_ConservationCheckDoesNotGate(t *testing.T) {
 		t.Fatalf("conservation gated the override: reason %q components %+v", fb, e.Components)
 	}
 }
+
+// An envelope operator (an injected tool declaration) has a figure and no pipeline row: the override
+// adds an envelope row for it, so the rows still sum to the baseline delta.
+func TestPriceMode_EnvelopeOperatorGetsARow(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Ops = append(e.accRes.Ops, accountant.PricedOp{Operator: "context-guru.expand", ChangeID: "cg:expand:x",
+		Caused: accountant.TierTokens{CacheRead: 100}})
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	var row *CompRow
+	var sum float64
+	for i := range e.Components {
+		sum += e.Components[i].SavedUSD
+		if e.Components[i].Component == "expand" {
+			row = &e.Components[i]
+		}
+	}
+	if row == nil || row.Kind != KindEnvelope || !accNear(row.SavedUSD, -100*0.3e-6) {
+		t.Fatalf("expand row %+v", row)
+	}
+	if !accNear(sum, e.BaselineCostUSD-e.CostUSD) {
+		t.Fatalf("rows sum %v, baseline delta %v", sum, e.BaselineCostUSD-e.CostUSD)
+	}
+}
+
+// A figure for a name that is neither a row nor an envelope operator still falls back.
+func TestPriceMode_UnknownOperatorStillFallsBack(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Ops = append(e.accRes.Ops, accountant.PricedOp{Operator: "context-guru.nosuch", ChangeID: "n",
+		Saved: accountant.TierTokens{CacheRead: 1}})
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != FallbackFigureWithoutRow {
+		t.Fatalf("fallback %q, want %q", fb, FallbackFigureWithoutRow)
+	}
+}
+
+// The break an ended change left behind is counted on a row of its own.
+func TestPriceMode_EndedChangeBreakHasARow(t *testing.T) {
+	e := switchEvent()
+	e.accRes.CacheEffects = []accountant.CacheEffect{{Kind: accountant.EffectBreak,
+		Saved: accountant.TierTokens{CacheRead: 100}, Caused: accountant.TierTokens{CacheWrite5m: 100}}}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	brk := 100*0.3e-6 - 100*3.75e-6
+	var got float64
+	found := false
+	for _, c := range e.Components {
+		if c.Component == EndedChangeComponent {
+			got, found = c.SavedUSD, true
+		}
+	}
+	if !found || !accNear(got, brk) || !accNear(e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6+brk) {
+		t.Fatalf("ended_change %v (found %v), delta %v", got, found, e.BaselineCostUSD-e.CostUSD)
+	}
+}
+
+// penalty_unknown (a thread's first request) does not gate: the figure applies and is an estimate
+// (accountant design §6.4). Any other unpriced reason still gates (TestPriceMode_FallsBackToLegacy).
+func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" || !e.AccountantEstimated() {
+		t.Fatalf("fallback %q estimated %v, want the override applied as an estimate", fb, e.AccountantEstimated())
+	}
+	e.Price(accTestPrice, true)
+	if e.AccountantEstimated() {
+		t.Fatal("Price left the estimate flag set")
+	}
+}

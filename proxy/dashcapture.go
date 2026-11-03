@@ -120,9 +120,11 @@ type capture struct {
 	// and the accountant figure must not override the legacy figures.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings   *PingStore
-	accReq  *accountant.Request
-	accDone bool
+	pings  *PingStore
+	accReq *accountant.Request
+	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
+	accClient []byte
+	accDone   bool
 	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
 	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
 	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so

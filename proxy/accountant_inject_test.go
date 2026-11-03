@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 )
@@ -68,18 +69,36 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	if fmt.Sprint(r.Breakpoints) != fmt.Sprint(accBreakpoints(sent)) || len(r.Breakpoints) == 0 {
 		t.Fatalf("breakpoints %+v, want %+v", r.Breakpoints, accBreakpoints(sent))
 	}
-	// KNOWN LIMIT, pinned: no operation describes the injected declarations, so the tools section
-	// differs between the client and forwarded bodies with no op to explain it. The library's sum
-	// check fails there, and the event keeps the legacy figures (check_sum). Safe, and the
-	// reason is visible in acc_fallback.
+	// The injected declarations report no operation of their own; envelopeOps finds them in the body
+	// diff and reports each as an added declaration. The sum check passes, the override applies, and
+	// each injection is a cost on a row of its own.
 	waitForRows(t, rec, 1)
 	e := tap.all()[0]
 	res, _ := e.AccountantResult()
-	tools := false
 	for _, c := range res.Checks {
-		tools = tools || (c.Check == "sum" && strings.Contains(c.Detail, "section=tools"))
+		if c.Check == "sum" {
+			t.Fatalf("sum check failed: %+v", c)
+		}
 	}
-	if !tools || e.AccountantFallback() != "check_sum" {
-		t.Fatalf("checks %+v fallback %q: the injection must be caught by the sum gate", res.Checks, e.AccountantFallback())
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	for _, name := range []string{"expand", "adjudicate"} {
+		var row *dash.CompRow
+		for i := range e.Components {
+			if e.Components[i].Component == name {
+				row = &e.Components[i]
+			}
+		}
+		if row == nil || row.Kind != dash.KindEnvelope || row.SavedUSD >= 0 {
+			t.Fatalf("%s: row %+v, want an envelope row with a cost", name, row)
+		}
+	}
+	var sum float64
+	for _, c := range e.Components {
+		sum += c.SavedUSD
+	}
+	if d := sum - (e.BaselineCostUSD - e.CostUSD); d > 1e-12 || d < -1e-12 {
+		t.Fatalf("rows sum %v, baseline delta %v", sum, e.BaselineCostUSD-e.CostUSD)
 	}
 }

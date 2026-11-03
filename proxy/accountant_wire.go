@@ -21,6 +21,7 @@ func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
 		return
 	}
 	c.accReq = c.savings.begin(meta, client)
+	c.accClient = client
 }
 
 // accEnd records the thread, the forwarded body and the operations. A thread that continues
@@ -35,6 +36,10 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	if parent, ok := th.InheritsFrom(); ok {
 		t.Parent = accThreadID(parent)
 	}
+	// The envelope changes report no operation of their own: envelopeOps finds them from the two
+	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
+	// with a message splice.
+	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
 	// PingRead is left nil: see the LIMITATION note on entryFacts.
 	c.savings.end(c.accReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.accReq.Meta.Session, t))
 }

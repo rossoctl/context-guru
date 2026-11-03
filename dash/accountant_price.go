@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/rossoctl/accountant"
@@ -158,6 +159,27 @@ var gatedChecks = map[string]string{
 	"spans":         FallbackCheckSpans,
 }
 
+// KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
+// the ended-change break, neither of which is a pipeline component.
+const KindEnvelope = "envelope"
+
+// EndedChangeComponent is the row that carries the break an ended change left behind.
+const EndedChangeComponent = "ended_change"
+
+// envelopeComponents are the operators that change the request envelope (tools, system, cache
+// marks) and may have no pipeline row: the proxy reports them from a body diff
+// (proxy/accountant_envelope.go). expand and adjudicate are never pipeline components; headttl is
+// a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
+// the rewrite ran from an equivalent gate (cacheinject runs the split too).
+var envelopeComponents = map[string]bool{
+	"expand": true, "adjudicate": true, "headttl": true,
+	"toolschema": true, "toolfilter": true, "cachesplit": true,
+}
+
+// AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
+// out a break (penalty_unknown, accountant design §6.4). It is false when the override did not apply.
+func (e *Event) AccountantEstimated() bool { return e.accEstimated }
+
 // AccountantFallback is the reason PriceMode kept the legacy figures, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
 func (e *Event) AccountantFallback() string { return e.accFallback }
@@ -172,7 +194,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // gated library check failed; the figure is plausible; and every component that acted has a
 // library figure. Otherwise the legacy figures stand and AccountantFallback says why.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback = ""
+	e.accFallback, e.accEstimated = "", false
 	if !e.priceLegacy(p, accountingComplete) {
 		return
 	}
@@ -195,8 +217,16 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		}
 	}
 	fig := e.AccountantFigure(p)
-	if len(fig.Unpriced) > 0 {
-		return FallbackUnpriced
+	// penalty_unknown is not a missing price: the library priced every operation and could not
+	// rule out a break, because the thread has no history or a setting has no position. The design
+	// says to show such a figure and mark it estimated (accountant design §6.4), so it does not gate.
+	// Any other unpriced reason means an operation has no price, and it does.
+	estimated := false
+	for _, u := range fig.Unpriced {
+		if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
+			return FallbackUnpriced
+		}
+		estimated = true
 	}
 	// Plausibility bound on the library's INPUT: a request cannot remove more tokens than it had.
 	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
@@ -210,16 +240,32 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		return FallbackImplausibleSize
 	}
 	// A library figure for a component the event has no row for would leave the rows short of
-	// the baseline: the sum invariant would break. Keep the legacy figures instead.
+	// the baseline: the sum invariant would break. An envelope operator (envelopeComponents) gets
+	// its own row; for any other name the legacy figures stand.
 	rows := map[string]bool{}
 	for _, c := range e.Components {
 		rows[c.Component] = true
 	}
+	var added []CompRow
 	for name := range fig.ByComponent {
-		if !rows[name] {
+		switch {
+		case rows[name]:
+		case envelopeComponents[name]:
+			added = append(added, CompRow{Component: name, Kind: KindEnvelope, Acted: true, Mutated: true})
+		default:
 			return FallbackFigureWithoutRow
 		}
 	}
+	// The break an ended change left behind is counted and owned by no component: it gets a row
+	// of its own, so the rows still sum to the baseline delta.
+	if fig.EndedBreakUSD != 0 {
+		if rows[EndedChangeComponent] {
+			return FallbackDuplicateName
+		}
+		added = append(added, CompRow{Component: EndedChangeComponent, Kind: KindEnvelope, Acted: true})
+		fig.ByComponent[EndedChangeComponent] = fig.EndedBreakUSD
+	}
+	sort.Slice(added, func(i, j int) bool { return added[i].Component < added[j].Component })
 	// Two rows with one name would each take the full figure and break the sum invariant.
 	seen := map[string]bool{}
 	for _, c := range e.Components {
@@ -241,7 +287,12 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	for i := range e.Components {
 		e.Components[i].SavedUSD = saved[i]
 	}
+	for _, r := range added {
+		r.SavedUSD = fig.ByComponent[r.Component]
+		e.Components = append(e.Components, r)
+	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	e.accEstimated = estimated
 	return ""
 }
 

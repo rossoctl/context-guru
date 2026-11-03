@@ -128,6 +128,8 @@ type Event struct {
 	accObserve    bool
 	// accFallback is why PriceMode kept the legacy figures (see AccountantFallback).
 	accFallback string
+	// accEstimated says the applied accountant figure is an estimate (see AccountantEstimated).
+	accEstimated bool
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
@@ -816,7 +818,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked
 // partial/missing: a cost we cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback = ""
+	e.accFallback, e.accEstimated = "", false
 	e.priceLegacy(p, accountingComplete)
 }
 
