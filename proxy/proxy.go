@@ -1744,9 +1744,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// can never delay or fail a request.
 	var usage Usage
 	var usageOK bool
-	// deferMsg is the last round's response message, when this loop parsed one: tool deferral's
-	// ledger reads its searches from it (#485).
-	var deferMsg []byte
+	// deferSearches adds up the server-side searches of every round this loop held: tool
+	// deferral's ledger reads them (#485). Counted per round, before the splice path's early
+	// return, so a spliced Claude Code turn counts its searches too (#871).
+	var deferSearches searchTally
 	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
 	// benign, three a measurement outage — and nothing distinguished them, so a run that had
 	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
@@ -1824,7 +1825,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
-		h.deferLedger(r.Context(), di, usage, usageOK && status == http.StatusOK, deferMsg)
+		h.deferLedger(r.Context(), di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that
@@ -2184,6 +2185,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
+		if di != nil {
+			deferSearches.add(isSSE, respBody)
+		}
 		if isSSE && sp != nil && withheld == nil {
 			// The whole round is already on the wire. Either it never called a proxy tool, or
 			// it ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
@@ -2238,7 +2242,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		deferMsg = msg
 		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName)
 		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
 		// called PROXY tools only: by the time the request-path repair runs, the client has already
@@ -2515,7 +2518,11 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
 	if bytes.Contains(win, []byte(tooldefer.SearchName)) {
-		u.Searches, u.SearchLoaded = tooldefer.SearchesInSSE(win)
+		if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+			u.Searches, u.SearchLoaded = tooldefer.SearchesInSSE(win)
+		} else {
+			u.Searches, u.SearchLoaded = tooldefer.SearchesIn(win)
+		}
 	}
 	return firstByte, u, why, ok
 }
