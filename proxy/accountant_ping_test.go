@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 )
@@ -116,15 +117,15 @@ func TestEntryFactsConsumesPingFactsOnce(t *testing.T) {
 	st := NewPingStore()
 	PingSavings(okReport(), st)
 	th := accountant.Thread{ID: "main"}
-	f := entryFacts(nil, st, "s", th)
+	f := entryFacts("", "", nil, st, "s", th)
 	if f.LastPing.IsZero() || f.PingWindow == "" || f.PingRead != nil {
 		t.Fatalf("%+v", f)
 	}
-	g := entryFacts(nil, st, "s", th)
+	g := entryFacts("", "", nil, st, "s", th)
 	if !g.LastPing.IsZero() || g.PingWindow != "" {
 		t.Fatalf("second request got %+v", g)
 	}
-	if entryFacts(nil, nil, "s", th).TTL != 5*time.Minute {
+	if entryFacts("", "", nil, nil, "s", th).TTL != 5*time.Minute {
 		t.Fatal("nil store changes nothing")
 	}
 }
@@ -136,10 +137,10 @@ func TestNamedThreadKeyRoundTrips(t *testing.T) {
 	if _, ok := PingSavings(r, st); !ok {
 		t.Fatal("not converted")
 	}
-	if f := entryFacts(nil, st, "s", accountant.Thread{ID: "main"}); !f.LastPing.IsZero() {
+	if f := entryFacts("", "", nil, st, "s", accountant.Thread{ID: "main"}); !f.LastPing.IsZero() {
 		t.Fatal("the main thread must not take a named thread's ping")
 	}
-	f := entryFacts(nil, st, "s", accountant.Thread{ID: "sub-1"})
+	f := entryFacts("", "", nil, st, "s", accountant.Thread{ID: "sub-1"})
 	if f.LastPing.IsZero() || f.PingWindow == "" {
 		t.Fatalf("%+v", f)
 	}
@@ -162,8 +163,12 @@ func TestThePingRescueIsCreditedFromTheUsage(t *testing.T) {
 	turn := func(at time.Time, b []byte, u Usage) accountant.Result {
 		req := st.begin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "m", At: at}, b)
 		th := accountant.Thread{ID: "main"}
-		f := entryFacts(b, pings, "s", th)
-		f.Lifetime = accountant.LifetimeExact
+		// The lifetime comes from the production rule, not set by hand: an unknown lifetime would
+		// never rescue after a gap past the TTL.
+		f := entryFacts(bschemas.Anthropic, "m", b, pings, "s", th)
+		if f.Lifetime != accountant.LifetimeExact {
+			t.Fatalf("lifetime %v, want exact", f.Lifetime)
+		}
 		st.end(req, th, b, nil, f)
 		return st.compute(req, u)
 	}
@@ -189,5 +194,20 @@ func TestThePingRescueIsCreditedFromTheUsage(t *testing.T) {
 	}
 	if rescue == nil || rescue.Saved.CacheWrite5m == 0 || rescue.ChangeID == "" {
 		t.Fatalf("effects %+v, want a rescue on the ping's window", res.CacheEffects)
+	}
+}
+
+// The facts carry the lifetime the cold gate uses, per provider.
+func TestEntryFactsTakeTheLifetimeFromTheProvider(t *testing.T) {
+	th := accountant.Thread{ID: "main"}
+	if f := entryFacts(bschemas.Anthropic, "claude-sonnet-5", nil, nil, "s", th); f.Lifetime != accountant.LifetimeExact || f.TTL != 5*time.Minute {
+		t.Fatalf("anthropic: %+v", f)
+	}
+	one := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]}`)
+	if f := entryFacts(bschemas.Anthropic, "claude-sonnet-5", one, nil, "s", th); f.TTL != time.Hour {
+		t.Fatalf("1h breakpoint: %+v", f)
+	}
+	if f := entryFacts("", "m", nil, nil, "s", th); f.Lifetime != accountant.LifetimeUnknown {
+		t.Fatalf("unknown provider: %+v", f)
 	}
 }

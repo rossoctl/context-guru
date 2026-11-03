@@ -304,7 +304,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.agent_compaction, r.tokens_before,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
-		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by = 'accountant'
+		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
 	FROM requests r
 	LEFT JOIN request_components c ON c.request_id = r.id AND %c
 

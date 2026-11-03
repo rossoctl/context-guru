@@ -3,7 +3,9 @@ package proxy
 import (
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -40,7 +42,8 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
 	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
-	c.savings.end(c.accReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.accReq.Meta.Session, t))
+	c.savings.end(c.accReq, t, forwarded, ops,
+		entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t))
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
@@ -48,10 +51,22 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 // LastPing, PingWindow and the ping's usage. PingRead stays nil: the keeper replays the previous
 // request's forwarded body, so the library derives the extent the ping read from its usage
 // (accountant design §5.2).
-func entryFacts(forwarded []byte, pings *PingStore, session string, t accountant.Thread) accountant.EntryFacts {
+//
+// TTL and Lifetime come from apply.CacheLifetime, the same rule the cold gate uses: an exact expiry
+// for a provider with explicit breakpoints, a minimum for OpenAI's 30-minute entries, else unknown.
+// An unknown lifetime cannot prove an expiry, so the library would never rescue after a gap past
+// the TTL (design §5.2). A 1h breakpoint in the forwarded body still lengthens a TTL that is short.
+func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte, pings *PingStore,
+	session string, t accountant.Thread) accountant.EntryFacts {
 	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
+	switch ttl, kind := apply.CacheLifetime(provider, model, forwarded); kind {
+	case apply.CacheLifetimeExact:
+		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeExact
+	case apply.CacheLifetimeMinimum:
+		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeMinimum
+	}
 	for _, bp := range accBreakpoints(forwarded) {
-		if bp.TTL == "1h" {
+		if bp.TTL == "1h" && facts.TTL < time.Hour {
 			facts.TTL = time.Hour
 			break
 		}

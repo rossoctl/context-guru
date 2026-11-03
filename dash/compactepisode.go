@@ -98,8 +98,8 @@ type compactRow struct {
 	// Conservative for a savings figure, and stated in the panel's assumptions.
 	SavedGross int64
 	// SavedUSD is summarize's share of this request's baseline delta: the credit this turn earns.
-	// The dataset loader prices it through Event.ComponentSavedUSD, the same path Event.Price
-	// stores, so a row written before the first-removal rule changed is valued like a new one.
+	// The dataset loader prices it through Event.ComponentSavedUSD, the path the legacy
+	// write-time rules stored it with, so a row written before the first-removal rule changed is valued like a new one.
 	// Zero means summarize did nothing priceable on this turn (or the row predates the column).
 	SavedUSD float64
 	// FirstUSD is the part of SavedUSD that is a FIRST removal: the unique tokens, priced at the rate
@@ -1194,7 +1194,7 @@ func compactEpisodeSelectFor(components []string) string {
 		acted = append(acted, "COALESCE("+al+".acted, 0)")
 		unique = append(unique, "COALESCE("+al+".saved_unique, 0)")
 		first = append(first, "COALESCE("+al+".saved_first_usd, 0)")
-		acc = append(acc, "COALESCE("+al+".priced_by = 'accountant', 0)")
+		acc = append(acc, "COALESCE("+al+".priced_by <> '', 0)")
 	}
 	if len(joins) == 0 {
 		return "" // no valid component: the caller reads nothing

@@ -142,6 +142,13 @@ func TestPriceMode_FallsBackToNoSaving(t *testing.T) {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
 		e.accFallback = "" // the copy carries no reason; every other field must match
+		// A fallback row is marked, so the read views do not value it with the legacy rule.
+		for i := range e.Components {
+			if e.Components[i].PricedBy != PricedByNone {
+				t.Errorf("%s: component %q PricedBy %q, want %q", name, e.Components[i].Component, e.Components[i].PricedBy, PricedByNone)
+			}
+			e.Components[i].PricedBy = ""
+		}
 		if !reflect.DeepEqual(e, want) {
 			t.Errorf("%s: event differs from the cost-only copy:\n got %+v\nwant %+v", name, e, want)
 		}
@@ -231,4 +238,49 @@ func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
 	if e.AccountantEstimated() {
 		t.Fatal("Price left the estimate flag set")
 	}
+}
+
+// A request the library could not price books no saving, and the read views must agree: the
+// component tab must not value its row with the legacy rule (it looks like a row from before the
+// switch otherwise: saved_gross > 0, saved_usd = 0).
+func TestAFallbackRowIsNotEstimatedAtReadTime(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(DayMs+1, "s", "m1", 5000, 4000)
+	e.TenantID = "t1"
+	e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens = 100, 1000, 0, 10
+	e.Components = []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 9999, SavedUnique: 9999}}
+	e.SetAccountant(accountant.Result{Unpriced: []accountant.Unpriced{{OpID: "x", Reason: "r"}}})
+	e.PriceMode(accTestPrice, true)
+	if e.AccountantFallback() != FallbackUnpriced {
+		t.Fatalf("fallback %q, want unpriced", e.AccountantFallback())
+	}
+	if got := e.Components[0].PricedBy; got != PricedByNone {
+		t.Fatalf("PricedBy %q, want %q", got, PricedByNone)
+	}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The two read-time passes that value a row with the legacy rule when it has no stored figure.
+	if err := db.EstimateComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Component != "mask" {
+			continue
+		}
+		if r.SavedUSD != 0 || r.SavedUSDEstimated != 0 || r.SavedUSDEstimatedRows != 0 || r.NetUSDWithEstimate != r.NetUSD ||
+			r.SavedUSDFirstRemoval != 0 || r.SavedUSDReplay != 0 {
+			t.Fatalf("a fallback row was valued at read time: saved %v estimated %v (%d rows) net %v with-estimate %v",
+				r.SavedUSD, r.SavedUSDEstimated, r.SavedUSDEstimatedRows, r.NetUSD, r.NetUSDWithEstimate)
+		}
+		return
+	}
+	t.Fatal("no mask row")
 }

@@ -169,6 +169,12 @@ var gatedChecks = map[string]string{
 // PricedByAccountant is CompRow.PricedBy on a row the accountant library priced.
 const PricedByAccountant = "accountant"
 
+// PricedByNone is CompRow.PricedBy on a row of a request the accountant path handled but could not
+// price (a fallback): it books no saving, and the read-time passes must not value it with the
+// legacy rule. Any non-empty PricedBy means the stored split stands as written; only a row written
+// before the switch has it empty.
+const PricedByNone = "none"
+
 // KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
 // the ended-change break, neither of which is a pipeline component.
 const KindEnvelope = "envelope"
@@ -210,6 +216,11 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 		return
 	}
 	e.accFallback = e.accOverride(p)
+	if e.accFallback != "" {
+		for i := range e.Components {
+			e.Components[i].PricedBy = PricedByNone
+		}
+	}
 }
 
 // accOverride applies the accountant override, or returns the reason it cannot and changes nothing.

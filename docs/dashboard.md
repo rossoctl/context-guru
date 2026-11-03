@@ -106,7 +106,8 @@ What the library prices:
   cost. The component figures sum to baseline minus cost. Each row also stores the library's split:
   `saved_first_usd` (saved tokens priced at the write or input tier: content the provider had not
   cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
-  are `saved_usd` minus both. `priced_by` is `accountant`.
+  are `saved_usd` minus both. `priced_by` is `accountant`. On a request the library could not price (a
+  fallback) it is `none`: the row books no saving, and the read views do not value it.
 - **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
   cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
   from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
@@ -127,9 +128,14 @@ shown.
 
 Limits:
 
-- The first request of a thread has no previous request to classify a cache break against
-  (`penalty_unknown`). Its figure is booked as an estimate: the gross saving is right, and the net
-  can be too high if a component broke the cache on that request (accountant design §6.4).
+- A request with no history to classify a cache break against gets `penalty_unknown`. This is the
+  first request of a thread, and a request after a gap longer than the cache lifetime when the
+  provider's lifetime is unknown (no explicit breakpoints). Its figure is booked as an estimate: the
+  gross saving is right, and the net can be too high if a component broke the cache on that
+  request (accountant design §6.4).
+- The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
+  exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
+  library does not credit a keep-alive rescue after a gap past the TTL.
 - A request whose response called `context_guru_expand` (more than one upstream round) books no
   saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
 - The thread state lives in memory. After a restart, and for a thread dropped by the library's cap
