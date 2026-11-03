@@ -312,3 +312,58 @@ func TestApplySearchNeverSendsDeferLoading(t *testing.T) {
 		}
 	}
 }
+
+// A Responses turn chained on previous_response_id: in a thread our search rewrote, it declares the
+// same tools (the search tool and the tools added back), with no second names list. In a thread
+// with no record, it decides nothing.
+func TestApplySearchChainedTurn(t *testing.T) {
+	e := env(t, unusedHist())
+	o, _ := ApplySearch(e, cgschema.WireResponses, sreq(respBody()))
+	if !o.Changed {
+		t.Fatalf("first: %s", show(o))
+	}
+	AddBack(e.RecordStore(), "s", "", []string{"Workflow"})
+	chained := []byte(strings.Replace(string(respBody()), `"input":[{"role":"user","content":"hi"}]`,
+		`"previous_response_id":"resp_1","input":[{"role":"user","content":"next"}]`, 1))
+	o2, _ := ApplySearch(e, cgschema.WireResponses, sreq(chained))
+	if !o2.Changed || strings.Join(o2.Deferred, ",") != "Monitor" {
+		t.Fatalf("chained: %s", show(o2))
+	}
+	if got := wireToolNames(cgschema.WireResponses, o2.Body); got != "Bash,Read,"+ClientSearchName+",Workflow" {
+		t.Fatalf("chained tools = %s", got)
+	}
+	if strings.Contains(string(o2.Body), "Context Guru deferred these tools") || gjson.GetBytes(o2.Body, "input.#").Int() != 1 {
+		t.Fatalf("chained turn got a second names list: %s", gjson.GetBytes(o2.Body, "input").Raw)
+	}
+	// No record: a chained turn is never a decision.
+	e2 := env(t, unusedHist())
+	if o3, _ := ApplySearch(e2, cgschema.WireResponses, sreq(chained)); o3.Changed || o3.Why != "previous_response_id" {
+		t.Fatalf("no record: %s", show(o3))
+	}
+}
+
+// A chained turn carries the client's answer to a search it received, but not the call: the
+// record's call ids answer it.
+func TestApplySearchRepairsAChainedAnswer(t *testing.T) {
+	e := env(t, unusedHist())
+	ApplySearch(e, cgschema.WireResponses, sreq(respBody()))
+	rs := e.RecordStore()
+	NoteCalls(rs, "s", "", []SearchCall{{ID: "c1", Names: []string{"Monitor"}}})
+	AddBack(rs, "s", "", []string{"Monitor"})
+	chained := []byte(strings.Replace(string(respBody()), `"input":[{"role":"user","content":"hi"}]`,
+		`"previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"c1","output":"unknown tool"},`+
+			`{"type":"function_call_output","call_id":"c2","output":"a.txt"}]`, 1))
+	o, _ := ApplySearch(e, cgschema.WireResponses, sreq(chained))
+	if got := gjson.GetBytes(o.Body, "input.0.output").String(); !strings.HasPrefix(got, "Loaded: Monitor") {
+		t.Fatalf("chained answer not repaired: %q (%s)", got, show(o))
+	}
+	if gjson.GetBytes(o.Body, "input.1.output").String() != "a.txt" {
+		t.Fatal("the client's own answer changed")
+	}
+}
+
+func TestSearchArgsLoneString(t *testing.T) {
+	if got := strings.Join(searchArgs(`{"names":"Workflow"}`), ","); got != "Workflow" {
+		t.Fatalf("names as a string = %q", got)
+	}
+}

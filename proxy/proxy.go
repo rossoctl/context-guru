@@ -2004,7 +2004,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			body = di.orig
 			resp, err = h.doUpstream(r, up, body)
 			stubbed := false
-			if err == nil {
+			// The missing-reference repair reads Anthropic shapes: not on our search's OpenAI wires.
+			if err == nil && !di.search {
 				if fixed, ok := repairOnMissingRef(resp, body); ok {
 					// The original failed the same way: it names a tool `tools` lacks. Send it once
 					// more with a stub for that tool, so the client never sees our 400 (#871). The
@@ -2015,7 +2016,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
 			h.deferRetry(di, refused, errBody, ok)
-			di = nil
+			// The original declares no search tool of ours: nothing to hold or answer from here on.
+			di, searchOn = nil, false
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
@@ -2283,7 +2285,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		var searches []tooldefer.SearchCall
 		var searchSet map[string]bool
 		var searchNow []string
-		if searchOn {
+		if searchOn && di != nil {
 			var client bool
 			searches, client = tooldefer.SearchCalls(wire, msg, expand.ToolName, adjudicate.ToolName)
 			if len(searches) > 0 {
@@ -2299,6 +2301,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				if client || searchSet == nil {
 					if client {
 						h.deferGate().MixedSearches.Add(int64(len(searches)))
+						// Kept by call id, so the next request answers them even if it chains on
+						// previous_response_id and does not carry the calls.
+						h.noteSearchCalls(tn, di, searches)
 					}
 					bail()
 					return
@@ -2382,7 +2387,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		lg.Debug("cg.expand", "round", round, "calls", len(calls),
 			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(wire, body, msg, resolved)
-		if ok && len(searchNow) > 0 {
+		if ok && len(searchNow) > 0 && di != nil {
 			// The loaded tools go at the end of `tools`, as on every later request of the thread
 			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
 			next, ok = tooldefer.AppendTools(wire, next, di.orig, searchNow)

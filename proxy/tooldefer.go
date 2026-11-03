@@ -509,6 +509,11 @@ func (h *Handler) searchLoad(tn *Tenancy, di *deferInfo, names []string) (set ma
 	return set, now
 }
 
+// noteSearchCalls keeps the searches the client received in di's thread record.
+func (h *Handler) noteSearchCalls(tn *Tenancy, di *deferInfo, calls []tooldefer.SearchCall) {
+	tooldefer.NoteCalls(h.deferEnv(tn).RecordStore(), di.session, di.thread, calls)
+}
+
 // startProbe runs a probe in the background, through the host's Dispatcher, with the caller's own
 // endpoint and credential (the same resolution as the incoming model).
 func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.ModelProvider, up upstream, key tooldefer.ProbeKey) {

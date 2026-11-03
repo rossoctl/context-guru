@@ -265,3 +265,97 @@ func TestClientSearchOffOutsideUltrahigh(t *testing.T) {
 		t.Fatalf("claude model got our search: %s", got)
 	}
 }
+
+// A 400 on the rewritten request sends the original; when the original's answer still calls our
+// search tool (the model saw it earlier in the thread), the client gets that answer as it is: no
+// panic, no dropped connection, no in-band round.
+func TestClientSearch400ThenSearchCallDoesNotPanic(t *testing.T) {
+	up := &csUpstream{reject400: true, script: []string{
+		csCalls(csCall("c1", tooldefer.ClientSearchName, `{"names":["Workflow"]}`)),
+	}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	st, out := csPost(t, srv, "s1", csBody("s1"))
+	if st != http.StatusOK || gjson.Get(out, "choices.0.message.tool_calls.0.function.name").String() != tooldefer.ClientSearchName {
+		t.Fatalf("client got %d %s", st, out)
+	}
+	if n := len(up.all()); n != 2 {
+		t.Fatalf("upstream rounds = %d, want 2 (the rewritten request, then the original)", n)
+	}
+}
+
+// Responses, a client that chains on previous_response_id from turn 2: turn 2's search call is
+// answered in band, never streamed to the client, and the follow-up keeps the chain.
+func TestClientSearchChainedResponsesTurn(t *testing.T) {
+	respDecl := func(name string) string {
+		return fmt.Sprintf(`{"type":"function","name":%q,"description":"Does the %s job. %s","parameters":{"type":"object"}}`,
+			name, name, strings.Repeat("Detailed usage notes for this tool. ", 60))
+	}
+	body := func(input string) []byte {
+		return []byte(`{"model":"gpt-5.5","instructions":"agent","tools":[` + respDecl("Bash") + `,` + respDecl("Read") + `,` +
+			respDecl("Workflow") + `,` + respDecl("Monitor") + `],` + input + `}`)
+	}
+	answer := func(items string) string {
+		return `{"id":"resp_x","object":"response","status":"completed","output":[` + items +
+			`],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":0}}}`
+	}
+	msg := `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}`
+	up := &csUpstream{script: []string{
+		answer(msg),
+		answer(`{"type":"function_call","call_id":"c1","name":"` + tooldefer.ClientSearchName + `","arguments":"{\"names\":[\"Workflow\"]}"}`),
+		answer(`{"type":"function_call","call_id":"c2","name":"Workflow","arguments":"{}"}`),
+	}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	ds := h.toolDefer()
+	for i, s := range []string{"r1", "r2", "r3"} {
+		ds.hist.Observe("", s, "", tooldefer.View("responses", body(`"input":[{"role":"user","content":"x"}]`)), int64(i+10))
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	post := func(b []byte) string {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-test")
+		req.Header.Set("x-context-guru-session", "rs1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return string(out)
+	}
+	post(body(`"input":[{"role":"user","content":"hi"}]`))
+	out := post(body(`"previous_response_id":"resp_1","input":[{"role":"user","content":"run the workflow"}]`))
+	if strings.Contains(out, tooldefer.ClientSearchName) || !strings.Contains(out, `"Workflow"`) {
+		t.Fatalf("client got: %s", out)
+	}
+	b := up.all()
+	if len(b) != 3 {
+		t.Fatalf("upstream rounds = %d, want 3", len(b))
+	}
+	names := func(x []byte) string {
+		var o []string
+		gjson.GetBytes(x, "tools").ForEach(func(_, t gjson.Result) bool { o = append(o, t.Get("name").String()); return true })
+		return strings.Join(o, ",")
+	}
+	// The chained turn declares turn 1's tools: the search tool in, the deferred tools out.
+	if gjson.GetBytes(b[1], "tools").Raw != gjson.GetBytes(b[0], "tools").Raw {
+		t.Fatalf("chained turn tools = %s, turn 1 = %s", names(b[1]), names(b[0]))
+	}
+	if got := names(b[1]); !strings.Contains(got, tooldefer.ClientSearchName) || strings.Contains(got, "Workflow") {
+		t.Fatalf("chained turn tools = %s", got)
+	}
+	follow := b[2]
+	if gjson.GetBytes(follow, "previous_response_id").String() != "resp_1" || !strings.HasSuffix(names(follow), "Workflow") {
+		t.Fatalf("follow-up: prev=%s tools=%s", gjson.GetBytes(follow, "previous_response_id"), names(follow))
+	}
+	if !strings.Contains(gjson.GetBytes(follow, "input").Raw, "Loaded: Workflow") {
+		t.Fatalf("follow-up has no answer: %s", gjson.GetBytes(follow, "input").Raw)
+	}
+}

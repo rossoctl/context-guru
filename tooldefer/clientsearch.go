@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
 	cgschema "github.com/rossoctl/context-guru/schema"
@@ -184,7 +185,18 @@ type SearchRecord struct {
 	// Added is the deferred tools a search loaded, in the order they were loaded. They go at the end
 	// of `tools`, in this order, from then on.
 	Added []string `json:"a,omitempty"`
+	// Calls is the searches the client received (made together with a client tool call), by call
+	// id: the names each asked for. A chained Responses turn carries the client's answer to such a
+	// call but not the call, so the repair reads the names here. Bounded by maxCalls.
+	Calls map[string][]string `json:"c,omitempty"`
 }
+
+// maxCalls bounds SearchRecord.Calls; past it the record keeps the calls it has.
+const maxCalls = 32
+
+// recMu serialises the read-modify-write of a record (AddBack, NoteCalls): two requests of one
+// thread at once must not both report a tool as added now.
+var recMu sync.Mutex
 
 // searchKey is the store key of one thread's SearchRecord: apart from the Record of the
 // defer_loading path, under the same pinned prefix, so the disk store keeps it and a purge drops it.
@@ -222,6 +234,8 @@ func SaveSearch(st store.Store, session, thread string, r SearchRecord) {
 // AddBack adds names to the thread's Added list, keeping the order, and returns the names it added
 // now: the deferred ones not added before. A name outside the set is ignored.
 func AddBack(st store.Store, session, thread string, names []string) []string {
+	recMu.Lock()
+	defer recMu.Unlock()
 	rec, ok := LoadSearch(st, session, thread)
 	if !ok {
 		return nil
@@ -245,6 +259,34 @@ func AddBack(st store.Store, session, thread string, names []string) []string {
 		SaveSearch(st, session, thread, rec)
 	}
 	return now
+}
+
+// NoteCalls keeps the searches the client received, by call id, so a later request can answer
+// them even when it does not carry the call (repairSearchResults).
+func NoteCalls(st store.Store, session, thread string, calls []SearchCall) {
+	recMu.Lock()
+	defer recMu.Unlock()
+	rec, ok := LoadSearch(st, session, thread)
+	if !ok {
+		return
+	}
+	changed := false
+	for _, c := range calls {
+		if c.ID == "" || len(rec.Calls) >= maxCalls {
+			continue
+		}
+		if _, dup := rec.Calls[c.ID]; dup {
+			continue
+		}
+		if rec.Calls == nil {
+			rec.Calls = map[string][]string{}
+		}
+		rec.Calls[c.ID] = append([]string{}, c.Names...)
+		changed = true
+	}
+	if changed {
+		SaveSearch(st, session, thread, rec)
+	}
 }
 
 // ── the request side ─────────────────────────────────────────────────────
@@ -288,11 +330,14 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 	case !gjson.GetBytes(r.Orig, "tools").IsArray():
 		o.Why = "no_tools"
 		return o, nil
-	case gjson.GetBytes(r.Orig, "previous_response_id").Exists():
-		// The transcript lives at the provider: the follow-up and the names list need it here.
-		o.Why = "previous_response_id"
-		return o, nil
-	case cgschema.IsResponses(wire) && !gjson.GetBytes(r.Orig, "input").IsArray():
+	}
+	// A Responses turn that chains on previous_response_id holds only the new items: the transcript,
+	// the names list included, is stored at the provider. Such a turn never makes a decision. But a
+	// thread our search already rewrote keeps it: its turns must declare the same tools (the search
+	// tool, and the tools added back), or the names list the model reads points at a tool that is
+	// gone. The host holds the response and answers a search in band, as on any other turn.
+	chained := gjson.GetBytes(r.Orig, "previous_response_id").Exists()
+	if !chained && cgschema.IsResponses(wire) && !gjson.GetBytes(r.Orig, "input").IsArray() {
 		o.Why = "input_not_array"
 		return o, nil
 	}
@@ -301,6 +346,10 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 		l.LoadSession(r.Session)
 	}
 	rec, ok := LoadSearch(rs, r.Session, r.Thread)
+	if !ok && chained {
+		o.Why = "previous_response_id"
+		return o, nil
+	}
 	if !ok {
 		if SearchOff(rs, r.Session) || env.Gate.TakePending(r.Tenant, r.Session, rs) {
 			o.Why = "tool_search_false"
@@ -331,7 +380,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 	}
 	body := r.Body
 	// A call to our search that reached the client: answer it here, and add its tools back.
-	body, asked := repairSearchResults(wire, body, set)
+	body, asked := repairSearchResults(wire, body, set, rec.Calls)
 	// A tool tool_choice forces must be declared: it is added back for good.
 	if f := forcedClientTool(wire, body); f != "" {
 		asked = append(asked, f)
@@ -342,7 +391,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 			rec, _ = LoadSearch(rs, r.Session, r.Thread)
 		}
 	}
-	out, removed, changed := RewriteSearch(wire, body, rec)
+	out, removed, changed := rewriteSearch(wire, body, rec, !chained)
 	if !changed {
 		o.Why = "rewrite_declined"
 		return o, loaded
@@ -369,6 +418,12 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 // then the added tools in load order, and puts the names list in place. It returns the names it
 // removed, sorted. The client's other tools keep their order and their bytes. ok=false: out is body.
 func RewriteSearch(wire string, body []byte, rec SearchRecord) (out []byte, removed []string, ok bool) {
+	return rewriteSearch(wire, body, rec, true)
+}
+
+// rewriteSearch is RewriteSearch; list=false leaves the names list out (a chained Responses turn:
+// the list is in the transcript the provider stored).
+func rewriteSearch(wire string, body []byte, rec SearchRecord, list bool) (out []byte, removed []string, ok bool) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || len(rec.Deferred) == 0 {
 		return body, nil, false
@@ -415,6 +470,9 @@ func RewriteSearch(wire string, body []byte, rec SearchRecord) (out []byte, remo
 	out, err := sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(elems, ",")+"]"))
 	if err != nil {
 		return body, nil, false
+	}
+	if !list {
+		return out, removed, true
 	}
 	names := append([]string(nil), rec.Deferred...)
 	sort.Strings(names)
@@ -506,6 +564,9 @@ func SearchCalls(wire string, msg []byte, proxyTools ...string) (calls []SearchC
 // {"name":"..."} from a model that guessed the shape.
 func searchArgs(args string) []string {
 	var out []string
+	if v := gjson.Get(args, "names"); v.Type == gjson.String {
+		args = `{"names":[` + v.Raw + `]}` // a lone name as a string
+	}
 	gjson.Get(args, "names").ForEach(func(_, n gjson.Result) bool {
 		if s := strings.TrimSpace(n.String()); s != "" {
 			out = append(out, s)
@@ -579,11 +640,14 @@ func AppendTools(wire string, body, src []byte, names []string) ([]byte, bool) {
 // repairSearchResults answers, on the request side, every call to our search in the transcript:
 // the client's own answer (it has no such tool) is replaced with SearchAnswer. It returns the names
 // those calls asked for. The same transcript gets the same bytes on every request.
-func repairSearchResults(wire string, body []byte, deferred map[string]bool) ([]byte, []string) {
-	if !strings.Contains(string(body), ClientSearchName) {
+func repairSearchResults(wire string, body []byte, deferred map[string]bool, known map[string][]string) ([]byte, []string) {
+	if len(known) == 0 && !strings.Contains(string(body), ClientSearchName) {
 		return body, nil
 	}
 	answers := map[string]string{}
+	for id, ns := range known {
+		answers[id] = SearchAnswer(ns, deferred)
+	}
 	var asked []string
 	note := func(id, args string) {
 		if id == "" {
@@ -659,7 +723,7 @@ func AggregateChatSSE(raw []byte) ([]byte, bool) {
 		id, name string
 		args     strings.Builder
 	}
-	var text strings.Builder
+	var text, reasoning strings.Builder
 	calls := map[int64]*call{}
 	var order []int64
 	finish, usage, id, model := "", "", "", ""
@@ -690,6 +754,7 @@ func AggregateChatSSE(raw []byte) ([]byte, bool) {
 		}
 		d := ch.Get("delta")
 		text.WriteString(d.Get("content").String())
+		reasoning.WriteString(d.Get("reasoning_content").String())
 		d.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
 			i := tc.Get("index").Int()
 			c := calls[i]
@@ -713,6 +778,10 @@ func AggregateChatSSE(raw []byte) ([]byte, bool) {
 	}
 	msg := `{"role":"assistant"}`
 	msg, _ = sjson.Set(msg, "content", text.String())
+	if reasoning.Len() > 0 {
+		// GLM and Kimi stream their reasoning: the follow-up's assistant turn keeps it.
+		msg, _ = sjson.Set(msg, "reasoning_content", reasoning.String())
+	}
 	sort.Slice(order, func(a, b int) bool { return order[a] < order[b] })
 	for _, i := range order {
 		c := calls[i]
