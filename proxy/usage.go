@@ -17,8 +17,10 @@ import (
 type Usage struct {
 	// Searches and SearchLoaded are the server-side tool searches a streamed response ran and the
 	// tools they loaded, read off the sniffer window for tool deferral's ledger (#485).
-	Searches     int
-	SearchLoaded []string
+	// SearchDropped is how many of those searches have no result (sent with another tool call).
+	Searches      int
+	SearchLoaded  []string
+	SearchDropped int
 	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
 	Live       *LiveFacts
 	FreshInput int64
@@ -737,6 +739,26 @@ func (s *sniffer) bytes() []byte {
 	out = append(out, s.head...)
 	out = append(out, '\n')
 	return append(out, s.tail...)
+}
+
+// disjoint is the retained window with no byte twice. For a response of sniffMax to 2*sniffMax
+// bytes the head and the tail overlap, and bytes() holds the overlap twice: a reader that counts
+// events (tool deferral's search count) would count one there twice. Here the tail is cut past
+// the head, so an overlap gives the exact body; a gap keeps the newline between the halves.
+func (s *sniffer) disjoint() []byte {
+	if !s.on {
+		return nil
+	}
+	if s.total <= len(s.head) {
+		return s.head
+	}
+	start := len(s.head) - (s.total - len(s.tail)) // the tail's first byte the head does not hold
+	if start < 0 {
+		return s.bytes() // a gap: nothing is held twice
+	}
+	out := make([]byte, 0, len(s.head)+len(s.tail)-start)
+	out = append(out, s.head...)
+	return append(out, s.tail[start:]...)
 }
 
 func max64(a, b int64) int64 {

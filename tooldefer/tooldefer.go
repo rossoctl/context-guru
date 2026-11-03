@@ -16,9 +16,13 @@
 //     AskUserQuestion, Context Guru's own tools, a tool tool_choice forces, the account keep list);
 //  5. it weighs at least 200 tokens, weighed on the ORIGINAL request.
 //
+// The 200 tokens are o200k tokens (our own tokenizer, tokens.Count), not Claude tokens: about 340
+// Claude tokens. The ledger scales its weights by tokens.BilledDeltaFactor; the rule does not, on
+// purpose, so the set it defers stays the one #485 measured (#866, N6).
+//
 // An MCP server is one unit: all of mcp__<server>__* is deferred together, when the user's last 3
 // sessions declared the server and used none of its tools, the project used none of them in its last
-// 10 sessions, and the server's tools weigh at least 200 tokens together. A load of any one of its
+// 10 sessions, and the server's tools weigh at least 200 o200k tokens together. A load of any one of its
 // tools counts as a use of the server.
 //
 // Without 3 user sessions of history, nothing is deferred. A tool loaded through search counts as
@@ -29,10 +33,10 @@
 // `tools` hashes first, so a tool that moves between loaded and deferred rewrites the whole cached
 // prefix. So the set is decided ONCE per thread, at its first request, and never changes within the
 // thread. It is stored under a metadata key (tool names only), which the disk store keeps across a
-// restart. On a miss (a restart with no disk copy) the set is decided again with the same rule,
-// from history that leaves out the current session, which gives the same answer unless another
-// session of the user ended in between. Every tool a search in this transcript has loaded is then
-// added, because the client echoes those loads (Rebuild).
+// restart. On a miss mid-thread (the record evicted at the pin cap) the transcript proves part of
+// the set: every tool our search loaded was deferred. The rule is run again, as at the thread's
+// first request; when its set leaves out a tool the transcript proves, the history drifted, so the
+// original is sent and nothing is saved (Rebuild).
 //
 // The search tool goes into `tools` at the first request and stays. The names list goes into
 // Claude Code's own deferred-tools block at messages[1] when it exists, else into a system message
@@ -59,7 +63,7 @@ const (
 	SearchName = "tool_search_tool_bm25"
 )
 
-// The thresholds of the rule. See the package comment.
+// The thresholds of the rule. See the package comment. MinTokens is in o200k tokens.
 const (
 	UserSessions    = 3
 	ProjectSessions = 10
@@ -115,6 +119,11 @@ type Input struct {
 
 // Decide returns the tool names to defer, sorted. Empty when the rule defers nothing.
 func Decide(h History, in Input) []string {
+	return decide(h, in, usedInTranscript(in.Body))
+}
+
+// decide is Decide with the transcript's uses given: a tool in used is never deferred.
+func decide(h History, in Input, used map[string]bool) []string {
 	if h == nil || in.Session == "" {
 		return nil
 	}
@@ -126,7 +135,6 @@ func Decide(h History, in Input) []string {
 	if len(past) < UserSessions {
 		return nil // without 3 user sessions: defer nothing
 	}
-	used := usedInTranscript(in.Body)
 	keep := map[string]bool{}
 	for _, k := range in.Keep {
 		keep[k] = true
@@ -134,7 +142,7 @@ func Decide(h History, in Input) []string {
 	forced := forcedTool(in.Body)
 	// MCP tools are decided per SERVER (mcp__<server>__*): the unit a user installs. A server is
 	// deferred whole or not at all, from the history of all its tools together, and its 200-token
-	// minimum is the sum of its tools. Built-in tools are decided one by one.
+	// minimum is the sum of its tools (o200k tokens, see MinTokens). Built-in tools are decided one by one.
 	type unit struct {
 		names  []string
 		tokens int
@@ -224,6 +232,15 @@ func unusedIn(past []Session, name string) bool {
 // usedInTranscript is every tool name the transcript has called, plus every tool a search result
 // loaded (a load counts as a use).
 func usedInTranscript(body []byte) map[string]bool {
+	out := calledIn(body)
+	for n := range Loaded(body) {
+		out[n] = true
+	}
+	return out
+}
+
+// calledIn is every tool name the transcript has called.
+func calledIn(body []byte) map[string]bool {
 	out := map[string]bool{}
 	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
 		m.Get("content").ForEach(func(_, b gjson.Result) bool {
@@ -235,9 +252,6 @@ func usedInTranscript(body []byte) map[string]bool {
 		})
 		return true
 	})
-	for n := range Loaded(body) {
-		out[n] = true
-	}
 	return out
 }
 
@@ -352,31 +366,67 @@ func SetSearchOff(st store.Store, session string, on bool) {
 	st.Put(searchOffKey(session), v)
 }
 
-// Rebuild is the set after a store miss: the rule decided again (the history leaves out this
-// session), plus every tool our search has loaded in this transcript. A tool our search loaded was
-// deferred by definition, so adding it back cannot move a tool the provider cached as loaded.
+// Rebuild is the set after a store miss mid-thread. The transcript proves part of the set: a tool
+// our search loaded was deferred by definition. The rule is decided again as at the thread's first
+// request: the history leaves out this session, and the loads (and the calls that followed them) do
+// not count as uses. ok is false when that set leaves out a tool the transcript proves: the history
+// drifted, the set is unknown, and the host sends the original request and saves nothing (#866, N4).
 //
-// Known limit: a tool the model called directly while it was deferred, with no search (the API
-// accepts that), reads as "used" and comes back loaded. So does a tool whose history moved because
-// another session ended in between. Either rewrites the prefix once. The disk store, on with the
-// dashboard, makes both cases rare: Rebuild runs only when the stored record is gone.
-func Rebuild(h History, in Input) []string {
-	set := map[string]bool{}
-	for _, n := range Decide(h, in) {
-		set[n] = true
+// The history can drift: Observe adds a session at its first request, so a session that only
+// STARTED in between changes UserSessions. A drifted set moves a tool inside the thread's cached
+// prefix, and saved, it would stay wrong for the rest of the thread.
+//
+// Known limits: a drift on a tool no search loaded leaves no trace in the transcript, so the check
+// cannot see it. And a tool the model called directly while it was deferred, with no search (the API
+// accepts that), reads as "used" and comes back loaded. Either rewrites the prefix once. The disk
+// store, on with the dashboard, makes both rare: Rebuild runs only when the stored record is gone.
+func Rebuild(h History, in Input) (set []string, ok bool) {
+	proven := provenDeferred(in.Body)
+	used := calledIn(in.Body)
+	for n := range proven {
+		delete(used, n)
 	}
-	if hasSearchTurn(in.Body) {
-		for n := range Loaded(in.Body) {
-			if !NeverDefer(n) {
-				set[n] = true
-			}
+	set = decide(h, in, used)
+	got := make(map[string]bool, len(set))
+	for _, n := range set {
+		got[n] = true
+	}
+	for n := range proven {
+		if !got[n] {
+			return nil, false
 		}
 	}
-	out := make([]string, 0, len(set))
-	for n := range set {
-		out = append(out, n)
+	return set, true
+}
+
+// provenDeferred is every tool our search loaded in this transcript that the request still
+// declares, loaded, and the rule may defer: the part of the thread's set the transcript proves.
+// Loads by Claude Code's own search are left out: Claude Code deferred those, not us.
+func provenDeferred(body []byte) map[string]bool {
+	out := map[string]bool{}
+	if !hasSearchTurn(body) {
+		return out
 	}
-	sort.Strings(out)
+	loaded := map[string]bool{}
+	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
+		m.Get("content").ForEach(func(_, b gjson.Result) bool {
+			if b.Get("type").String() == "tool_search_tool_result" {
+				b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
+					loaded[r.Get("tool_name").String()] = true
+					return true
+				})
+			}
+			return true
+		})
+		return true
+	})
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		n := t.Get("name").String()
+		if loaded[n] && !t.Get("type").Exists() && !t.Get("defer_loading").Bool() && !NeverDefer(n) {
+			out[n] = true
+		}
+		return true
+	})
 	return out
 }
 

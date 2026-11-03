@@ -22,12 +22,17 @@ import (
 //   - the request path must never wait on a query: the whole index is in memory (Mem), loaded once
 //     in the background, and written back in the background.
 //
-// Bounded by COUNT, not by time: the newest MaxSessions sessions per tenant are kept, the rest
-// are deleted. The rule reads at most ProjectSessions (10) sessions of one project, so 64 per
-// tenant covers several projects.
+// Bounded by COUNT, not by time: the newest MaxSessions sessions per tenant are kept, plus the
+// newest ProjectSessions (10) of each project, which the project veto reads. Without the second
+// bound, a user in 4 or more projects, or with scripted `claude -p` runs, pushes a project's older
+// sessions out of the newest 64, and the veto no longer sees them. The rest are deleted.
 
-// MaxSessions is how many sessions per tenant the history keeps.
+// MaxSessions is how many sessions per tenant the history keeps, newest first, in any project.
 const MaxSessions = 64
+
+// maxKeptSessions bounds one tenant's history with the per-project sessions added: a user with
+// very many projects keeps the newest of them only.
+const maxKeptSessions = 4 * MaxSessions
 
 // maxToolsPerSession bounds one session's tool set: names come off the request body.
 const maxToolsPerSession = 512
@@ -39,7 +44,11 @@ type histSession struct {
 	last     int64
 	declared map[string]bool
 	used     map[string]bool
-	dirty    bool
+	// dirty: the tool sets changed since the last write, so the flush writes every tool row.
+	dirty bool
+	// written is the last time the disk holds. A newer last with no set change is written at close
+	// only: a request that changes no set must not make the flush rewrite the session's rows.
+	written int64
 }
 
 // Mem is the in-memory history. Safe for concurrent use. The zero value is not usable; use NewMem.
@@ -54,6 +63,7 @@ type Mem struct {
 	Retention time.Duration
 	loaded    bool
 	ready     chan struct{} // closed when loaded turns true
+	readyOnce sync.Once
 	now       func() time.Time
 }
 
@@ -167,10 +177,10 @@ func (m *Mem) Open(flushEvery time.Duration, p *Prober) (stop func()) {
 		for {
 			select {
 			case <-done:
-				m.flush()
+				m.flush(true)
 				return
 			case <-t.C:
-				m.flush()
+				m.flush(false)
 			}
 		}
 	}()
@@ -202,13 +212,14 @@ func (m *Mem) WaitReady(d time.Duration) bool {
 	}
 }
 
+// ReadyC is closed when the load that Open started has finished. For a host's start-up only.
+func (m *Mem) ReadyC() <-chan struct{} { return m.ready }
+
 func (m *Mem) setLoaded() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.loaded {
-		m.loaded = true
-		close(m.ready)
-	}
+	m.loaded = true
+	m.mu.Unlock()
+	m.readyOnce.Do(func() { close(m.ready) })
 }
 
 func (m *Mem) load() error {
@@ -238,7 +249,7 @@ func (m *Mem) load() error {
 			byKey[k] = s
 		}
 		if last > s.last {
-			s.last = last
+			s.last, s.written = last, last
 		}
 		if decl != 0 {
 			s.declared[tool] = true
@@ -389,13 +400,28 @@ func (m *Mem) find(tenant, sid string) *histSession {
 	return nil
 }
 
+// sortLocked orders tenant's sessions newest first and drops the ones past the bounds: a session
+// stays when it is among the newest MaxSessions, or among the newest ProjectSessions of its project
+// (the project veto reads those), up to maxKeptSessions in all.
 func (m *Mem) sortLocked(tenant string) {
 	ss := m.tenants[tenant]
 	sort.SliceStable(ss, func(i, j int) bool { return ss[i].last > ss[j].last })
-	if len(ss) > MaxSessions {
-		ss = ss[:MaxSessions]
+	if len(ss) <= MaxSessions {
+		return
 	}
-	m.tenants[tenant] = ss
+	perProject := map[string]int{}
+	kept := ss[:0]
+	for i, s := range ss {
+		n := perProject[s.project]
+		perProject[s.project] = n + 1
+		if len(kept) < maxKeptSessions && (i < MaxSessions || (s.project != "" && n < ProjectSessions)) {
+			kept = append(kept, s)
+		}
+	}
+	for i := len(kept); i < len(ss); i++ {
+		ss[i] = nil // let the dropped sessions be collected
+	}
+	m.tenants[tenant] = kept
 }
 
 // Observe records one request: the tools it declares (from the ORIGINAL body, Claude Code's own
@@ -422,8 +448,8 @@ func (m *Mem) Observe(tenant, session, project string, body []byte, ts int64) {
 			used[n] = true
 		}
 	}
-	if s.project == "" {
-		s.project = project
+	if s.project == "" && project != "" {
+		s.project, s.dirty = project, true
 	}
 	for n := range declared {
 		if !s.declared[n] && len(s.declared) < maxToolsPerSession {
@@ -436,12 +462,18 @@ func (m *Mem) Observe(tenant, session, project string, body []byte, ts int64) {
 		}
 	}
 	if ts > s.last {
-		s.last, s.dirty = ts, true
+		s.last = ts // not dirty: a new time alone is written at close (see histSession.written)
 	}
 	m.sortLocked(tenant)
 }
 
 // UserSessions is History.UserSessions.
+//
+// A session that is still running counts as history, on purpose: the newest n by last activity,
+// ended or not. Its uses are read up to the moment of the decision, which is what the rule needs.
+// Measured on the hosted database (2026-10-28 to 11-02, 452 sessions): at 391 of 415 decisions
+// (94%) one of the last 3 sessions was still running. A replay with ended sessions only gave 22
+// wrong guesses against 24, at the same deferred volume (#866, N10). Do not "fix" this.
 func (m *Mem) UserSessions(tenant, exclude string, n int) []Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -480,14 +512,28 @@ func (m *Mem) ProjectUsed(tenant, project, tool, exclude string, n int) bool {
 	return false
 }
 
-// flush writes the changed sessions and deletes the ones that fell out of the newest MaxSessions.
-func (m *Mem) flush() {
-	type row struct {
-		tenant, sid, project, tool string
-		decl, used                 int
-		last                       int64
+// lastTSEvery bounds how far the disk's last_ts of a running session may fall behind memory (half
+// the retention, when that is shorter). A request that changes no tool set does not mark the session
+// dirty; its time reaches the disk at close, or by this bound, so a crash loses at most this much,
+// and the disk's retention never deletes a session that is still running.
+const lastTSEvery = time.Hour
+
+// flush writes the sessions whose tool sets changed, and deletes the ones that fell out of the
+// bounds (see sortLocked). A session whose time alone moved is written at close (final), or once
+// its disk time is lastTSEvery behind. A failed write marks the sessions dirty again, so the next
+// flush retries them.
+func (m *Mem) flush(final bool) {
+	type touch struct {
+		s    *histSession
+		last int64
+		sets bool // the tool rows were written, not only last_ts
 	}
 	m.mu.Lock()
+	now := m.now().UnixMilli()
+	every := lastTSEvery
+	if m.Retention > 0 && m.Retention/2 < every {
+		every = m.Retention / 2 // the disk's retention must never see a running session as idle
+	}
 	if m.Retention > 0 {
 		// Sessions idle longer than the retention go from memory too (the rows go below).
 		cutoff := m.now().Add(-m.Retention).UnixMilli()
@@ -501,37 +547,72 @@ func (m *Mem) flush() {
 			m.tenants[tenant] = kept
 		}
 	}
-	var rows []row
+	var rows []histRow
+	var times []histRow // last_ts only: tenant, sid, last
+	var touched []touch
 	keep := map[string][]string{}
 	for tenant, ss := range m.tenants {
 		for _, s := range ss {
 			keep[tenant] = append(keep[tenant], s.id)
-			if !s.dirty {
-				continue
-			}
-			s.dirty = false
-			names := map[string]bool{}
-			for n := range s.declared {
-				names[n] = true
-			}
-			for n := range s.used {
-				names[n] = true
-			}
-			for n := range names {
-				rows = append(rows, row{tenant, s.id, s.project, n, b2i(s.declared[n]), b2i(s.used[n]), s.last})
+			switch {
+			case s.dirty:
+				s.dirty = false
+				names := map[string]bool{}
+				for n := range s.declared {
+					names[n] = true
+				}
+				for n := range s.used {
+					names[n] = true
+				}
+				for n := range names {
+					rows = append(rows, histRow{tenant, s.id, s.project, n, b2i(s.declared[n]), b2i(s.used[n]), s.last})
+				}
+				touched = append(touched, touch{s, s.last, true})
+			case s.last > s.written && (final || now-s.written >= every.Milliseconds()):
+				times = append(times, histRow{tenant: tenant, sid: s.id, last: s.last})
+				touched = append(touched, touch{s, s.last, false})
 			}
 		}
 	}
 	m.mu.Unlock()
-	if len(rows) == 0 {
+	if len(rows) == 0 && len(times) == 0 {
 		return
 	}
+	if err := m.write(rows, times, keep); err != nil {
+		slog.Debug("tooldefer: history flush", "err", err)
+		m.mu.Lock()
+		for _, t := range touched {
+			if t.sets {
+				t.s.dirty = true // written again at the next flush
+			}
+		}
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Lock()
+	for _, t := range touched {
+		if t.last > t.s.written {
+			t.s.written = t.last
+		}
+	}
+	m.mu.Unlock()
+}
+
+// histRow is one tool row of the history table.
+type histRow struct {
+	tenant, sid, project, tool string
+	decl, used                 int
+	last                       int64
+}
+
+// write runs one flush's writes in one transaction: the tool rows, the last_ts updates, and the
+// deletes past the retention and the bounds. Any error rolls the whole flush back.
+func (m *Mem) write(rows, times []histRow, keep map[string][]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		slog.Debug("tooldefer: history flush", "err", err)
-		return
+		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO tool_defer_history(tenant_id, session_id, project, tool, declared, used, last_ts)
@@ -539,19 +620,24 @@ func (m *Mem) flush() {
 		project = excluded.project, declared = MAX(declared, excluded.declared), used = MAX(used, excluded.used),
 		last_ts = MAX(last_ts, excluded.last_ts)`)
 	if err != nil {
-		return
+		return err
 	}
 	defer stmt.Close()
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx, r.tenant, r.sid, r.project, r.tool, r.decl, r.used, r.last); err != nil {
-			slog.Debug("tooldefer: history flush", "err", err)
-			return
+			return err
+		}
+	}
+	for _, r := range times {
+		if _, err := tx.ExecContext(ctx, `UPDATE tool_defer_history SET last_ts = MAX(last_ts, ?)
+			WHERE tenant_id = ? AND session_id = ?`, r.last, r.tenant, r.sid); err != nil {
+			return err
 		}
 	}
 	if m.Retention > 0 {
 		cutoff := m.now().Add(-m.Retention).UnixMilli()
 		if _, err := tx.ExecContext(ctx, `DELETE FROM tool_defer_history WHERE last_ts < ?`, cutoff); err != nil {
-			return
+			return err
 		}
 	}
 	for tenant, ids := range keep {
@@ -565,12 +651,10 @@ func (m *Mem) flush() {
 		q := `DELETE FROM tool_defer_history WHERE tenant_id = ? AND session_id NOT IN (?` +
 			strings.Repeat(",?", len(ids)-1) + `)`
 		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
-			return
+			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		slog.Debug("tooldefer: history flush", "err", err)
-	}
+	return tx.Commit()
 }
 
 func copySet(m map[string]bool) map[string]bool {

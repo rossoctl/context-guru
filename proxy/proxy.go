@@ -46,6 +46,7 @@ import (
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/tenant"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -466,7 +467,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		// A write to an account or to the keep-alive strategies drops the cached dashboard reads that
 		// include that state, so a toggle shows on the next load and not after the stale window.
 		if reg := h.registry(); reg != nil {
-			reg.SetOnChange(h.api.InvalidateStateCaches)
+			reg.SetOnChange(h.onRegistryChange)
 		}
 		// Publish the off-path pool's counters to the dashboard, the same layering /stats
 		// uses: the pool lives in `modes`, which sits above both `metrics` and `dash`, so
@@ -481,7 +482,22 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 			})
 		}
 	}
+	if reg := h.registry(); reg != nil && h.api == nil {
+		reg.SetOnChange(h.onRegistryChange)
+	}
 	return h
+}
+
+// onRegistryChange runs after every committed account or strategy write: it drops the dashboard's
+// cached state reads, and lets an account that turned tool deferral on after the start load its
+// state as at the start (deferTenantsChanged).
+func (h *Handler) onRegistryChange(kind string) {
+	if h.api != nil {
+		h.api.InvalidateStateCaches(kind)
+	}
+	if kind == tenant.ChangeAccount {
+		h.deferTenantsChanged()
+	}
 }
 
 // Close shuts down the off-path worker pool and waits briefly for its goroutines to exit,
@@ -2519,12 +2535,15 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
+	// It counts events, so it reads the window with no byte twice (#866, N5).
 	if bytes.Contains(win, []byte(tooldefer.SearchName)) {
+		var sr tooldefer.SearchRead
 		if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
-			u.Searches, u.SearchLoaded = tooldefer.SearchesInSSE(win)
+			sr = tooldefer.ReadSearchesSSE(sn.disjoint())
 		} else {
-			u.Searches, u.SearchLoaded = tooldefer.SearchesIn(win)
+			sr = tooldefer.ReadSearches(win)
 		}
+		u.Searches, u.SearchLoaded, u.SearchDropped = sr.Searches, sr.Loaded, sr.Dropped()
 	}
 	return firstByte, u, why, ok
 }

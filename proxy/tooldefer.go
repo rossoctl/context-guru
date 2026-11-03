@@ -49,6 +49,8 @@ type deferHost struct {
 	file *tooldefer.File
 	// asks holds the tenants whose preset picker asked for a probe, until their next request.
 	asks map[string]bool
+	// closed is set by closeToolDefer: a late background build (deferTenantsChanged) then stops.
+	closed bool
 }
 
 // maxProbeAsks bounds asks: one entry per tenant that asked and has not sent a request since.
@@ -98,6 +100,11 @@ func (h *Handler) deferGate() *tooldefer.Gate {
 func (h *Handler) toolDefer() *deferState {
 	h.defer_.mu.Lock()
 	defer h.defer_.mu.Unlock()
+	return h.toolDeferLocked()
+}
+
+// toolDeferLocked is toolDefer with h.defer_.mu held.
+func (h *Handler) toolDeferLocked() *deferState {
 	if d := h.defer_.state; d != nil {
 		return d
 	}
@@ -138,8 +145,9 @@ func (h *Handler) toolDefer() *deferState {
 	return d
 }
 
-// startWait bounds how long New waits for the stored deferral state to load. The load is a few
-// small tables; the bound only keeps a broken disk from holding the start.
+// startWait bounds how long New waits for the stored deferral state to load: the probe verdicts,
+// the history and the seeds together, 10 s in all. The load is a few small tables; the bound only
+// keeps a broken disk from holding the start.
 const startWait = 10 * time.Second
 
 // startToolDefer builds the deferral state at start, when this proxy's configuration, or any
@@ -154,20 +162,53 @@ func (h *Handler) startToolDefer() {
 	}
 	ds := h.toolDefer()
 	h.deferGate() // so /stats reports the state from the start
-	ok := ds.hist.WaitReady(startWait)
+	// One bound for the load and the seeds together. A context, not a timer channel: a fired timer
+	// delivers once, and the next wait on it would block for ever.
+	ctx, cancel := context.WithTimeout(context.Background(), startWait)
+	defer cancel()
+	ok := waitAll(ctx, ds.hist.ReadyC()) // the seeds start after the load: a loaded session wins
 	seeds := make([]<-chan struct{}, 0, len(tenants))
 	for _, id := range tenants {
 		seeds = append(seeds, ds.hist.SeedTenant(id))
 	}
-	deadline := time.After(startWait)
-	for _, done := range seeds {
+	ok = waitAll(ctx, seeds...) && ok
+	slog.Info("context-guru: tool deferral state loaded at start", "tenants", len(tenants), "ready", ok)
+}
+
+// waitAll waits until every channel is closed or ctx ends. It reports whether all closed.
+func waitAll(ctx context.Context, chans ...<-chan struct{}) bool {
+	for _, c := range chans {
 		select {
-		case <-done:
-		case <-deadline:
-			ok = false
+		case <-c:
+		case <-ctx.Done():
+			return false
 		}
 	}
-	slog.Info("context-guru: tool deferral state loaded at start", "tenants", len(tenants), "ready", ok)
+	return true
+}
+
+// deferTenantsChanged builds the deferral state, in the background, when an account change (a
+// new configuration, a new account) turns deferral on for a tenant, and seeds that tenant's
+// history. So a tenant that picks ultrahigh after the start gets the same eager load as one that
+// had it at the start: its first request finds the stored verdicts. It never waits.
+func (h *Handler) deferTenantsChanged() {
+	go func() {
+		tenants := h.deferTenantsAtStart()
+		if tenants == nil {
+			return
+		}
+		h.defer_.mu.Lock()
+		if h.defer_.closed {
+			h.defer_.mu.Unlock()
+			return // the handler is closed: never build a state nobody will stop
+		}
+		ds := h.toolDeferLocked()
+		h.defer_.mu.Unlock()
+		h.deferGate()
+		for _, id := range tenants {
+			ds.hist.SeedTenant(id) // once per tenant: a no-op for one seeded before
+		}
+	}()
 }
 
 // deferTenantsAtStart is the tenants whose configuration turns deferral on ("" for a
@@ -290,6 +331,7 @@ func (h *Handler) closeToolDefer() {
 	h.defer_.mu.Lock()
 	d, f := h.defer_.state, h.defer_.file
 	h.defer_.file = nil
+	h.defer_.closed = true
 	h.defer_.mu.Unlock()
 	if d != nil {
 		d.stop()
@@ -403,8 +445,10 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	ref := m.Ref
 	d := h.dispatch
 	path := up.path
+	// The client's own auth betas: a subscription token on direct Anthropic needs the OAuth beta.
+	beta := tooldefer.AuthBetas(r.Header.Values("Anthropic-Beta"))
 	h.toolDefer().prober.Ensure(key, func(ctx context.Context) (tooldefer.Verdict, error) {
-		v, err := tooldefer.RunProbe(ctx, d, ref, path, key.Model)
+		v, err := tooldefer.RunProbeBeta(ctx, d, ref, path, key.Model, beta)
 		slog.Info("cg.tooldefer_probe", "model", key.Model, "route", path, "verdict", v.String(), "err", err)
 		return v, err
 	})
@@ -440,7 +484,12 @@ func repairOnMissingRef(resp *http.Response, body []byte) (fixed []byte, ok bool
 	}
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 	name := tooldefer.MissingRef(errBody)
-	if name == "" || declares(body, name) {
+	if name != "" && !declares(body, name) {
+		fixed, _, ok = tooldefer.StubTools(body, []string{name})
+	}
+	if !ok {
+		// Put back what was read: LimitReader stops at 16 KiB, so the bytes read and the unread
+		// rest of resp.Body are the original stream, in order.
 		resp.Body = struct {
 			io.Reader
 			io.Closer
@@ -448,10 +497,6 @@ func repairOnMissingRef(resp *http.Response, body []byte) (fixed []byte, ok bool
 		return nil, false
 	}
 	resp.Body.Close()
-	fixed, _, ok = tooldefer.StubTools(body, []string{name})
-	if !ok {
-		return nil, false
-	}
 	slog.Info("cg.tooldefer_stub", "on", "retry")
 	return fixed, true
 }
@@ -473,12 +518,24 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 	if di == nil || !usageOK {
 		return
 	}
-	r := tooldefer.Request{Model: di.model, DeferredTokens: di.outcome.DeferredTokens,
+	r := tooldefer.Request{Tenant: di.tenant, Model: di.model, DeferredTokens: di.outcome.DeferredTokens,
 		ListTokens: di.outcome.ListTokens, Tier: tooldefer.TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
 	n := u.Searches + st.n
 	loaded := append(append([]string(nil), u.SearchLoaded...), st.loaded...)
 	r.Searches = n
+	r.DroppedSearches = u.SearchDropped + st.dropped
 	r.LoadedTokens = tooldefer.LoadedWeight(di.original, loaded)
+	// A wrong guess: a tool this request deferred that a search then loaded (#866, N8).
+	deferred := make(map[string]bool, len(di.outcome.Deferred))
+	for _, name := range di.outcome.Deferred {
+		deferred[name] = true
+	}
+	for _, name := range loaded {
+		if deferred[name] {
+			r.WrongGuesses++
+			delete(deferred, name) // one per tool, however many results load it
+		}
+	}
 	var p modelinfo.Price
 	if h.opts.Prices != nil {
 		p, _ = h.opts.Prices.Price(ctx, di.model)
@@ -488,8 +545,9 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.
 type searchTally struct {
-	n      int
-	loaded []string
+	n       int
+	dropped int // searches with no result
+	loaded  []string
 }
 
 // add reads one round's response: an event stream, or a message object.
@@ -497,15 +555,15 @@ func (st *searchTally) add(sse bool, resp []byte) {
 	if !bytes.Contains(resp, []byte(tooldefer.SearchName)) {
 		return
 	}
-	var n int
-	var loaded []string
+	var sr tooldefer.SearchRead
 	if sse {
-		n, loaded = tooldefer.SearchesInSSE(resp)
+		sr = tooldefer.ReadSearchesSSE(resp)
 	} else {
-		n, loaded = tooldefer.SearchesIn(resp)
+		sr = tooldefer.ReadSearches(resp)
 	}
-	st.n += n
-	st.loaded = append(st.loaded, loaded...)
+	st.n += sr.Searches
+	st.dropped += sr.Dropped()
+	st.loaded = append(st.loaded, sr.Loaded...)
 }
 
 // noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent, for
@@ -529,11 +587,20 @@ func (h *Handler) deferStats() any {
 		return nil
 	}
 	pass, fail := ds.prober.Runs()
+	total := ds.ledger.Snapshot()
 	return map[string]any{
-		"ledger":    ds.ledger.Snapshot(),
-		"decisions": g.Decisions.Load(),
-		"rebuilds":  g.Rebuilds.Load(),
-		"requests":  g.Deferred.Load(),
+		"ledger": total,
+		// Per account ("" is a single-tenant proxy's one account), the same fields as ledger.
+		"accounts": ds.ledger.Accounts(),
+		// A deferred tool that a search then loaded, and a search with no result (sent together
+		// with another tool call, so the model searched again). The same totals as ledger's.
+		"wrong_guesses":    total.WrongGuesses,
+		"dropped_searches": total.DroppedSearches,
+		"decisions":        g.Decisions.Load(),
+		"rebuilds":         g.Rebuilds.Load(),
+		// Store misses sent as the original: the rule's set left out a tool the transcript proves.
+		"rebuilds_unproven": g.Unproven.Load(),
+		"requests":          g.Deferred.Load(),
 		// Every 400/422 to a changed request that the proxy answered with the original, whatever
 		// the cause; "turned_off" counts only those whose original succeeded, which turned it off.
 		"retries_400":  g.Retries.Load(),
