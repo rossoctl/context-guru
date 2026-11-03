@@ -1980,7 +1980,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			refused := resp.StatusCode
 			body = di.orig
 			resp, err = h.doUpstream(r, up, body)
-			ok := err == nil && resp != nil && resp.StatusCode < 400
+			stubbed := false
+			if err == nil {
+				if fixed, ok := repairOnMissingRef(resp, body); ok {
+					// The original failed the same way: it names a tool `tools` lacks. Send it once
+					// more with a stub for that tool, so the client never sees our 400 (#871). The
+					// refusal was then not deferral's, so deferral stays on (originalOK false).
+					body, stubbed = fixed, true
+					resp, err = h.doUpstream(r, up, body)
+				}
+			}
+			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
 			h.deferRetry(di, refused, errBody, ok)
 			di = nil
 		}

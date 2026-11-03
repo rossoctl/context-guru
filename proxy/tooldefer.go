@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -263,6 +265,14 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	if !on {
 		return body, nil
 	}
+	// A transcript that names a tool `tools` no longer declares (a search loaded it, then its MCP
+	// server was removed before a resume) is a 400 at the provider, for the client's own body too.
+	// A deferred stub keeps it valid without touching the cached prefix (#871, defect 1). Before
+	// Apply, so the original a retry would send carries the stub as well.
+	if fixed, added, ok := tooldefer.RepairRefs(body); ok {
+		body = fixed
+		slog.Debug("cg.tooldefer_stub", "session", session, "thread", threadID, "tools", len(added))
+	}
 	ds := h.toolDefer()
 	model := gjson.GetBytes(orig, "model").String()
 	project := tooldefer.NormProject(apply.ProjectFor(provider, orig))
@@ -340,6 +350,41 @@ func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte, original
 	h.toolDefer().prober.Forget(di.probe)
 	slog.Warn("cg.tooldefer_retry", "status", status, "model", di.model, "deferral_cause", cause, "original_ok", true,
 		"note", "the provider refused a request with deferred tools and accepted the original; turned deferral off for this model")
+}
+
+// repairOnMissingRef reads a refused response. When it is a 400 that names a tool_reference to a
+// tool body does not declare, it closes resp and returns body with a deferred stub for that tool.
+// Otherwise resp is left readable, with the same bytes, and ok is false.
+func repairOnMissingRef(resp *http.Response, body []byte) (fixed []byte, ok bool) {
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		return nil, false
+	}
+	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+	name := tooldefer.MissingRef(errBody)
+	if name == "" || declares(body, name) {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
+		return nil, false
+	}
+	resp.Body.Close()
+	fixed, _, ok = tooldefer.StubTools(body, []string{name})
+	if !ok {
+		return nil, false
+	}
+	slog.Info("cg.tooldefer_stub", "on", "retry")
+	return fixed, true
+}
+
+// declares reports whether body's `tools` declares name.
+func declares(body []byte, name string) bool {
+	found := false
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		found = t.Get("name").String() == name
+		return !found
+	})
+	return found
 }
 
 // deferLedger books one finished request in the net-saving ledger. msg is the response message
