@@ -378,7 +378,9 @@ func SetSearchOff(st store.Store, session string, on bool) {
 //
 // Known limits: a drift on a tool no search loaded leaves no trace in the transcript, so the check
 // cannot see it. And a tool the model called directly while it was deferred, with no search (the API
-// accepts that), reads as "used" and comes back loaded. Either rewrites the prefix once. The disk
+// accepts that), reads as "used" and comes back loaded. Also, a tool Claude Code's own search loaded,
+// with no call after it, is not a use here, so the rebuilt set can defer it where the first
+// decision kept it loaded. Each rewrites the prefix once. The disk
 // store, on with the dashboard, makes both rare: Rebuild runs only when the stored record is gone.
 func Rebuild(h History, in Input) (set []string, ok bool) {
 	proven := provenDeferred(in.Body)

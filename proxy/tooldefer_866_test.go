@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -236,5 +237,69 @@ func TestWaitAllIsOneBound(t *testing.T) {
 	close(closed)
 	if !waitAll(context.Background(), closed, closed) {
 		t.Fatal("closed channels not done")
+	}
+	// A closed channel is done even when the bound has passed too (review note on #874).
+	for i := 0; i < 100; i++ {
+		if !waitAll(ctx, closed) {
+			t.Fatal("a closed channel read as not done after the bound")
+		}
+	}
+}
+
+// #874 round 1. A tenant that turns deferral on after the start: its seed must not land before the
+// history load, or the seeded copy of a session hides the table's row for it, with its used flags.
+// The seed is made to start before the load (Open runs after it); the load must still win.
+func TestSeedAfterLoadKeepsTheLoadedUses(t *testing.T) {
+	dir := t.TempDir()
+	hdb, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "h.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hdb.Close()
+	// The history table holds session a, which used Workflow.
+	m0 := tooldefer.NewMem(hdb)
+	stop0 := m0.Open(time.Hour, nil)
+	if !m0.WaitReady(5 * time.Second) {
+		t.Fatal("not loaded")
+	}
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Workflow","input":{}}]}`
+	m0.Observe("t", "a", "/w", tdBody(use), time.Now().UnixMilli())
+	stop0()
+	// The dashboard's inventory has session a too, with no use.
+	sdb, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "d.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdb.Close()
+	for _, q := range []string{
+		`CREATE TABLE tool_declarations (tenant_id TEXT, session_id TEXT, kind TEXT, name TEXT, ts INTEGER)`,
+		`CREATE TABLE tool_uses (tenant_id TEXT, session_id TEXT, project TEXT, name TEXT)`,
+		`INSERT INTO tool_declarations VALUES ('t','a','tool','Workflow',1)`,
+	} {
+		if _, err := sdb.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := tooldefer.NewMem(hdb)
+	m.SeedDB = sdb
+	done := make(chan struct{})
+	go func() {
+		waitAll(context.Background(), seedAfterLoad(m, []string{"t"})...)
+		close(done)
+	}()
+	select {
+	case <-done: // the seed ran before the load: the bug
+	case <-time.After(200 * time.Millisecond):
+	}
+	stop := m.Open(time.Hour, nil)
+	defer stop()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the seed never ran after the load")
+	}
+	got := m.UserSessions("t", "", 10)
+	if len(got) != 1 || !got[0].Used["Workflow"] {
+		t.Fatalf("the seeded copy hid the loaded uses: %+v", got)
 	}
 }

@@ -180,6 +180,11 @@ func waitAll(ctx context.Context, chans ...<-chan struct{}) bool {
 	for _, c := range chans {
 		select {
 		case <-c:
+			continue // closed already: done, even when ctx is done too
+		default:
+		}
+		select {
+		case <-c:
 		case <-ctx.Done():
 			return false
 		}
@@ -205,10 +210,21 @@ func (h *Handler) deferTenantsChanged() {
 		ds := h.toolDeferLocked()
 		h.defer_.mu.Unlock()
 		h.deferGate()
-		for _, id := range tenants {
-			ds.hist.SeedTenant(id) // once per tenant: a no-op for one seeded before
-		}
+		seedAfterLoad(ds.hist, tenants) // the seeds run on; nothing here waits for them
 	}()
+}
+
+// seedAfterLoad waits for the history load that Open started, then seeds each tenant. The seed and
+// the load both add only the sessions memory does not hold yet: a seed that landed first would hide
+// the table's row for the same session, with its used flags. So the load goes first, as at the
+// start. For a background goroutine only: it waits without a bound.
+func seedAfterLoad(hist *tooldefer.Mem, tenants []string) []<-chan struct{} {
+	<-hist.ReadyC()
+	seeds := make([]<-chan struct{}, 0, len(tenants))
+	for _, id := range tenants {
+		seeds = append(seeds, hist.SeedTenant(id)) // once per tenant: a no-op for one seeded before
+	}
+	return seeds
 }
 
 // deferTenantsAtStart is the tenants whose configuration turns deferral on ("" for a
