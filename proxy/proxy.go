@@ -1287,7 +1287,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
 					body = orig
 					// The original goes upstream, so no operation of the savings record is on the
-					// wire: drop the record, and the event keeps its legacy figures.
+					// wire: drop the record, and the event books no saving.
 					cp.accDrop()
 				}
 			}()

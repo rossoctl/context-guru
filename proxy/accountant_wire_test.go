@@ -127,9 +127,9 @@ func accRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
 	return tap.all()[1:], b
 }
 
-// legacyOf prices a copy of a recorded event with the legacy rules alone: what the event would
-// carry had no accountant Result overridden it. Event.Price is that path.
-func legacyOf(e dash.Event) dash.Event {
+// costOnlyOf prices a copy of a recorded event with Event.Price alone: its cost and no saving,
+// which is what an event the accountant library could not price carries.
+func costOnlyOf(e dash.Event) dash.Event {
 	e.Components = append([]dash.CompRow(nil), e.Components...)
 	p, _ := fixedPricer{}.Price(context.Background(), e.Model)
 	e.Price(p, true)
@@ -190,24 +190,18 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 	if math.Abs(got-want) > 2*2e-6 {
 		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d message bytes)", got, want, client, fb)
 	}
-	lg := extractRow(t, legacyOf(e)).SavedUSD
-	if lg <= 0 || got/lg > 20 || lg/got > 20 {
-		t.Fatalf("library %v and legacy %v differ by more than 20x", got, lg)
-	}
-	t.Logf("library %v legacy %v hand %v", got, lg, want)
+	t.Logf("library %v hand %v", got, want)
 }
 
 // The old fixture: 10,512 prompt tokens for a few-hundred-byte forwarded body. The library's
-// token figure then exceeds the request's size, so PriceMode must fall back to legacy, and for that
+// token figure then exceeds the request's size, so PriceMode must book no saving, and for that
 // reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
 // unpriced, so the plausibility bound is what fired, not some earlier gate.
-func TestAbsurdUsageFallsBackToLegacy(t *testing.T) {
+func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 	cfs, _ := accRunUsage(t, 12, 9000, 1500)
-	leg := legacyOf(cfs[0])
-	got, want := extractRow(t, cfs[0]).SavedUSD, extractRow(t, leg).SavedUSD
-	if got != want || cfs[0].BaselineCostUSD != leg.BaselineCostUSD {
-		t.Fatalf("absurd usage did not fall back: component %v vs legacy %v, baseline %v vs %v",
-			got, want, cfs[0].BaselineCostUSD, leg.BaselineCostUSD)
+	if got := extractRow(t, cfs[0]).SavedUSD; got != 0 || cfs[0].BaselineCostUSD != cfs[0].CostUSD {
+		t.Fatalf("absurd usage booked a saving: component %v, baseline %v, cost %v",
+			got, cfs[0].BaselineCostUSD, cfs[0].CostUSD)
 	}
 	r, ok := cfs[0].AccountantResult()
 	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {

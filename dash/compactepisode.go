@@ -117,6 +117,10 @@ type compactRow struct {
 	Events string
 	// Acted is the stored flag: summarize removed tokens on this turn. True on a replay too.
 	Acted bool
+	// Accountant is true when the accountant library priced the row: SavedUSD is its figure and
+	// storedFirstUSD its first-removal part, and no read-time formula re-prices it (rePriceRow).
+	Accountant     bool
+	storedFirstUSD float64
 }
 
 // Episode states. A closed episode is the only one that contributes to a total.
@@ -1165,7 +1169,7 @@ func compactAssumptions(spanFrac, fillFrac float64) CompactionAssumptions {
 const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id, r.model, r.ts, r.tokens_before,
 		r.fresh_input + r.cache_read + r.cache_write AS billed,
 		r.cache_miss_reason, r.cache_write, r.cache_write_1h, r.cache_read, r.cg_llm_cost_usd,
-		%[1]s, r.fresh_input, %[2]s
+		%[1]s, r.fresh_input, %[2]s, %[4]s, %[5]s
 	FROM requests r
 	%[3]s
 	WHERE %%s
@@ -1176,7 +1180,7 @@ const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id,
 // the sum across the components (a request normally has one). Names come from SummarizerComponents
 // only; anything else is refused.
 func compactEpisodeSelectFor(components []string) string {
-	var joins, gross, usd, events, acted, unique []string
+	var joins, gross, usd, events, acted, unique, first, acc []string
 	for i, name := range components {
 		if !IsSummarizer(name) {
 			continue
@@ -1188,6 +1192,8 @@ func compactEpisodeSelectFor(components []string) string {
 		events = append(events, al+".events")
 		acted = append(acted, "COALESCE("+al+".acted, 0)")
 		unique = append(unique, "COALESCE("+al+".saved_unique, 0)")
+		first = append(first, "COALESCE("+al+".saved_first_usd, 0)")
+		acc = append(acc, "COALESCE("+al+".priced_by = 'accountant', 0)")
 	}
 	if len(joins) == 0 {
 		return "" // no valid component: the caller reads nothing
@@ -1199,7 +1205,8 @@ func compactEpisodeSelectFor(components []string) string {
 		cols = strings.Join(gross, " + ") + ", " + strings.Join(usd, " + ") + ", COALESCE(" +
 			strings.Join(events, ", ") + ", ''), " + acted[0]
 	}
-	return fmt.Sprintf(compactEpisodeSelectTmpl, cols, strings.Join(unique, " + "), strings.Join(joins, "\n\t"))
+	return fmt.Sprintf(compactEpisodeSelectTmpl, cols, strings.Join(unique, " + "), strings.Join(joins, "\n\t"),
+		strings.Join(first, " + "), strings.Join(acc, " OR "))
 }
 
 // summarizeSessionsOnly narrows the dataset to sessions in which a summarizer ever acted. The
@@ -1245,7 +1252,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 		if err := rows.Scan(&r.Tenant, &r.Session, &r.Thread, &r.Model, &r.TS, &r.TokensBefore,
 			&r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
 			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted,
-			&r.FreshInput, &r.SavedUnique); err != nil {
+			&r.FreshInput, &r.SavedUnique, &r.storedFirstUSD, &r.Accountant); err != nil {
 			return nil, err
 		}
 		r.Acted = acted != 0

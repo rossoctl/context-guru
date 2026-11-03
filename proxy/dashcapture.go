@@ -117,7 +117,7 @@ type capture struct {
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
-	// and the accountant figure must not override the legacy figures.
+	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
@@ -679,7 +679,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
 	// state stays untouched and the event carries no result. Not after several upstream rounds
-	// either (see rounds): no Result is attached, so PriceMode keeps the legacy figures
+	// either (see rounds): no Result is attached, so PriceMode books no saving
 	// (acc_fallback reason no_result). The thread state is left as the
 	// previous request left it; the next request then sees a longer gap, which the library
 	// handles (a phase it cannot prove is unknown and falls back too).

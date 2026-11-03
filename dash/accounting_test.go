@@ -164,9 +164,9 @@ func TestDecompositionReconcilesWithTheStoredFigure(t *testing.T) {
 			Components: []CompRow{{Component: "extract", Acted: true, Mutated: true,
 				SavedGross: tr.gross, SavedUnique: tr.unique}},
 		}
-		// Price at write time, exactly as the proxy does.
+		// Price at write time, as the proxy did before the accountant library (priced_by '').
 		p, _ := handPrice.Price(context.Background(), "m1")
-		e.Price(p, true)
+		legacyPrice(e, p)
 		insertReq(t, db, e)
 	}
 	rows, err := db.Components(Filter{TenantAll: true})
@@ -813,7 +813,7 @@ func TestCrossCheckCoversOnlyStoredRows(t *testing.T) {
 		Components: []CompRow{{Component: "extract", Kind: "offload", Acted: true,
 			Mutated: true, SavedGross: 1000, SavedUnique: 1000}},
 	}
-	stored.Price(p, true)
+	legacyPrice(stored, p)
 	insertReq(t, db, stored)
 	insertReq(t, db, &Event{
 		TS: 2000, SessionID: "s1", Model: "m1", TenantID: "t1",
@@ -1016,5 +1016,48 @@ func TestDirectoryScopedSkillIsNotAPlugin(t *testing.T) {
 		if got := RemovalFor(KindSkill, name, ""); got.Kind != "skill" {
 			t.Errorf("%s = kind %q, want skill", name, got.Kind)
 		}
+	}
+}
+
+// legacyPrice writes a row the way the proxy did before the accountant library priced savings
+// (priced_by ”): the cost, then each component's SavedUSD from the legacy rule, ComponentSavedUSD,
+// and the baseline as their sum. The read-time passes still value such rows, so their tests need one.
+func legacyPrice(e *Event, p modelinfo.Price) {
+	e.Price(p, true)
+	for i := range e.Components {
+		c := &e.Components[i]
+		c.SavedUSD = e.ComponentSavedUSD(p, c.Component, c.SavedGross, c.SavedUnique)
+		e.BaselineCostUSD += c.SavedUSD
+	}
+}
+
+// A row the accountant library priced carries its split: the decomposition sums it as stored and
+// the cross-check agrees exactly, with the costs as the third term.
+func TestDecompositionSumsTheAccountantSplitAsStored(t *testing.T) {
+	db := openTestDB(t)
+	e := &Event{TS: 1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 20000, TokensAfter: 19000, FreshInput: 5, CacheRead: 40000, OutputTokens: 50,
+		TokenAccounting: AccountingComplete,
+		Components: []CompRow{{Component: "extract", Acted: true, Mutated: true, SavedGross: 1000, SavedUnique: 1000,
+			SavedUSD: 0.009, SavedFirstUSD: 0.006, SavedReplayUSD: 0.004, PricedBy: PricedByAccountant}}}
+	insertReq(t, db, e)
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EstimateComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	c := rows[0]
+	nearEq(t, "first removal", c.SavedUSDFirstRemoval, 0.006)
+	nearEq(t, "replay", c.SavedUSDReplay, 0.004)
+	nearEq(t, "costs", c.SavedUSDCosts, -0.001)
+	nearEq(t, "decomposed", c.SavedUSDDecomposed, 0.009)
+	nearEq(t, "stored cross-check", c.SavedUSDDecomposedStored, c.SavedUSD)
+	if c.SavedUSDEstimated != 0 {
+		t.Fatalf("an accountant row was estimated again: %v", c.SavedUSDEstimated)
 	}
 }

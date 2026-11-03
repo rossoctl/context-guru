@@ -94,44 +94,53 @@ runs with no persistence at all.
 
 ## Savings source
 
-The stored savings figures come from the accountant library when an event qualifies, and from the
-dashboard's own pricing rules when it does not. It needs `--dashboard`: the library's result is
-attached to the recorded event, so without a recorder nothing runs.
+Every saving the dashboard stores comes from the accountant library
+([rossoctl/accountant](https://github.com/rossoctl/accountant)). It needs `--dashboard`: the
+library's result is attached to the recorded event, so without a recorder nothing runs. The proxy
+itself books no saving: `Event.Price` stores the cost, the provider's own cache saving and the
+accounting fields, and nothing else.
 
-When the event qualifies, each component's saved dollars and the baseline cost are stored from the
-library's result. The component figures are net of the cache break each component caused, and
-they sum to baseline minus cost.
+What the library prices:
+
+- **Components.** Each component's saved dollars, net of the cache break it caused, and the baseline
+  cost. The component figures sum to baseline minus cost. Each row also stores the library's split:
+  `saved_first_usd` (saved tokens priced at the write or input tier: content the provider had not
+  cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
+  are `saved_usd` minus both. `priced_by` is `accountant`.
+- **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
+  cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
+  from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
+  row of its own.
+- **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
+  and the library derives the extent the ping read from it. A prefix that another thread of the
+  session kept warm inside the TTL is not credited (`EntryFacts.SharedWarm`, accountant R54).
+- **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
+- **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
+- **A break nobody owns.** A break that a change left behind when it ended is counted on the
+  `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
+
+When the library cannot price an event, the event books **no saving**, and the proxy logs one
+`acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
+`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
+`figure_without_row`, `duplicate_name` or `acted_without_figure`. A saving nothing measured is not
+shown.
 
 Limits:
 
-- The override is all-or-nothing per event. If the event does not qualify, it keeps its legacy
-  figures and the proxy logs one `acc_fallback` line with the reason. The reasons are `no_result`,
-  `ops_dropped`, `observe`, `unpriced`, `check_sum`, `check_unique_change`, `check_spans`,
-  `size_unknown`, `implausible_size`, `figure_without_row`, `duplicate_name` and
-  `acted_without_figure`.
-- So a dashboard total mixes the two methods: some events are priced by the library, the rest by
-  the legacy rules.
-- The first request of a thread falls back (`unpriced`): there is no previous request to classify a
-  cache break against. A request after a gap longer than the cache TTL falls back for the same
-  reason.
-- A request whose response called `context_guru_expand` (more than one upstream round) falls back
-  (`no_result`): the usage is billed on the expanded body, which the library did not see.
+- The first request of a thread has no previous request to classify a cache break against
+  (`penalty_unknown`). Its figure is booked as an estimate: the gross saving is right, and the net
+  can be too high if a component broke the cache on that request (accountant design §6.4).
+- A request whose response called `context_guru_expand` (more than one upstream round) books no
+  saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
 - The thread state lives in memory. After a restart, and for a thread dropped by the library's cap
-  of 10,000 threads (the oldest go first), the next request of the thread falls back until the
-  state is rebuilt. There is no idle timeout: a keep-alive ping keeps a thread's cache alive after
-  its last request, and the library learns of a ping only at the thread's next request.
-- The keep-alive and cachesplit figures stay on the legacy rules. The library cannot yet price
-  keep-alive, because the keeper report carries no read extent.
-- The proxy does not tell the library which part of the cache a sibling thread kept warm
-  (`EntryFacts.SharedWarm`, accountant R54). On a session with sibling threads, a keep-alive
-  rescue is credited in full.
-- The cache-saved and cost figures are not changed.
-- The figures are estimates. The library converts the removed bytes to tokens with the request's
-  own billed-token ratio. A figure that implies more removed tokens than the request had (a ratio
-  that does not fit the usage) is rejected, and the event keeps its legacy figures.
-- They can differ from the legacy figures: the library prices removed tokens at the tier their
-  position falls in, and legacy prices them at the rate the request paid.
-- Rows stored under the legacy rule are still repriced with the legacy rule at read time.
+  of 10,000 threads (the oldest go first), the next request of the thread is a first request again.
+- The figures are estimates. The library converts removed bytes to tokens with the request's own
+  billed-token ratio. A figure that implies more removed tokens than the request had is rejected
+  (`implausible_size`).
+- The cost and the provider's cache saving are not the library's.
+- Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
+  the summarize ledger and the replay cap value those rows with the legacy rule at read time, and
+  sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
 - The proxy computes the operations on every request when a dashboard is on. That cost is accepted.
 
 ## Tool inventory panel

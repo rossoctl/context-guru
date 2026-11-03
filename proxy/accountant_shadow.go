@@ -8,7 +8,8 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 )
 
-// logFallback writes the acc_fallback line for an event whose figures stayed on the legacy rules,
+// logFallback writes the acc_fallback line for an event the accountant library could not price, so it
+// books no saving,
 // with the reason (dash.Fallback*).
 func logFallback(e *dash.Event) {
 	r, _ := e.AccountantResult()

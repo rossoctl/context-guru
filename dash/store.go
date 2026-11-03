@@ -595,8 +595,8 @@ func (d *DB) insertBatch(evs []*Event) error {
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -683,7 +683,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			if _, err := compStmt.Exec(id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events)); err != nil {
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy); err != nil {
 				return err
 			}
 		}

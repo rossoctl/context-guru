@@ -20,7 +20,9 @@ func switchEvent() *Event {
 	return e
 }
 
-func legacyCopy(e *Event) *Event {
+// costOnlyCopy is a copy priced with Price alone: its cost and no saving, which is what an event the
+// accountant library could not price carries.
+func costOnlyCopy(e *Event) *Event {
 	c := *e
 	c.Components = append([]CompRow(nil), e.Components...)
 	c.Price(accTestPrice, true)
@@ -47,7 +49,7 @@ func TestPriceMode_AccountantOverridesComponentsAndBaseline(t *testing.T) {
 	if d := sum - (e.BaselineCostUSD - e.CostUSD); d > 1e-9 || d < -1e-9 {
 		t.Fatalf("components sum %v != baseline delta %v", sum, e.BaselineCostUSD-e.CostUSD)
 	}
-	l := legacyCopy(switchEvent())
+	l := costOnlyCopy(switchEvent())
 	if e.CacheSavedUSD != l.CacheSavedUSD || e.CostUSD != l.CostUSD {
 		t.Fatal("cache-saved or cost changed by the override")
 	}
@@ -73,13 +75,10 @@ func TestPriceMode_KeepAliveAndSplitComeFromTheLibrary(t *testing.T) {
 	}
 }
 
-// With no rescue from the library, the keep-alive column is 0 even where the legacy rule credits.
+// With no rescue from the library, the keep-alive column is 0, whatever the gap and the pings.
 func TestPriceMode_NoRescueMeansNoKeepAliveCredit(t *testing.T) {
 	e := switchEvent()
-	e.KeepAlivePings, e.SinceLastMs, e.KeepAliveRefreshed = 1, 1<<40, 1000
-	if l := legacyCopy(e); l.KeepAliveSavedUSD <= 0 {
-		t.Fatalf("fixture: legacy credits nothing (%v)", l.KeepAliveSavedUSD)
-	}
+	e.KeepAlivePings, e.SinceLastMs, e.KeepAliveRefreshed = 1, 1<<40, 1000 // the gaps the legacy rule credited on
 	e.PriceMode(accTestPrice, true)
 	if e.KeepAliveSavedUSD != 0 {
 		t.Fatalf("keep-alive %v, want 0: the library found no rescue", e.KeepAliveSavedUSD)
@@ -106,7 +105,7 @@ func TestPriceMode_HeadTTLIsAComponentFigure(t *testing.T) {
 	}
 }
 
-func TestPriceMode_FallsBackToLegacy(t *testing.T) {
+func TestPriceMode_FallsBackToNoSaving(t *testing.T) {
 	cases := map[string]struct {
 		mut    func(*Event)
 		reason string
@@ -137,14 +136,14 @@ func TestPriceMode_FallsBackToLegacy(t *testing.T) {
 	for name, c := range cases {
 		e := switchEvent()
 		c.mut(e)
-		want := legacyCopy(e)
+		want := costOnlyCopy(e)
 		e.PriceMode(accTestPrice, true)
 		if got := e.AccountantFallback(); got != c.reason {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
-		e.accFallback = "" // the legacy copy carries no reason; every other field must match
+		e.accFallback = "" // the copy carries no reason; every other field must match
 		if !reflect.DeepEqual(e, want) {
-			t.Errorf("%s: event differs from the legacy-priced copy:\n got %+v\nwant %+v", name, e, want)
+			t.Errorf("%s: event differs from the cost-only copy:\n got %+v\nwant %+v", name, e, want)
 		}
 	}
 }
@@ -220,7 +219,7 @@ func TestPriceMode_EndedChangeBreakHasARow(t *testing.T) {
 }
 
 // penalty_unknown (a thread's first request) does not gate: the figure applies and is an estimate
-// (accountant design §6.4). Any other unpriced reason still gates (TestPriceMode_FallsBackToLegacy).
+// (accountant design §6.4). Any other unpriced reason still gates (TestPriceMode_FallsBackToNoSaving).
 func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
 	e := switchEvent()
 	e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}

@@ -23,6 +23,10 @@ func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 // summed; token tiers are never collapsed into one total.
 type AccFigure struct {
 	ByComponent map[string]float64 // net of the break each component caused
+	// ByComponentFirst and ByComponentReplay split each component's SAVED tokens by tier: the write
+	// and input tiers (content the provider had not cached: a first removal) and the read tier (a
+	// replay of content in the cached prefix). ByComponent minus both is its costs (Caused, breaks).
+	ByComponentFirst, ByComponentReplay map[string]float64
 	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD. It excludes UnattributedBreakUSD,
 	// KeepAliveSavedUSD, SplitUSD and TTLUSD.
 	DeltaUSD          float64
@@ -44,7 +48,7 @@ type AccFigure struct {
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
-	f := AccFigure{ByComponent: map[string]float64{}}
+	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{}}
 	if e.accRes == nil {
 		return f
 	}
@@ -74,6 +78,9 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		}
 		net := tierUSD(p, o.Saved) - tierUSD(p, o.Caused)
 		f.ByComponent[c] += net
+		read := tierUSD(p, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
+		f.ByComponentReplay[c] += read
+		f.ByComponentFirst[c] += tierUSD(p, o.Saved) - read
 		f.DeltaUSD += net
 		f.Estimated = f.Estimated || o.Estimated
 	}
@@ -118,7 +125,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	return f
 }
 
-// Fallback reasons: why PriceMode kept the legacy figures of an event. AccountantFallback
+// Fallback reasons: why PriceMode booked no saving on an event. AccountantFallback
 // returns one of them ("" when the override applied).
 const (
 	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
@@ -159,6 +166,9 @@ var gatedChecks = map[string]string{
 	"spans":         FallbackCheckSpans,
 }
 
+// PricedByAccountant is CompRow.PricedBy on a row the accountant library priced.
+const PricedByAccountant = "accountant"
+
 // KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
 // the ended-change break, neither of which is a pipeline component.
 const KindEnvelope = "envelope"
@@ -180,7 +190,7 @@ var envelopeComponents = map[string]bool{
 // out a break (penalty_unknown, accountant design §6.4). It is false when the override did not apply.
 func (e *Event) AccountantEstimated() bool { return e.accEstimated }
 
-// AccountantFallback is the reason PriceMode kept the legacy figures, or "" when the override
+// AccountantFallback is the reason PriceMode booked no saving, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
 func (e *Event) AccountantFallback() string { return e.accFallback }
 
@@ -192,10 +202,11 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // component as a $0 saving. It applies only when: a Result is attached; no change was dropped
 // from the operation list; the run was not observe mode; no operation or effect is unpriced; no
 // gated library check failed; the figure is plausible; and every component that acted has a
-// library figure. Otherwise the legacy figures stand and AccountantFallback says why.
+// library figure. Otherwise the event books no saving (Price set every saving to 0) and
+// AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.accEstimated = "", false
-	if !e.priceLegacy(p, accountingComplete) {
+	if !e.priceCost(p, accountingComplete) {
 		return
 	}
 	e.accFallback = e.accOverride(p)
@@ -232,7 +243,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
 	// usage that does not match the forwarded body (a wrong bytes-to-tokens ratio) would otherwise
 	// publish an inflated figure. Over the bound, or with TokensBefore unknown (0), the bound cannot
-	// be met or checked and the legacy figures stand. This is a gate, never a rescale of the figure.
+	// be met or checked and the event books no saving. This is a gate, never a rescale of the figure.
 	if e.TokensBefore <= 0 {
 		return FallbackSizeUnknown
 	}
@@ -241,7 +252,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	}
 	// A library figure for a component the event has no row for would leave the rows short of
 	// the baseline: the sum invariant would break. An envelope operator (envelopeComponents) gets
-	// its own row; for any other name the legacy figures stand.
+	// its own row; for any other name the event books no saving.
 	rows := map[string]bool{}
 	for _, c := range e.Components {
 		rows[c.Component] = true
@@ -293,16 +304,18 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		}
 		saved[i] = v
 	}
-	for i := range e.Components {
-		e.Components[i].SavedUSD = saved[i]
-	}
 	for _, r := range added {
-		r.SavedUSD = fig.ByComponent[r.Component]
 		e.Components = append(e.Components, r)
+		saved = append(saved, fig.ByComponent[r.Component])
+	}
+	for i := range e.Components {
+		c := &e.Components[i]
+		c.SavedUSD, c.PricedBy = saved[i], PricedByAccountant
+		c.SavedFirstUSD, c.SavedReplayUSD = fig.ByComponentFirst[c.Component], fig.ByComponentReplay[c.Component]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
 	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
-	// the legacy rules did: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
+	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
 	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
 	e.accEstimated = estimated
 	return ""

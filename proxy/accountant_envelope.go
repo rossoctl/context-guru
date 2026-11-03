@@ -15,7 +15,7 @@ import (
 // array, and the cache marks. The proxy changes it in several places (apply's toolschema,
 // toolfilter, cachesplit, headttl and tail mark; expand.Inject and adjudicate.Inject after the
 // pipeline), and none of them reports an operation. The library's sum check then fails on the
-// tools and system sections, and the event falls back to the legacy figures.
+// tools and system sections, and the event books no saving.
 //
 // envelopeOps reports each change from the two bodies instead: the client body and the body that
 // went upstream. A reporter that diffs bodies cannot miss a rewrite that forgot to report itself,
