@@ -49,6 +49,22 @@ func TestDashWaitPolicyReportsTheEffectivePlan(t *testing.T) {
 		t.Errorf("5-minute strategy: plan off")
 	}
 
+	// Coexistence: a covering strategy wins over an active campaign, as in resolvePolicyWindows.
+	k, get = setup(t)
+	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
+	k.pred = rt
+	k.setStrategies([]tenant.Strategy{{ID: "s3", Active: true, IdleSeconds: 240, MaxPings: 2, Target: tenant.Target{Mode: tenant.TargetAll}}})
+	if p := get(); !p.WaitPlan {
+		t.Errorf("active campaign + 5-minute strategy: plan off, want on (the strategy wins)")
+	}
+	k, get = setup(t)
+	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
+	k.pred = rt
+	k.setStrategies([]tenant.Strategy{{ID: "s4", Active: true, IdleSeconds: 3540, MaxPings: 1, Target: tenant.Target{Mode: tenant.TargetAll}}})
+	if p := get(); p.WaitPlan {
+		t.Errorf("active campaign + 1-hour strategy: plan on, want off")
+	}
+
 	// The account switch.
 	k, get = setup(t)
 	cache.WaitPlan = false

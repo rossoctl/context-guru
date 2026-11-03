@@ -134,9 +134,11 @@ type SpanFacts struct {
 	ToolSeen bool
 	// OpenAI is true for an OpenAI request. The plan does not cover OpenAI: it keeps the base count.
 	OpenAI bool
-	// OneHour is true when the thread's BILLED tier is the 1-hour one, as ResolveTier decides it
-	// (the request asked 1 hour on every breakpoint, and the last write was billed at 1 hour).
-	// The thread then keeps the schedule of Policy.ForOneHour.
+	// OneHour is true when the thread's BILLED tier is the 1-hour one. ResolveTier needs EVERY
+	// breakpoint to ask 1 hour; a stored row keeps only "ANY breakpoint asked 1 hour" (cache_ttl), so a
+	// replay can call a mixed request 1-hour when the keeper keeps it on 5 minutes. The billed write
+	// (cache_write_1h >= cache_write) is the other half of the rule. The thread then keeps the schedule
+	// of Policy.ForOneHour.
 	OneHour bool
 }
 

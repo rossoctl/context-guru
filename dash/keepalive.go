@@ -1313,8 +1313,8 @@ func toolStopList() string {
 //
 //   - seen is true when this request or an earlier one of the same THREAD called a tool: a tool stop
 //     reason, or a stored wait on its own tool.
-//   - hour is the BILLED tier, as keepalive.ResolveTier decides it: the request asked 1 hour
-//     (cache_ttl) and the last write of the thread (this row's own, or the latest before it) was billed
+//   - hour is the BILLED tier, close to keepalive.ResolveTier: the request asked 1 hour (cache_ttl:
+//     ANY breakpoint asked, where ResolveTier needs EVERY breakpoint to ask, a known gap) and the last write of the thread (this row's own, or the latest before it) was billed
 //     entirely at 1 hour (cache_write_1h >= cache_write). A row that wrote nothing inherits.
 //
 // Pings are excluded by the filter, as in every replay. Two extra windows, partitioned by thread.
@@ -1621,7 +1621,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 			ToolWaitMax:     orInt(wait.ToolWaitMaxPings, keepalive.DefaultToolWaitMaxPings),
 			BackgroundExtra: orInt(wait.BackgroundExtraPings, keepalive.DefaultBackgroundExtraPings),
 			HumanExtra:      orInt(wait.HumanExtraPings, keepalive.DefaultHumanExtraPings),
-			MaxPings:        keepalive.MaxWaitPings}
+			MaxPings:        max(k, keepalive.MaxWaitPings)}
 	}
 	var p modelinfo.Price
 	if price != nil && model != "" {
@@ -1847,7 +1847,8 @@ type PlanCounts struct {
 	ToolWaitMax     int `json:"tool_wait_max"`
 	BackgroundExtra int `json:"background_extra"`
 	HumanExtra      int `json:"human_extra"`
-	MaxPings        int `json:"max_pings"`
+	// MaxPings is the cap on any plan count: max(base, MaxWaitPings).
+	MaxPings int `json:"max_pings"`
 }
 
 func orInt(v, def int) int {

@@ -43,6 +43,7 @@ type turn struct {
 	status         int
 	hour, billed1h bool
 	read           bool
+	partial        bool // only the first breakpoint asks 1 hour (stored cache_ttl still says 1 hour)
 }
 
 func (t turn) withHour(billed bool) turn { t.hour, t.billed1h = true, billed; return t }
@@ -78,7 +79,11 @@ func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) 
 			status = 200
 		}
 		if r.hour {
-			body = strings.ReplaceAll(body, `"cache_control":{"type":"ephemeral"}`, `"cache_control":{"type":"ephemeral","ttl":"1h"}`)
+			n := -1
+			if r.partial {
+				n = 1
+			}
+			body = strings.Replace(body, `"cache_control":{"type":"ephemeral"}`, `"cache_control":{"type":"ephemeral","ttl":"1h"}`, n)
 		}
 		u := keepalive.Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop}
 		if r.read {
@@ -203,7 +208,9 @@ func TestDashboardReplayMatchesTheKeeper(t *testing.T) {
 // sniff window, which is rare. The same window gives the second known gap: the keeper counts a response
 // with an incomplete name list as a tool call (calledATool), and the stored row has no such fact, so the
 // replay's "tool seen" misses it (a thread whose only tool calls were spliced reads "no tool yet" until a
-// tool stop is stored).
+// tool stop is stored). The third gap: the stored cache_ttl says ANY breakpoint asked 1 hour, where the
+// keeper's ResolveTier needs EVERY breakpoint to ask. A mixed request with a billed 1-hour write reads
+// as 1-hour in the replay (one ping at 59 minutes) and as 5-minute in the keeper.
 func TestDashboardReplayKnownGapSplicedToolStop(t *testing.T) {
 	seq := []turn{tCall, {stop: "tool_use"}}
 	if got, _ := keeperPings(t, 2, "", 0, 0, seq); got != 8 {
@@ -380,5 +387,19 @@ func TestCalculatorStatesThePlanCounts(t *testing.T) {
 	}
 	if c.Counts == nil || c.Counts.ToolWaitMax != 6 || c.Counts.HumanExtra != keepalive.DefaultHumanExtraPings {
 		t.Errorf("plan_counts = %+v", c.Counts)
+	}
+}
+
+// Third known gap: the stored cache_ttl means ANY breakpoint asked 1 hour; the keeper's ResolveTier needs
+// EVERY breakpoint to ask. A mixed request billed at 1 hour is a 5-minute thread for the keeper (the plan
+// counts, 5-minute spacing) and a 1-hour thread for the replay (one ping, 59 minutes apart).
+func TestDashboardReplayKnownGapMixedBreakpointTier(t *testing.T) {
+	mixed := tCall.withHour(true)
+	mixed.partial = true
+	seq := []turn{tCall, mixed}
+	_, kIdle := keeperPings(t, 2, "", 0, 0, seq)
+	_, dIdle := dashPings(t, 2, "", 0, 0, seq)
+	if kIdle >= time.Hour || dIdle < 50*time.Minute {
+		t.Errorf("keeper spacing %v, replay spacing %v: want a 5-minute keeper and a 1-hour replay", kIdle, dIdle)
 	}
 }
