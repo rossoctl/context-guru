@@ -553,10 +553,13 @@ func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session strin
 //
 //  1. keepalive_wait_plan is false, or the account cannot be read (fail to the old model);
 //  2. a covering manager strategy wins first, found as the request path finds it for a wait that is
-//     not for a person (bestStrategy, windows ignored). Its Idle decides: 300 s or more (the 1-hour
+//     not for a person (bestStrategy, windows ignored; respected while a campaign is active). Its Idle decides: 300 s or more (the 1-hour
 //     band) turns the plan off, less keeps the account's own setting. The campaign is then skipped;
 //  3. only when no strategy covers the account, an active campaign (keep-alive on) owns the count and
 //     turns the plan off.
+//
+// While a campaign is active the answer depends on the hour: a strategy whose window is closed falls
+// through to the campaign, so the flag is right at the moment the page is read.
 //
 // Limits, stated because one read hook cannot see a single request:
 //   - A campaign owns the count only on a request that passes its price gate (pdecOK in
@@ -585,21 +588,25 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 		c := tn.Cache
 		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
 			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
+		// With an active campaign the request path does not retry a closed window (resolvePolicyWindows),
+		// so a strategy counts only while its window is open and a closed one falls through to the
+		// campaign. Without one, the window-ignoring lookup stands.
+		campaignOn := false
+		if pc := h.predRT().forTenant(tn.ID); pc != nil && c.KeepAlive {
+			pc.mu.Lock()
+			campaignOn = pc.meta.Mode == campaignModeActive
+			pc.mu.Unlock()
+		}
 		if h.keeper != nil {
-			if best := h.keeper.bestStrategy(tn.ID, h.keeper.now(), true); best != nil {
+			if best := h.keeper.bestStrategy(tn.ID, h.keeper.now(), !campaignOn); best != nil {
 				if time.Duration(best.IdleSeconds)*time.Second >= 300*time.Second {
 					return off
 				}
 				return pol // a covering strategy decides; the campaign is skipped
 			}
 		}
-		if pc := h.predRT().forTenant(tn.ID); pc != nil && c.KeepAlive {
-			pc.mu.Lock()
-			active := pc.meta.Mode == campaignModeActive
-			pc.mu.Unlock()
-			if active {
-				return off
-			}
+		if campaignOn {
+			return off
 		}
 		return pol
 	}

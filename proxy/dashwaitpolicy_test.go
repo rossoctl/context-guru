@@ -53,16 +53,42 @@ func TestDashWaitPolicyReportsTheEffectivePlan(t *testing.T) {
 	k, get = setup(t)
 	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
 	k.pred = rt
-	k.setStrategies([]tenant.Strategy{{ID: "s3", Active: true, IdleSeconds: 240, MaxPings: 2, Target: tenant.Target{Mode: tenant.TargetAll}}})
+	k.setStrategies([]tenant.Strategy{{ID: "s3", Active: true, IdleSeconds: 240, MaxPings: 2, Windows: []tenant.Window{{Start: "11:00", End: "13:00", TZ: "UTC"}}, Target: tenant.Target{Mode: tenant.TargetAll}}})
 	if p := get(); !p.WaitPlan {
 		t.Errorf("active campaign + 5-minute strategy: plan off, want on (the strategy wins)")
 	}
 	k, get = setup(t)
 	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
 	k.pred = rt
-	k.setStrategies([]tenant.Strategy{{ID: "s4", Active: true, IdleSeconds: 3540, MaxPings: 1, Target: tenant.Target{Mode: tenant.TargetAll}}})
+	k.setStrategies([]tenant.Strategy{{ID: "s4", Active: true, IdleSeconds: 3540, MaxPings: 1, Windows: []tenant.Window{{Start: "11:00", End: "13:00", TZ: "UTC"}}, Target: tenant.Target{Mode: tenant.TargetAll}}})
 	if p := get(); p.WaitPlan {
 		t.Errorf("active campaign + 1-hour strategy: plan on, want off")
+	}
+
+	// Windows with a campaign (the test clock is 12:00 UTC): a closed window falls through to the
+	// campaign, an open one keeps the strategy. With no campaign a closed window is still ignored.
+	win := func(start, end string) []tenant.Window { return []tenant.Window{{Start: start, End: end, TZ: "UTC"}} }
+	five := func(w []tenant.Window) []tenant.Strategy {
+		return []tenant.Strategy{{ID: "s5", Active: true, IdleSeconds: 240, MaxPings: 2, Windows: w, Target: tenant.Target{Mode: tenant.TargetAll}}}
+	}
+	k, get = setup(t)
+	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
+	k.pred = rt
+	k.setStrategies(five(win("02:00", "03:00")))
+	if p := get(); p.WaitPlan {
+		t.Errorf("active campaign + 5-minute strategy, window closed: plan on, want off (the campaign owns it)")
+	}
+	k, get = setup(t)
+	rt, _ = campaignRuntime(t, planSpec, nil, campaignModeActive)
+	k.pred = rt
+	k.setStrategies(five(win("11:00", "13:00")))
+	if p := get(); !p.WaitPlan {
+		t.Errorf("active campaign + 5-minute strategy, window open: plan off, want on")
+	}
+	k, get = setup(t)
+	k.setStrategies(five(win("02:00", "03:00")))
+	if p := get(); !p.WaitPlan {
+		t.Errorf("no campaign + 5-minute strategy, window closed: plan off, want on")
 	}
 
 	// The account switch.
