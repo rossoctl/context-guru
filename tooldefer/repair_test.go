@@ -44,7 +44,7 @@ func TestRepairRefsAddsADeferredStub(t *testing.T) {
 
 // Nothing to repair: every reference is declared, or there is none.
 func TestRepairRefsLeavesAValidBodyAlone(t *testing.T) {
-	b := body([]string{decl("Bash"), decl("Monitor"), searchTool}, "", searchTurn("Monitor"))
+	b := body([]string{decl("Bash"), decl("CronCreate"), searchTool}, "", searchTurn("CronCreate"))
 	if out, _, ok := RepairRefs(b); ok || string(out) != string(b) {
 		t.Fatal("repaired a body whose references are all declared")
 	}

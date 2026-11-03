@@ -166,4 +166,4 @@ func TestToolDeferRetryRepairsAMissingReference(t *testing.T) {
 	}
 }
 
-// sseUpstream streams one assistant turn as events: a server-side search that loads Monitor, then
+// sseUpstream streams one assistant turn as events: a server-side search that loads CronCreate, then

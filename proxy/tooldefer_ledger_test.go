@@ -18,7 +18,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// sseUpstream streams one assistant turn as events: a server-side search that loads Monitor, then
+// sseUpstream streams one assistant turn as events: a server-side search that loads CronCreate, then
 // text. It answers a probe as JSON.
 type sseUpstream struct{}
 
@@ -34,9 +34,9 @@ func (sseUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev := func(typ, data string) { fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typ, data) }
 	ev("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":3000,"output_tokens":1}}}`)
 	ev("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{}}}`)
-	ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Monitor\",\"limit\":1}"}}`)
+	ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"CronCreate\",\"limit\":1}"}}`)
 	ev("content_block_stop", `{"type":"content_block_stop","index":0}`)
-	ev("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Monitor"}]}}}`)
+	ev("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"CronCreate"}]}}}`)
 	ev("content_block_stop", `{"type":"content_block_stop","index":1}`)
 	ev("content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`)
 	ev("content_block_delta", `{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"ok"}}`)

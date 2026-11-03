@@ -39,13 +39,13 @@ func TestHintIsTheFirstSentenceCutOnAWord(t *testing.T) {
 }
 
 func TestHintedListNamesAndHints(t *testing.T) {
-	b := body([]string{decl("Bash"), decl("Monitor"), smallDecl("Tiny"), `{"name":"Bare","input_schema":{"type":"object"}}`}, "")
-	got := HintedList(b, []string{"Bare", "Monitor", "Tiny"})
+	b := body([]string{decl("Bash"), decl("CronCreate"), smallDecl("Tiny"), `{"name":"Bare","input_schema":{"type":"object"}}`}, "")
+	got := HintedList(b, []string{"Bare", "CronCreate", "Tiny"})
 	if !strings.HasPrefix(got, hintHead+"\n") {
 		t.Fatalf("head: %q", got)
 	}
 	lines := strings.Split(strings.TrimPrefix(got, hintHead+"\n"), "\n")
-	want := []string{"Bare", "Monitor: Does the Monitor job.", "Tiny: tiny"}
+	want := []string{"Bare", "CronCreate: Does the CronCreate job.", "Tiny: tiny"}
 	if strings.Join(lines, "|") != strings.Join(want, "|") {
 		t.Fatalf("lines = %q", lines)
 	}
@@ -59,7 +59,7 @@ func TestApplyHintedListIsStableAcrossTurnsAndRestarts(t *testing.T) {
 	passProbe(e, ProbeKey{"u", "m", "r"})
 	first := Apply(e, req(body(catalogue(), "")))
 	m1 := gjson.GetBytes(first.Body, "messages.1.content").String()
-	if !strings.Contains(m1, "\nMonitor: Does the Monitor job.\n") {
+	if !strings.Contains(m1, "\nCronCreate: Does the CronCreate job.\n") {
 		t.Fatalf("no hint in the names list: %q", m1)
 	}
 	rec, ok := Load(e.RecordStore(), "s", "")
@@ -70,7 +70,7 @@ func TestApplyHintedListIsStableAcrossTurnsAndRestarts(t *testing.T) {
 		t.Fatalf("ListTokens = %d, want the hinted list's %d", first.ListTokens, tokens.Count(rec.List))
 	}
 	later := body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`)
-	later = []byte(strings.ReplaceAll(string(later), "Does the Monitor job.", "Watches a thing."))
+	later = []byte(strings.ReplaceAll(string(later), "Does the CronCreate job.", "Watches a thing."))
 	o2 := Apply(e, req(later))
 	if gjson.GetBytes(o2.Body, "messages.1").Raw != gjson.GetBytes(first.Body, "messages.1").Raw {
 		t.Fatal("the names list changed within the thread")
@@ -86,9 +86,23 @@ func TestApplyHintedListIsStableAcrossTurnsAndRestarts(t *testing.T) {
 // A record written before hints (no List) keeps the bare list: its thread's cached prefix holds it.
 func TestApplyOldRecordKeepsTheBareList(t *testing.T) {
 	e := env(t, threeUnused())
-	Save(e.RecordStore(), "s", "", Record{Deferred: []string{"Monitor", "Workflow"}})
+	Save(e.RecordStore(), "s", "", Record{Deferred: []string{"CronCreate", "Workflow"}})
 	o := Apply(e, req(body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"x"}`)))
-	if !o.Changed || !strings.HasSuffix(gjson.GetBytes(o.Body, "messages.1.content").String(), NamesList([]string{"Monitor", "Workflow"})) {
+	if !o.Changed || !strings.HasSuffix(gjson.GetBytes(o.Body, "messages.1.content").String(), NamesList([]string{"CronCreate", "Workflow"})) {
 		t.Fatalf("old record: %s", show(o))
+	}
+}
+
+// The tools Bash can stand in for stay loaded, with the same history that defers Workflow (#871).
+func TestDecideKeepsTheBashStandIns(t *testing.T) {
+	stand := []string{"NotebookEdit", "Monitor", "EnterWorktree", "WebFetch"}
+	tools := []string{decl("Bash"), decl("Workflow")}
+	for _, n := range stand {
+		tools = append(tools, decl(n))
+	}
+	declared := append([]string{"Bash", "Workflow"}, stand...)
+	h := hist{sessions: []Session{sess(declared), sess(declared), sess(declared)}}
+	if got := strings.Join(Decide(h, Input{Session: "s", Body: body(tools, "")}), ","); got != "Workflow" {
+		t.Fatalf("deferred = %s, want Workflow only", got)
 	}
 }

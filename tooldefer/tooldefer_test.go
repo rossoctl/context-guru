@@ -78,7 +78,7 @@ func sess(declared []string, used ...string) Session {
 }
 
 var all = []string{"Bash", "Read", "Edit", "Write", "Agent", "Skill", "ToolSearch", "AskUserQuestion",
-	"context_guru_expand", "Workflow", "Monitor", "mcp__a__b", "Tiny", "Kept", "ProjUsed", "UsedOnce"}
+	"context_guru_expand", "Workflow", "CronCreate", "mcp__a__b", "Tiny", "Kept", "ProjUsed", "UsedOnce"}
 
 func catalogue() []string {
 	var t []string
@@ -101,10 +101,10 @@ func threeUnused() hist {
 func TestDecideRuleRows(t *testing.T) {
 	in := Input{Session: "s", Project: "/w", Body: body(catalogue(), ""), Keep: []string{"Kept"}}
 	got := strings.Join(Decide(threeUnused(), in), ",")
-	if got != "Monitor,Workflow,mcp__a__b" {
-		t.Fatalf("deferred = %s, want Monitor,Workflow,mcp__a__b", got)
+	if got != "CronCreate,Workflow,mcp__a__b" {
+		t.Fatalf("deferred = %s, want CronCreate,Workflow,mcp__a__b", got)
 	}
-	for _, n := range []string{"Bash", "Read", "Edit", "Write", "Agent", "Skill", "ToolSearch", "AskUserQuestion", "context_guru_expand"} {
+	for _, n := range []string{"Bash", "Read", "Edit", "Write", "Agent", "Skill", "ToolSearch", "AskUserQuestion", "NotebookEdit", "Monitor", "EnterWorktree", "WebFetch", "context_guru_expand"} {
 		if strings.Contains(","+got+",", ","+n+",") {
 			t.Errorf("never-defer tool %s deferred", n)
 		}
@@ -133,11 +133,11 @@ func TestDecideNeedsDeclaredInEverySession(t *testing.T) {
 
 func TestDecideUsedInThreadAndLoadedCountsAsUse(t *testing.T) {
 	use := `{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Workflow","input":{}}]}`
-	load := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"Monitor"}},` +
-		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Monitor"}]}}]}`
+	load := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"CronCreate"}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"CronCreate"}]}}]}`
 	in := Input{Session: "s", Body: body(catalogue(), "", use, load)}
 	got := strings.Join(Decide(threeUnused(), in), ",")
-	if strings.Contains(got, "Workflow") || strings.Contains(got, "Monitor") {
+	if strings.Contains(got, "Workflow") || strings.Contains(got, "CronCreate") {
 		t.Fatalf("used or loaded tool deferred: %s", got)
 	}
 }
@@ -233,12 +233,12 @@ func TestDecideMCPOneUseKeepsTheServer(t *testing.T) {
 }
 
 func TestRewriteShape(t *testing.T) {
-	b := body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
-	if !ok || strings.Join(n, ",") != "Monitor,Workflow" {
+	b := body([]string{decl("Bash"), decl("Workflow"), decl("CronCreate")}, "")
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "CronCreate": true}, "")
+	if !ok || strings.Join(n, ",") != "CronCreate,Workflow" {
 		t.Fatalf("ok=%v names=%v", ok, n)
 	}
-	if got := names(out); got != "Bash,Workflow*,Monitor*,tool_search_tool_bm25" {
+	if got := names(out); got != "Bash,Workflow*,CronCreate*,tool_search_tool_bm25" {
 		t.Fatalf("tools = %s", got)
 	}
 	if gjson.GetBytes(out, "tools.3.type").String() != SearchType {
@@ -246,14 +246,14 @@ func TestRewriteShape(t *testing.T) {
 	}
 	// The names list is in the system message at messages[1], not at the end.
 	m1 := gjson.GetBytes(out, "messages.1.content").String()
-	if !strings.HasPrefix(m1, "# Environment") || !strings.HasSuffix(m1, NamesList([]string{"Monitor", "Workflow"})) {
+	if !strings.HasPrefix(m1, "# Environment") || !strings.HasSuffix(m1, NamesList([]string{"CronCreate", "Workflow"})) {
 		t.Fatalf("messages[1] = %q", m1)
 	}
 	if gjson.GetBytes(out, "messages.#").Int() != 2 {
 		t.Fatal("a message was added although messages[1] is a system message")
 	}
 	// Same input, same bytes.
-	again, _, _ := Rewrite(b, map[string]bool{"Monitor": true, "Workflow": true}, "")
+	again, _, _ := Rewrite(b, map[string]bool{"CronCreate": true, "Workflow": true}, "")
 	if string(again) != string(out) {
 		t.Fatal("rewrite is not deterministic")
 	}
@@ -317,12 +317,12 @@ func TestRewriteMovesCacheControl(t *testing.T) {
 
 // Never defer the last loaded client tool.
 func TestRewriteKeepsLastLoaded(t *testing.T) {
-	b := body([]string{decl("Workflow"), decl("Monitor")}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
+	b := body([]string{decl("Workflow"), decl("CronCreate")}, "")
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "CronCreate": true}, "")
 	if !ok || strings.Join(n, ",") != "Workflow" {
 		t.Fatalf("names = %v", n)
 	}
-	if got := names(out); got != "Workflow*,Monitor,tool_search_tool_bm25" {
+	if got := names(out); got != "Workflow*,CronCreate,tool_search_tool_bm25" {
 		t.Fatalf("tools = %s", got)
 	}
 	// One client tool only: nothing to defer.
@@ -347,9 +347,9 @@ func TestRewriteLeavesServerAndClientDeferredTools(t *testing.T) {
 // the loaded tool before it, and two marked deferred tools keep both marks.
 func TestRewriteKeepsEveryCacheMark(t *testing.T) {
 	mk := func(d string) string { return strings.TrimSuffix(d, "}") + `,"cache_control":{"type":"ephemeral"}}` }
-	b := body([]string{decl("Bash"), decl("Read"), mk(decl("Edit")), mk(decl("Workflow")), mk(decl("Monitor"))}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
-	if !ok || strings.Join(n, ",") != "Monitor,Workflow" {
+	b := body([]string{decl("Bash"), decl("Read"), mk(decl("Edit")), mk(decl("Workflow")), mk(decl("CronCreate"))}, "")
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "CronCreate": true}, "")
+	if !ok || strings.Join(n, ",") != "CronCreate,Workflow" {
 		t.Fatalf("names = %v", n)
 	}
 	if c := strings.Count(string(out), `"cache_control"`); c != 3 {
@@ -365,13 +365,13 @@ func TestRewriteKeepsEveryCacheMark(t *testing.T) {
 // A later turn that forces a deferred tool gets it loaded for that request, and the names list keeps
 // its bytes.
 func TestRewriteLeavesForcedToolLoaded(t *testing.T) {
-	set := map[string]bool{"Workflow": true, "Monitor": true}
-	plain, _, _ := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, ""), set, "")
-	forced, n, ok := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, `"tool_choice":{"type":"tool","name":"Workflow"},`), set, "")
-	if !ok || strings.Join(n, ",") != "Monitor" {
+	set := map[string]bool{"Workflow": true, "CronCreate": true}
+	plain, _, _ := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("CronCreate")}, ""), set, "")
+	forced, n, ok := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("CronCreate")}, `"tool_choice":{"type":"tool","name":"Workflow"},`), set, "")
+	if !ok || strings.Join(n, ",") != "CronCreate" {
 		t.Fatalf("names = %v", n)
 	}
-	if got := names(forced); got != "Bash,Workflow,Monitor*,tool_search_tool_bm25" {
+	if got := names(forced); got != "Bash,Workflow,CronCreate*,tool_search_tool_bm25" {
 		t.Fatalf("tools = %s", got)
 	}
 	if gjson.GetBytes(forced, "messages.1").Raw != gjson.GetBytes(plain, "messages.1").Raw {
@@ -464,7 +464,7 @@ func TestApplyDecidesOnceAndKeepsTheSet(t *testing.T) {
 	passProbe(e, ProbeKey{"u", "m", "r"})
 	first := body(catalogue(), "")
 	o := Apply(e, req(first))
-	if !o.Changed || !o.Decided || strings.Join(o.Deferred, ",") != "Monitor,Workflow,mcp__a__b" {
+	if !o.Changed || !o.Decided || strings.Join(o.Deferred, ",") != "CronCreate,Workflow,mcp__a__b" {
 		t.Fatalf("first: %s", show(o))
 	}
 	// Later turn: the history now says nothing is unused. The set must not change.

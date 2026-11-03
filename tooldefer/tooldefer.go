@@ -13,7 +13,8 @@
 //  2. the user's last 3 sessions, in any project, declared it and used it in none;
 //  3. this project did not use it in its last 10 sessions (the project veto);
 //  4. it is not on the never-defer list (Bash, Read, Edit, Write, Agent, Skill, ToolSearch,
-//     AskUserQuestion, Context Guru's own tools, a tool tool_choice forces, the account keep list);
+//     AskUserQuestion, the tools Bash can stand in for (NotebookEdit, Monitor, EnterWorktree,
+//     WebFetch), Context Guru's own tools, a tool tool_choice forces, the account keep list);
 //  5. it weighs at least 200 tokens, weighed on the ORIGINAL request.
 //
 // An MCP server is one unit: all of mcp__<server>__* is deferred together, when the user's last 3
@@ -73,9 +74,15 @@ const claudeCodeSearch = "ToolSearch"
 const placeholder = "DeferredToolPlaceholder"
 
 // neverDefer is the fixed part of the never-defer list.
+//
+// The second line is the tools Bash can stand in for. With only a name in the list, Opus 5.5 did
+// the job through Bash instead (a notebook edit in Python, a monitor loop, a worktree by git, a
+// fetch by curl), even with a hint per name: 70 of 80 right against 73 with no deferral (#871).
+// Loaded, their full definition draws the model to them.
 var neverDefer = map[string]bool{
 	"Bash": true, "Read": true, "Edit": true, "Write": true, "Agent": true, "Skill": true,
 	claudeCodeSearch: true, "AskUserQuestion": true,
+	"NotebookEdit": true, "Monitor": true, "EnterWorktree": true, "WebFetch": true,
 }
 
 // NeverDefer reports whether the fixed list, or Context Guru's own prefix, protects name.

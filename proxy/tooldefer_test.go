@@ -33,7 +33,7 @@ func tdBody(extra ...string) []byte {
 		msgs += "," + m
 	}
 	return []byte(`{"model":"claude-sonnet-5-5","max_tokens":64,"metadata":{"user_id":"{\"session_id\":\"sess-1\"}"},` +
-		`"tools":[` + tdDecl("Bash") + `,` + tdDecl("Read") + `,` + tdDecl("Workflow") + `,` + tdDecl("Monitor") + `],` +
+		`"tools":[` + tdDecl("Bash") + `,` + tdDecl("Read") + `,` + tdDecl("Workflow") + `,` + tdDecl("CronCreate") + `],` +
 		`"messages":[` + msgs + `]}`)
 }
 
@@ -132,7 +132,7 @@ func tdHandlerAt(t *testing.T, preset, upstream, path string) *Handler {
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: upstream,
 		ToolDeferPath: path, Prices: tdPrices{}})
 	t.Cleanup(h.Close)
-	// Three past sessions that declared Workflow and Monitor and used neither.
+	// Three past sessions that declared Workflow and CronCreate and used neither.
 	ds := h.toolDefer()
 	for i, s := range []string{"p1", "p2", "p3"} {
 		ds.hist.Observe("", s, "/w", tdBody(), int64(i+1))
@@ -190,10 +190,10 @@ func TestToolDeferUltrahighEndToEnd(t *testing.T) {
 	s2 := bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1)
 	tdPost(t, srv, s2)
 	first := up.last()
-	if got := tdTools(first); got != "Bash,Read,Workflow*,Monitor*,context_guru_expand,context_guru_adjudicate,tool_search_tool_bm25" {
+	if got := tdTools(first); got != "Bash,Read,Workflow*,CronCreate*,context_guru_expand,context_guru_adjudicate,tool_search_tool_bm25" {
 		t.Fatalf("tools = %s", got)
 	}
-	if !strings.Contains(gjson.GetBytes(first, "messages.1.content").String(), "Deferred tools:\nMonitor: Does the Monitor job.\nWorkflow: Does the Workflow job.") {
+	if !strings.Contains(gjson.GetBytes(first, "messages.1.content").String(), "Deferred tools:\nCronCreate: Does the CronCreate job.\nWorkflow: Does the Workflow job.") {
 		t.Fatalf("names list missing at messages[1]: %s", gjson.GetBytes(first, "messages.1").Raw)
 	}
 	s2b := bytes.Replace(tdBody(`{"role":"assistant","content":"ok"}`, `{"role":"user","content":"next"}`), []byte("sess-1"), []byte("sess-2"), 1)
