@@ -507,5 +507,26 @@ class Cli(Base):
         self.assertIn("Usage", out)
 
 
+
+class SaveMoreToolsHeadline(unittest.TestCase):
+    """save-more tools (#869): the headline total leaves out unpriced rows and says so, as the table's n/a does."""
+
+    def render(self, rows):
+        rep = {"search_on": True, "rows": rows, "window": {}, "writable": False}
+        o = {"details": False, "days": 0, "tz_min": 0}
+        return "\n".join(cg.render_deferral(rep, o, T.Env(color=False, ascii_only=True, width=200)))
+
+    def test_unpriced_rows_make_the_total_a_floor(self):
+        out = self.render([{"name": "a", "carry_usd": 2.0, "carry_priced": True},
+                           {"name": "b", "carry_usd": 0.31, "carry_priced": False}])
+        self.assertIn("cost at least $2.00", out)
+        self.assertIn("1 item had no price", out)
+
+    def test_all_priced_is_an_exact_total(self):
+        out = self.render([{"name": "a", "carry_usd": 2.0, "carry_priced": True},
+                           {"name": "b", "carry_usd": 1.0, "carry_priced": True}])
+        self.assertIn("cost $3.00", out)
+        self.assertNotIn("no price", out)
+
 if __name__ == "__main__":
     unittest.main()

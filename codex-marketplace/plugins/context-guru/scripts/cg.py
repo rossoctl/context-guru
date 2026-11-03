@@ -1205,11 +1205,17 @@ def render_deferral(rep: dict, o: dict, e) -> list[str]:
     for r in rows:
         by[r.get("state")] = by.get(r.get("state"), 0) + 1
     on = rep.get("search_on")
+    # Missing is not zero: an unpriced row's dollars are unknown, so the total is a floor and says so.
+    priced = [r for r in rows if r.get("carry_priced", True)]
+    unpriced = len(rows) - len(priced)
+    carried = dollars(sum(r.get("carry_usd") or 0 for r in priced))
+    cost = (f"Carrying all of them cost at least {carried} over the last {days_of(w)} days; "
+            f"{unpriced} item{'s' * (unpriced != 1)} had no price." if unpriced
+            else f"Carrying all of them cost {carried} over the last {days_of(w)} days.")
     lines = [f"Tool search is {'on' if on else 'off'} for your account"
              + (f": Context Guru defers {by.get('deferred_cg', 0)} of these {len(rows)} items, from your own history." if on
                 else ": every tool is sent in full, unless Claude Code defers it itself."),
-             f"Claude Code defers {by.get('deferred_client', 0)} itself. Carrying all of them cost "
-             f"{dollars(sum(r.get('carry_usd') or 0 for r in rows))} over the last {days_of(w)} days."]
+             f"Claude Code defers {by.get('deferred_client', 0)} itself. {cost}"]
     L = card("Save more: tools", lines, e)
     shown = rows if o["details"] else rows[:DEFERRAL_ROWS]
     if shown:
