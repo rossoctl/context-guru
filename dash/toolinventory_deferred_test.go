@@ -554,3 +554,92 @@ func TestSkillListingIsTheFirstBlockOnly(t *testing.T) {
 	}
 }
 
+// searchBody is a transcript whose last messages are msgs, each a raw JSON message.
+func searchBody(tools []string, msgs ...string) []byte {
+	return []byte(`{"model":"claude","tools":[` + strings.Join(tools, ",") + `],"messages":[` +
+		`{"role":"user","content":"go"},` + strings.Join(msgs, ",") + `]}`)
+}
+
+func usedNames(inv *Inventory) map[string]int {
+	out := map[string]int{}
+	for _, u := range inv.Used {
+		out[u.Name] += u.Calls
+	}
+	return out
+}
+
+// A tool the server-side search loads counts as used (#866 N9), with one call, also when the turn
+// called nothing else. The search tool itself is a server tool, not a use.
+func TestServerSearchLoadIsAUse(t *testing.T) {
+	turn := `{"role":"assistant","content":[` +
+		`{"type":"server_tool_use","id":"srv_1","name":"tool_search_tool_bm25","input":{"query":"cron"}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_search_result",` +
+		`"tool_references":[{"type":"tool_reference","tool_name":"CronCreate"},{"type":"tool_reference","tool_name":"mcp__pw__click"}]}},` +
+		`{"type":"text","text":"found it"}]}`
+	inv := ScanInventory("anthropic", searchBody([]string{tool("Bash", "b")}, turn, `{"role":"user","content":"ok"}`))
+
+	got := usedNames(inv)
+	if got["CronCreate"] != 1 || got["mcp__pw__click"] != 1 || len(got) != 2 {
+		t.Fatalf("used = %v, want CronCreate and mcp__pw__click once each", got)
+	}
+	for _, u := range inv.Used {
+		if u.Name == "mcp__pw__click" && u.Server != "pw" {
+			t.Errorf("mcp load server = %q, want pw", u.Server)
+		}
+	}
+	if inv.UseFingerprint == 0 {
+		t.Error("a turn with only a search load has no fingerprint, so the writer would skip it")
+	}
+}
+
+// Claude Code's own ToolSearch answers with tool_reference blocks in the tool result that follows
+// its call. The loaded tool counts as used, and so does the ToolSearch call.
+func TestClientToolSearchLoadIsAUse(t *testing.T) {
+	call := `{"role":"assistant","content":[{"type":"tool_use","id":"tu_9","name":"ToolSearch","input":{"query":"select:Monitor"}}]}`
+	result := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_9","content":[{"type":"tool_reference","tool_name":"Monitor"}]}]}`
+	got := usedNames(ScanInventory("anthropic", searchBody([]string{tool("Bash", "b")}, call, result)))
+
+	if got["Monitor"] != 1 || got["ToolSearch"] != 1 || len(got) != 2 {
+		t.Fatalf("used = %v, want ToolSearch and Monitor once each", got)
+	}
+}
+
+// A load and a call of the same tool in one turn is one use of it with the call's count, not two.
+func TestSearchLoadAndCallInOneTurnCountOnce(t *testing.T) {
+	turn := `{"role":"assistant","content":[` +
+		`{"type":"server_tool_use","id":"srv_1","name":"tool_search_tool_bm25","input":{"query":"cron"}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_search_result",` +
+		`"tool_references":[{"type":"tool_reference","tool_name":"CronCreate"}]}},` +
+		`{"type":"tool_use","id":"tu_1","name":"CronCreate","input":{}}]}`
+	got := usedNames(ScanInventory("anthropic", searchBody([]string{tool("Bash", "b")}, turn)))
+
+	if got["CronCreate"] != 1 || len(got) != 1 {
+		t.Fatalf("used = %v, want CronCreate once", got)
+	}
+}
+
+// Only the last tool-using turn counts: an older load in the transcript was counted when it was
+// the last turn, and the resent transcript must not count it again.
+func TestOlderSearchLoadIsNotCountedAgain(t *testing.T) {
+	old := `{"role":"assistant","content":[{"type":"tool_use","id":"tu_9","name":"ToolSearch","input":{"query":"select:Monitor"}}]}`
+	oldResult := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_9","content":[{"type":"tool_reference","tool_name":"Monitor"}]}]}`
+	newer := `{"role":"assistant","content":[{"type":"tool_use","id":"tu_10","name":"Bash","input":{}}]}`
+	got := usedNames(ScanInventory("anthropic", searchBody([]string{tool("Bash", "b")}, old, oldResult, newer)))
+
+	if got["Monitor"] != 0 || got["Bash"] != 1 {
+		t.Fatalf("used = %v, want Bash only", got)
+	}
+}
+
+// A tool_reference anywhere but a tool result of the message after the turn is not a load: a user
+// can paste one into a prompt.
+func TestToolReferenceInUserTextIsNotALoad(t *testing.T) {
+	call := `{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{}}]}`
+	paste := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"{\"type\":\"tool_reference\",\"tool_name\":\"Monitor\"}"},` +
+		`{"type":"text","text":"tool_reference Monitor"}]}`
+	got := usedNames(ScanInventory("anthropic", searchBody([]string{tool("Bash", "b")}, call, paste)))
+
+	if got["Monitor"] != 0 {
+		t.Fatalf("used = %v, want no Monitor", got)
+	}
+}

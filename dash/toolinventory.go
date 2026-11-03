@@ -578,6 +578,16 @@ const maxCanonFingerprint = 8 << 10
 // all of it would multiply every session's call counts by its request count. The
 // fingerprint lets the writer recognise the same turn arriving again on the next
 // request and skip it.
+//
+// On the Anthropic wire a tool loaded through search counts as used too (#866 N9): tool
+// deferral's rule reads "a load counts as a use", and its history is seeded from these rows.
+// Two forms, both read only next to the turn the fingerprint covers, so a load is counted once:
+//   - the server-side search: a tool_search_tool_result block in the turn itself. A turn that
+//     holds one is a tool-using turn even with no tool_use in it;
+//   - Claude Code's own ToolSearch: tool_reference blocks in the tool_result of the message right
+//     after the turn.
+//
+// A load adds one call, unless the same turn also called the tool.
 func usedFrom(wire string, body []byte) ([]Used, uint64) {
 	if schema.IsResponses(wire) {
 		return usedFromResponses(body)
@@ -587,10 +597,14 @@ func usedFrom(wire string, body []byte) ([]Used, uint64) {
 	if oai {
 		marker = `"tool_calls"`
 	}
-	last := ""
-	gjson.GetBytes(body, expand.MessagesField(wire)).ForEach(func(_, m gjson.Result) bool {
-		if strings.Contains(m.Raw, marker) {
-			last = m.Raw
+	last, next := "", ""
+	lastIdx := -1
+	gjson.GetBytes(body, expand.MessagesField(wire)).ForEach(func(k, m gjson.Result) bool {
+		i := int(k.Int())
+		if strings.Contains(m.Raw, marker) || (!oai && strings.Contains(m.Raw, `"tool_search_tool_result"`)) {
+			last, lastIdx, next = m.Raw, i, ""
+		} else if i == lastIdx+1 && lastIdx >= 0 {
+			next = m.Raw
 		}
 		return true
 	})
@@ -650,8 +664,50 @@ func usedFrom(wire string, body []byte) ([]Used, uint64) {
 			add(name, skillArg(name, blk.Get("input")))
 			return true
 		})
+		for _, name := range searchLoads(msg, gjson.Parse(next)) {
+			u := Used{Name: identName(name)}
+			if server, _, ok := SplitMCPName(name); ok {
+				u.Server = identName(server)
+			}
+			if byKey[u] == 0 {
+				byKey[u] = 1
+			}
+		}
 	}
 	return usedList(byKey), fp
+}
+
+// searchLoads is every tool name a search loaded in turn (a tool_search_tool_result block) or in
+// the tool results of after, the message that answers it (tool_reference blocks, from Claude
+// Code's own ToolSearch). Names that are not bare tool names are skipped.
+func searchLoads(turn, after gjson.Result) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(r gjson.Result) bool {
+		if n := r.Get("tool_name").String(); deferred.ValidName(n) && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+		return true
+	}
+	turn.Get("content").ForEach(func(_, b gjson.Result) bool {
+		if b.Get("type").String() == "tool_search_tool_result" {
+			b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool { return add(r) })
+		}
+		return true
+	})
+	after.Get("content").ForEach(func(_, b gjson.Result) bool {
+		if b.Get("type").String() == "tool_result" {
+			b.Get("content").ForEach(func(_, r gjson.Result) bool {
+				if r.Get("type").String() == "tool_reference" {
+					add(r)
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return out
 }
 
 // usedFromResponses is usedFrom for the Responses dialect. The transcript is the flat `input`
