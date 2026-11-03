@@ -257,6 +257,12 @@ Object.assign(TILE_INFO, {
     catch: 'The same net figure as the tool_defer block of /stats. Our tokenizer\'s counts, '
       + 'corrected by the measured factor, so it is not a figure off an invoice.',
   },
+  'inv-defer-tokens': {
+    what: 'The weight of the tool definitions tool deferral held back, summed over every request it changed.',
+    how: 'Each deferred definition\'s own tokens on the original request, less the ones a search had '
+      + 'already loaded in that thread, added up per request.',
+    catch: 'A local tokenizer\'s count before the billed-token correction, so it is not a figure off an invoice.',
+  },
   'inv-defer-loads': {
     what: 'Deferred tools the model loaded back through search, and the wrong guesses among them.',
     how: 'A wrong guess is a tool the thread had deferred that a search then loaded for the first '
