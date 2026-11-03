@@ -165,5 +165,3 @@ func TestToolDeferRetryRepairsAMissingReference(t *testing.T) {
 		t.Fatal("a refusal the original also got turned deferral off")
 	}
 }
-
-// sseUpstream streams one assistant turn as events: a server-side search that loads Monitor, then

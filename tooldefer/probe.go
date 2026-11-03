@@ -268,14 +268,23 @@ func ProbeVerdict(resp []byte, nonce string) Verdict {
 // RunProbe sends one probe through the host's Dispatcher. A transport error or a 5xx/429 is an
 // error (no verdict, retried later); any other answer is a verdict.
 func RunProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path, model string) (Verdict, error) {
+	return RunProbeBeta(ctx, d, ref, path, model, "")
+}
+
+// RunProbeBeta is RunProbe with an anthropic-beta header (none when beta is ""). A host passes the
+// client's auth betas (AuthBetas): a subscription token on direct Anthropic needs the OAuth beta,
+// and without it the probe gets a 401, which is no verdict, so deferral would stay off (#866, N12a).
+func RunProbeBeta(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path, model, beta string) (Verdict, error) {
 	nonce := Nonce()
 	if path == "" {
 		path = "/v1/messages"
 	}
+	hdr := http.Header{"Content-Type": {"application/json"}, "Anthropic-Version": {"2023-06-01"}}
+	if beta != "" {
+		hdr.Set("Anthropic-Beta", beta)
+	}
 	resp, err := d.Do(ctx, dispatch.Request{Purpose: PurposeProbe, Ref: ref, Provider: bschemas.Anthropic,
-		Method: http.MethodPost, Path: path,
-		Header: http.Header{"Content-Type": {"application/json"}, "Anthropic-Version": {"2023-06-01"}},
-		Body:   ProbeBody(model, nonce)})
+		Method: http.MethodPost, Path: path, Header: hdr, Body: ProbeBody(model, nonce)})
 	if err != nil {
 		return Unknown, err
 	}
@@ -296,6 +305,21 @@ func RunProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path
 		return Unknown, errStatus(resp.Status) // the API paused a long server-tool turn: no answer yet
 	}
 	return ProbeVerdict(resp.Body, nonce), nil
+}
+
+// AuthBetas is the auth-related part of a client's anthropic-beta values: the oauth-* betas, comma
+// separated, in the client's order. The other betas change what a request does, so the probe, which
+// tests one behaviour, leaves them out.
+func AuthBetas(values []string) string {
+	var out []string
+	for _, v := range values {
+		for _, b := range strings.Split(v, ",") {
+			if b = strings.TrimSpace(b); strings.HasPrefix(strings.ToLower(b), "oauth-") {
+				out = append(out, b)
+			}
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 type errStatus int

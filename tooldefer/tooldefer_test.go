@@ -722,3 +722,35 @@ func TestStoreKeyIsMetadata(t *testing.T) {
 		t.Fatal("the disk store does not keep the deferral record")
 	}
 }
+
+// #866 N4. A record lost mid-thread, and the history drifted in between (another session used the
+// tool our search had loaded): the rule's set leaves out a tool the transcript proves deferred. The
+// set is unknown, so the original is sent and nothing is saved.
+func TestApplyRebuildThatDriftedSendsTheOriginal(t *testing.T) {
+	h := threeUnused()
+	e := env(t, h)
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	Apply(e, req(body(catalogue(), "")))
+	load := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"Workflow","limit":1}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Workflow"}]}},` +
+		`{"type":"tool_use","id":"t9","name":"Workflow","input":{}}]}`
+	res := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"done"}]}`
+	later := body(catalogue(), "", load, res)
+	drifted := hist{sessions: []Session{sess(all, "Workflow"), sess(all), sess(all)}, project: h.project}
+	e2 := env(t, drifted) // a different file: the record is gone
+	o := Apply(e2, req(later))
+	if o.Changed || o.Why != "rebuild_unproven" || string(o.Body) != string(later) {
+		t.Fatalf("a drifted rebuild was sent: %s", show(o))
+	}
+	if _, ok := Load(e2.RecordStore(), "s", ""); ok {
+		t.Fatal("a drifted rebuild was saved")
+	}
+	if e2.Gate.Unproven.Load() != 1 {
+		t.Fatal("not counted")
+	}
+	// The same history as at the decision gives the proven set: Rebuild accepts it.
+	if set, ok := Rebuild(h, Input{Session: "s", Project: "/w", Body: later, Keep: []string{"Kept"}}); !ok ||
+		strings.Join(set, ",") != "Monitor,Workflow,mcp__a__b" {
+		t.Fatalf("Rebuild = %v %v", set, ok)
+	}
+}

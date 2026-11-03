@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -158,9 +159,15 @@ func TestLedgerNetSaving(t *testing.T) {
 	// A search turn: its output, plus the loaded definition read uncached once.
 	m, _ = Price(Request{Model: model, DeferredTokens: 10000, ListTokens: 100, Searches: 1,
 		SearchOutput: 40, LoadedTokens: 1500, Tier: TierRead}, p)
-	wantCost = 100*f*p.CacheRead + 40*p.Output + 1500*f*p.Input
+	// N7: and the cache write of that definition on the next request, once.
+	wantCost = 100*f*p.CacheRead + 40*p.Output + 1500*f*p.Input + 1500*f*p.CacheWrite
 	if !near(m.Cost, wantCost) {
 		t.Fatalf("search turn cost %v, want %v", m.Cost, wantCost)
+	}
+	// On a thread on the 1-hour tier, the next request writes it at the 1-hour price.
+	m, _ = Price(Request{Model: model, Searches: 1, SearchOutput: 40, LoadedTokens: 1500, Tier: TierWrite1h}, p)
+	if want := 40*p.Output + 1500*f*p.Input + 1500*f*p.CacheWrite1h(); !near(m.Cost, want) {
+		t.Fatalf("1h search turn cost %v, want %v", m.Cost, want)
 	}
 	// Usage adds up across requests.
 	var l Ledger
@@ -170,6 +177,19 @@ func TestLedgerNetSaving(t *testing.T) {
 	s := l.Snapshot()
 	if s.Requests != 3 || s.Searches != 1 || s.Unpriced != 1 || s.Net >= s.Gross || !near(s.Net, s.Gross-s.Cost) {
 		t.Fatalf("ledger: %+v", s)
+	}
+	// N8: per account, with the wrong guesses and the dropped searches.
+	l.Add(Request{Tenant: "acct", Model: model, Searches: 2, WrongGuesses: 1, DroppedSearches: 1, Tier: TierRead}, p)
+	s = l.Snapshot()
+	acc := l.Accounts()
+	if s.WrongGuesses != 1 || s.DroppedSearches != 1 || s.Requests != 4 {
+		t.Fatalf("total: %+v", s)
+	}
+	if a := acc["acct"]; a.Requests != 1 || a.Searches != 2 || a.WrongGuesses != 1 || a.DroppedSearches != 1 {
+		t.Fatalf("account acct: %+v", a)
+	}
+	if a := acc[""]; a.Requests != 3 || a.WrongGuesses != 0 || a.Unpriced != 1 {
+		t.Fatalf("account \"\": %+v", a)
 	}
 	if TierOf(5, 5, 0) != TierRead || TierOf(0, 5, 0) != TierWrite || TierOf(0, 5, 5) != TierWrite1h || TierOf(0, 0, 0) != TierFresh {
 		t.Fatal("TierOf")
@@ -625,5 +645,207 @@ func TestForgetVoidsAProbeInFlight(t *testing.T) {
 func TestNormProject(t *testing.T) {
 	if NormProject("/r/.claude/worktrees/x") != "/r" || NormProject("/r") != "/r" {
 		t.Fatal("NormProject")
+	}
+}
+
+// N8. A search with no result (sent with another tool call) counts as dropped, in a message and
+// in a stream.
+func TestReadSearchesCountsDropped(t *testing.T) {
+	msg := []byte(`{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}},` +
+		`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{}},` +
+		`{"type":"server_tool_use","id":"srvtoolu_2","name":"tool_search_tool_bm25","input":{}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_2","content":{"tool_references":[{"type":"tool_reference","tool_name":"Monitor"}]}}]}`)
+	r := ReadSearches(msg)
+	if r.Searches != 2 || r.Results != 1 || r.Dropped() != 1 || strings.Join(r.Loaded, ",") != "Monitor" {
+		t.Fatalf("%+v dropped=%d", r, r.Dropped())
+	}
+	sse := []byte("data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"server_tool_use\",\"name\":\"tool_search_tool_bm25\"}}\n")
+	if r := ReadSearchesSSE(sse); r.Searches != 1 || r.Dropped() != 1 {
+		t.Fatalf("sse: %+v", r)
+	}
+	if (SearchRead{Searches: 1, Results: 2}).Dropped() != 0 {
+		t.Fatal("more results than searches is not a negative drop")
+	}
+}
+
+// N12a. The probe sends the client's auth betas, and only those.
+func TestProbeSendsAuthBetas(t *testing.T) {
+	if got := AuthBetas([]string{"interleaved-thinking-2025-05-14, oauth-2025-04-20", "context-1m-2025-08-07"}); got != "oauth-2025-04-20" {
+		t.Fatalf("AuthBetas = %q", got)
+	}
+	if got := AuthBetas(nil); got != "" {
+		t.Fatalf("AuthBetas(nil) = %q", got)
+	}
+	var hdr http.Header
+	d := &hdrD{fakeD: fakeD{status: 200, resp: good}, hdr: &hdr}
+	if v, err := RunProbeBeta(context.Background(), d, "r", "", "claude-x", "oauth-2025-04-20"); v != Pass || err != nil {
+		t.Fatalf("probe: %v %v", v, err)
+	}
+	if hdr.Get("Anthropic-Beta") != "oauth-2025-04-20" {
+		t.Fatalf("probe headers: %v", hdr)
+	}
+	RunProbe(context.Background(), d, "r", "", "claude-x")
+	if _, ok := hdr["Anthropic-Beta"]; ok {
+		t.Fatalf("a probe without betas sent one: %v", hdr)
+	}
+}
+
+// hdrD is fakeD that keeps the last request's headers.
+type hdrD struct {
+	fakeD
+	hdr *http.Header
+}
+
+func (d *hdrD) Do(ctx context.Context, r dispatch.Request) (dispatch.Response, error) {
+	*d.hdr = r.Header.Clone()
+	return d.fakeD.Do(ctx, r)
+}
+
+// ── #866 history items ───────────────────────────────────────────────────
+
+func diskLast(t *testing.T, db *sql.DB, sid string) (rows int, last int64) {
+	t.Helper()
+	db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(last_ts),0) FROM tool_defer_history WHERE session_id = ?`, sid).Scan(&rows, &last)
+	return rows, last
+}
+
+// N1. A failed write marks the sessions dirty again, so the next flush writes them.
+func TestHistoryFailedFlushRetries(t *testing.T) {
+	db := openDB(t)
+	m := NewMem(db)
+	stop := m.Open(time.Hour, nil)
+	defer stop()
+	waitReady(t, m)
+	if _, err := db.Exec(`DROP TABLE tool_defer_history`); err != nil {
+		t.Fatal(err)
+	}
+	m.Observe("t", "s1", "/w", body(catalogue(), ""), 1000)
+	m.flush(false) // fails: no table
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	m.flush(false)
+	if n, _ := diskLast(t, db, "s1"); n != len(DeclaredNames(body(catalogue(), ""))) {
+		t.Fatalf("%d rows on disk after the retry, want %d", n, len(DeclaredNames(body(catalogue(), ""))))
+	}
+}
+
+// N2. A request that changes no tool set does not rewrite the session's rows; its time reaches
+// the disk at close (or after lastTSEvery).
+func TestHistoryTimeAloneIsNotDirty(t *testing.T) {
+	db := openDB(t)
+	m := NewMem(db)
+	now := time.UnixMilli(1_000_000)
+	m.now = func() time.Time { return now }
+	stop := m.Open(time.Hour, nil)
+	waitReady(t, m)
+	b := body(catalogue(), "")
+	m.Observe("t", "s1", "/w", b, 1_000_000)
+	m.flush(false)
+	m.Observe("t", "s1", "/w", b, 1_005_000) // the same sets, 5 s later
+	m.mu.Lock()
+	dirty := m.find("t", "s1").dirty
+	m.mu.Unlock()
+	if dirty {
+		t.Fatal("a new time alone marked the session dirty")
+	}
+	now = now.Add(5 * time.Second)
+	m.flush(false)
+	if _, last := diskLast(t, db, "s1"); last != 1_000_000 {
+		t.Fatalf("a flush wrote a time-only change: last_ts %d", last)
+	}
+	// A set change is dirty and writes the new time with it.
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Monitor","input":{}}]}`
+	m.Observe("t", "s1", "/w", body(catalogue(), "", use), 1_006_000)
+	m.flush(false)
+	if _, last := diskLast(t, db, "s1"); last != 1_006_000 {
+		t.Fatalf("a set change did not write the time: last_ts %d", last)
+	}
+	// Time only again: written at close.
+	m.Observe("t", "s1", "/w", body(catalogue(), "", use), 1_009_000)
+	stop()
+	if _, last := diskLast(t, db, "s1"); last != 1_009_000 {
+		t.Fatalf("close did not write the time: last_ts %d", last)
+	}
+	// And by the bound, for a session that runs for hours.
+	m2 := NewMem(db)
+	m2.now = func() time.Time { return now }
+	stop2 := m2.Open(time.Hour, nil)
+	defer stop2()
+	waitReady(t, m2)
+	m2.Observe("t", "s1", "/w", body(catalogue(), "", use), 1_010_000)
+	now = time.UnixMilli(1_009_000).Add(lastTSEvery)
+	m2.flush(false)
+	if _, last := diskLast(t, db, "s1"); last != 1_010_000 {
+		t.Fatalf("a time lastTSEvery behind was not written: last_ts %d", last)
+	}
+}
+
+// N3. A project's newest 10 sessions stay, however many newer sessions other projects have, so the
+// project veto still sees them.
+func TestHistoryKeepsTenPerProject(t *testing.T) {
+	m := NewMem(nil)
+	m.Open(0, nil)
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Monitor","input":{}}]}`
+	m.Observe("t", "b0", "/b", body(catalogue(), "", use), 1)
+	for i := 1; i < ProjectSessions; i++ {
+		m.Observe("t", "b"+itoa(i), "/b", body(catalogue(), ""), int64(1+i))
+	}
+	for i := 0; i < MaxSessions+20; i++ {
+		m.Observe("t", "a"+itoa(i), "/a", body(catalogue(), ""), int64(100+i))
+	}
+	if !m.ProjectUsed("t", "/b", "Monitor", "", ProjectSessions) {
+		t.Fatal("project /b's older sessions were pushed out; the veto no longer sees its use")
+	}
+	if n := len(m.UserSessions("t", "", 1000)); n != MaxSessions+ProjectSessions {
+		t.Fatalf("kept %d sessions, want %d", n, MaxSessions+ProjectSessions)
+	}
+	// /a keeps its newest 64 only: past them, its own older sessions go.
+	if m.Has("t", "a0") || !m.Has("t", "a"+itoa(MaxSessions+19)) {
+		t.Fatal("the per-project bound kept the wrong /a sessions")
+	}
+	// The total is bounded too.
+	for i := 0; i < maxKeptSessions; i++ {
+		m.Observe("t", "p"+itoa(i), "/p"+itoa(i), body(catalogue(), ""), int64(10_000+i))
+	}
+	if n := len(m.UserSessions("t", "", 10_000)); n != maxKeptSessions {
+		t.Fatalf("kept %d sessions, want the bound %d", n, maxKeptSessions)
+	}
+}
+
+// setLoaded closes the ready channel once, however often it runs.
+func TestHistorySetLoadedTwice(t *testing.T) {
+	m := NewMem(nil)
+	m.setLoaded()
+	m.setLoaded()
+	if !m.WaitReady(time.Millisecond) {
+		t.Fatal("not ready")
+	}
+}
+
+// N8. A wrong guess is a tool WE deferred on this request, loaded by a search in its response, that
+// no earlier message had loaded. Once per tool.
+func TestWrongGuesses(t *testing.T) {
+	earlier := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_0","name":"tool_search_tool_bm25","input":{}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_0","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Monitor"}]}}]}`
+	fresh := body(catalogue(), "")
+	again := body(catalogue(), "", earlier, `{"role":"user","content":"more"}`)
+	deferred := []string{"Monitor", "Workflow"}
+	for _, tc := range []struct {
+		name     string
+		original []byte
+		loaded   []string
+		want     int
+	}{
+		{"a tool we deferred, loaded for the first time", fresh, []string{"Monitor"}, 1},
+		{"loaded twice in one response counts once", fresh, []string{"Monitor", "Monitor"}, 1},
+		{"two of ours", fresh, []string{"Monitor", "Workflow"}, 2},
+		{"a tool Claude Code deferred is not ours", fresh, []string{"WebFetch"}, 0},
+		{"a re-search of a tool loaded earlier is not new", again, []string{"Monitor"}, 0},
+		{"an earlier load of one tool does not hide another", again, []string{"Monitor", "Workflow"}, 1},
+	} {
+		if got := WrongGuesses(deferred, tc.original, tc.loaded); got != tc.want {
+			t.Errorf("%s: %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }

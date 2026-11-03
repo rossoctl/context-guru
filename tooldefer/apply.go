@@ -144,7 +144,17 @@ func Apply(env Env, r Req) (o Outcome) {
 		default:
 			// A record lost mid-thread (evicted at the pin cap) in a thread our search has loaded
 			// from: rebuild. Our search could only load a deferred tool, so the provider supported it.
-			rec = Record{Deferred: Rebuild(env.History, in)}
+			set, ok := Rebuild(env.History, in)
+			if !ok {
+				// The rule defers a tool the transcript does not prove: the set is unknown. Send
+				// the original and save nothing, so the next request checks again.
+				o.Why = "rebuild_unproven"
+				if env.Gate != nil {
+					env.Gate.Unproven.Add(1)
+				}
+				return o
+			}
+			rec = Record{Deferred: set}
 			o.Decided, o.Rebuilt = true, true
 		}
 		Save(rs, r.Session, r.Thread, rec)
@@ -194,21 +204,50 @@ func Apply(env Env, r Req) (o Outcome) {
 // SearchesIn reads one response message (an Anthropic message object): how many server-side
 // searches ran, and which tools they loaded.
 func SearchesIn(msg []byte) (searches int, loaded []string) {
+	r := ReadSearches(msg)
+	return r.Searches, r.Loaded
+}
+
+// SearchRead is what one response's server-side searches did.
+type SearchRead struct {
+	// Searches is the calls to our search tool; Results the tool_search_tool_result blocks.
+	Searches, Results int
+	// Loaded is the tools the results loaded.
+	Loaded []string
+}
+
+// Dropped is how many searches have no result: the API does not run a search sent in the same
+// response as another tool call, and the client drops the call (#866, N8).
+func (r SearchRead) Dropped() int {
+	if r.Searches > r.Results {
+		return r.Searches - r.Results
+	}
+	return 0
+}
+
+// ReadSearches is SearchesIn with the result count.
+func ReadSearches(msg []byte) (r SearchRead) {
 	gjson.GetBytes(msg, "content").ForEach(func(_, b gjson.Result) bool {
-		switch b.Get("type").String() {
-		case "server_tool_use":
-			if b.Get("name").String() == SearchName {
-				searches++
-			}
-		case "tool_search_tool_result":
-			b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-				loaded = append(loaded, r.Get("tool_name").String())
-				return true
-			})
-		}
+		r.add(b)
 		return true
 	})
-	return searches, loaded
+	return r
+}
+
+// add reads one content block.
+func (r *SearchRead) add(b gjson.Result) {
+	switch b.Get("type").String() {
+	case "server_tool_use":
+		if b.Get("name").String() == SearchName {
+			r.Searches++
+		}
+	case "tool_search_tool_result":
+		r.Results++
+		b.Get("content.tool_references").ForEach(func(_, t gjson.Result) bool {
+			r.Loaded = append(r.Loaded, t.Get("tool_name").String())
+			return true
+		})
+	}
 }
 
 // LoadedWeight is the weight, in the original request, of the named tools.
@@ -230,22 +269,17 @@ func LoadedWeight(body []byte, names []string) int {
 // SearchesInSSE is SearchesIn for a raw event stream (or a window of one): it reads the
 // content_block_start events of server_tool_use and tool_search_tool_result blocks.
 func SearchesInSSE(raw []byte) (searches int, loaded []string) {
+	r := ReadSearchesSSE(raw)
+	return r.Searches, r.Loaded
+}
+
+// ReadSearchesSSE is SearchesInSSE with the result count.
+func ReadSearchesSSE(raw []byte) (r SearchRead) {
 	for _, line := range strings.Split(string(raw), "\n") {
 		if !strings.HasPrefix(line, "data:") || !strings.Contains(line, "content_block_start") {
 			continue
 		}
-		cb := gjson.Get(strings.TrimSpace(line[5:]), "content_block")
-		switch cb.Get("type").String() {
-		case "server_tool_use":
-			if cb.Get("name").String() == SearchName {
-				searches++
-			}
-		case "tool_search_tool_result":
-			cb.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-				loaded = append(loaded, r.Get("tool_name").String())
-				return true
-			})
-		}
+		r.add(gjson.Get(strings.TrimSpace(line[5:]), "content_block"))
 	}
-	return searches, loaded
+	return r
 }
