@@ -41,16 +41,33 @@ func (s *PingStore) put(key string, f accountant.PingFacts) {
 	s.m[key] = f
 }
 
-// take returns the facts for key and deletes them: they belong to the next real request only.
-func (s *PingStore) take(key string) (accountant.PingFacts, bool) {
+// peek returns the facts for key and keeps them. A request reads them before it is sent; it takes
+// them (drop) only once it is priced, so a request that books nothing leaves them for the next one.
+func (s *PingStore) peek(key string) (accountant.PingFacts, bool) {
 	if s == nil {
 		return accountant.PingFacts{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f, ok := s.m[key]
-	delete(s.m, key)
 	return f, ok
+}
+
+// take is peek and drop in one step.
+func (s *PingStore) take(key string) (accountant.PingFacts, bool) {
+	f, ok := s.peek(key)
+	s.drop(key)
+	return f, ok
+}
+
+// drop deletes the facts for key: they belong to the next priced request only.
+func (s *PingStore) drop(key string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, key)
 }
 
 // pingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not

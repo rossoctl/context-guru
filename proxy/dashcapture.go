@@ -124,6 +124,8 @@ type capture struct {
 	accReq *accountant.Request
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
+	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
+	accThread string
 	accDone   bool
 	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
 	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
@@ -686,6 +688,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		c.accDone = true
 		if c.rounds <= 1 {
 			e.SetAccountant(c.savings.compute(c.accReq, usage))
+			// The ping facts were read for this request; now that it is priced they are spent.
+			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread))
 		}
 	}
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)

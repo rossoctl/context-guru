@@ -66,16 +66,24 @@ func envelopeOps(client, forwarded []byte) []accountant.Operation {
 
 // toolsOps matches declarations by name. An unnamed declaration (an Anthropic server tool carries a
 // type, and a name too, but a malformed one may not) is matched by its position in the unnamed ones.
+// A name that repeats is matched by its occurrence: the second "x" of the client body is the second
+// "x" of the forwarded body, so the operations keep matching the bytes.
 func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 	key := func(arr []gjson.Result) ([]string, map[string]int) {
 		keys, at := make([]string, len(arr)), map[string]int{}
-		unnamed := 0
+		seen := map[string]int{}
 		for i, d := range arr {
-			k := d.Get("name").String()
-			if k == "" {
-				k = "\x00" + strconv.Itoa(unnamed)
-				unnamed++
+			base := d.Get("name").String()
+			if base == "" {
+				base = "\x00" // unnamed declarations share one counter
 			}
+			// The first occurrence keeps the bare name, so the owner check and the ChangeID hash see
+			// the name as before; a repeat gets its occurrence number.
+			k := base
+			if n := seen[base]; n > 0 {
+				k = base + "\x00" + strconv.Itoa(n)
+			}
+			seen[base]++
 			keys[i] = k
 			at[k] = i
 		}

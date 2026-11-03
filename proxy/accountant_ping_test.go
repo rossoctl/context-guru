@@ -113,7 +113,7 @@ func TestPingStoreIsBounded(t *testing.T) {
 	}
 }
 
-func TestEntryFactsConsumesPingFactsOnce(t *testing.T) {
+func TestEntryFactsReadsPingFactsUntilDropped(t *testing.T) {
 	st := NewPingStore()
 	PingSavings(okReport(), st)
 	th := accountant.Thread{ID: "main"}
@@ -121,6 +121,7 @@ func TestEntryFactsConsumesPingFactsOnce(t *testing.T) {
 	if f.LastPing.IsZero() || f.PingWindow == "" || f.PingRead != nil {
 		t.Fatalf("%+v", f)
 	}
+	st.drop(accPingKey("s", "main")) // the capture spends them once the request is priced
 	g := entryFacts("", "", nil, st, "s", th)
 	if !g.LastPing.IsZero() || g.PingWindow != "" {
 		t.Fatalf("second request got %+v", g)
@@ -210,4 +211,27 @@ func TestEntryFactsTakeTheLifetimeFromTheProvider(t *testing.T) {
 	if f := entryFacts("", "m", nil, nil, "s", th); f.Lifetime != accountant.LifetimeUnknown {
 		t.Fatalf("unknown provider: %+v", f)
 	}
+}
+
+// A request that books nothing leaves the ping facts for the next one: the facts are read when the
+// request ends and spent only when it is priced.
+func TestPingFactsSurviveARequestThatBooksNothing(t *testing.T) {
+	st := NewPingStore()
+	PingSavings(okReport(), st)
+	key := accPingKey("s", "main")
+	if _, ok := st.peek(key); !ok {
+		t.Fatal("no facts after the ping")
+	}
+	// Reading the facts for a request (entryFacts) does not spend them.
+	entryFacts("", "", nil, st, "s", accountant.Thread{ID: "main"})
+	if _, ok := st.peek(key); !ok {
+		t.Fatal("entryFacts spent the ping facts: a request that books nothing would lose them")
+	}
+	st.drop(key)
+	if _, ok := st.peek(key); ok {
+		t.Fatal("drop kept the facts")
+	}
+	st.drop(key) // idempotent
+	var nilStore *PingStore
+	nilStore.drop(key)
 }

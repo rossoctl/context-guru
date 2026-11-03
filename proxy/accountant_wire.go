@@ -35,6 +35,7 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 		return
 	}
 	t := accountant.Thread{ID: accThreadID(th.ID)}
+	c.accThread = t.ID
 	if parent, ok := th.InheritsFrom(); ok {
 		t.Parent = accThreadID(parent)
 	}
@@ -47,7 +48,8 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
-// ping for the thread since its last request is consumed from pings (nil = none) and supplies
+// ping for the thread since its last request is read from pings (nil = none; the capture drops it
+// once the request is priced) and supplies
 // LastPing, PingWindow and the ping's usage. PingRead stays nil: the keeper replays the previous
 // request's forwarded body, so the library derives the extent the ping read from its usage
 // (accountant design §5.2).
@@ -71,7 +73,7 @@ func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 			break
 		}
 	}
-	if pf, ok := pings.take(accPingKey(session, t.ID)); ok {
+	if pf, ok := pings.peek(accPingKey(session, t.ID)); ok {
 		pf.Apply(&facts)
 	}
 	return facts

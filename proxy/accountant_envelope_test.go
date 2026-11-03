@@ -112,3 +112,24 @@ func TestEnvelopeChangeIDIsStableAcrossTurns(t *testing.T) {
 		t.Fatalf("turn 1 %+v, turn 2 %+v: want one op each with the same ChangeID", a, b)
 	}
 }
+
+// A tool name that repeats still matches by occurrence, so the operations explain every byte. Before,
+// the last duplicate won the name and the operations did not match the bodies (the sum check failed).
+func TestEnvelopeOpsExplainDuplicateToolNames(t *testing.T) {
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	x1 := `{"name":"x","description":"first"}`
+	x2 := `{"name":"x","description":"second, longer"}`
+	for _, tc := range []struct{ name, cl, fw string }{
+		{"second duplicate removed", `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`, `{"tools":[` + x1 + `],` + msgs + `}`},
+		{"first duplicate rewritten", `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`,
+			`{"tools":[{"name":"x","description":"1"},` + x2 + `],` + msgs + `}`},
+		{"a duplicate added", `{"tools":[` + x1 + `],` + msgs + `}`, `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := envelopeOps([]byte(tc.cl), []byte(tc.fw))
+			if got, want := opsDelta(ops, accountant.SectionTools), sectionDelta([]byte(tc.cl), []byte(tc.fw), accountant.SectionTools); got != want {
+				t.Fatalf("ops explain %d tools bytes, bodies differ by %d (ops %+v)", got, want, ops)
+			}
+		})
+	}
+}
