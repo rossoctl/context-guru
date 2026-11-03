@@ -139,12 +139,14 @@ func Apply(env Env, r Req) (o Outcome) {
 				rec = Record{} // decided: nothing, for this whole thread
 			} else {
 				rec = Record{Deferred: Decide(env.History, in)}
+				rec.List = listFor(r.Orig, rec.Deferred)
 			}
 			o.Decided = true
 		default:
 			// A record lost mid-thread (evicted at the pin cap) in a thread our search has loaded
 			// from: rebuild. Our search could only load a deferred tool, so the provider supported it.
 			rec = Record{Deferred: Rebuild(env.History, in)}
+			rec.List = listFor(r.Orig, rec.Deferred)
 			o.Decided, o.Rebuilt = true, true
 		}
 		Save(rs, r.Session, r.Thread, rec)
@@ -165,7 +167,7 @@ func Apply(env Env, r Req) (o Outcome) {
 	for _, n := range rec.Deferred {
 		set[n] = true
 	}
-	out, names, changed := Rewrite(r.Body, set)
+	out, names, changed := Rewrite(r.Body, set, rec.List)
 	if !changed {
 		o.Why = "rewrite_declined"
 		return o
@@ -184,11 +186,23 @@ func Apply(env Env, r Req) (o Outcome) {
 		return true
 	})
 	o.Body, o.Changed, o.Deferred = out, true, names
-	o.ListTokens = tokens.Count(NamesList(names))
+	if rec.List != "" {
+		o.ListTokens = tokens.Count(rec.List)
+	} else {
+		o.ListTokens = tokens.Count(NamesList(names))
+	}
 	if env.Gate != nil {
 		env.Gate.Deferred.Add(1)
 	}
 	return o
+}
+
+// listFor is the stored names list for a decided set, or "" when the set is empty.
+func listFor(orig []byte, deferred []string) string {
+	if len(deferred) == 0 {
+		return ""
+	}
+	return HintedList(orig, deferred)
 }
 
 // SearchesIn reads one response message (an Anthropic message object): how many server-side

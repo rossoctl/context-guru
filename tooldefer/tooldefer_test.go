@@ -234,7 +234,7 @@ func TestDecideMCPOneUseKeepsTheServer(t *testing.T) {
 
 func TestRewriteShape(t *testing.T) {
 	b := body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true})
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
 	if !ok || strings.Join(n, ",") != "Monitor,Workflow" {
 		t.Fatalf("ok=%v names=%v", ok, n)
 	}
@@ -253,7 +253,7 @@ func TestRewriteShape(t *testing.T) {
 		t.Fatal("a message was added although messages[1] is a system message")
 	}
 	// Same input, same bytes.
-	again, _, _ := Rewrite(b, map[string]bool{"Monitor": true, "Workflow": true})
+	again, _, _ := Rewrite(b, map[string]bool{"Monitor": true, "Workflow": true}, "")
 	if string(again) != string(out) {
 		t.Fatal("rewrite is not deterministic")
 	}
@@ -262,7 +262,7 @@ func TestRewriteShape(t *testing.T) {
 func TestRewriteAppendsToClaudeCodeDeferredBlock(t *testing.T) {
 	cc := `{"role":"user","content":"hi"},{"role":"system","content":[{"type":"text","text":"` + deferred.Header + `\\nCronList","cache_control":{"type":"ephemeral"}}]}`
 	b := []byte(`{"model":"claude-x","tools":[` + decl("Bash") + `,` + decl("Workflow") + `],"messages":[` + cc + `]}`)
-	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true})
+	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true}, "")
 	if !ok {
 		t.Fatal("not rewritten")
 	}
@@ -277,7 +277,7 @@ func TestRewriteAppendsToClaudeCodeDeferredBlock(t *testing.T) {
 
 func TestRewriteInsertsSystemMessageAtIndexOne(t *testing.T) {
 	b := []byte(`{"model":"claude-x","tools":[` + decl("Bash") + `,` + decl("Workflow") + `],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
-	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true})
+	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true}, "")
 	if !ok {
 		t.Fatal("not rewritten")
 	}
@@ -290,7 +290,7 @@ func TestRewriteInsertsSystemMessageAtIndexOne(t *testing.T) {
 		t.Fatalf("roles = %v", roles)
 	}
 	one := []byte(`{"model":"claude-x","tools":[` + decl("Bash") + `,` + decl("Workflow") + `],"messages":[{"role":"user","content":"a"}]}`)
-	out, _, _ = Rewrite(one, map[string]bool{"Workflow": true})
+	out, _, _ = Rewrite(one, map[string]bool{"Workflow": true}, "")
 	if gjson.GetBytes(out, "messages.1.role").String() != "system" {
 		t.Fatalf("one-message body: %s", gjson.GetBytes(out, "messages").Raw)
 	}
@@ -300,7 +300,7 @@ func TestRewriteInsertsSystemMessageAtIndexOne(t *testing.T) {
 func TestRewriteMovesCacheControl(t *testing.T) {
 	marked := strings.TrimSuffix(decl("Workflow"), "}") + `,"cache_control":{"type":"ephemeral"}}`
 	b := body([]string{decl("Bash"), decl("Read"), marked}, "")
-	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true})
+	out, _, ok := Rewrite(b, map[string]bool{"Workflow": true}, "")
 	if !ok {
 		t.Fatal("not rewritten")
 	}
@@ -318,7 +318,7 @@ func TestRewriteMovesCacheControl(t *testing.T) {
 // Never defer the last loaded client tool.
 func TestRewriteKeepsLastLoaded(t *testing.T) {
 	b := body([]string{decl("Workflow"), decl("Monitor")}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true})
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
 	if !ok || strings.Join(n, ",") != "Workflow" {
 		t.Fatalf("names = %v", n)
 	}
@@ -326,7 +326,7 @@ func TestRewriteKeepsLastLoaded(t *testing.T) {
 		t.Fatalf("tools = %s", got)
 	}
 	// One client tool only: nothing to defer.
-	if _, _, ok := Rewrite(body([]string{decl("Workflow")}, ""), map[string]bool{"Workflow": true}); ok {
+	if _, _, ok := Rewrite(body([]string{decl("Workflow")}, ""), map[string]bool{"Workflow": true}, ""); ok {
 		t.Fatal("the only client tool was deferred")
 	}
 }
@@ -334,7 +334,7 @@ func TestRewriteKeepsLastLoaded(t *testing.T) {
 func TestRewriteLeavesServerAndClientDeferredTools(t *testing.T) {
 	cd := strings.TrimSuffix(decl("CronList"), "}") + `,"defer_loading":true}`
 	b := body([]string{decl("Bash"), `{"type":"web_search_20250305","name":"web_search"}`, cd, decl("Workflow")}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"web_search": true, "CronList": true, "Workflow": true})
+	out, n, ok := Rewrite(b, map[string]bool{"web_search": true, "CronList": true, "Workflow": true}, "")
 	if !ok || strings.Join(n, ",") != "Workflow" {
 		t.Fatalf("names = %v", n)
 	}
@@ -348,7 +348,7 @@ func TestRewriteLeavesServerAndClientDeferredTools(t *testing.T) {
 func TestRewriteKeepsEveryCacheMark(t *testing.T) {
 	mk := func(d string) string { return strings.TrimSuffix(d, "}") + `,"cache_control":{"type":"ephemeral"}}` }
 	b := body([]string{decl("Bash"), decl("Read"), mk(decl("Edit")), mk(decl("Workflow")), mk(decl("Monitor"))}, "")
-	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true})
+	out, n, ok := Rewrite(b, map[string]bool{"Workflow": true, "Monitor": true}, "")
 	if !ok || strings.Join(n, ",") != "Monitor,Workflow" {
 		t.Fatalf("names = %v", n)
 	}
@@ -366,8 +366,8 @@ func TestRewriteKeepsEveryCacheMark(t *testing.T) {
 // its bytes.
 func TestRewriteLeavesForcedToolLoaded(t *testing.T) {
 	set := map[string]bool{"Workflow": true, "Monitor": true}
-	plain, _, _ := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, ""), set)
-	forced, n, ok := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, `"tool_choice":{"type":"tool","name":"Workflow"},`), set)
+	plain, _, _ := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, ""), set, "")
+	forced, n, ok := Rewrite(body([]string{decl("Bash"), decl("Workflow"), decl("Monitor")}, `"tool_choice":{"type":"tool","name":"Workflow"},`), set, "")
 	if !ok || strings.Join(n, ",") != "Monitor" {
 		t.Fatalf("names = %v", n)
 	}

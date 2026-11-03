@@ -193,7 +193,7 @@ func TestToolDeferUltrahighEndToEnd(t *testing.T) {
 	if got := tdTools(first); got != "Bash,Read,Workflow*,Monitor*,context_guru_expand,context_guru_adjudicate,tool_search_tool_bm25" {
 		t.Fatalf("tools = %s", got)
 	}
-	if !strings.Contains(gjson.GetBytes(first, "messages.1.content").String(), "Deferred tools:\nMonitor\nWorkflow") {
+	if !strings.Contains(gjson.GetBytes(first, "messages.1.content").String(), "Deferred tools:\nMonitor: Does the Monitor job.\nWorkflow: Does the Workflow job.") {
 		t.Fatalf("names list missing at messages[1]: %s", gjson.GetBytes(first, "messages.1").Raw)
 	}
 	s2b := bytes.Replace(tdBody(`{"role":"assistant","content":"ok"}`, `{"role":"user","content":"next"}`), []byte("sess-1"), []byte("sess-2"), 1)
