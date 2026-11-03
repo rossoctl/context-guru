@@ -1,6 +1,9 @@
 package dash
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func smtRows(doc *SaveMoreToolsDoc) map[string]SaveMoreToolsRow {
 	out := map[string]SaveMoreToolsRow{}
@@ -24,7 +27,7 @@ func TestSaveMoreToolsRowsAndStates(t *testing.T) {
 		},
 		Tools: []ToolStat{
 			{Kind: KindMCPTool, Name: "mcp__pw__click", Server: "pw", Tokens: 300, LastUsedTS: 7},
-			{Kind: KindMCPTool, Name: "mcp__gh__pr", Server: "gh", Deferred: true},
+			{Kind: KindMCPTool, Name: "mcp__gh__pr", Server: "gh"},
 		},
 		Servers: []ServerStat{{Server: "pw", Tokens: 300, CarryUSD: 3, CarryPriced: true}, {Server: "gh", CarryUSD: 0.5}},
 		Skills:  SkillStat{Skills: []ToolStat{{Kind: KindSkill, Name: "dataviz", CarryUSD: 0.2}}},
@@ -88,5 +91,37 @@ func TestSaveMoreToolsSearchOff(t *testing.T) {
 	}
 	if last := doc.Options[len(doc.Options)-1]; last.ID != "search_on" {
 		t.Errorf("last option = %+v, want search_on", last)
+	}
+}
+
+// Reviewer notes on #877 round 1. A server reads deferred by Claude Code only when all its tools are,
+// a client-deferred tool on the removal list is still client-deferred (the filter cannot remove it),
+// and more than the limit of rows is cut to the costliest.
+func TestSaveMoreToolsServerAndRemovedEdges(t *testing.T) {
+	rep := &ToolReport{
+		Aside: []ToolStat{{Kind: KindTool, Name: "Monitor", Builtin: true, Deferred: true}},
+		Tools: []ToolStat{
+			{Kind: KindMCPTool, Name: "mcp__half__a", Server: "half", Deferred: true},
+			{Kind: KindMCPTool, Name: "mcp__half__b", Server: "half"},
+			{Kind: KindMCPTool, Name: "mcp__all__a", Server: "all", Deferred: true},
+		},
+		Servers: []ServerStat{{Server: "half"}, {Server: "all"}},
+	}
+	rows := smtRows(buildSaveMoreTools(rep, SaveMoreToolsHost{Removed: []string{"Monitor"}}, Filter{}))
+	if rows["mcp__half"].State != StateLoaded || rows["mcp__all"].State != StateDeferredCC {
+		t.Errorf("half = %s, all = %s; want loaded and deferred_client", rows["mcp__half"].State, rows["mcp__all"].State)
+	}
+	if rows["Monitor"].State != StateDeferredCC {
+		t.Errorf("Monitor = %+v, want deferred_client although it is on the removal list", rows["Monitor"])
+	}
+
+	many := &ToolReport{}
+	for i := 0; i < saveMoreToolsLimit+3; i++ {
+		many.Aside = append(many.Aside, ToolStat{Kind: KindTool, Name: "T" + string(rune('A'+i%26)) + strconv.Itoa(i), CarryUSD: float64(i)})
+	}
+	doc := buildSaveMoreTools(many, SaveMoreToolsHost{}, Filter{})
+	if len(doc.Rows) != saveMoreToolsLimit || doc.Truncated != 3 || doc.Rows[len(doc.Rows)-1].CarryUSD != 3 {
+		t.Errorf("rows %d, truncated %d, cheapest kept %v; want %d, 3, 3", len(doc.Rows), doc.Truncated,
+			doc.Rows[len(doc.Rows)-1].CarryUSD, saveMoreToolsLimit)
 	}
 }

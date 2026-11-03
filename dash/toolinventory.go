@@ -493,12 +493,14 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 //     tool name. One line that is not voids that whole list.
 //
 // Each list's measured tokens are split equally over every name in it, so an MCP tool is
-// charged its share and the built-in names keep theirs off the page, as before: a built-in is
-// recorded with 0 tokens, so the history that seeds tool deferral sees it declared (#866 N9) and
-// no figure on the page moves. The shares are
+// charged its share and the built-in names keep theirs off the page, as before. The shares are
 // APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
 // name costs a little more than a short one. Removing a tool gives back its own line, not the
 // header, so an equal share of the whole is a fair bound, not an exact figure.
+//
+// A built-in is recorded with 0 tokens, so the history that seeds tool deferral sees it declared
+// (#866 N9) and no figure on the page moves.
+//
 // deferredDeclsFrom parses the lists in texts, from either wire's finder (deferredTexts).
 func deferredDeclsFrom(texts []string) []Decl {
 	var out []Decl

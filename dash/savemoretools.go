@@ -127,18 +127,23 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 	sort.Strings(doc.Keep)
 
 	state := func(name string, clientDeferred bool) (string, string) {
+		// Client-deferred first: the removal filter removes only `tools` elements, so a name Claude
+		// Code defers is still sent even when it is on the removal list.
 		switch {
-		case removed[name]:
-			return StateRemoved, "on your removal list: the proxy does not send it"
 		case clientDeferred:
 			return StateDeferredCC, "Claude Code defers it: only its name is sent until the model searches for it"
+		case removed[name]:
+			return StateRemoved, "on your removal list: the proxy does not send it"
 		case !host.SearchOn:
 			return StateLoaded, "tool search is off for your account"
 		case host.Explain == nil:
 			return StateLoaded, "no tool history on this proxy yet"
 		}
+		// Explain checks the user rule only. The project veto and the 200-token minimum are decided
+		// per request, so a thread may still send this tool in full; the reason says so.
 		if on, why := host.Explain(name); on {
-			return StateDeferredCG, "Context Guru defers it: " + why
+			return StateDeferredCG, "Context Guru defers it in new threads (" + why +
+				"), unless this project used it or it is under 200 tokens"
 		} else {
 			return StateLoaded, why
 		}
@@ -171,11 +176,17 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 			Tokens: t.Tokens, SessionsDeclared: t.SessionsDeclared, SessionsUsed: t.SessionsUsed, Calls: t.Calls,
 			LastUsedTS: t.LastUsedTS, CarryUSD: t.CarryUSD, CarryPriced: t.CarryPriced})
 	}
-	deferredServer := map[string]bool{}
+	// A server reads "deferred by Claude Code" only when every tool of it is: Claude Code defers
+	// tools one by one, so one deferred tool does not make the whole server deferred.
+	deferredTools, serverTools := map[string]int{}, map[string]int{}
 	var lastUsed = map[string]int64{}
 	for _, t := range rep.Tools {
-		if t.Kind == KindMCPTool && t.Deferred {
-			deferredServer[t.Server] = true
+		if t.Kind != KindMCPTool {
+			continue
+		}
+		serverTools[t.Server]++
+		if t.Deferred {
+			deferredTools[t.Server]++
 		}
 		if t.LastUsedTS > lastUsed[t.Server] {
 			lastUsed[t.Server] = t.LastUsedTS
@@ -186,10 +197,7 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 			continue
 		}
 		name := "mcp__" + s.Server
-		st, why := state(name, deferredServer[s.Server])
-		if removed[name] {
-			st, why = StateRemoved, "on your removal list: the proxy does not send it"
-		}
+		st, why := state(name, serverTools[s.Server] > 0 && deferredTools[s.Server] == serverTools[s.Server])
 		add(SaveMoreToolsRow{Kind: KindMCPServer, Name: name, Server: s.Server, State: st, Reason: why,
 			Tokens: s.Tokens, SessionsDeclared: s.SessionsDeclared, SessionsUsed: s.SessionsUsed, Calls: s.Calls,
 			LastUsedTS: lastUsed[s.Server], CarryUSD: s.CarryUSD, CarryPriced: s.CarryPriced})

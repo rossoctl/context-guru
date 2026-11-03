@@ -286,6 +286,13 @@ func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
 	if read()["search_on"] != true {
 		t.Fatal("the report does not read search on back")
 	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"unkeep:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("unkeep = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || len(keep) != 0 {
+		t.Fatalf("after unkeep: defers %v keep %v", on, keep)
+	}
 	// An option no report offered is refused.
 	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:Bash","basis":"`+basis+`"}`); w.Code != http.StatusConflict {
 		t.Fatalf("unoffered option = %d %s", w.Code, w.Body)
@@ -293,7 +300,7 @@ func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
 	if w := do("POST", "/api/save-more/tools/apply", `{"option":"revert"}`); w.Code != http.StatusOK {
 		t.Fatalf("revert = %d %s", w.Code, w.Body)
 	}
-	if on, keep := tf(); on || strings.Join(keep, ",") != "mcp__srv" {
-		t.Fatalf("after revert: defers %v keep %v; want the keep change kept and search off", on, keep)
+	if on, keep := tf(); !on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after revert: defers %v keep %v; want the unkeep undone and search still on", on, keep)
 	}
 }

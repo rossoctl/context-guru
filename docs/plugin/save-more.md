@@ -223,11 +223,11 @@ The words may come in either order (`apply cache X` or `apply X cache`). A chang
 
 | Column | What it says |
 |---|---|
-| state | `loaded`, `deferred by CG` (Context Guru's tool deferral holds it back from your own history), `deferred by Claude Code` (Claude Code sends only its name), or `removed` (on your removal list) |
+| state | `loaded`, `deferred by CG` (your own history says Context Guru defers it in new threads), `deferred by Claude Code` (Claude Code sends only its name), or `removed` (on your removal list) |
 | used | the sessions that used it, of the sessions that carried it. A tool loaded through search counts as used |
 | cost | what carrying it cost over the window, used or not; `n/a` when a model had no price |
 
-`details` adds the reason for each state. There is no recommendation: deferral decides per tool, and this view is for overriding it. Each change is one command, run after a yes:
+`deferred by CG` checks your last 3 sessions only. A thread still sends the tool in full when this project used it in its last 10 sessions, or when it weighs under 200 tokens; the reason says so. `details` adds the reason for each state. There is no recommendation: deferral decides per tool, and this view is for overriding it. Each change is one command, run after a yes:
 
 | Change | Command |
 |---|---|
