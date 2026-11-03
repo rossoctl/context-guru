@@ -469,8 +469,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// than re-parse the whole messages array to find each message again — that parse
 	// measured ~3x the cost of the whole-body copy it was meant to save.
 	shiftAt, shift := 0, 0
-	// splitStableTokens is what the split rescued from the cache-creation tier; the
-	// dashboard prices it (see dash.Event.cachesplitSavedUSD). 0 when nothing split.
+	// splitStableTokens is the size of the stable half the split moved the breakpoint onto, recorded
+	// on the dashboard row. The split's saving is the accountant library's split effect. 0 when
+	// nothing split.
 	splitStableTokens := 0
 	// splitTailHash identifies the volatile half, so a later turn can tell whether the
 	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.

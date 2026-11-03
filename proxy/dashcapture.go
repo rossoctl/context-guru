@@ -586,9 +586,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	cgCacheWrite, cgCacheRead := c.llm.CacheTotals()
 	cgModel := c.llm.Model()
 
-	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
-	// pricing, because whether this is the session's first request is an input to a dollar
-	// figure and not only to a label — see Event.cachesplitSavedUSD.
+	// Cache attribution, with a cold start treated as the non-failure it is. The verdict is a
+	// label on the row; the savings are the accountant library's.
 	//
 	// Per THREAD (#423). Keyed on the session alone, a subagent's requests reset the main
 	// thread's idle gap, so the main thread's TTL expiries fell through to prefix_change — on
@@ -666,8 +665,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
-	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
-	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
+	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
+	// saving is the accountant library's rescue, not computed from these.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy

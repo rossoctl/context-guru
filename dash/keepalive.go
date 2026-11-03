@@ -98,7 +98,7 @@ func kaSavedSince(alias string, since int64) string {
 // not make, applied on read. pingFloor is one extra predicate on the ping row (kp), "" for
 // none — see kaSavedSince for the only caller that needs one.
 //
-// The credit written at capture time asks four questions (Event.keepaliveSavedUSD) and not one
+// The credit the legacy rule wrote at capture time asked four questions and not one
 // of them is an upper bound on the idle gap: it requires that the gap EXCEEDED the provider's
 // lifetime — the floor — and then credits the row whatever the gap was, on the strength of
 // keepalive_pings alone. That column is the whole of the write path's evidence, and on real rows
@@ -186,10 +186,10 @@ func kaSavedGate(alias, pingFloor string) string {
 	//
 	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
 	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
-	// never credits one (keepaliveSavedUSD gates on GPT56OrLater). The provider-only CASE sees
+	// never credited one (the legacy rule gated on GPT56OrLater). The provider-only CASE sees
 	// only rows that already passed the model gate.
 	//
-	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
+	// This is a reachability ceiling for rows ALREADY credited at write time,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
 	// window for a successful ping. Duplicating Go's routed-model parser here
@@ -230,7 +230,7 @@ type KeepAliveLedger struct {
 	PingUSD       float64 `json:"ping_usd"`
 	MissesAvoided int64   `json:"misses_avoided"`
 	// SavedUSD is a CEILING, and every tile that shows it says so. The credit itself is exact
-	// arithmetic — see Event.keepaliveSavedUSD — but the provider's cache is keyed on CONTENT,
+	// arithmetic (the accountant library's rescue) — but the provider's cache is keyed on CONTENT,
 	// so another session sending a byte-identical prefix would have refreshed the same entry
 	// for nothing. That confound cannot be measured from our side; it can only be declared.
 	SavedUSD float64 `json:"saved_usd"`

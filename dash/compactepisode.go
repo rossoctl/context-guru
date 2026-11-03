@@ -30,7 +30,8 @@ import (
 //
 // # Why almost nothing is computed here
 //
-// The economics already exist and are already right. Event.baselineDeltaUSD prices a removal as
+// The economics already exist. The legacy rule (Event.ComponentSavedUSD, which still values rows
+// from before the accountant library) prices a removal as
 // `SavedUnique × cacheWriteRate + (Saved − SavedUnique) × repeatRate`, and repeatRate prices the
 // re-sent remainder at the cache-READ rate on a turn whose cache hit, the cache-CREATION rate on a
 // turn whose cache missed, and fresh otherwise — with three documented guards against inflation.

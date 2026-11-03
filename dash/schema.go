@@ -129,8 +129,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- provider read at least that much from cache while writing less, and the snapshot had MOVED
   -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
   -- have missed. Priced against a cache MISS (creation rate), not fresh input.
-  -- See Event.cachesplitSavedUSD, which is the authority on the condition; the
-  -- session's-first-request test it once used was REPLACED because it reported ~$0, and three
+  -- Written from the accountant library's split effect. The legacy rule's
+  -- session's-first-request test was REPLACED because it reported ~$0, and three
   -- descriptions of this column went on stating it for a while after.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the

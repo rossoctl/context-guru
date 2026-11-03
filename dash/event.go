@@ -370,9 +370,8 @@ type Event struct {
 	// distinguishes them.
 	KeepAlivePings int `json:"keepalive_pings"`
 	// KeepAliveRefreshed is what the last ping on this session actually read from cache —
-	// the tokens our ping demonstrably refreshed. Not persisted: it is the numerator's
-	// CEILING, and what gets stored is the credited dollars beside the cache_read they were
-	// computed from. See keepaliveSavedUSD for why the credit is the smaller of the two.
+	// the tokens our ping demonstrably refreshed. Not persisted. The legacy credit rule capped
+	// the credit with it; the credit is now the accountant library's rescue.
 	KeepAliveRefreshed int64 `json:"-"`
 	// KeepAliveSavedUSD is the cache re-creation this request avoided because a ping kept
 	// its prefix alive.
@@ -597,8 +596,8 @@ type CompRow struct {
 	SavedUnique int    `json:"saved_unique"`
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
-	// paid — the same rule and the same rates as baselineDeltaUSD, so the per-component
-	// figures sum to the request-level saving. It exists because the components view had
+	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
+	// request-level saving. It exists because the components view had
 	// only a bare COST for the components that spend, and a dollar value improvised
 	// client-side from hardcoded rates is wrong by whatever the deployment's model
 	// actually charges.
@@ -866,7 +865,7 @@ func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, un
 		gross = 0
 	}
 	if unique > gross {
-		unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
+		unique = gross // shared content keys can over-attribute
 	}
 	if unique < 0 {
 		unique = 0

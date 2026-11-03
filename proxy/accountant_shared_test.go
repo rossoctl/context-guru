@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -68,5 +69,44 @@ func TestSharedWarmIsPerSession(t *testing.T) {
 	_ = s.sharedWarm("other", "sub", t0, 5*time.Minute, sharedBody("a"), bpAt(accountant.SectionSystem, 0))
 	if got := s.sharedWarm("s1", "main", t0.Add(time.Minute), 5*time.Minute, sharedBody("a"), nil); got != nil {
 		t.Fatalf("SharedWarm %+v across sessions", *got)
+	}
+}
+
+// A session keeps at most siblingThreadsMax threads: the oldest goes first.
+func TestSharedWarmBoundsThreadsPerSession(t *testing.T) {
+	s := newSiblingStore()
+	t0 := time.Unix(1_700_000_000, 0)
+	for i := 0; i < siblingThreadsMax+10; i++ {
+		s.sharedWarm("s1", fmt.Sprintf("t%03d", i), t0.Add(time.Duration(i)*time.Second), time.Hour, sharedBody("a"), nil)
+	}
+	ss := s.session("s1")
+	if n := len(ss.threads); n != siblingThreadsMax {
+		t.Fatalf("threads = %d, want %d", n, siblingThreadsMax)
+	}
+	if _, ok := ss.threads["t000"]; ok {
+		t.Fatal("the oldest thread was kept")
+	}
+	if _, ok := ss.threads[fmt.Sprintf("t%03d", siblingThreadsMax+9)]; !ok {
+		t.Fatal("the newest thread was dropped")
+	}
+}
+
+// The store keeps at most siblingsMax sessions and drops the least recently used.
+func TestSharedWarmBoundsSessions(t *testing.T) {
+	s := newSiblingStore()
+	t0 := time.Unix(1_700_000_000, 0)
+	for i := 0; i < siblingsMax; i++ {
+		s.sharedWarm(fmt.Sprintf("s%d", i), "main", t0, time.Hour, sharedBody("a"), nil)
+	}
+	s.sharedWarm("s0", "main", t0, time.Hour, sharedBody("a"), nil) // s0 is now the most recent
+	s.sharedWarm("new", "main", t0, time.Hour, sharedBody("a"), nil)
+	if len(s.m) != siblingsMax {
+		t.Fatalf("sessions = %d, want %d", len(s.m), siblingsMax)
+	}
+	if _, ok := s.m["s0"]; !ok {
+		t.Fatal("the recently used session was dropped")
+	}
+	if _, ok := s.m["s1"]; ok {
+		t.Fatal("the least recently used session was kept")
 	}
 }

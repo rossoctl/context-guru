@@ -152,8 +152,8 @@ type kaEntry struct {
 	// spent is what this session's pings have cost so far. Reported, never a cap — see
 	// Policy.MaxUSDPerPing for why the guard is per ping.
 	spent float64
-	// refreshed is what the last ping read from cache. It is the ceiling on what the next
-	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
+	// refreshed is what the last ping read from cache, reported on the next real request's
+	// row. The keep-alive's credit is the accountant library's rescue.
 	refreshed int64
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.

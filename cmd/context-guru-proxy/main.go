@@ -420,9 +420,8 @@ func main() {
 		// means no ping ever reaches this far without --dashboard on.
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
-		// in flight reports a cold start on its next turn — and that flag also decides whether
-		// a cache hit counts as our saving, so a restart handed out one bonus credit per live
-		// session (see dash.Event.cachesplitSavedUSD).
+		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
+		// that turn.
 		if n, err := rec.SeedSessions(time.Now().UnixMilli()); err != nil {
 			slog.Warn("dashboard: could not recover session recency; the first turn of each live "+
 				"session will be reported as a cold start", "err", err)
