@@ -1237,6 +1237,9 @@ def render_deferral(rep: dict, o: dict, e) -> list[str]:
             act.append(f"Turn tool search {'off' if sw['action'] == 'search_off' else 'on'} for your account, after a yes: "
                        f"{apply_line('deferral', sw['id'] + '@' + basis, o)}")
         act.append(f"Undo the last of these changes: {SLASH['deferral']} revert deferral")
+    for x in rep.get("not_yet") or []:
+        L.append(f"  Not available yet: {x.get('label', x.get('action', ''))} (#{x['issue']})." if x.get("issue")
+                 else f"  Not available yet: {x.get('label', x.get('action', ''))}.")
     return T.fit(L, e) + act
 
 

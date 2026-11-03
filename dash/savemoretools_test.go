@@ -71,6 +71,9 @@ func TestSaveMoreToolsRowsAndStates(t *testing.T) {
 	if !ids["search_off"] || ids["search_on"] || !ids["keep:WebFetch"] || !ids["unkeep:Bash"] {
 		t.Errorf("options = %v", doc.Options)
 	}
+	if len(doc.NotYet) != 1 || doc.NotYet[0].Action != "defer" || doc.NotYet[0].Issue != 878 || ids["defer"] {
+		t.Errorf("not_yet = %+v; want defer, issue 878, and no defer option", doc.NotYet)
+	}
 	if offers := doc.SaveMoreToolsOffers(); offers["keep:WebFetch"].(SaveMoreToolsOption).Name != "WebFetch" {
 		t.Errorf("offers = %v", offers)
 	}

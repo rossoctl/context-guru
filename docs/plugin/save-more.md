@@ -236,6 +236,8 @@ The words may come in either order (`apply cache X` or `apply X cache`). A chang
 | tool search on or off for your account | `/context-guru:save-more apply deferral search_on@<basis>` (or `search_off`) |
 | undo the last of these changes | `/context-guru:save-more revert deferral` |
 
+"Always defer a tool" is not available yet: toolfilter has no list for it (#878). The screen says so.
+
 A change reaches new threads only: a thread keeps the set of tools it decided at its first request, so its cached prefix stays the same. The keep list is toolfilter's `keep`, and search is toolfilter's `defer: auto` or `off`. The routes are `GET /api/save-more/tools` and `POST /api/save-more/tools/apply`, with the same token and loopback rules as the other reports.
 
 ## Settings that cost you money

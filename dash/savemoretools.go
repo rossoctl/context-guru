@@ -78,6 +78,17 @@ type SaveMoreToolsOption struct {
 	Name   string `json:"name,omitempty"`
 }
 
+// SaveMoreToolsNotYet is one action the design lists and this proxy does not offer yet.
+type SaveMoreToolsNotYet struct {
+	Action string `json:"action"`
+	Label  string `json:"label"`
+	Issue  int    `json:"issue"`
+}
+
+// deferNotYet is "always defer": toolfilter has no list for it yet (#878).
+var deferNotYet = SaveMoreToolsNotYet{Action: "defer", Issue: 878,
+	Label: "always defer a tool (toolfilter has no list for it yet)"}
+
 // SaveMoreToolsDoc is the GET /api/save-more/tools response.
 type SaveMoreToolsDoc struct {
 	Kind     string                `json:"kind"`
@@ -88,6 +99,9 @@ type SaveMoreToolsDoc struct {
 	Window   AdaptToolsWindow      `json:"window"`
 	Rows     []SaveMoreToolsRow    `json:"rows"`
 	Options  []SaveMoreToolsOption `json:"options"`
+	// NotYet names the actions #485 D3 lists that this proxy does not offer yet, each with the
+	// issue that builds it, so a reader sees them as missing rather than absent.
+	NotYet []SaveMoreToolsNotYet `json:"not_yet"`
 	// Truncated is how many rows were left out past the limit (the cheapest ones).
 	Truncated int `json:"truncated,omitempty"`
 	// BasisID names this report; an apply sends it back with the option id.
@@ -107,7 +121,8 @@ func (d *DB) SaveMoreTools(f Filter, price func(string) (modelinfo.Price, bool),
 func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *SaveMoreToolsDoc {
 	keep, removed := set(host.Keep), set(host.Removed)
 	doc := &SaveMoreToolsDoc{Kind: SaveMoreToolsKind, SearchOn: host.SearchOn, Keep: append([]string{}, host.Keep...),
-		Writable: host.Writable, Reason: host.Reason, Rows: []SaveMoreToolsRow{}, Options: []SaveMoreToolsOption{}}
+		Writable: host.Writable, Reason: host.Reason, Rows: []SaveMoreToolsRow{}, Options: []SaveMoreToolsOption{},
+		NotYet: []SaveMoreToolsNotYet{deferNotYet}}
 	doc.Window = AdaptToolsWindow{Since: f.Since, Until: f.Until, Sessions: rep.Coverage.Captured, Requests: rep.Coverage.Requests}
 	sort.Strings(doc.Keep)
 
