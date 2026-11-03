@@ -132,7 +132,8 @@ func TestDeferredReminderInsideSystemReminderTag(t *testing.T) {
 
 // The listing's measured cost is split equally over every name in it (60 here), and the 39
 // MCP tools carry their shares: removing one gives back its own line, not the header or the
-// built-in names. The placeholder is a marker, not a declaration.
+// built-in names. The 21 built-ins are recorded with 0 tokens. The placeholder is a marker, not a
+// declaration.
 func TestDeferredReminderCostMovesOffThePlaceholder(t *testing.T) {
 	listing := deferredFixture(t, "deferred-reminder-full-39mcp.txt")
 	body := deferredBody(t, []string{placeholderTool(t)}, []string{listing}, nil)
@@ -141,13 +142,20 @@ func TestDeferredReminderCostMovesOffThePlaceholder(t *testing.T) {
 
 	inv := ScanInventory("anthropic", body)
 
-	n := 0
+	n, builtins := 0, 0
 	for _, d := range inv.Decls {
 		if d.Name == "DeferredToolPlaceholder" {
 			t.Errorf("placeholder recorded as %+v", d)
 		}
+		if d.Kind == KindTool {
+			builtins++
+			if d.Tokens != 0 || !d.Deferred {
+				t.Errorf("built-in %s = %d tokens, deferred %v; want 0 and true", d.Name, d.Tokens, d.Deferred)
+			}
+			continue
+		}
 		if d.Kind != KindMCPTool {
-			t.Errorf("unexpected non-MCP row %s:%s", d.Kind, d.Name)
+			t.Errorf("unexpected row %s:%s", d.Kind, d.Name)
 			continue
 		}
 		n++
@@ -155,8 +163,66 @@ func TestDeferredReminderCostMovesOffThePlaceholder(t *testing.T) {
 			t.Errorf("%s = %d tokens, want %d or %d (listing %d / 60 names)", d.Name, d.Tokens, share, share+1, total)
 		}
 	}
-	if n != 39 {
-		t.Errorf("MCP rows = %d, want 39", n)
+	if n != 39 || builtins != 21 {
+		t.Errorf("MCP rows = %d, built-in rows = %d; want 39 and 21", n, builtins)
+	}
+}
+
+// The built-ins Claude Code defers (#866 N9) are declarations too: the history that seeds tool
+// deferral must see them declared, or a session that never used Monitor reads as "not declared"
+// instead of "declared and unused". Each is a KindTool row with the deferred mark and 0 tokens, so
+// no figure on the page moves. A built-in also sent in `tools` keeps its own row.
+func TestDeferredBuiltinsAreRecorded(t *testing.T) {
+	listing := deferredFixture(t, "deferred-reminder-full-39mcp.txt")
+	body := deferredBody(t, []string{tool("Bash", "b"), placeholderTool(t)}, []string{listing}, nil)
+
+	inv := ScanInventory("anthropic", body)
+
+	want := map[string]bool{}
+	for _, line := range strings.Split(listing, "\n")[1:] {
+		if line != "" && !strings.HasPrefix(line, "mcp__") {
+			want[line] = true
+		}
+	}
+	if len(want) != 21 {
+		t.Fatalf("fixture has %d built-in names, want 21", len(want))
+	}
+	got := map[string]Decl{}
+	for _, d := range inv.Decls {
+		if d.Kind == KindTool {
+			got[d.Name] = d
+		}
+	}
+	for n := range want {
+		d, ok := got[n]
+		if !ok {
+			t.Errorf("deferred built-in %s not recorded", n)
+			continue
+		}
+		if !d.Deferred || d.Tokens != 0 || d.Server != "" {
+			t.Errorf("%s = %+v, want deferred, 0 tokens, no server", n, d)
+		}
+	}
+	if b := got["Bash"]; b.Deferred || b.Tokens <= 0 {
+		t.Errorf("Bash from `tools` = %+v, want its own weighed, not deferred row", b)
+	}
+}
+
+// A deferred built-in loaded through ToolSearch is in `tools` (defer_loading, 0 tokens) and in
+// the listing: one row, with the deferred mark.
+func TestDeferredBuiltinLoadedIsOneRow(t *testing.T) {
+	loaded := `{"name":"Monitor","description":"m","input_schema":{"type":"object"},"defer_loading":true}`
+	body := deferredBody(t, []string{placeholderTool(t), loaded},
+		[]string{deferredFixture(t, "deferred-reminder-full-39mcp.txt")}, nil)
+
+	var rows []Decl
+	for _, d := range ScanInventory("anthropic", body).Decls {
+		if d.Name == "Monitor" {
+			rows = append(rows, d)
+		}
+	}
+	if len(rows) != 1 || !rows[0].Deferred {
+		t.Fatalf("rows for Monitor = %+v, want one deferred row", rows)
 	}
 }
 
@@ -487,3 +553,4 @@ func TestSkillListingIsTheFirstBlockOnly(t *testing.T) {
 		t.Errorf("skills = %v, want only alpha", names)
 	}
 }
+

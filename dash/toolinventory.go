@@ -119,9 +119,10 @@ type Decl struct {
 	// while keeping its metrics. Applying it here instead would poison declCache, whose
 	// entries are shared by every tenant that declares the same set.
 	Text string `json:"text,omitempty"`
-	// Deferred marks an MCP tool read from the deferred-tools list, not from `tools`. The proxy
-	// filter removes only `tools` elements, so it cannot remove this one: only the user's own
-	// change (claude mcp remove, permissions.deny) can.
+	// Deferred marks a tool read from the deferred-tools list, not from `tools`: an MCP tool, or a
+	// built-in that Claude Code defers (#866 N9). The proxy filter removes only `tools` elements,
+	// so it cannot remove this one: only the user's own change (claude mcp remove,
+	// permissions.deny) can.
 	Deferred bool `json:"deferred,omitempty"`
 }
 
@@ -492,7 +493,9 @@ func hashDeferred(h *maphash.Hash, body []byte) bool {
 //     tool name. One line that is not voids that whole list.
 //
 // Each list's measured tokens are split equally over every name in it, so an MCP tool is
-// charged its share and the built-in names keep theirs off the page, as before. The shares are
+// charged its share and the built-in names keep theirs off the page, as before: a built-in is
+// recorded with 0 tokens, so the history that seeds tool deferral sees it declared (#866 N9) and
+// no figure on the page moves. The shares are
 // APPROXIMATE on purpose: the header (about 50 tokens) is spread over the names too, and a long
 // name costs a little more than a short one. Removing a tool gives back its own line, not the
 // header, so an equal share of the whole is a fair bound, not an exact figure.
@@ -506,7 +509,8 @@ func deferredDeclsFrom(texts []string) []Decl {
 	return out
 }
 
-// appendDeferred adds the MCP tools of every valid list in text, skipping names in seen.
+// appendDeferred adds the tools of every valid list in text, skipping names in seen: an MCP tool
+// with its share of the list, a built-in with 0 tokens.
 func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 	lists, voided := deferred.Lists(text)
 	if voided > 0 {
@@ -523,11 +527,15 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 			if k < extra {
 				n++
 			}
-			server, _, isMCP := SplitMCPName(name)
-			if !isMCP || seen[name] {
+			if seen[name] {
 				continue
 			}
 			seen[name] = true
+			server, _, isMCP := SplitMCPName(name)
+			if !isMCP {
+				out = append(out, Decl{Kind: KindTool, Name: identName(name), Text: name, Deferred: true})
+				continue
+			}
 			out = append(out, Decl{Kind: KindMCPTool, Name: identName(name),
 				Server: identName(server), Tokens: n, Text: name, Deferred: true})
 		}
@@ -535,9 +543,9 @@ func appendDeferred(out []Decl, seen map[string]bool, text string) []Decl {
 	return out
 }
 
-// mergeDeferred adds the deferred MCP tools to the tools-array declarations. A tool loaded
-// through ToolSearch is in both, with 0 tokens in `tools`; its listing row replaces that one,
-// so it is charged once.
+// mergeDeferred adds the deferred tools to the tools-array declarations. A tool loaded through
+// ToolSearch is in both, with 0 tokens in `tools`; its listing row replaces that one, so it is
+// charged once and keeps its deferred mark.
 func mergeDeferred(decls, deferred []Decl) []Decl {
 	if len(deferred) == 0 {
 		return decls
@@ -548,7 +556,7 @@ func mergeDeferred(decls, deferred []Decl) []Decl {
 	}
 	out := decls[:0:0]
 	for _, d := range decls {
-		if d.Kind == KindMCPTool && d.Tokens == 0 && listed[d.Name] {
+		if (d.Kind == KindMCPTool || d.Kind == KindTool) && d.Tokens == 0 && listed[d.Name] {
 			continue
 		}
 		out = append(out, d)
