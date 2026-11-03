@@ -18,6 +18,7 @@ func TestToolDeferReportPerAccountAndDay(t *testing.T) {
 		e.TenantID = tenant
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = tok, 20, searches
 		e.DeferLoaded, e.DeferWrongGuesses, e.DeferGrossUSD, e.DeferNetUSD = loaded, wrong, gross, net
+		e.DeferDroppedSearches = searches / 2
 		return e
 	}
 	if err := db.InsertEvents([]*Event{
@@ -48,7 +49,7 @@ func TestToolDeferReportPerAccountAndDay(t *testing.T) {
 		math.Abs(a0.GrossUSD-0.020) > 1e-12 || math.Abs(a0.NetUSD-0.013) > 1e-12 || math.Abs(a0.CostUSD-0.007) > 1e-12 {
 		t.Errorf("tenant a, day 0 = %+v", a0)
 	}
-	if rep.Total.Requests != 5 || rep.Total.TokensDeferred != 21000 || rep.Total.WrongGuesses != 1 ||
+	if rep.Total.Requests != 5 || rep.Total.TokensDeferred != 21000 || rep.Total.WrongGuesses != 1 || rep.Total.DroppedSearches != 1 ||
 		math.Abs(rep.Total.NetUSD-0.019) > 1e-12 {
 		t.Errorf("total = %+v", rep.Total)
 	}

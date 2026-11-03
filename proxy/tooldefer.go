@@ -548,39 +548,20 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 		p, _ = h.opts.Prices.Price(ctx, di.model)
 	}
 	h.toolDefer().ledger.Add(r, p)
+	// The dashboard row takes the same r the ledger booked, so /stats and the panel agree (#869).
 	m, _ := tooldefer.Price(r, p)
-	distinct, wrong := wrongGuesses(di, loaded)
-	cp.noteDefer(r, m, distinct, wrong)
+	cp.noteDefer(r, m, distinctLoads(loaded))
 }
 
-// wrongGuesses is the distinct tools this response's searches loaded that the request had deferred
-// and no earlier search in the transcript had loaded: a deferred tool the model then needed. A
-// tool loaded earlier is not counted again, because the guess was already counted when it was
-// loaded. Returns the distinct loaded names and the wrong guesses among them.
-func wrongGuesses(di *deferInfo, loaded []string) (distinct, wrong int) {
-	deferred := map[string]bool{}
-	for _, n := range di.outcome.Deferred {
-		deferred[n] = true
-	}
-	var before map[string]bool
+// distinctLoads is how many different tools the searches of one response loaded.
+func distinctLoads(loaded []string) int {
 	seen := map[string]bool{}
 	for _, n := range loaded {
-		if n == "" || seen[n] {
-			continue
-		}
-		seen[n] = true
-		distinct++
-		if !deferred[n] {
-			continue
-		}
-		if before == nil {
-			before = tooldefer.Loaded(di.original)
-		}
-		if !before[n] {
-			wrong++
+		if n != "" {
+			seen[n] = true
 		}
 	}
-	return distinct, wrong
+	return len(seen)
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

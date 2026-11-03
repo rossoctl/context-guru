@@ -125,21 +125,14 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	if e.DeferTokens <= 0 || int64(e.DeferTokens) != st.DeferredTokens || e.DeferListTokens <= 0 {
 		t.Errorf("row deferred %d tokens (list %d), ledger %d", e.DeferTokens, e.DeferListTokens, st.DeferredTokens)
 	}
-	if e.DeferSearches != 1 || e.DeferLoaded != 1 || e.DeferWrongGuesses != 1 {
-		t.Errorf("row searches %d, loaded %d, wrong %d; want 1, 1, 1", e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses)
+	if e.DeferSearches != 1 || e.DeferLoaded != 1 || e.DeferWrongGuesses != 1 || e.DeferDroppedSearches != 0 {
+		t.Errorf("row searches %d, loaded %d, wrong %d, dropped %d; want 1, 1, 1, 0", e.DeferSearches, e.DeferLoaded,
+			e.DeferWrongGuesses, e.DeferDroppedSearches)
+	}
+	if int64(e.DeferWrongGuesses) != st.WrongGuesses || int64(e.DeferDroppedSearches) != st.DroppedSearches {
+		t.Errorf("row wrong %d dropped %d, ledger %d and %d", e.DeferWrongGuesses, e.DeferDroppedSearches, st.WrongGuesses, st.DroppedSearches)
 	}
 	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferNetUSD-st.Net) > 1e-12 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
 		t.Errorf("row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st.Money)
-	}
-}
-
-// A load is a wrong guess only for a tool this request deferred, and only the first time.
-func TestWrongGuessesCountsOnlyNewLoadsOfDeferredTools(t *testing.T) {
-	loadedBefore := `{"role":"assistant","content":[{"type":"tool_search_tool_result","tool_use_id":"s",` +
-		`"content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Workflow"}]}}]}`
-	di := &deferInfo{outcome: tooldefer.Outcome{Deferred: []string{"Monitor", "Workflow"}}, original: tdBody(loadedBefore)}
-	distinct, wrong := wrongGuesses(di, []string{"Monitor", "Monitor", "Workflow", "Bash", ""})
-	if distinct != 3 || wrong != 1 {
-		t.Errorf("distinct %d, wrong %d; want 3 (Monitor, Workflow, Bash) and 1 (Monitor)", distinct, wrong)
 	}
 }

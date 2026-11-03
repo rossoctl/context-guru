@@ -444,18 +444,19 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 
 // deferFacts is what tool deferral did on one request, for the dashboard row (#869).
 type deferFacts struct {
-	tokens, list, searches, loaded, wrong int
-	gross, net                            float64
+	tokens, list, searches, dropped, loaded, wrong int
+	gross, net                                     float64
 }
 
-// noteDefer records tool deferral's ledger entry for this request: the request facts, its price
-// (zero when the model has none) and the tools its searches loaded and guessed wrong.
-func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded, wrong int) {
+// noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
+// booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
+// none) and how many different tools its searches loaded.
+func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
 	if c == nil {
 		return
 	}
 	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
-		loaded: loaded, wrong: wrong, gross: m.Gross, net: m.Net}
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net}
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -566,6 +567,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
+		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
 		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
 	}

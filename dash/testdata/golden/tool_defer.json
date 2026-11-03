@@ -3,6 +3,7 @@
  "total": {
   "cost_usd": 0,
   "day": 0,
+  "dropped_searches": 0,
   "gross_usd": 0,
   "list_tokens": 0,
   "loaded": 0,

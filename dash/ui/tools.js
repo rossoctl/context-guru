@@ -265,8 +265,9 @@ Object.assign(TILE_INFO, {
   },
   'inv-defer-loads': {
     what: 'Deferred tools the model loaded back through search, and the wrong guesses among them.',
-    how: 'A wrong guess is a tool the thread had deferred that a search then loaded for the first '
-      + 'time: the user\'s history said it was unused, and it was needed.',
+    how: 'A wrong guess is a tool the request deferred that a search then loaded for the first '
+      + 'time: the user\'s history said it was unused, and it was needed. A dropped search is one sent '
+      + 'beside another tool call: it gets no result, and the model searches again.',
     catch: 'A load counts as a use, so the next sessions keep that tool loaded from the start.',
   },
   'inv-real-reads': {
@@ -1195,7 +1196,8 @@ function renderDeferNet(host) {
     tile('inv-defer-tokens', 'Tokens not carried', compact(t.tokens_deferred),
       num(t.requests) + ' requests with deferred tools'),
     tile('inv-defer-loads', 'Loaded through search', num(t.loaded),
-      num(t.searches) + ' searches; ' + num(t.wrong_guesses) + ' wrong guess' + (t.wrong_guesses === 1 ? '' : 'es'))));
+      num(t.searches) + ' searches (' + num(t.dropped_searches || 0) + ' dropped); ' + num(t.wrong_guesses)
+        + ' wrong guess' + (t.wrong_guesses === 1 ? '' : 'es'))));
   const many = new Set(doc.days.map((d) => d.tenant)).size > 1;
   const table = el('table', { class: 'tbl' },
     el('thead', {}, el('tr', {},

@@ -209,12 +209,14 @@ CREATE TABLE IF NOT EXISTS requests (
   sweep_false_expands INTEGER NOT NULL DEFAULT 0,
   sweep_answer_usd    REAL    NOT NULL DEFAULT 0,
   -- Tool deferral's per-request facts (#485, #869; Event.DeferTokens and the rest): tokens
-  -- deferred, the names list's tokens, server-side searches, tools they loaded, wrong guesses,
+  -- deferred, the names list's tokens, server-side searches, the ones with no result, tools they
+  -- loaded, wrong guesses,
   -- and the ledger's gross and net dollars. Counts and prices only. 0 on every row deferral did
   -- not change, and on every earlier row, which is true: nothing was deferred then.
   defer_tokens        INTEGER NOT NULL DEFAULT 0,
   defer_list_tokens   INTEGER NOT NULL DEFAULT 0,
   defer_searches      INTEGER NOT NULL DEFAULT 0,
+  defer_dropped_searches INTEGER NOT NULL DEFAULT 0,
   defer_loaded        INTEGER NOT NULL DEFAULT 0,
   defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
@@ -816,6 +818,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "defer_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_list_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_searches", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_dropped_searches", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_loaded", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
