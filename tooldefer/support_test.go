@@ -822,3 +822,30 @@ func TestHistorySetLoadedTwice(t *testing.T) {
 		t.Fatal("not ready")
 	}
 }
+
+// N8. A wrong guess is a tool WE deferred on this request, loaded by a search in its response, that
+// no earlier message had loaded. Once per tool.
+func TestWrongGuesses(t *testing.T) {
+	earlier := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_0","name":"tool_search_tool_bm25","input":{}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_0","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Monitor"}]}}]}`
+	fresh := body(catalogue(), "")
+	again := body(catalogue(), "", earlier, `{"role":"user","content":"more"}`)
+	deferred := []string{"Monitor", "Workflow"}
+	for _, tc := range []struct {
+		name     string
+		original []byte
+		loaded   []string
+		want     int
+	}{
+		{"a tool we deferred, loaded for the first time", fresh, []string{"Monitor"}, 1},
+		{"loaded twice in one response counts once", fresh, []string{"Monitor", "Monitor"}, 1},
+		{"two of ours", fresh, []string{"Monitor", "Workflow"}, 2},
+		{"a tool Claude Code deferred is not ours", fresh, []string{"WebFetch"}, 0},
+		{"a re-search of a tool loaded earlier is not new", again, []string{"Monitor"}, 0},
+		{"an earlier load of one tool does not hide another", again, []string{"Monitor", "Workflow"}, 1},
+	} {
+		if got := WrongGuesses(deferred, tc.original, tc.loaded); got != tc.want {
+			t.Errorf("%s: %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

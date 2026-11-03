@@ -85,6 +85,33 @@ type Request struct {
 	Tier Tier
 }
 
+// WrongGuesses is how many wrong guesses one response shows (#866, N8): tools that are in this
+// request's deferred set (deferred, the names we sent with defer_loading), that a search in the
+// response loaded (loaded), and that no earlier message of the request's transcript had loaded
+// (original, the client's body). Each tool counts once, however many results load it.
+//
+// A tool Claude Code deferred is not in deferred: not our guess. A tool loaded earlier in the
+// thread was counted at its first load: a search again is not a new wrong guess. /stats and the
+// dashboard both count with this function, so their numbers agree.
+func WrongGuesses(deferred []string, original []byte, loaded []string) int {
+	if len(deferred) == 0 || len(loaded) == 0 {
+		return 0
+	}
+	ours := make(map[string]bool, len(deferred))
+	for _, n := range deferred {
+		ours[n] = true
+	}
+	before := Loaded(original)
+	n := 0
+	for _, name := range loaded {
+		if ours[name] && !before[name] {
+			n++
+			delete(ours, name) // once per tool
+		}
+	}
+	return n
+}
+
 // Money is one request's (or a total's) deferral figures in USD.
 type Money struct {
 	Gross float64 `json:"gross_usd"`

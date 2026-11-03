@@ -525,17 +525,7 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 	r.Searches = n
 	r.DroppedSearches = u.SearchDropped + st.dropped
 	r.LoadedTokens = tooldefer.LoadedWeight(di.original, loaded)
-	// A wrong guess: a tool this request deferred that a search then loaded (#866, N8).
-	deferred := make(map[string]bool, len(di.outcome.Deferred))
-	for _, name := range di.outcome.Deferred {
-		deferred[name] = true
-	}
-	for _, name := range loaded {
-		if deferred[name] {
-			r.WrongGuesses++
-			delete(deferred, name) // one per tool, however many results load it
-		}
-	}
+	r.WrongGuesses = tooldefer.WrongGuesses(di.outcome.Deferred, di.original, loaded)
 	var p modelinfo.Price
 	if h.opts.Prices != nil {
 		p, _ = h.opts.Prices.Price(ctx, di.model)
