@@ -649,9 +649,9 @@ func main() {
 				"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
 		}
 	}
-	// Tool deferral's own file (#485), next to the dashboard database path. The proxy opens it only
-	// at the first ultrahigh request, and only when it needs it (see proxy.Options.ToolDeferPath), so
-	// a setup that never defers creates no file.
+	// Tool deferral's own file (#485), next to the dashboard database path. The proxy opens it at
+	// start when a configuration turns deferral on (ultrahigh), and only when it needs it (see
+	// proxy.Options.ToolDeferPath), so a setup that never defers creates no file.
 	tdPath := ""
 	if *dashDB != "" && *dashDB != ":memory:" {
 		tdPath = filepath.Join(filepath.Dir(*dashDB), tooldefer.FileName)

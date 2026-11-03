@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
@@ -25,8 +28,9 @@ import (
 // only the ultrahigh preset sets), the probe through the host's Dispatcher, the retry of the original
 // request after a 400, the ENABLE_TOOL_SEARCH flag from /tool-search, and the /stats ledger.
 
-// deferState is one handler's deferral state. Built lazily, so a proxy no tenant of which asks for
-// deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
+// deferState is one handler's deferral state. Built at start when a configuration turns deferral
+// on (startToolDefer), else at the first request that asks for it, so a proxy no tenant of which
+// asks for deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
 type deferState struct {
 	hist   *tooldefer.Mem
 	stop   func()
@@ -132,6 +136,83 @@ func (h *Handler) toolDefer() *deferState {
 	d.stop = d.hist.Open(0, d.prober)
 	h.defer_.state = d
 	return d
+}
+
+// startWait bounds how long New waits for the stored deferral state to load. The load is a few
+// small tables; the bound only keeps a broken disk from holding the start.
+const startWait = 10 * time.Second
+
+// startToolDefer builds the deferral state at start, when this proxy's configuration, or any
+// tenant's, turns deferral on, and waits (bounded) for the stored probe verdicts and history to
+// load. Without it the state is built at the first ultrahigh request and loads in the background,
+// so that request reads "probe unknown" and its whole session defers nothing (#871, defect 3).
+// Start-up only: the request path never waits.
+func (h *Handler) startToolDefer() {
+	tenants := h.deferTenantsAtStart()
+	if tenants == nil {
+		return
+	}
+	ds := h.toolDefer()
+	h.deferGate() // so /stats reports the state from the start
+	ok := ds.hist.WaitReady(startWait)
+	seeds := make([]<-chan struct{}, 0, len(tenants))
+	for _, id := range tenants {
+		seeds = append(seeds, ds.hist.SeedTenant(id))
+	}
+	deadline := time.After(startWait)
+	for _, done := range seeds {
+		select {
+		case <-done:
+		case <-deadline:
+			ok = false
+		}
+	}
+	slog.Info("context-guru: tool deferral state loaded at start", "tenants", len(tenants), "ready", ok)
+}
+
+// deferTenantsAtStart is the tenants whose configuration turns deferral on ("" for a
+// single-tenant proxy), or nil when none does.
+func (h *Handler) deferTenantsAtStart() []string {
+	reg := h.registry()
+	if reg == nil {
+		if on, _ := deferOn(h.static.Load()); on {
+			return []string{""}
+		}
+		return nil
+	}
+	ts, err := reg.List()
+	if err != nil {
+		slog.Warn("context-guru: tool deferral not loaded at start: the tenant list is unreadable", "err", err)
+		return nil
+	}
+	var out []string
+	for _, t := range ts {
+		if !t.Disabled && docDefers(reg.Config(t)) {
+			out = append(out, t.ID)
+		}
+	}
+	return out
+}
+
+// docDefers reports whether a configuration document turns tool deferral on: its pipeline holds
+// toolfilter with `defer: auto` (the ultrahigh preset, or a document that sets it).
+func docDefers(doc string) bool {
+	c, err := config.LoadBytes([]byte(doc))
+	if err != nil {
+		return false
+	}
+	has := false
+	for _, n := range c.Pipeline {
+		has = has || n == "toolfilter"
+	}
+	node, ok := c.Components["toolfilter"]
+	if !has || !ok {
+		return false
+	}
+	var tf struct {
+		Defer string `yaml:"defer"`
+	}
+	return node.Decode(&tf) == nil && tf.Defer == "auto"
 }
 
 // deferFallback is the record store for a tenant whose session store is not durable.
@@ -263,6 +344,14 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	if !on {
 		return body, nil
 	}
+	// A transcript that names a tool `tools` no longer declares (a search loaded it, then its MCP
+	// server was removed before a resume) is a 400 at the provider, for the client's own body too.
+	// A deferred stub keeps it valid without touching the cached prefix (#871, defect 1). Before
+	// Apply, so the original a retry would send carries the stub as well.
+	if fixed, added, ok := tooldefer.RepairRefs(body); ok {
+		body = fixed
+		slog.Debug("cg.tooldefer_stub", "session", session, "thread", threadID, "tools", len(added))
+	}
 	ds := h.toolDefer()
 	model := gjson.GetBytes(orig, "model").String()
 	project := tooldefer.NormProject(apply.ProjectFor(provider, orig))
@@ -342,19 +431,52 @@ func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte, original
 		"note", "the provider refused a request with deferred tools and accepted the original; turned deferral off for this model")
 }
 
-// deferLedger books one finished request in the net-saving ledger. msg is the response message
-// when the proxy parsed one, else nil (a stream-through response: its searches are not seen, and
-// the request is booked with no search cost — the searches counter in /stats then reads low).
-func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, msg []byte) {
+// repairOnMissingRef reads a refused response. When it is a 400 that names a tool_reference to a
+// tool body does not declare, it closes resp and returns body with a deferred stub for that tool.
+// Otherwise resp is left readable, with the same bytes, and ok is false.
+func repairOnMissingRef(resp *http.Response, body []byte) (fixed []byte, ok bool) {
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		return nil, false
+	}
+	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+	name := tooldefer.MissingRef(errBody)
+	if name == "" || declares(body, name) {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
+		return nil, false
+	}
+	resp.Body.Close()
+	fixed, _, ok = tooldefer.StubTools(body, []string{name})
+	if !ok {
+		return nil, false
+	}
+	slog.Info("cg.tooldefer_stub", "on", "retry")
+	return fixed, true
+}
+
+// declares reports whether body's `tools` declares name.
+func declares(body []byte, name string) bool {
+	found := false
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		found = t.Get("name").String() == name
+		return !found
+	})
+	return found
+}
+
+// deferLedger books one finished request in the net-saving ledger. The searches are the ones the
+// stream-through path read off its window (u.Searches) plus the ones serve's loop read off each
+// round it held (st): every path counts them, the SSE splice included (#871, defect 2).
+func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, st searchTally) {
 	if di == nil || !usageOK {
 		return
 	}
 	r := tooldefer.Request{Model: di.model, DeferredTokens: di.outcome.DeferredTokens,
 		ListTokens: di.outcome.ListTokens, Tier: tooldefer.TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
-	n, loaded := u.Searches, u.SearchLoaded
-	if msg != nil {
-		n, loaded = tooldefer.SearchesIn(msg)
-	}
+	n := u.Searches + st.n
+	loaded := append(append([]string(nil), u.SearchLoaded...), st.loaded...)
 	r.Searches = n
 	r.LoadedTokens = tooldefer.LoadedWeight(di.original, loaded)
 	var p modelinfo.Price
@@ -362,6 +484,28 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 		p, _ = h.opts.Prices.Price(ctx, di.model)
 	}
 	h.toolDefer().ledger.Add(r, p)
+}
+
+// searchTally adds up the server-side searches of the rounds serve's loop held.
+type searchTally struct {
+	n      int
+	loaded []string
+}
+
+// add reads one round's response: an event stream, or a message object.
+func (st *searchTally) add(sse bool, resp []byte) {
+	if !bytes.Contains(resp, []byte(tooldefer.SearchName)) {
+		return
+	}
+	var n int
+	var loaded []string
+	if sse {
+		n, loaded = tooldefer.SearchesInSSE(resp)
+	} else {
+		n, loaded = tooldefer.SearchesIn(resp)
+	}
+	st.n += n
+	st.loaded = append(st.loaded, loaded...)
 }
 
 // noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent, for

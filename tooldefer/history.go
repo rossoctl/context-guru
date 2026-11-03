@@ -53,13 +53,14 @@ type Mem struct {
 	// Retention bounds a row's age: the flush deletes sessions idle longer. 0: no age bound.
 	Retention time.Duration
 	loaded    bool
+	ready     chan struct{} // closed when loaded turns true
 	now       func() time.Time
 }
 
 // NewMem returns an empty history. db may be nil: the history then lives in memory only, and a
 // restart starts it from zero (so nothing is deferred until 3 new sessions).
 func NewMem(db *sql.DB) *Mem {
-	return &Mem{tenants: map[string][]*histSession{}, seeded: map[string]bool{}, db: db, now: time.Now}
+	return &Mem{tenants: map[string][]*histSession{}, seeded: map[string]bool{}, db: db, ready: make(chan struct{}), now: time.Now}
 }
 
 // Schema creates the history table. Called by Open.
@@ -147,9 +148,7 @@ func (m *Mem) Open(flushEvery time.Duration, p *Prober) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	if m.db == nil {
-		m.mu.Lock()
-		m.loaded = true
-		m.mu.Unlock()
+		m.setLoaded()
 		close(finished)
 		return func() {}
 	}
@@ -162,9 +161,7 @@ func (m *Mem) Open(flushEvery time.Duration, p *Prober) (stop func()) {
 		if err := m.load(); err != nil {
 			slog.Warn("tooldefer: history not loaded; it starts empty", "err", err)
 		}
-		m.mu.Lock()
-		m.loaded = true
-		m.mu.Unlock()
+		m.setLoaded()
 		t := time.NewTicker(flushEvery)
 		defer t.Stop()
 		for {
@@ -189,6 +186,29 @@ func (m *Mem) Ready() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.loaded
+}
+
+// WaitReady waits up to d for the load that Open started (the probe verdicts first, then the
+// history). It reports whether the load finished. For a host's start-up only, never the request
+// path: the first request after a start then reads the stored verdicts.
+func (m *Mem) WaitReady(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-m.ready:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+func (m *Mem) setLoaded() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.loaded {
+		m.loaded = true
+		close(m.ready)
+	}
 }
 
 func (m *Mem) load() error {
@@ -250,18 +270,25 @@ func (m *Mem) load() error {
 // at once rather than after 3 more. Called at the tenant's first deferral request; the copy runs in
 // the background. Best effort: an older dashboard database simply seeds nothing. Sessions the
 // history already holds win (they are newer).
-func (m *Mem) SeedTenant(tenant string) {
+//
+// The returned channel closes when the copy ends (at once when there is nothing to copy). Only a
+// host's start-up waits on it.
+func (m *Mem) SeedTenant(tenant string) <-chan struct{} {
+	done := make(chan struct{})
 	if m == nil || m.SeedDB == nil {
-		return
+		close(done)
+		return done
 	}
 	m.mu.Lock()
 	if m.seeded[tenant] {
 		m.mu.Unlock()
-		return
+		close(done)
+		return done
 	}
 	m.seeded[tenant] = true
 	m.mu.Unlock()
 	go func() {
+		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		byKey := map[[2]string]*histSession{}
@@ -279,6 +306,7 @@ func (m *Mem) SeedTenant(tenant string) {
 		}
 		m.sortLocked(tenant)
 	}()
+	return done
 }
 
 // DropTenant forgets tenant's history in memory (a purge; the rows are the purge's to delete).
