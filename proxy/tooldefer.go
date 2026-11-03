@@ -387,19 +387,17 @@ func declares(body []byte, name string) bool {
 	return found
 }
 
-// deferLedger books one finished request in the net-saving ledger. msg is the response message
-// when the proxy parsed one, else nil (a stream-through response: its searches are not seen, and
-// the request is booked with no search cost — the searches counter in /stats then reads low).
-func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, msg []byte) {
+// deferLedger books one finished request in the net-saving ledger. The searches are the ones the
+// stream-through path read off its window (u.Searches) plus the ones serve's loop read off each
+// round it held (st): every path counts them, the SSE splice included (#871, defect 2).
+func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, st searchTally) {
 	if di == nil || !usageOK {
 		return
 	}
 	r := tooldefer.Request{Model: di.model, DeferredTokens: di.outcome.DeferredTokens,
 		ListTokens: di.outcome.ListTokens, Tier: tooldefer.TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
-	n, loaded := u.Searches, u.SearchLoaded
-	if msg != nil {
-		n, loaded = tooldefer.SearchesIn(msg)
-	}
+	n := u.Searches + st.n
+	loaded := append(append([]string(nil), u.SearchLoaded...), st.loaded...)
 	r.Searches = n
 	r.LoadedTokens = tooldefer.LoadedWeight(di.original, loaded)
 	var p modelinfo.Price
@@ -407,6 +405,28 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 		p, _ = h.opts.Prices.Price(ctx, di.model)
 	}
 	h.toolDefer().ledger.Add(r, p)
+}
+
+// searchTally adds up the server-side searches of the rounds serve's loop held.
+type searchTally struct {
+	n      int
+	loaded []string
+}
+
+// add reads one round's response: an event stream, or a message object.
+func (st *searchTally) add(sse bool, resp []byte) {
+	if !bytes.Contains(resp, []byte(tooldefer.SearchName)) {
+		return
+	}
+	var n int
+	var loaded []string
+	if sse {
+		n, loaded = tooldefer.SearchesInSSE(resp)
+	} else {
+		n, loaded = tooldefer.SearchesIn(resp)
+	}
+	st.n += n
+	st.loaded = append(st.loaded, loaded...)
 }
 
 // noteToolSearch records the raw ENABLE_TOOL_SEARCH value a client's session-start hook sent, for
