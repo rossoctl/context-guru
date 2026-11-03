@@ -288,6 +288,11 @@ type Record struct {
 	// Deferred is the set decided at the thread's first request. Empty means "decided: nothing",
 	// which is a decision too and is stored so the thread is never re-decided.
 	Deferred []string `json:"d"`
+	// List is the names list text (HintedList), built once at the decision so messages[1] keeps
+	// its bytes for the whole thread, also across a restart. Tool names and the start of their
+	// descriptions, from the request's own tool definitions: no customer data. "" in a record
+	// written before hints: such a thread keeps the bare NamesList.
+	List string `json:"l,omitempty"`
 }
 
 // Key is the store key of one thread's record.

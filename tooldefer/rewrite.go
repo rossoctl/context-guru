@@ -3,6 +3,7 @@ package tooldefer
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -20,13 +21,81 @@ const listHead = "Context Guru deferred these tools to save context. Their defin
 	"Before you call one, load it with " + SearchName + ": set query to its exact name and limit to 1. " +
 	"Then call it directly. Deferred tools:"
 
-// NamesList is the names list for a sorted set of names.
+// NamesList is the bare names list for a sorted set of names. A thread recorded before hints
+// existed (its Record has no List) keeps this text, so its cached prefix keeps its bytes.
 func NamesList(names []string) string {
 	return listHead + "\n" + strings.Join(names, "\n")
 }
 
+// hintHead starts the hinted names list (HintedList). Fixed text, like listHead.
+const hintHead = "Context Guru deferred these tools to save context. Their definitions are not loaded yet. " +
+	"Each line gives a tool's name and the start of its description. " +
+	"If one fits the task, use it rather than a shell command that does the same job. " +
+	"Before you call one, load it with " + SearchName + ": set query to its exact name and limit to 1. " +
+	"Then call it directly. Deferred tools:"
+
+// maxHint bounds one hint, in bytes.
+const maxHint = 100
+
+// HintedList is the names list for a sorted set of names, with a short hint per name: the first
+// sentence of the tool's description in body's `tools`, cut on a word boundary to at most maxHint
+// bytes. A name body does not declare, or whose description is empty, gets no hint. The thread
+// builds it once, at its decision, and keeps it in its Record: the list sits in the cached prefix,
+// so it must not change when a description does.
+func HintedList(body []byte, names []string) string {
+	desc := map[string]string{}
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		desc[t.Get("name").String()] = t.Get("description").String()
+		return true
+	})
+	var b strings.Builder
+	b.WriteString(hintHead)
+	for _, n := range names {
+		b.WriteString("\n")
+		b.WriteString(n)
+		if h := Hint(desc[n]); h != "" {
+			b.WriteString(": ")
+			b.WriteString(h)
+		}
+	}
+	return b.String()
+}
+
+// Hint is the first sentence of a tool description, on one line, cut on a word boundary to at
+// most maxHint bytes. A leading markdown heading line that only repeats the name is dropped.
+func Hint(desc string) string {
+	desc = strings.TrimSpace(desc)
+	if strings.HasPrefix(desc, "#") {
+		if i := strings.IndexByte(desc, '\n'); i > 0 && len(strings.Fields(desc[:i])) <= 3 {
+			desc = desc[i+1:]
+		} else {
+			desc = strings.TrimLeft(desc, "# ")
+		}
+	}
+	s := strings.Join(strings.Fields(desc), " ")
+	for i := 0; i+1 < len(s); i++ {
+		if (s[i] == '.' || s[i] == '!' || s[i] == '?') && s[i+1] == ' ' {
+			s = s[:i+1]
+			break
+		}
+	}
+	if len(s) <= maxHint {
+		return s
+	}
+	cut := strings.LastIndexByte(s[:maxHint+1], ' ')
+	if cut <= 0 {
+		// One word longer than the bound: cut before the rune that crosses it.
+		cut = maxHint
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+	}
+	return strings.TrimRight(s[:cut], " ,;:")
+}
+
 // Rewrite defers the tools in set that this request declares and loads, adds the search tool, and
-// puts the names list at messages[1]. It returns the names it deferred, sorted. ok=false means
+// puts the names list at messages[1]: list when it is not "" (the thread's stored text), else the
+// bare NamesList. It returns the names it deferred, sorted. ok=false means
 // nothing changed (nothing to defer, or a shape it does not handle); out is then body.
 //
 // Guards, from the 400 errors the API returns:
@@ -38,7 +107,7 @@ func NamesList(names []string) string {
 //     it that has no mark, so no mark is lost while one has a home;
 //   - a tool `tool_choice` forces on THIS request stays loaded for this request (a forced deferred
 //     tool can draw a 400). The thread's set does not change; the names list still names it.
-func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok bool) {
+func Rewrite(body []byte, set map[string]bool, list string) (out []byte, names []string, ok bool) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || len(set) == 0 {
 		return body, nil, false
@@ -127,12 +196,15 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 		return body, nil, false
 	}
 	sort.Strings(names)
-	list := names
-	if f := forcedTool(body); f != "" && listed[f] && !set[f] {
-		list = append(append([]string{}, names...), f)
+	if list == "" {
+		bare := names
+		if f := forcedTool(body); f != "" && listed[f] && !set[f] {
+			bare = append(append([]string{}, names...), f)
+		}
+		sort.Strings(bare)
+		list = NamesList(bare)
 	}
-	sort.Strings(list)
-	if out, ok = placeList(out, NamesList(list)); !ok {
+	if out, ok = placeList(out, list); !ok {
 		return body, nil, false
 	}
 	return out, names, true
