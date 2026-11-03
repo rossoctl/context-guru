@@ -22,13 +22,19 @@ func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 // summed; token tiers are never collapsed into one total.
 type AccFigure struct {
 	ByComponent map[string]float64 // net of the break each component caused
-	// DeltaUSD is the sum of ByComponent: net of the ATTRIBUTED breaks only. It excludes
-	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
-	DeltaUSD             float64
-	KeepAliveSavedUSD    float64  // rescue effects
-	SplitUSD             float64  // cachesplit effects (Saved - Caused); Task 11 decides where it lands
-	TTLUSD               float64  // headttl effects: premium (negative) plus rescue; Task 11 decides where it lands
-	UnattributedBreakUSD float64  // client edits, expired caches: shown, never charged to a component
+	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD. It excludes UnattributedBreakUSD,
+	// KeepAliveSavedUSD, SplitUSD and TTLUSD.
+	DeltaUSD          float64
+	KeepAliveSavedUSD float64 // rescue effects
+	SplitUSD          float64 // cachesplit effects (Saved - Caused); Task 11 decides where it lands
+	TTLUSD            float64 // headttl effects: premium (negative) plus rescue; Task 11 decides where it lands
+	// EndedBreakUSD is the break a change left behind when it ended (accountant design §5.2 row 1,
+	// Q12): it has no ChangeID, so no component owns it, but the client body would have read that
+	// prefix, so it is part of the bill difference. Negative: a cost.
+	EndedBreakUSD float64
+	// UnattributedBreakUSD is the breaks the client body has too (InBaseline: client edits, expired
+	// caches, entries lost early): shown, never counted, never charged to a component.
+	UnattributedBreakUSD float64
 	Unpriced             []string // "opID:reason"; an unpriced operation is not a zero saving
 	Estimated            bool     // any counted operation or effect is an estimate
 }
@@ -54,14 +60,16 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
-		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
-			continue
-		}
 		c := strings.TrimPrefix(o.Operator, "context-guru.")
+		// An unpriced op still owns the break it caused: a setting with no position is unpriced
+		// (penalty_unknown) and its break is priced from the read the usage shows.
 		if o.ChangeID != "" {
 			if _, dup := owner[o.ChangeID]; !dup { // first owner wins; the library flags duplicates (unique_change)
 				owner[o.ChangeID] = c
 			}
+		}
+		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
+			continue
 		}
 		net := tierUSD(p, o.Saved) - tierUSD(p, o.Caused)
 		f.ByComponent[c] += net
@@ -79,11 +87,16 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
 		switch ce.Kind {
 		case accountant.EffectBreak:
-			// An empty ChangeID is a break nobody caused (client edit, cache expiry): unowned.
-			if c, ok := owner[ce.ChangeID]; ok && ce.ChangeID != "" {
+			switch c, ok := owner[ce.ChangeID]; {
+			case ce.InBaseline: // the client body has this break too: shown, not counted
+				f.UnattributedBreakUSD -= value
+			case ok && ce.ChangeID != "":
 				f.ByComponent[c] += value
 				f.DeltaUSD += value
-			} else {
+			case ce.ChangeID == "": // an ended change left it behind: counted, owned by no component
+				f.EndedBreakUSD += value
+				f.DeltaUSD += value
+			default: // a ChangeID no counted op owns (a dry run): shown, never charged
 				f.UnattributedBreakUSD -= value
 			}
 		case accountant.EffectRescue:

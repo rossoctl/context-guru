@@ -210,7 +210,9 @@ func TestFigure_EmptyOpIDUnpricedEntryNeverDropsRealTokens(t *testing.T) {
 	}
 }
 
-func TestFigure_EmptyChangeIDBreakIsUnowned(t *testing.T) {
+// A break with no ChangeID that the client body does not have is one an ended change left behind
+// (accountant design §5.2 row 1, Q12): it counts in DeltaUSD, and no component owns it.
+func TestFigure_EndedChangeBreakCountsAndIsUnowned(t *testing.T) {
 	f := figOf(accountant.Result{
 		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 100}}},
 		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak,
@@ -219,7 +221,36 @@ func TestFigure_EmptyChangeIDBreakIsUnowned(t *testing.T) {
 	if !accNear(f.ByComponent["mask"], 100*3e-6) {
 		t.Fatalf("component touched: %+v", f)
 	}
+	brk := 100*0.3e-6 - 100*3.75e-6
+	if !accNear(f.EndedBreakUSD, brk) || !accNear(f.DeltaUSD, 100*3e-6+brk) || f.UnattributedBreakUSD != 0 {
+		t.Fatalf("%+v", f)
+	}
+}
+
+// A break the client body has too (InBaseline: a client edit, an expiry) is shown and never counted.
+func TestFigure_InBaselineBreakIsShownNotCounted(t *testing.T) {
+	f := figOf(accountant.Result{
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 100}}},
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak, InBaseline: true,
+			Caused: accountant.TierTokens{CacheWrite5m: 100}, Saved: accountant.TierTokens{CacheRead: 100}}},
+	})
+	if !accNear(f.DeltaUSD, 100*3e-6) || f.EndedBreakUSD != 0 {
+		t.Fatalf("an in-baseline break was counted: %+v", f)
+	}
 	if !accNear(f.UnattributedBreakUSD, 100*3.75e-6-100*0.3e-6) {
+		t.Fatalf("%+v", f)
+	}
+}
+
+// An unpriced setting (no position: penalty_unknown) still owns the break the library priced for it.
+func TestFigure_UnpricedSettingOwnsItsBreak(t *testing.T) {
+	f := figOf(accountant.Result{
+		Ops: []accountant.PricedOp{{OpID: "op1", Operator: "inference-router", ChangeID: "rt:1"}},
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak, ChangeID: "rt:1",
+			Caused: accountant.TierTokens{CacheWrite5m: 100}, Saved: accountant.TierTokens{CacheRead: 100}}},
+		Unpriced: []accountant.Unpriced{{OpID: "op1", Reason: "penalty_unknown"}},
+	})
+	if brk := 100*0.3e-6 - 100*3.75e-6; !accNear(f.ByComponent["inference-router"], brk) || f.UnattributedBreakUSD != 0 {
 		t.Fatalf("%+v", f)
 	}
 }

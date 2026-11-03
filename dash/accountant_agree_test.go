@@ -23,7 +23,6 @@ type PlayedAcc struct {
 	// ByComponent is AccFigure.ByComponent in micro-dollars: the ops plus the breaks charged to a
 	// component. A per-ChangeID figure is not derivable from it, so the comparison is per component.
 	ByComponent map[string]int64
-	Unattrib    int64 // the unattributed break, in µ$ (a cost, positive): reported, not in NetMicro
 	Unpriced    []string
 }
 
@@ -57,7 +56,7 @@ func PlayAcc(c cases.Case) []PlayedAcc {
 		e := &dash.Event{}
 		e.SetAccountant(res)
 		fig := e.AccountantFigure(priceOfAcc(c.StepRate(s)))
-		p := PlayedAcc{ByComponent: map[string]int64{}, Unattrib: microsAcc(fig.UnattributedBreakUSD), Unpriced: fig.Unpriced}
+		p := PlayedAcc{ByComponent: map[string]int64{}, Unpriced: fig.Unpriced}
 		for k, v := range fig.ByComponent {
 			p.ByComponent[k] = microsAcc(v)
 		}
@@ -122,7 +121,7 @@ func sharedComp(c cases.Case, comp string) bool {
 // expectedByComponent is the case's expected figure of each component, the way AccFigure.ByComponent
 // builds it: the priced rewrite and setting ops (a spend is priced by the host, so it is left out)
 // plus the counted breaks whose ChangeID a component owns. Rescue, split and TTL effects are their
-// own AccFigure fields, not component figures; a break nobody owns is UnattributedBreakUSD.
+// own AccFigure fields, not component figures; a counted break nobody owns is EndedBreakUSD.
 func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) map[string]int64 {
 	picos := map[string]int64{}
 	rate := c.StepRate(s)
@@ -199,90 +198,20 @@ type accPlace struct {
 	comp string
 }
 
-// accKnownDifferences are the places where AccountantFigure deliberately differs from a case.
-// The test tolerates exactly these places and fails if one stops differing.
-var accKnownDifferences = map[string]struct {
-	Reason string
-	At     []accPlace
-	// Unattrib asserts that the step net differs by exactly the unattributed break AccFigure reports
-	// (a cost the case counts in its net and AccFigure shows apart): the steps listed here.
-	Unattrib []int
-}{
-	"rewrite/decision-flips-inside-prefix/hot/5m": {
-		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
-		At:       []accPlace{{3, ""}},
-		Unattrib: []int{3},
-	},
-	"rewrite/restore-in-place/hot/5m": {
-		Reason:   "a break with no ChangeID is UnattributedBreakUSD, outside the net (accountant_price.go: ownerless breaks are shown, never charged)",
-		At:       []accPlace{{2, ""}},
-		Unattrib: []int{2},
-	},
-	"setting/nil-position/penalty-unknown": {
-		Reason:   "the setting is unpriced, so it owns nothing and its break is UnattributedBreakUSD (an unpriced op is not a zero saving)",
-		At:       []accPlace{{1, ""}, {1, "inference-router"}},
-		Unattrib: []int{1},
-	},
-}
-
 // accLibraryDisagrees are cases where Compute itself returns something other than the case expects.
 // They are skipped, with the reason, so the suite stays green and the finding stays visible.
 var accLibraryDisagrees = map[string]string{}
 
+// TestProxyPathMatchesTheAccountantCases plays every shared case through the proxy path and wants
+// every step net, every component figure and the thread total to match. No difference is allowed.
 func TestProxyPathMatchesTheAccountantCases(t *testing.T) {
 	for _, c := range cases.All() {
 		t.Run(c.ID, func(t *testing.T) {
-			diffs := CompareAcc(c, PlayAcc(c))
 			if why, ok := accLibraryDisagrees[c.ID]; ok {
 				t.Skipf("library disagrees with its own case: %s", why)
 			}
-			known, listed := accKnownDifferences[c.ID]
-			allowed := map[accPlace]bool{}
-			for _, p := range known.At {
-				allowed[accPlace{p.step, p.comp}] = true
-			}
-			played := PlayAcc(c)
-			// Where a case is listed, the gap at each Unattrib step must be exactly the unattributed
-			// break AccFigure reports, and the thread total may differ only by the sum of those.
-			var wantTotalGap int64
-			for _, st := range known.Unattrib {
-				want, _ := expectedAcc(c, c.Steps[st])
-				gap := played[st].NetMicro - want
-				if gap == 0 || absAcc(gap) <= 1 && played[st].Unattrib == 0 {
-					t.Errorf("step %d is listed as unattributed but the net agrees: remove it", st)
-				} else if absAcc(gap-played[st].Unattrib) > 1 {
-					t.Errorf("step %d: net gap %d µ$ is not the unattributed break %d µ$", st, gap, played[st].Unattrib)
-				}
-				wantTotalGap += played[st].Unattrib
-			}
-			used := map[accPlace]bool{}
-			for _, x := range diffs {
-				pl := accPlace{x.step, x.change}
-				if listed && (allowed[pl] || x.step == -1 && len(known.Unattrib) > 0) {
-					used[pl] = true
-					t.Logf("known difference (%s): %s", known.Reason, x.text)
-					continue
-				}
+			for _, x := range CompareAcc(c, PlayAcc(c)) {
 				t.Error(x.text)
-			}
-			if listed && len(known.Unattrib) > 0 {
-				var wantT, gotT int64
-				for i, st := range c.Steps {
-					w, _ := expectedAcc(c, st)
-					wantT += w
-					gotT += played[i].NetMicro
-				}
-				if absAcc((gotT-wantT)-wantTotalGap) > 1 {
-					t.Errorf("thread total gap %d µ$ is not the unattributed sum %d µ$", gotT-wantT, wantTotalGap)
-				}
-			}
-			for pl := range allowed {
-				if !used[pl] {
-					t.Errorf("%s allows step %d %q to differ but it agrees: remove it", c.ID, pl.step, pl.comp)
-				}
-			}
-			if listed && len(diffs) == 0 {
-				t.Errorf("listed as a known difference (%s) but it agrees: remove the entry", known.Reason)
 			}
 		})
 	}
