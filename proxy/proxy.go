@@ -573,6 +573,9 @@ func (h *Handler) Mux() *http.ServeMux {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
 		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+		// save-more tools (#869): tool deferral's per-tool view and its keep / search actions.
+		m.HandleFunc("GET /api/save-more/tools", h.saveMoreToolsReport)
+		m.HandleFunc("POST /api/save-more/tools/apply", h.saveMoreToolsApply)
 		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
 		h.mountManualPing(m)
 	}
