@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // The keep-alive tab's arithmetic and its attribution, and the tests are mostly about the
@@ -424,11 +425,11 @@ func TestCalculatorPricesFromTheRowsModelNotABlend(t *testing.T) {
 		}
 		return modelinfo.Price{}, false
 	}
-	a, err := fx.db.KeepAliveCalc(f, 280, 300_000, "cheap", price, 2)
+	a, err := fx.db.KeepAliveCalc(f, 280, 300_000, "cheap", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := fx.db.KeepAliveCalc(f, 280, 300_000, "dear", price, 2)
+	b, err := fx.db.KeepAliveCalc(f, 280, 300_000, "dear", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +447,7 @@ func TestCalculatorPricesFromTheRowsModelNotABlend(t *testing.T) {
 			"miss", a.AvoidedUSDEach)
 	}
 	// The unpriced model: no dollar figure at all, and it says so.
-	un, err := fx.db.KeepAliveCalc(f, 280, 300_000, "nobody-prices-me", price, 2)
+	un, err := fx.db.KeepAliveCalc(f, 280, 300_000, "nobody-prices-me", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +482,7 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	}
 	fx := newKAFixture(t, evs...)
 	price := func(string) (modelinfo.Price, bool) { return ibmSonnet, true }
-	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2)
+	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,14 +508,17 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	if g3 > g1 {
 		t.Errorf("the ladder does not flatten: K1->K2 gains %d, K3->K4 gains %d", g1, g3)
 	}
-	// No rung is marked current (#858): the live policy picks its count per wait, and the ladder
-	// models the fixed-K (plan off) policy, which it says on the wire.
+	// With the plan off (the zero Policy), the model is fixed K, every rung says so, and the rung with
+	// K = the account's base is the current one (#868).
 	for _, r := range out.Rows {
-		if r.Current {
-			t.Errorf("K=%d is marked current; no fixed-K rung is the live policy", r.MaxPings)
+		if r.Plan != PlanFixed {
+			t.Errorf("K=%d plan = %q, want fixed_k", r.MaxPings, r.Plan)
+		}
+		if r.Current != (r.MaxPings == 2) {
+			t.Errorf("K=%d current = %v", r.MaxPings, r.Current)
 		}
 	}
-	if out.Plan != "fixed_k" {
+	if out.Plan != PlanFixed {
 		t.Errorf("plan = %q, want fixed_k", out.Plan)
 	}
 }
@@ -563,7 +567,7 @@ func TestKeepAlivePanelsStateTheirCoverage(t *testing.T) {
 // below it.
 func TestRecommendationRefusesThinHistory(t *testing.T) {
 	fx := newKAFixture(t, kaSpread(t, 19, 700, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +595,7 @@ func TestRecommendationRefusesWhenTheIntervalCrossesZero(t *testing.T) {
 	// any coverage at X=280 — so nothing converts, the pings cost money, and the interval sits
 	// on or below zero rather than excluding it above.
 	fx := newKAFixture(t, kaSpread(t, 30, 40_000, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +618,7 @@ func TestRecommendationRefusesAnIntervalEntirelyBelowZero(t *testing.T) {
 	// 30 expiries whose gaps are far past any coverage at X=280 (2.8 hours), on sessions that
 	// nevertheless have plenty of idle spans to be pinged through. Cost with no conversion.
 	fx := newKAFixture(t, kaSpread(t, 30, 10_000, 2.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +645,7 @@ func TestRecommendationRefusesAnIntervalEntirelyBelowZero(t *testing.T) {
 // does not exist, because a field that exists gets rendered.
 func TestRecommendationPayloadCarriesNoPointEstimate(t *testing.T) {
 	fx := newKAFixture(t, kaSpread(t, 25, 700, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +682,7 @@ func TestRecommendationNeverSuggestsOnePing(t *testing.T) {
 		gap float64
 	}{{25, 400}, {40, 700}, {25, 1100}, {30, 5000}} {
 		fx := newKAFixture(t, kaSpread(t, tc.n, tc.gap, 1.0)...)
-		rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+		rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -841,7 +845,7 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 	calc, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, "aws/claude-sonnet-5",
 		func(string) (modelinfo.Price, bool) {
 			return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
-		}, 2)
+		}, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}

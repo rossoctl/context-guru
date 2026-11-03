@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"github.com/rossoctl/context-guru/keepalive"
 	"math"
 	"testing"
 	"time"
@@ -247,7 +248,7 @@ func TestKeepAliveCalcJudgesAnExpiryAgainstItsOwnLifetime(t *testing.T) {
 		{"anthropic", "aws/claude-sonnet-5", 0},
 	} {
 		fx := newKAFixture(t, exp("s", c.provider, c.model)...)
-		out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, c.model, price, 2)
+		out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, c.model, price, 2, keepalive.Policy{})
 		if err != nil {
 			t.Fatal(err)
 		}
