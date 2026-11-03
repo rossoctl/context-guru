@@ -1748,6 +1748,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
 	// adjudication call stream straight through on a request that advertised only that one.
 	advertised := expand.HasTool(wire, body) || adjudicate.HasTool(wire, body)
+	// Our own tool search (#825) is a proxy tool too: its calls are answered in band, so the
+	// response is held whenever the request declares it.
+	searchOn := di != nil && di.search && tooldefer.HasClientSearch(wire, body)
+	advertised = advertised || searchOn
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -2146,7 +2150,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					recIncomplete = record.IncompleteRetainCap
 				}
 			}
-		case isSSE && schema.IsResponses(wire) && expand.HasMarkersInMessages(body):
+		case isSSE && schema.IsResponses(wire) && (searchOn || expand.HasMarkersInMessages(body)):
 			// Responses' terminal event includes the complete output array. Buffer
 			// only when a model-visible marker exists: advertising stays stable
 			// across turns, while marker-free ordinary traffic keeps streaming.
@@ -2157,6 +2161,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// Raw Responses-API events. The recorder translates only the Anthropic stream, so
 				// this turn is kept and marked incomplete rather than written with an empty
 				// response -- the same outcome as the other non-Anthropic stream path below.
+				recBody, recIsSSE = respBody, true
+			}
+		case isSSE && searchOn:
+			// Our search on Chat Completions: the stream is buffered, so a call to it can be answered
+			// in band (tooldefer.AggregateChatSSE rebuilds the message). The client loses its stream
+			// for the requests of a thread with deferred tools; see #825.
+			sse, sseBuffered = true, true
+			respBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if h.recorder != nil {
 				recBody, recIsSSE = respBody, true
 			}
 		case isSSE:
@@ -2253,6 +2267,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		msg := respBody
 		if isSSE {
 			agg, ok := expand.AggregateSSE(wire, respBody)
+			if !ok && searchOn && wire == schema.WireOpenAI {
+				agg, ok = tooldefer.AggregateChatSSE(respBody)
+			}
 			if !ok {
 				bail()
 				return
@@ -2260,7 +2277,36 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName)
+		// Calls to our own tool search (#825). Together with a client tool call, the turn goes to the
+		// client whole (the loop cannot run the client's tool): the tools are added back now, and the
+		// next request answers our call (tooldefer.ApplySearch). Alone, they are answered below.
+		var searches []tooldefer.SearchCall
+		var searchSet map[string]bool
+		var searchNow []string
+		if searchOn {
+			var client bool
+			searches, client = tooldefer.SearchCalls(wire, msg, expand.ToolName, adjudicate.ToolName)
+			if len(searches) > 0 {
+				var names []string
+				for _, c := range searches {
+					names = append(names, c.Names...)
+				}
+				searchSet, searchNow = h.searchLoad(tn, di, names)
+				deferSearches.n += len(searches)
+				deferSearches.loaded = append(deferSearches.loaded, searchNow...)
+				lg.Debug("cg.tooldefer_search_call", "round", round, "calls", len(searches), "added_back", len(searchNow),
+					"with_client_tool", client)
+				if client || searchSet == nil {
+					if client {
+						h.deferGate().MixedSearches.Add(int64(len(searches)))
+					}
+					bail()
+					return
+				}
+			}
+		}
+
+		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName, tooldefer.ClientSearchName)
 		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
 		// called PROXY tools only: by the time the request-path repair runs, the client has already
 		// received a tool_use for a tool it does not implement, already answered "not found", and
@@ -2282,7 +2328,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// or maxExpandRounds is spent). An earlier version of this comment said the backstop was only
 		// for "a path this loop does not see", which was false for the first of those.
 		strays := adjudicate.ResponseCallIDs(wire, msg)
-		if (len(calls) == 0 && len(strays) == 0) || otherTools {
+		if (len(calls) == 0 && len(strays) == 0 && len(searches) == 0) || otherTools {
 			bail() // normal answer (or a CLIENT tool) — hand it over unchanged
 			return
 		}
@@ -2294,6 +2340,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// finish its turn instead of waiting on a tool nobody will run.
 		for _, id := range strays {
 			resolved[id] = adjudicate.StrayAnswer
+		}
+		for _, c := range searches {
+			resolved[c.ID] = tooldefer.SearchAnswer(c.Names, searchSet)
 		}
 		got := 0
 		for _, c := range calls {
@@ -2333,6 +2382,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		lg.Debug("cg.expand", "round", round, "calls", len(calls),
 			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(wire, body, msg, resolved)
+		if ok && len(searchNow) > 0 {
+			// The loaded tools go at the end of `tools`, as on every later request of the thread
+			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
+			next, ok = tooldefer.AppendTools(wire, next, di.orig, searchNow)
+		}
 		if !ok {
 			bail() // malformed shapes — fail open, hand the response over unchanged
 			return
