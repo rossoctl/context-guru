@@ -529,34 +529,21 @@ type SearchCall struct {
 // search, and whether it called a client tool too. proxyTools are the host's other tools: a call to
 // one of them is not a client call.
 func SearchCalls(wire string, msg []byte, proxyTools ...string) (calls []SearchCall, other bool) {
-	add := func(id, name, args string) {
-		if name != ClientSearchName {
-			for _, p := range proxyTools {
-				if name == p {
-					return
-				}
+	for _, c := range cgschema.OutputCalls(wire, msg) {
+		if c.Name == ClientSearchName {
+			args := c.Args
+			if c.Custom {
+				args = "" // free text: no names to read
 			}
-			other = true
-			return
+			calls = append(calls, SearchCall{ID: c.ID, Names: searchArgs(args)})
+			continue
 		}
-		calls = append(calls, SearchCall{ID: id, Names: searchArgs(args)})
+		mine := false
+		for _, p := range proxyTools {
+			mine = mine || c.Name == p
+		}
+		other = other || !mine
 	}
-	if cgschema.IsResponses(wire) {
-		gjson.GetBytes(msg, "output").ForEach(func(_, it gjson.Result) bool {
-			switch it.Get("type").String() {
-			case "function_call":
-				add(it.Get("call_id").String(), it.Get("name").String(), it.Get("arguments").String())
-			case "custom_tool_call":
-				add(it.Get("call_id").String(), it.Get("name").String(), "")
-			}
-			return true
-		})
-		return calls, other
-	}
-	gjson.GetBytes(msg, "choices.0.message.tool_calls").ForEach(func(_, tc gjson.Result) bool {
-		add(tc.Get("id").String(), tc.Get("function.name").String(), tc.Get("function.arguments").String())
-		return true
-	})
 	return calls, other
 }
 
