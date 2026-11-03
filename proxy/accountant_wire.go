@@ -40,18 +40,14 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
 	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
-	// PingRead is left nil: see the LIMITATION note on entryFacts.
 	c.savings.end(c.accReq, t, forwarded, ops, entryFacts(forwarded, c.pings, c.accReq.Meta.Session, t))
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
 // ping for the thread since its last request is consumed from pings (nil = none) and supplies
-// LastPing and PingWindow.
-//
-// LIMITATION: PingRead stays nil. The library takes its ping-hot branch, and so produces a Rescue
-// effect, only with PingRead, the extent the ping read in forwarded coordinates, and the
-// keeper's report does not carry it. Inventing one would misprice the rescue, so with it nil the
-// library uses LastPing for the gap only.
+// LastPing, PingWindow and the ping's usage. PingRead stays nil: the keeper replays the previous
+// request's forwarded body, so the library derives the extent the ping read from its usage
+// (accountant design §5.2).
 func entryFacts(forwarded []byte, pings *PingStore, session string, t accountant.Thread) accountant.EntryFacts {
 	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
 	for _, bp := range accBreakpoints(forwarded) {
@@ -61,7 +57,7 @@ func entryFacts(forwarded []byte, pings *PingStore, session string, t accountant
 		}
 	}
 	if pf, ok := pings.take(accPingKey(session, t.ID)); ok {
-		facts.LastPing, facts.PingWindow = pf.LastPing, pf.PingWindow
+		pf.Apply(&facts)
 	}
 	return facts
 }

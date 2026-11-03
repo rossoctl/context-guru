@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +142,52 @@ func TestNamedThreadKeyRoundTrips(t *testing.T) {
 	f := entryFacts(nil, st, "s", accountant.Thread{ID: "sub-1"})
 	if f.LastPing.IsZero() || f.PingWindow == "" {
 		t.Fatalf("%+v", f)
+	}
+}
+
+// The proxy's keep-alive path credits a rescue end to end: turn 1 caches the body, the keeper's ping
+// replays it and reads it, and turn 2 after the TTL but inside the ping's renewal is hot with a
+// rescue on the ping's window. The extent the ping read is derived from its usage (accountant
+// design §5.2): the proxy passes no PingRead.
+func TestThePingRescueIsCreditedFromTheUsage(t *testing.T) {
+	st, pings := newSavingsTracker(), NewPingStore()
+	t0 := time.Unix(1_700_000_000, 0)
+	body := func(n int) []byte {
+		msgs := `[{"role":"user","content":"` + strings.Repeat("x", 4000) + `","cache_control":{"type":"ephemeral"}}`
+		for i := 1; i < n; i++ {
+			msgs += `,{"role":"assistant","content":"ok"},{"role":"user","content":"more","cache_control":{"type":"ephemeral"}}`
+		}
+		return []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":` + msgs + `]}`)
+	}
+	turn := func(at time.Time, b []byte, u Usage) accountant.Result {
+		req := st.begin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "m", At: at}, b)
+		th := accountant.Thread{ID: "main"}
+		f := entryFacts(b, pings, "s", th)
+		f.Lifetime = accountant.LifetimeExact
+		st.end(req, th, b, nil, f)
+		return st.compute(req, u)
+	}
+	b1 := body(1)
+	turn(t0, b1, Usage{CacheWrite: int64(len(b1))})
+	r := okReport()
+	r.Session, r.Thread, r.TS = "s", "", t0.Add(4*time.Minute).UnixMilli()
+	r.Window = t0
+	r.FreshInput, r.CacheRead, r.CacheWrite, r.Output = 0, int64(len(b1)), 0, 1
+	if _, ok := PingSavings(r, pings); !ok {
+		t.Fatal("the ping was not converted")
+	}
+	b2 := body(2)
+	res := turn(t0.Add(8*time.Minute), b2, Usage{CacheRead: int64(len(b1)), CacheWrite: int64(len(b2) - len(b1))})
+	if res.Phase != accountant.PhaseHot {
+		t.Fatalf("phase %q, want hot: the ping renewed the entry", res.Phase)
+	}
+	var rescue *accountant.CacheEffect
+	for i := range res.CacheEffects {
+		if res.CacheEffects[i].Kind == accountant.EffectRescue {
+			rescue = &res.CacheEffects[i]
+		}
+	}
+	if rescue == nil || rescue.Saved.CacheWrite5m == 0 || rescue.ChangeID == "" {
+		t.Fatalf("effects %+v, want a rescue on the ping's window", res.CacheEffects)
 	}
 }

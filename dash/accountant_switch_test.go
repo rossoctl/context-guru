@@ -48,9 +48,61 @@ func TestPriceMode_AccountantOverridesComponentsAndBaseline(t *testing.T) {
 		t.Fatalf("components sum %v != baseline delta %v", sum, e.BaselineCostUSD-e.CostUSD)
 	}
 	l := legacyCopy(switchEvent())
-	if e.KeepAliveSavedUSD != l.KeepAliveSavedUSD || e.CachesplitSavedUSD != l.CachesplitSavedUSD ||
-		e.CacheSavedUSD != l.CacheSavedUSD || e.CostUSD != l.CostUSD {
-		t.Fatal("keep-alive, cachesplit, cache-saved or cost changed by the override")
+	if e.CacheSavedUSD != l.CacheSavedUSD || e.CostUSD != l.CostUSD {
+		t.Fatal("cache-saved or cost changed by the override")
+	}
+}
+
+// The keep-alive rescue and the split saving come from the library, in their own columns.
+func TestPriceMode_KeepAliveAndSplitComeFromTheLibrary(t *testing.T) {
+	e := switchEvent()
+	e.KeepAlivePings, e.SinceLastMs, e.SplitStableTokens = 1, 1<<40, 500 // legacy would credit both
+	e.accRes.CacheEffects = []accountant.CacheEffect{
+		{Kind: accountant.EffectRescue, ChangeID: "ka:main:w", Saved: accountant.TierTokens{CacheWrite5m: 200}, Caused: accountant.TierTokens{CacheRead: 200}},
+		{Kind: accountant.EffectSplit, ChangeID: "cg:cachesplit:x", Saved: accountant.TierTokens{CacheWrite5m: 100}, Caused: accountant.TierTokens{CacheRead: 100}},
+	}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	if !accNear(e.KeepAliveSavedUSD, 200*(3.75e-6-0.3e-6)) || !accNear(e.CachesplitSavedUSD, 100*(3.75e-6-0.3e-6)) {
+		t.Fatalf("keep-alive %v split %v", e.KeepAliveSavedUSD, e.CachesplitSavedUSD)
+	}
+	if !accNear(e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6) {
+		t.Fatalf("the rescue or the split leaked into the baseline: delta %v", e.BaselineCostUSD-e.CostUSD)
+	}
+}
+
+// With no rescue from the library, the keep-alive column is 0 even where the legacy rule credits.
+func TestPriceMode_NoRescueMeansNoKeepAliveCredit(t *testing.T) {
+	e := switchEvent()
+	e.KeepAlivePings, e.SinceLastMs, e.KeepAliveRefreshed = 1, 1<<40, 1000
+	if l := legacyCopy(e); l.KeepAliveSavedUSD <= 0 {
+		t.Fatalf("fixture: legacy credits nothing (%v)", l.KeepAliveSavedUSD)
+	}
+	e.PriceMode(accTestPrice, true)
+	if e.KeepAliveSavedUSD != 0 {
+		t.Fatalf("keep-alive %v, want 0: the library found no rescue", e.KeepAliveSavedUSD)
+	}
+}
+
+// The head-TTL legs go on the headttl row, inside the baseline delta.
+func TestPriceMode_HeadTTLIsAComponentFigure(t *testing.T) {
+	e := switchEvent()
+	e.accRes.CacheEffects = []accountant.CacheEffect{{Kind: accountant.EffectTTLPremium, ChangeID: "headttl:main:x",
+		Saved: accountant.TierTokens{CacheWrite5m: 100}, Caused: accountant.TierTokens{CacheWrite1h: 100}}}
+	e.PriceMode(accTestPrice, true)
+	var got float64
+	var sum float64
+	for _, c := range e.Components {
+		sum += c.SavedUSD
+		if c.Component == "headttl" {
+			got = c.SavedUSD
+		}
+	}
+	want := 100*3.75e-6 - 100*2*3e-6
+	if !accNear(got, want) || !accNear(sum, e.BaselineCostUSD-e.CostUSD) {
+		t.Fatalf("headttl %v want %v; rows %v delta %v", got, want, sum, e.BaselineCostUSD-e.CostUSD)
 	}
 }
 

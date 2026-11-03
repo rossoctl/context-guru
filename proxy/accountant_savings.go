@@ -8,12 +8,13 @@ import (
 // of the proxy: a thread's state lives there between requests.
 type savingsTracker struct {
 	trackers *accountant.Trackers
+	siblings *siblingStore // each thread's last forwarded body, for EntryFacts.SharedWarm
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
 	onEnd func(*accountant.Request)
 }
 
 func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers()}
+	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore()}
 }
 
 // begin opens the request record with the client body, before any component ran. The Trackers bound
@@ -30,7 +31,9 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 	for _, op := range ops {
 		req.Add(op)
 	}
-	req.EndRequest(th, accBodies(forwarded), accBreakpoints(forwarded), facts)
+	fwd, bps := accBodies(forwarded), accBreakpoints(forwarded)
+	facts.SharedWarm = s.siblings.sharedWarm(req.Meta.Session, th.ID, req.Meta.At, facts.TTL, fwd, bps)
+	req.EndRequest(th, fwd, bps, facts)
 	if s.onEnd != nil {
 		s.onEnd(req)
 	}

@@ -27,8 +27,8 @@ type AccFigure struct {
 	// KeepAliveSavedUSD, SplitUSD and TTLUSD.
 	DeltaUSD          float64
 	KeepAliveSavedUSD float64 // rescue effects
-	SplitUSD          float64 // cachesplit effects (Saved - Caused); Task 11 decides where it lands
-	TTLUSD            float64 // headttl effects: premium (negative) plus rescue; Task 11 decides where it lands
+	SplitUSD          float64 // cachesplit effects (Saved - Caused): CachesplitSavedUSD
+	TTLUSD            float64 // headttl effects: premium (negative) plus rescue: the headttl row
 	// EndedBreakUSD is the break a change left behind when it ended (accountant design §5.2 row 1,
 	// Q12): it has no ChangeID, so no component owns it, but the client body would have read that
 	// prefix, so it is part of the bill difference. Negative: a cost.
@@ -184,9 +184,9 @@ func (e *Event) AccountantEstimated() bool { return e.accEstimated }
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
 func (e *Event) AccountantFallback() string { return e.accFallback }
 
-// PriceMode is Price, then an override of each component's
-// SavedUSD and of BaselineCostUSD from the library's figure. KeepAliveSavedUSD, CachesplitSavedUSD,
-// CacheSavedUSD, CostUSD and CGLLMCostUSD always stay as Price set them.
+// PriceMode is Price, then an override of each component's SavedUSD, of BaselineCostUSD, of
+// KeepAliveSavedUSD and of CachesplitSavedUSD from the library's figure. CacheSavedUSD (the
+// provider's own cache, a measurement), CostUSD and CGLLMCostUSD always stay as Price set them.
 //
 // The override is all-or-nothing per event, because a partial list would show an unmeasured
 // component as a $0 saving. It applies only when: a Result is attached; no change was dropped
@@ -256,6 +256,15 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 			return FallbackFigureWithoutRow
 		}
 	}
+	// The head-TTL legs (premium and rescue) are a lever's figure like any component's: they go on
+	// the headttl row, inside the baseline delta. Legacy had no figure for them.
+	if fig.TTLUSD != 0 {
+		fig.ByComponent["headttl"] += fig.TTLUSD
+		fig.DeltaUSD += fig.TTLUSD
+		if !rows["headttl"] && !inAdded(added, "headttl") {
+			added = append(added, CompRow{Component: "headttl", Kind: KindEnvelope, Acted: true, Mutated: true})
+		}
+	}
 	// The break an ended change left behind is counted and owned by no component: it gets a row
 	// of its own, so the rows still sum to the baseline delta.
 	if fig.EndedBreakUSD != 0 {
@@ -292,8 +301,20 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		e.Components = append(e.Components, r)
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
+	// the legacy rules did: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
+	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
 	e.accEstimated = estimated
 	return ""
+}
+
+func inAdded(rows []CompRow, name string) bool {
+	for _, r := range rows {
+		if r.Component == name {
+			return true
+		}
+	}
+	return false
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
