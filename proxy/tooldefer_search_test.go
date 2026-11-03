@@ -174,6 +174,12 @@ func TestClientSearchInBand(t *testing.T) {
 	if gjson.GetBytes(b[2], "tools").Raw != gjson.GetBytes(follow, "tools").Raw {
 		t.Fatalf("tools moved after the add-back:\n%s\n%s", csTools(b[2]), csTools(follow))
 	}
+	// No body our search sends carries defer_loading (GLM drops such a tool; #825): it removes.
+	for i, sent := range up.all() {
+		if bytes.Contains(sent, []byte("defer_loading")) {
+			t.Fatalf("upstream body %d carries defer_loading", i)
+		}
+	}
 	if g := h.deferGate(); g.AddBacks.Load() != 1 || g.MixedSearches.Load() != 0 {
 		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
 	}

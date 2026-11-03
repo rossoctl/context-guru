@@ -287,3 +287,28 @@ func TestAggregateChatSSE(t *testing.T) {
 		t.Fatalf("msg = %s", msg)
 	}
 }
+
+// Our search never sends defer_loading: through our gateway, GLM drops a Chat Completions tool that
+// carries it inside `function`, and gpt-5.5 Responses refuses it without tool_search. A deferred tool
+// is removed instead. Checked on every request of a thread: first, after an add-back, and a repair.
+func TestApplySearchNeverSendsDeferLoading(t *testing.T) {
+	for _, wire := range []string{cgschema.WireOpenAI, cgschema.WireResponses} {
+		e := env(t, unusedHist())
+		b := chatBody()
+		if wire == cgschema.WireResponses {
+			b = respBody()
+		}
+		o, _ := ApplySearch(e, wire, sreq(b))
+		if !o.Changed {
+			t.Fatalf("%s: %s", wire, show(o))
+		}
+		AddBack(e.RecordStore(), "s", "", []string{"Workflow"})
+		o2, _ := ApplySearch(e, wire, sreq(b))
+		follow, _ := AppendTools(wire, o.Body, b, []string{"Workflow"})
+		for i, out := range [][]byte{o.Body, o2.Body, follow} {
+			if strings.Contains(string(out), "defer_loading") {
+				t.Fatalf("%s: body %d carries defer_loading: %s", wire, i, out)
+			}
+		}
+	}
+}
