@@ -685,8 +685,9 @@ func (h *Handler) deferStats() any {
 		// the cause; "turned_off" counts only those whose original succeeded, which turned it off.
 		"retries_400": g.Retries.Load(),
 		"turned_off":  g.TurnedOff.Load(),
-		// Our own search (#825): tools it added back (each is a wrong guess, and one cache miss on
-		// `tools`), and searches made together with a client tool call, answered on the next request.
+		// Our own search (#825), counters of its own: tools it added back (one cache miss on `tools`
+		// each; those a search loaded count in wrong_guesses too, through the ledger), and searches
+		// made together with a client tool call, answered on the next request.
 		"add_backs":      g.AddBacks.Load(),
 		"mixed_searches": g.MixedSearches.Load(),
 		"probes_pass":    pass,

@@ -180,6 +180,10 @@ func TestClientSearchInBand(t *testing.T) {
 			t.Fatalf("upstream body %d carries defer_loading", i)
 		}
 	}
+	// The add-back is a wrong guess, counted by tooldefer.WrongGuesses through the ledger, once.
+	if w := h.toolDefer().ledger.Snapshot().WrongGuesses; w != 1 {
+		t.Fatalf("wrong_guesses = %d, want 1", w)
+	}
 	if g := h.deferGate(); g.AddBacks.Load() != 1 || g.MixedSearches.Load() != 0 {
 		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
 	}
@@ -217,6 +221,10 @@ func TestClientSearchMixedCall(t *testing.T) {
 	}
 	if got := gjson.GetBytes(sent, "messages.4.content").String(); !strings.HasPrefix(got, "Loaded: Monitor") {
 		t.Fatalf("our call not answered: %q", got)
+	}
+	// Counted at the response that searched, not again when the next request repairs it.
+	if w := h.toolDefer().ledger.Snapshot().WrongGuesses; w != 1 {
+		t.Fatalf("wrong_guesses = %d, want 1", w)
 	}
 	if g := h.deferGate(); g.AddBacks.Load() != 1 || g.MixedSearches.Load() != 1 {
 		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
