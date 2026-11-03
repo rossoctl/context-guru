@@ -13,6 +13,7 @@ Your items, most costly first:
   skill        dataviz          loaded                    0 of 42    n/a
 
   2026-09-08..2026-10-08 · 42 sessions, 1,830 requests
+  Not available yet: always defer a tool (toolfilter has no list for it yet) (#878).
 Keep a tool loaded (never defer it), after a yes: /context-guru:save-more apply deferral 'keep:<name>@9d4e2a7c'
 Turn tool search off for your account, after a yes: /context-guru:save-more apply deferral search_off@9d4e2a7c
 Undo the last of these changes: /context-guru:save-more revert deferral
