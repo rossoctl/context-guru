@@ -1309,6 +1309,8 @@ func (a *API) toolRoutes() []route {
 		{"GET /api/adapt/tools", scopeTenant, a.adaptTools},
 		// What the client settings that cost money have cost: counts and dollars of rows by request shape (costlysettings.go).
 		{"GET /api/adapt/settings", scopeTenant, a.costlySettings},
+		// Tool deferral's net saving per account and per day, from the request rows (tooldeferpanel.go).
+		{"GET /api/tool-defer", scopeTenant, a.toolDefer},
 	}
 }
 

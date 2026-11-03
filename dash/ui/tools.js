@@ -63,6 +63,8 @@ const tools = {
   // that vanishes with no explanation is a page with no opinion; the reason is the whole
   // difference between "this proxy cannot do it" and "pick an account first".
   controlDoc: null,
+  // deferDoc is GET /api/tool-defer: tool deferral's net saving per account and day, or null.
+  deferDoc: null,
   sort: 'unused_reads',
   dir: 'desc',
   busy: '',
@@ -246,6 +248,20 @@ Object.assign(TILE_INFO, {
     catch: 'This is the only figure on the page that is a SAVING rather than a projection. '
       + 'It is normally much smaller than the projected figure above, and the two are not '
       + 'comparable: one is what happened, the other is what could have.',
+  },
+  'inv-defer-net-usd': {
+    what: 'What tool deferral saved after its own costs, over the selected window.',
+    how: 'Gross is the deferred definitions\' weight on every request, priced at the tier that '
+      + 'request paid. The names list and every search are taken off: the search call\'s output, '
+      + 'and the loaded definitions read once without the cache.',
+    catch: 'The same net figure as the tool_defer block of /stats. Our tokenizer\'s counts, '
+      + 'corrected by the measured factor, so it is not a figure off an invoice.',
+  },
+  'inv-defer-loads': {
+    what: 'Deferred tools the model loaded back through search, and the wrong guesses among them.',
+    how: 'A wrong guess is a tool the thread had deferred that a search then loaded for the first '
+      + 'time: the user\'s history said it was unused, and it was needed.',
+    catch: 'A load counts as a use, so the next sessions keep that tool loaded from the start.',
   },
   'inv-real-reads': {
     what: 'Tokens the provider never had to read, because they were no longer in the prompt.',
@@ -1147,6 +1163,52 @@ function renderRealized(host) {
       num(r.requests || 0) + ' requests sent without them'),
     tile('inv-real-items', 'Items opted out', num((tools.control.excluded || []).length),
       'reversible, one prefix rebuild each')));
+}
+
+/**
+ * renderDeferNet is tool deferral's net saving (#485, #869): per account and per UTC day, what the
+ * deferred definitions did not cost, the searches that loaded them back, the wrong guesses (a
+ * deferred tool the model then needed), and the net after every search cost. The figures are the
+ * proxy's own ledger, stored per request, so they match the tool_defer block of /stats. Nothing is
+ * drawn when deferral never changed a request in the window: it is off unless the ultrahigh preset
+ * is on, and an empty panel would read as "deferral saved nothing".
+ */
+function renderDeferNet(host) {
+  const doc = tools.deferDoc;
+  if (!doc || !doc.days || !doc.days.length) return;
+  const t = doc.total;
+  const priced = t.requests > t.unpriced_requests;
+  const panel = el('div', { class: 'panel', 'data-testid': 'inv-defer-net' },
+    el('div', { class: 'section' }, el('h2', {}, 'What did tool deferral save?'),
+      el('span', { class: 'section-note' }, 'net of the names list and every search, measured on real requests')));
+  host.appendChild(panel);
+  panel.appendChild(el('div', { class: 'tiles' },
+    tile('inv-defer-net-usd', 'Net saving', priced ? usd(t.net_usd) : compact(t.tokens_deferred) + ' tok',
+      priced ? 'gross ' + usd(t.gross_usd) + ' less ' + usd(t.cost_usd) + ' of searches and list' : 'unpriced model; tokens only',
+      t.net_usd > 0 ? 'good' : ''),
+    tile('inv-defer-tokens', 'Tokens not carried', compact(t.tokens_deferred),
+      num(t.requests) + ' requests with deferred tools'),
+    tile('inv-defer-loads', 'Loaded through search', num(t.loaded),
+      num(t.searches) + ' searches; ' + num(t.wrong_guesses) + ' wrong guess' + (t.wrong_guesses === 1 ? '' : 'es'))));
+  const many = new Set(doc.days.map((d) => d.tenant)).size > 1;
+  const table = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Day (UTC)'), many ? el('th', {}, 'Account') : null,
+      el('th', { class: 'num' }, 'Tokens deferred'), el('th', { class: 'num' }, 'Loaded'),
+      el('th', { class: 'num' }, 'Wrong guesses'), el('th', { class: 'num' }, 'Gross'),
+      el('th', { class: 'num' }, 'Net'))));
+  const body = el('tbody');
+  for (const d of doc.days) {
+    const p = d.requests > d.unpriced_requests;
+    body.appendChild(el('tr', {},
+      el('td', { text: new Date(d.day).toISOString().slice(0, 10) }),
+      many ? el('td', {}, el('code', { text: d.tenant || '(default)' })) : null,
+      numTd(d.tokens_deferred), numTd(d.loaded), numTd(d.wrong_guesses),
+      el('td', { class: 'num' }, money(d.gross_usd, p)),
+      el('td', { class: 'num' }, money(d.net_usd, p))));
+  }
+  table.appendChild(body);
+  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
 }
 
 /** toggleExcluded posts one change and repaints from the server's answer, not from the DOM. */
@@ -2293,6 +2355,7 @@ function renderTools() {
   const rows = removableRows(rep);
   const groups = groupRemovable(rows);
   renderInvTop(host, rep, rows, groups);
+  renderDeferNet(host);
   invSection(host, 'Every tool server', 'Each MCP server you have added, what it declares, and how much of it was ever called.',
     (d) => serverTable(d, rep));
   invSection(host, 'Every tool', 'All of your add-on tools and skills, sortable, including the ones you did use.',
@@ -2431,10 +2494,19 @@ async function loadTools() {
     control = null; // 404 on an older proxy, or the feature is not built yet
     controlDoc = null;
   }
+  // Tool deferral's net saving, best-effort like the control: an older proxy has no route.
+  let deferDoc = null;
+  try {
+    deferDoc = await api('tool-defer');
+  } catch (err) {
+    if (aborted(err)) return;
+    deferDoc = null;
+  }
   try {
     tools.report = await api('tools');
     tools.control = control;
     tools.controlDoc = controlDoc;
+    tools.deferDoc = deferDoc;
   } catch (err) {
     if (aborted(err)) return;
     errorState(toolsView, 'Could not read the tool inventory', err);

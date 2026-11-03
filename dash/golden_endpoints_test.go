@@ -166,6 +166,7 @@ func goldenPaths() map[string]string {
 		"ka_recommend":    "/api/keepalive/recommend",
 		"tools":           "/api/tools",
 		"toolfilter":      "/api/toolfilter",
+		"tool_defer":      "/api/tool-defer",
 		"prompt":          "/api/prompt",
 		"kvcache":         "/api/kvcache",
 		"kv_rows":         "/api/kvcache/rows?limit=100",

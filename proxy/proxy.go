@@ -1843,7 +1843,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
-		h.deferLedger(r.Context(), di, usage, usageOK && status == http.StatusOK, deferSearches)
+		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that

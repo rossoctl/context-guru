@@ -529,8 +529,9 @@ func declares(body []byte, name string) bool {
 
 // deferLedger books one finished request in the net-saving ledger. The searches are the ones the
 // stream-through path read off its window (u.Searches) plus the ones serve's loop read off each
-// round it held (st): every path counts them, the SSE splice included (#871, defect 2).
-func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usageOK bool, st searchTally) {
+// round it held (st): every path counts them, the SSE splice included (#871, defect 2). The same
+// facts go to the dashboard row (cp), for the per-account, per-day net-saving panel (#869).
+func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u Usage, usageOK bool, st searchTally) {
 	if di == nil || !usageOK {
 		return
 	}
@@ -547,6 +548,39 @@ func (h *Handler) deferLedger(ctx context.Context, di *deferInfo, u Usage, usage
 		p, _ = h.opts.Prices.Price(ctx, di.model)
 	}
 	h.toolDefer().ledger.Add(r, p)
+	m, _ := tooldefer.Price(r, p)
+	distinct, wrong := wrongGuesses(di, loaded)
+	cp.noteDefer(r, m, distinct, wrong)
+}
+
+// wrongGuesses is the distinct tools this response's searches loaded that the request had deferred
+// and no earlier search in the transcript had loaded: a deferred tool the model then needed. A
+// tool loaded earlier is not counted again, because the guess was already counted when it was
+// loaded. Returns the distinct loaded names and the wrong guesses among them.
+func wrongGuesses(di *deferInfo, loaded []string) (distinct, wrong int) {
+	deferred := map[string]bool{}
+	for _, n := range di.outcome.Deferred {
+		deferred[n] = true
+	}
+	var before map[string]bool
+	seen := map[string]bool{}
+	for _, n := range loaded {
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		distinct++
+		if !deferred[n] {
+			continue
+		}
+		if before == nil {
+			before = tooldefer.Loaded(di.original)
+		}
+		if !before[n] {
+			wrong++
+		}
+	}
+	return distinct, wrong
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

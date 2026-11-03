@@ -410,6 +410,22 @@ type Event struct {
 	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
 	// column so the sweep's credit and its answer cost are never one number.
 	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
+	// Tool deferral's facts for this request (#485, #869), from the proxy's own deferral ledger:
+	// set only on a request deferral changed and the provider answered with usage. DeferTokens is
+	// the weight of the definitions it deferred (less those a search had already loaded), and
+	// DeferListTokens the names list's weight, in our tokenizer's units. DeferSearches is the
+	// server-side searches the response ran, DeferLoaded the distinct tools they loaded, and
+	// DeferWrongGuesses the loaded tools this thread had deferred and no earlier search had
+	// loaded: a deferred tool that was then needed. DeferGrossUSD and DeferNetUSD are the ledger's
+	// prices (tooldefer.Price): gross is what the deferred definitions would have cost, net takes
+	// off the names list and the search costs. Both 0 when the model has no price.
+	DeferTokens       int     `json:"defer_tokens,omitempty"`
+	DeferListTokens   int     `json:"defer_list_tokens,omitempty"`
+	DeferSearches     int     `json:"defer_searches,omitempty"`
+	DeferLoaded       int     `json:"defer_loaded,omitempty"`
+	DeferWrongGuesses int     `json:"defer_wrong_guesses,omitempty"`
+	DeferGrossUSD     float64 `json:"defer_gross_usd,omitempty"`
+	DeferNetUSD       float64 `json:"defer_net_usd,omitempty"`
 
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`

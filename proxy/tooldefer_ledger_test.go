@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tooldefer"
@@ -82,5 +84,62 @@ func TestToolDeferLedgerCountsSearchesOnEveryPath(t *testing.T) {
 				t.Fatalf("ledger = %+v, want 1 request with 1 search", st)
 			}
 		})
+	}
+}
+
+// #869: the request deferral changed lands on its dashboard row with the ledger's facts, so the
+// net-saving panel reads the same figures /stats does. The streamed turn's search loads Monitor,
+// which deferral had deferred and nothing had loaded before: one wrong guess.
+func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
+	us := httptest.NewServer(sseUpstream{})
+	defer us.Close()
+	cfg, _ := config.LoadBytes([]byte("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n"))
+	agg := metrics.NewAggregator()
+	pipe, _ := cfg.Build(agg)
+	rec, err := dash.NewRecorder(dash.Options{DBPath: t.TempDir() + "/d.db", BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL, Dashboard: rec,
+		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: tdPrices{}, InjectExpand: "never"})
+	defer h.Close()
+	ds := h.toolDefer()
+	for i, s := range []string{"p1", "p2", "p3"} {
+		ds.hist.Observe("", s, "/w", tdBody(), int64(i+1))
+	}
+	ds.prober.Seed(tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"}, tooldefer.Pass, time.Now())
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	b := bytes.Replace(tdBody(), []byte(`"max_tokens":64,`), []byte(`"max_tokens":64,"stream":true,`), 1)
+	if resp, out := tdPost(t, srv, b); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, out)
+	}
+	waitForRows(t, rec, 1)
+	page, _ := rec.DB().Requests(dash.Filter{TenantAll: true}, 0, 10)
+	if len(page.Requests) != 1 {
+		t.Fatalf("rows = %d, want 1", len(page.Requests))
+	}
+	e := page.Requests[0]
+	st := ds.ledger.Snapshot()
+	if e.DeferTokens <= 0 || int64(e.DeferTokens) != st.DeferredTokens || e.DeferListTokens <= 0 {
+		t.Errorf("row deferred %d tokens (list %d), ledger %d", e.DeferTokens, e.DeferListTokens, st.DeferredTokens)
+	}
+	if e.DeferSearches != 1 || e.DeferLoaded != 1 || e.DeferWrongGuesses != 1 {
+		t.Errorf("row searches %d, loaded %d, wrong %d; want 1, 1, 1", e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses)
+	}
+	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferNetUSD-st.Net) > 1e-12 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
+		t.Errorf("row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st.Money)
+	}
+}
+
+// A load is a wrong guess only for a tool this request deferred, and only the first time.
+func TestWrongGuessesCountsOnlyNewLoadsOfDeferredTools(t *testing.T) {
+	loadedBefore := `{"role":"assistant","content":[{"type":"tool_search_tool_result","tool_use_id":"s",` +
+		`"content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Workflow"}]}}]}`
+	di := &deferInfo{outcome: tooldefer.Outcome{Deferred: []string{"Monitor", "Workflow"}}, original: tdBody(loadedBefore)}
+	distinct, wrong := wrongGuesses(di, []string{"Monitor", "Monitor", "Workflow", "Bash", ""})
+	if distinct != 3 || wrong != 1 {
+		t.Errorf("distinct %d, wrong %d; want 3 (Monitor, Workflow, Bash) and 1 (Monitor)", distinct, wrong)
 	}
 }

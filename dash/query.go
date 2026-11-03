@@ -193,7 +193,9 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
 	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
-	r.session_alias`
+	r.session_alias,
+	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
+	r.defer_gross_usd, r.defer_net_usd`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -217,7 +219,9 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
 		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
-		&e.SessionAlias)
+		&e.SessionAlias,
+		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
+		&e.DeferGrossUSD, &e.DeferNetUSD)
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64

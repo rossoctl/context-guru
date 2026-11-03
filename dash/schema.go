@@ -208,6 +208,17 @@ CREATE TABLE IF NOT EXISTS requests (
   sweep_expand_tokens INTEGER NOT NULL DEFAULT 0,
   sweep_false_expands INTEGER NOT NULL DEFAULT 0,
   sweep_answer_usd    REAL    NOT NULL DEFAULT 0,
+  -- Tool deferral's per-request facts (#485, #869; Event.DeferTokens and the rest): tokens
+  -- deferred, the names list's tokens, server-side searches, tools they loaded, wrong guesses,
+  -- and the ledger's gross and net dollars. Counts and prices only. 0 on every row deferral did
+  -- not change, and on every earlier row, which is true: nothing was deferred then.
+  defer_tokens        INTEGER NOT NULL DEFAULT 0,
+  defer_list_tokens   INTEGER NOT NULL DEFAULT 0,
+  defer_searches      INTEGER NOT NULL DEFAULT 0,
+  defer_loaded        INTEGER NOT NULL DEFAULT 0,
+  defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
+  defer_gross_usd     REAL    NOT NULL DEFAULT 0,
+  defer_net_usd       REAL    NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -800,6 +811,15 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "sweep_expand_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "sweep_false_expands", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "sweep_answer_usd", "REAL NOT NULL DEFAULT 0"},
+	// Tool deferral's per-request facts (#869). Additive with a default of 0: an earlier row
+	// deferred nothing.
+	{"requests", "defer_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_list_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_searches", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_loaded", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "defer_net_usd", "REAL NOT NULL DEFAULT 0"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
 
@@ -50,6 +51,9 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
+	// did not change it.
+	deferFacts *deferFacts
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -438,6 +442,22 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	}
 }
 
+// deferFacts is what tool deferral did on one request, for the dashboard row (#869).
+type deferFacts struct {
+	tokens, list, searches, loaded, wrong int
+	gross, net                            float64
+}
+
+// noteDefer records tool deferral's ledger entry for this request: the request facts, its price
+// (zero when the model has none) and the tools its searches loaded and guessed wrong.
+func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded, wrong int) {
+	if c == nil {
+		return
+	}
+	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
+		loaded: loaded, wrong: wrong, gross: m.Gross, net: m.Net}
+}
+
 // finish builds the event and hands it off. Called once, after the response has
 // been written, so nothing here is on the client's critical path. usage may be
 // zero-valued with ok=false, in which case the row is marked partial and left
@@ -544,6 +564,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	if d := c.deferFacts; d != nil {
+		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
+		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
+		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
+	}
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
