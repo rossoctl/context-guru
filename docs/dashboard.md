@@ -130,9 +130,13 @@ Limits:
 
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the
-  provider's lifetime is unknown (no explicit breakpoints). Its figure is booked as an estimate: the
-  gross saving is right, and the net can be too high if a component broke the cache on that
-  request (accountant design §6.4).
+  provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
+  can be too high if a component broke the cache on that request (accountant design §6.4). The
+  event carries an estimate flag (`AccountantEstimated`), but it is **not stored or shown yet**: the
+  dashboard shows such a figure as an ordinary net figure. The design says a host must mark it.
+- A thread that continues another by content (a rewind, a fork) is priced as a first request. The
+  proxy passes the parent thread to the library, but the library does not read it, so the new thread
+  does not start from a copy of the parent's cache state (accountant design §4.1).
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
   library does not credit a keep-alive rescue after a gap past the TTL.
@@ -147,7 +151,13 @@ Limits:
 - Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
   the summarize ledger and the replay cap value those rows with the legacy rule at read time, and
   sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
-- The proxy computes the operations on every request when a dashboard is on. That cost is accepted.
+- The savings tracker runs only when a dashboard is on. The pipeline records what each component
+  changed on every request, with or without a dashboard (a scan of the changed messages). That cost
+  is accepted.
+- A request that asks for the one-hour tier and is billed the five-minute tier (a gateway that
+  downgrades it) keeps the one-hour TTL in the facts, because the facts are written before the
+  response. The library can then credit a rescue after a gap of 5 to 60 minutes that the provider
+  did not honour. The keeper uses the billed tier.
 
 ## Tool inventory panel
 

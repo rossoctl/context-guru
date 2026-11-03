@@ -2,13 +2,17 @@ package proxy
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 var pingAt = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
@@ -121,7 +125,7 @@ func TestEntryFactsReadsPingFactsUntilDropped(t *testing.T) {
 	if f.LastPing.IsZero() || f.PingWindow == "" || f.PingRead != nil {
 		t.Fatalf("%+v", f)
 	}
-	st.drop(accPingKey("s", "main")) // the capture spends them once the request is priced
+	st.drop(accPingKey("s", "main"), "") // the capture spends them once the request is priced
 	g := entryFacts("", "", nil, st, "s", th)
 	if !g.LastPing.IsZero() || g.PingWindow != "" {
 		t.Fatalf("second request got %+v", g)
@@ -206,7 +210,13 @@ func TestEntryFactsTakeTheLifetimeFromTheProvider(t *testing.T) {
 	}
 	one := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]}`)
 	if f := entryFacts(bschemas.Anthropic, "claude-sonnet-5", one, nil, "s", th); f.TTL != time.Hour {
-		t.Fatalf("1h breakpoint: %+v", f)
+		t.Fatalf("every breakpoint asks 1h: %+v", f)
+	}
+	// A 1h head over a 5m tail: the tail expires in five minutes, so the entry's TTL is five.
+	mixed := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"t","cache_control":{"type":"ephemeral"}}]}]}`)
+	if f := entryFacts(bschemas.Anthropic, "claude-sonnet-5", mixed, nil, "s", th); f.TTL != 5*time.Minute {
+		t.Fatalf("a mixed ask keeps the five-minute TTL: %+v", f)
 	}
 	if f := entryFacts("", "m", nil, nil, "s", th); f.Lifetime != accountant.LifetimeUnknown {
 		t.Fatalf("unknown provider: %+v", f)
@@ -227,11 +237,66 @@ func TestPingFactsSurviveARequestThatBooksNothing(t *testing.T) {
 	if _, ok := st.peek(key); !ok {
 		t.Fatal("entryFacts spent the ping facts: a request that books nothing would lose them")
 	}
-	st.drop(key)
+	st.drop(key, "")
 	if _, ok := st.peek(key); ok {
 		t.Fatal("drop kept the facts")
 	}
-	st.drop(key) // idempotent
+	st.drop(key, "") // idempotent
 	var nilStore *PingStore
-	nilStore.drop(key)
+	nilStore.drop(key, "")
+}
+
+// A ping that arrives while a request is in flight is not spent by that request: finish drops only
+// the facts the request read, and the newer ping stays for the next one.
+func TestDropKeepsANewerPing(t *testing.T) {
+	st := NewPingStore()
+	key := accPingKey("s", "main")
+	st.put(key, accountant.PingFacts{PingWindow: "w1", LastPing: pingAt})
+	read, _ := st.peek(key) // the request reads window w1 ...
+	st.put(key, accountant.PingFacts{PingWindow: "w2", LastPing: pingAt.Add(time.Minute)})
+	st.drop(key, read.PingWindow) // ... and is priced after w2 arrived
+	f, ok := st.peek(key)
+	if !ok || f.PingWindow != "w2" {
+		t.Fatalf("the newer ping was dropped with the older one: %+v %v", f, ok)
+	}
+	st.drop(key, "w2")
+	if _, ok := st.peek(key); ok {
+		t.Fatal("the facts the request read were kept")
+	}
+}
+
+// The capture spends the ping facts only when it prices the request: finish with no usage (nothing
+// computed) leaves them for the next request, finish with usage spends them. A finish that dropped
+// them unconditionally, or under another key, fails here.
+func TestFinishSpendsThePingFactsOnlyWhenItPrices(t *testing.T) {
+	body := []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":[{"role":"user","content":"hi"}]}`)
+	run := func(usage Usage, usageOK bool) (spent bool) {
+		rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { rec.Close() })
+		pings := NewPingStore()
+		PingSavings(okReport(), pings)
+		key := accPingKey("s", "main")
+		if _, ok := pings.peek(key); !ok {
+			t.Fatal("the ping stored nothing")
+		}
+		c := &capture{rec: rec, savings: newSavingsTracker(), pings: pings, tenant: "t1", provider: "anthropic",
+			model: "m", route: "/v1/messages", start: time.Now(), status: 200, trace: apply.Trace{Session: "s"}}
+		c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Now()}, body)
+		c.accEnd(thread.Result{ID: thread.Primary}, body, nil)
+		if _, ok := pings.peek(key); !ok {
+			t.Fatal("accEnd spent the facts before the request was priced")
+		}
+		c.finish(usage, usageOK, false, 0, 0)
+		_, still := pings.peek(key)
+		return !still
+	}
+	if run(Usage{}, false) {
+		t.Error("a request with no usage spent the ping facts: the next request loses the ping gap")
+	}
+	if !run(Usage{FreshInput: 10, CacheWrite: 100}, true) {
+		t.Error("a priced request left the ping facts for the next one")
+	}
 }

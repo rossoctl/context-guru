@@ -157,3 +157,37 @@ func TestKVCacheSuggestRunsOnAReadOnlyHandle(t *testing.T) {
 		t.Fatalf("KVCacheSuggest on a read-only handle: %v", err)
 	}
 }
+
+// A file written before the split columns existed lacks request_components.priced_by and its two
+// siblings. A read-only handle cannot ALTER, so the shim must supply them, or a reader of an older
+// file fails with "no such column".
+func TestOpenReadOnlyShimsAnOlderRequestComponentsTable(t *testing.T) {
+	path := seededFile(t)
+	rw, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{"priced_by", "saved_first_usd", "saved_replay_usd"} {
+		if _, err := rw.sql.Exec(`ALTER TABLE request_components DROP COLUMN ` + c); err != nil {
+			t.Fatalf("drop %s: %v", c, err)
+		}
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer db.Close()
+	var n int
+	var by string
+	var first float64
+	if err := db.sql.QueryRow(`SELECT COUNT(*), COALESCE(MAX(priced_by), ''), COALESCE(MAX(saved_first_usd), 0)
+		FROM request_components`).Scan(&n, &by, &first); err != nil {
+		t.Fatalf("reading the missing columns: %v", err)
+	}
+	if by != "" || first != 0 {
+		t.Fatalf("missing columns read as %q, %v; want their defaults", by, first)
+	}
+}

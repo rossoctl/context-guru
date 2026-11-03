@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	"github.com/rossoctl/accountant"
 )
@@ -113,6 +114,19 @@ func TestEnvelopeChangeIDIsStableAcrossTurns(t *testing.T) {
 	}
 }
 
+// A removal among repeated names cannot be placed, so nothing is reported and the sum check gates the
+// event: the first "x" removed and the second rewritten used to come out as the second removed and the
+// first rewritten, with the right sizes at the wrong positions.
+func TestEnvelopeReportsNothingForARemovalAmongRepeatedNames(t *testing.T) {
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	x1, x2, y := `{"name":"x","description":"one"}`, `{"name":"x","description":"two!!"}`, `{"name":"y"}`
+	cl := []byte(`{"tools":[` + x1 + `,` + x2 + `,` + y + `],` + msgs + `}`)
+	fw := []byte(`{"tools":[{"name":"x","description":"two!!!"},` + y + `],` + msgs + `}`)
+	if ops := envelopeOps(cl, fw); len(ops) != 0 {
+		t.Fatalf("ops %+v, want none for an ambiguous removal", ops)
+	}
+}
+
 // A tool name that repeats still matches by occurrence, so the operations explain every byte. Before,
 // the last duplicate won the name and the operations did not match the bodies (the sum check failed).
 func TestEnvelopeOpsExplainDuplicateToolNames(t *testing.T) {
@@ -120,7 +134,6 @@ func TestEnvelopeOpsExplainDuplicateToolNames(t *testing.T) {
 	x1 := `{"name":"x","description":"first"}`
 	x2 := `{"name":"x","description":"second, longer"}`
 	for _, tc := range []struct{ name, cl, fw string }{
-		{"second duplicate removed", `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`, `{"tools":[` + x1 + `],` + msgs + `}`},
 		{"first duplicate rewritten", `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`,
 			`{"tools":[{"name":"x","description":"1"},` + x2 + `],` + msgs + `}`},
 		{"a duplicate added", `{"tools":[` + x1 + `],` + msgs + `}`, `{"tools":[` + x1 + `,` + x2 + `],` + msgs + `}`},
@@ -132,4 +145,31 @@ func TestEnvelopeOpsExplainDuplicateToolNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The head-TTL op reaches the library's premium effect through the real reporter: the proxy relabels
+// the client's 5m system breakpoint to 1h, the response bills the write at 1h, and the library books
+// the premium on the headttl change. The library finds the head by the prefix "headttl:"; a ChangeID
+// under any other prefix is priced as nothing.
+func TestHeadTTLRelabelBooksThePremium(t *testing.T) {
+	sys := func(ttl string) string {
+		return `"system":[{"type":"text","text":"HEAD","cache_control":{"type":"ephemeral"` + ttl + `}}]`
+	}
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	client := []byte(`{` + sys("") + `,` + msgs + `}`)
+	fwd := []byte(`{` + sys(`,"ttl":"1h"`) + `,` + msgs + `}`)
+	ops := envelopeOps(client, fwd)
+	if len(ops) != 1 || ops[0].Operator != "context-guru.headttl" {
+		t.Fatalf("ops %+v, want one headttl op", ops)
+	}
+	st := newSavingsTracker()
+	req := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, client)
+	st.end(req, accountant.Thread{ID: "main"}, fwd, ops, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
+	res := st.compute(req, Usage{CacheWrite: 2000, CacheWrite1h: 2000})
+	for _, e := range res.CacheEffects {
+		if e.Kind == accountant.EffectTTLPremium {
+			return
+		}
+	}
+	t.Fatalf("no ttlPremium effect for ChangeID %q: %+v", ops[0].ChangeID, res.CacheEffects)
 }

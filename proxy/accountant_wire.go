@@ -6,6 +6,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -43,8 +44,9 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
 	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
-	c.savings.end(c.accReq, t, forwarded, ops,
-		entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t))
+	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
+	c.accPingWindow = facts.PingWindow
+	c.savings.end(c.accReq, t, forwarded, ops, facts)
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
@@ -54,24 +56,26 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 // request's forwarded body, so the library derives the extent the ping read from its usage
 // (accountant design §5.2).
 //
-// TTL and Lifetime come from apply.CacheLifetime, the same rule the cold gate uses: an exact expiry
+// The Lifetime kind comes from apply.CacheLifetime, the same rule the cold gate uses: an exact expiry
 // for a provider with explicit breakpoints, a minimum for OpenAI's 30-minute entries, else unknown.
 // An unknown lifetime cannot prove an expiry, so the library would never rescue after a gap past
-// the TTL (design §5.2). A 1h breakpoint in the forwarded body still lengthens a TTL that is short.
+// the TTL (design §5.2). The TTL is 1h only when EVERY breakpoint of the forwarded body asks for it,
+// as the keeper decides: a 1h head over a 5m tail leaves a tail that expires in five minutes. The
+// keeper also needs the billed tier, which is known only after the response; the facts are written
+// before it, so a request that asks for 1h and is billed 5m keeps the 1h here. The library then
+// treats a gap of 5 to 60 minutes as hot, which can overstate a rescue (an edge case: a gateway that
+// downgrades the tier).
 func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte, pings *PingStore,
 	session string, t accountant.Thread) accountant.EntryFacts {
 	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
+	// The kind comes from the cold gate's rule. The duration is taken again with the keeper's tier
+	// (every breakpoint asks 1h): apply.CacheLifetime lengthens it for a single 1h ask.
 	switch ttl, kind := apply.CacheLifetime(provider, model, forwarded); kind {
 	case apply.CacheLifetimeExact:
-		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeExact
+		facts.TTL, facts.Lifetime = modelinfo.CacheLifetime(string(provider), model, apply.AllBreakpointsAskExtendedTTL(forwarded)),
+			accountant.LifetimeExact
 	case apply.CacheLifetimeMinimum:
 		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeMinimum
-	}
-	for _, bp := range accBreakpoints(forwarded) {
-		if bp.TTL == "1h" && facts.TTL < time.Hour {
-			facts.TTL = time.Hour
-			break
-		}
 	}
 	if pf, ok := pings.peek(accPingKey(session, t.ID)); ok {
 		pf.Apply(&facts)

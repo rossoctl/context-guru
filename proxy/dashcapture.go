@@ -126,7 +126,10 @@ type capture struct {
 	accClient []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
 	accThread string
-	accDone   bool
+	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
+	// newer ping that arrived while the request was in flight.
+	accPingWindow string
+	accDone       bool
 	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
 	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
 	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so
@@ -689,7 +692,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		if c.rounds <= 1 {
 			e.SetAccountant(c.savings.compute(c.accReq, usage))
 			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread))
+			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
 		}
 	}
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)

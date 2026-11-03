@@ -56,18 +56,22 @@ func (s *PingStore) peek(key string) (accountant.PingFacts, bool) {
 // take is peek and drop in one step.
 func (s *PingStore) take(key string) (accountant.PingFacts, bool) {
 	f, ok := s.peek(key)
-	s.drop(key)
+	s.drop(key, f.PingWindow)
 	return f, ok
 }
 
-// drop deletes the facts for key: they belong to the next priced request only.
-func (s *PingStore) drop(key string) {
+// drop deletes the facts for key: they belong to the next priced request only. window is the
+// PingWindow the request read; facts with another window are a newer ping, put after the request
+// read, and stay for the next request. An empty window drops whatever is there.
+func (s *PingStore) drop(key, window string) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.m, key)
+	if f, ok := s.m[key]; ok && (window == "" || f.PingWindow == window) {
+		delete(s.m, key)
+	}
 }
 
 // pingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not

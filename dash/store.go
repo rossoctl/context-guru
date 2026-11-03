@@ -337,8 +337,8 @@ func OpenReadOnly(path string) (*DB, error) {
 // file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
 // query with "no such column" would break a reader (the cache-campaign tool opens live databases
 // this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
-// view named `requests` that adds every missing column as its default. Temp objects are searched
-// before main, so every unqualified `requests` resolves to the shim; the view is per connection and
+// view named after each table with additive columns (`requests`, `request_components`) that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified table name resolves to the shim; the view is per connection and
 // writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
 // last, because it forbids creating even a temp object.
 //
@@ -349,30 +349,37 @@ func init() {
 			return nil
 		}
 		ctx := context.Background()
-		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests')`, nil)
-		if err != nil {
-			return err
-		}
-		have := map[string]bool{}
-		vals := make([]driver.Value, 1)
-		for rows.Next(vals) == nil {
-			if n, ok := vals[0].(string); ok {
-				have[n] = true
-			}
-		}
-		rows.Close()
-		var extra string
+		// One shim per table that has additive columns (requests, request_components, ...).
+		tables := map[string]bool{}
 		for _, c := range additiveColumns {
-			if c.table == "requests" && !have[c.column] {
-				extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
-			}
+			tables[c.table] = true
 		}
-		if extra != "" && len(have) > 0 {
-			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
+		for table := range tables {
+			rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('`+table+`')`, nil)
+			if err != nil {
 				return err
 			}
+			have := map[string]bool{}
+			vals := make([]driver.Value, 1)
+			for rows.Next(vals) == nil {
+				if n, ok := vals[0].(string); ok {
+					have[n] = true
+				}
+			}
+			rows.Close()
+			var extra string
+			for _, c := range additiveColumns {
+				if c.table == table && !have[c.column] {
+					extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+				}
+			}
+			if extra != "" && len(have) > 0 {
+				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT *`+extra+` FROM main.`+table, nil); err != nil {
+					return err
+				}
+			}
 		}
-		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		_, err := conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
 		return err
 	})
 }

@@ -67,8 +67,12 @@ func envelopeOps(client, forwarded []byte) []accountant.Operation {
 // toolsOps matches declarations by name. An unnamed declaration (an Anthropic server tool carries a
 // type, and a name too, but a malformed one may not) is matched by its position in the unnamed ones.
 // A name that repeats is matched by its occurrence: the second "x" of the client body is the second
-// "x" of the forwarded body, so the operations keep matching the bytes.
+// "x" of the forwarded body, so an append or an in-place rewrite keeps matching the bytes. A removal
+// among repeated names cannot be placed (the declarations are indistinguishable, so which one went is
+// unknown), and the reporter returns nil: the sum check then sends the event to the no-saving
+// fallback, as for any change it cannot explain.
 func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
+	repeated := false
 	key := func(arr []gjson.Result) ([]string, map[string]int) {
 		keys, at := make([]string, len(arr)), map[string]int{}
 		seen := map[string]int{}
@@ -84,6 +88,7 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 				k = base + "\x00" + strconv.Itoa(n)
 			}
 			seen[base]++
+			repeated = repeated || seen[base] > 1
 			keys[i] = k
 			at[k] = i
 		}
@@ -104,6 +109,9 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 		removedBytes += n
 		removedHash.Write([]byte(k))
 		removedHash.Write([]byte{0})
+	}
+	if len(removed) > 0 && repeated {
+		return nil
 	}
 	if len(removed) > 0 {
 		op := envelopeOp("toolfilter", accountant.Position{Section: accountant.SectionTools, Index: removed[0].From},
@@ -171,7 +179,9 @@ func systemOps(cl, fw []string) []accountant.Operation {
 			continue
 		}
 		if cl[i] != fw[j] {
-			ops = append(ops, envelopeOp("headttl", pos, len(cl[i]), len(fw[j]), "sys-relabelled:"+hashOf(textOf(cl[i]))))
+			// The library finds the head by the prefix "headttl:" (design §4.4), not "cg:". Its state is per
+			// thread, so the thread part of the spelled-out form is not needed to keep two heads apart.
+			ops = append(ops, envelopeOpID("headttl", pos, len(cl[i]), len(fw[j]), "headttl:"+hashOf(textOf(cl[i]))))
 		}
 	}
 	return ops
