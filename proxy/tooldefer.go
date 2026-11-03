@@ -14,6 +14,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
@@ -27,8 +28,9 @@ import (
 // only the ultrahigh preset sets), the probe through the host's Dispatcher, the retry of the original
 // request after a 400, the ENABLE_TOOL_SEARCH flag from /tool-search, and the /stats ledger.
 
-// deferState is one handler's deferral state. Built lazily, so a proxy no tenant of which asks for
-// deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
+// deferState is one handler's deferral state. Built at start when a configuration turns deferral
+// on (startToolDefer), else at the first request that asks for it, so a proxy no tenant of which
+// asks for deferral pays nothing. Once built it never changes; every field is safe for concurrent use.
 type deferState struct {
 	hist   *tooldefer.Mem
 	stop   func()
@@ -134,6 +136,83 @@ func (h *Handler) toolDefer() *deferState {
 	d.stop = d.hist.Open(0, d.prober)
 	h.defer_.state = d
 	return d
+}
+
+// startWait bounds how long New waits for the stored deferral state to load. The load is a few
+// small tables; the bound only keeps a broken disk from holding the start.
+const startWait = 10 * time.Second
+
+// startToolDefer builds the deferral state at start, when this proxy's configuration, or any
+// tenant's, turns deferral on, and waits (bounded) for the stored probe verdicts and history to
+// load. Without it the state is built at the first ultrahigh request and loads in the background,
+// so that request reads "probe unknown" and its whole session defers nothing (#871, defect 3).
+// Start-up only: the request path never waits.
+func (h *Handler) startToolDefer() {
+	tenants := h.deferTenantsAtStart()
+	if tenants == nil {
+		return
+	}
+	ds := h.toolDefer()
+	h.deferGate() // so /stats reports the state from the start
+	ok := ds.hist.WaitReady(startWait)
+	seeds := make([]<-chan struct{}, 0, len(tenants))
+	for _, id := range tenants {
+		seeds = append(seeds, ds.hist.SeedTenant(id))
+	}
+	deadline := time.After(startWait)
+	for _, done := range seeds {
+		select {
+		case <-done:
+		case <-deadline:
+			ok = false
+		}
+	}
+	slog.Info("context-guru: tool deferral state loaded at start", "tenants", len(tenants), "ready", ok)
+}
+
+// deferTenantsAtStart is the tenants whose configuration turns deferral on ("" for a
+// single-tenant proxy), or nil when none does.
+func (h *Handler) deferTenantsAtStart() []string {
+	reg := h.registry()
+	if reg == nil {
+		if on, _ := deferOn(h.static.Load()); on {
+			return []string{""}
+		}
+		return nil
+	}
+	ts, err := reg.List()
+	if err != nil {
+		slog.Warn("context-guru: tool deferral not loaded at start: the tenant list is unreadable", "err", err)
+		return nil
+	}
+	var out []string
+	for _, t := range ts {
+		if !t.Disabled && docDefers(reg.Config(t)) {
+			out = append(out, t.ID)
+		}
+	}
+	return out
+}
+
+// docDefers reports whether a configuration document turns tool deferral on: its pipeline holds
+// toolfilter with `defer: auto` (the ultrahigh preset, or a document that sets it).
+func docDefers(doc string) bool {
+	c, err := config.LoadBytes([]byte(doc))
+	if err != nil {
+		return false
+	}
+	has := false
+	for _, n := range c.Pipeline {
+		has = has || n == "toolfilter"
+	}
+	node, ok := c.Components["toolfilter"]
+	if !has || !ok {
+		return false
+	}
+	var tf struct {
+		Defer string `yaml:"defer"`
+	}
+	return node.Decode(&tf) == nil && tf.Defer == "auto"
 }
 
 // deferFallback is the record store for a tenant whose session store is not durable.

@@ -664,7 +664,7 @@ func (p tdPricesOnly) Price(_ context.Context, model string) (modelinfo.Price, b
 	return modelinfo.Price{Input: 3e-6, Output: 15e-6}, true
 }
 
-// Round 4 (#861). A purge after a restart, with no ultrahigh request since (so this process never
+// Round 4 (#861). A purge after a restart on a preset that does not defer (so this process never
 // opened tool deferral's file), still deletes the tenant's rows in the file and reports them. A
 // purge with no file creates none.
 func TestToolDeferPurgeReachesAnUnopenedFile(t *testing.T) {
@@ -685,8 +685,9 @@ func TestToolDeferPurgeReachesAnUnopenedFile(t *testing.T) {
 	stop() // flushes the history
 	f.Close()
 
-	// The restarted proxy: no ultrahigh request, so the file is not open.
-	cfg, _ := config.LoadBytes([]byte("preset: ultrahigh\n"))
+	// The restarted proxy, now on a preset that does not defer: the file is not open (ultrahigh opens
+	// it at start since #871).
+	cfg, _ := config.LoadBytes([]byte("preset: xhigh\n"))
 	agg := metrics.NewAggregator()
 	pipe, _ := cfg.Build(agg)
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: "http://127.0.0.1:1", ToolDeferPath: path})

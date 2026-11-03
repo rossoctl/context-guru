@@ -450,6 +450,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	}
 	h.keeper = newKeeper(h)
 	h.keeper.start()
+	// Tool deferral's stored state, loaded before the first request when a config turns it on.
+	h.startToolDefer()
 	h.threads = thread.New()
 	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
