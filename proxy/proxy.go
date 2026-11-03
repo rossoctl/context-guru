@@ -2167,7 +2167,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 		case isSSE && searchOn:
 			// Our search on Chat Completions: the stream is buffered, so a call to it can be answered
-			// in band (tooldefer.AggregateChatSSE rebuilds the message). The client loses its stream
+			// in band (expand.AggregateSSE rebuilds the message). The client loses its stream
 			// for the requests of a thread with deferred tools; see #825.
 			sse, sseBuffered = true, true
 			respBody, _ = io.ReadAll(resp.Body)
@@ -2269,9 +2269,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		msg := respBody
 		if isSSE {
 			agg, ok := expand.AggregateSSE(wire, respBody)
-			if !ok && searchOn && wire == schema.WireOpenAI {
-				agg, ok = tooldefer.AggregateChatSSE(respBody)
-			}
 			if !ok {
 				bail()
 				return

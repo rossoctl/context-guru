@@ -270,24 +270,6 @@ func TestApplySearchFailsOpen(t *testing.T) {
 	}
 }
 
-func TestAggregateChatSSE(t *testing.T) {
-	raw := "data: {\"id\":\"x\",\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"context_guru_tools\",\"arguments\":\"\"}}]}}]}\n\n" +
-		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"names\\\":[\\\"Mon\"}}]}}]}\n\n" +
-		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"itor\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
-		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"
-	msg, ok := AggregateChatSSE([]byte(raw))
-	if !ok {
-		t.Fatal("not rebuilt")
-	}
-	calls, other := SearchCalls(cgschema.WireOpenAI, msg)
-	if other || len(calls) != 1 || strings.Join(calls[0].Names, ",") != "Monitor" {
-		t.Fatalf("calls=%v other=%v msg=%s", calls, other, msg)
-	}
-	if gjson.GetBytes(msg, "usage.prompt_tokens").Int() != 10 || gjson.GetBytes(msg, "choices.0.finish_reason").String() != "tool_calls" {
-		t.Fatalf("msg = %s", msg)
-	}
-}
-
 // Our search never sends defer_loading: through our gateway, GLM drops a Chat Completions tool that
 // carries it inside `function`, and gpt-5.5 Responses refuses it without tool_search. A deferred tool
 // is removed instead. Checked on every request of a thread: first, after an add-back, and a repair.

@@ -3,6 +3,7 @@ package expand
 import (
 	"bufio"
 	"bytes"
+	"sort"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -17,16 +18,18 @@ import (
 // stream can't be reconstructed (unknown dialect / malformed) — the caller then
 // streams the bytes through unchanged (fail-open).
 //
-// Only the Anthropic Messages event stream is reconstructed (the streaming coding
-// agents in scope use it). For other dialects it returns ok=false.
+// It reconstructs the Anthropic Messages stream, the Responses stream (from its terminal event)
+// and the Chat Completions stream (wire "openai"). For other dialects it returns ok=false.
 func AggregateSSE(provider string, raw []byte) (msg []byte, ok bool) {
-	if schema.IsResponses(provider) {
+	switch {
+	case schema.IsResponses(provider):
 		return aggregateResponsesSSE(raw)
+	case provider == schema.WireOpenAI:
+		return aggregateChatSSE(raw)
+	case provider == schema.WireAnthropic:
+		return aggregateAnthropicSSE(raw)
 	}
-	if provider != schema.WireAnthropic {
-		return nil, false
-	}
-	return aggregateAnthropicSSE(raw)
+	return nil, false
 }
 
 // Responses' terminal event carries the complete response, including its output
@@ -168,6 +171,95 @@ func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 				out, _ = sjson.SetRaw(out, "content.-1", b.start.Raw)
 			}
 		}
+	}
+	return []byte(out), true
+}
+
+// aggregateChatSSE rebuilds a Chat Completions object from its event stream: the first choice's
+// text and tool calls (by index, arguments joined), its finish reason and the usage chunk. ok=false
+// when the stream holds no chunk.
+func aggregateChatSSE(raw []byte) ([]byte, bool) {
+	type call struct {
+		id, name string
+		args     strings.Builder
+	}
+	var text, reasoning strings.Builder
+	calls := map[int64]*call{}
+	var order []int64
+	finish, usage, id, model := "", "", "", ""
+	seen := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		p := strings.TrimSpace(line[5:])
+		if p == "" || p == "[DONE]" || !gjson.Valid(p) {
+			continue
+		}
+		ev := gjson.Parse(p)
+		if !ev.Get("choices").Exists() {
+			continue // not a Chat Completions chunk
+		}
+		seen = true
+		if id == "" {
+			id, model = ev.Get("id").String(), ev.Get("model").String()
+		}
+		if u := ev.Get("usage"); u.IsObject() {
+			usage = u.Raw
+		}
+		ch := ev.Get("choices.0")
+		if !ch.Exists() {
+			continue
+		}
+		if f := ch.Get("finish_reason").String(); f != "" {
+			finish = f
+		}
+		d := ch.Get("delta")
+		text.WriteString(d.Get("content").String())
+		reasoning.WriteString(d.Get("reasoning_content").String())
+		d.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
+			i := tc.Get("index").Int()
+			c := calls[i]
+			if c == nil {
+				c = &call{}
+				calls[i] = c
+				order = append(order, i)
+			}
+			if v := tc.Get("id").String(); v != "" {
+				c.id = v
+			}
+			if v := tc.Get("function.name").String(); v != "" {
+				c.name = v
+			}
+			c.args.WriteString(tc.Get("function.arguments").String())
+			return true
+		})
+	}
+	if !seen {
+		return nil, false
+	}
+	msg := `{"role":"assistant"}`
+	msg, _ = sjson.Set(msg, "content", text.String())
+	if reasoning.Len() > 0 {
+		// GLM and Kimi stream their reasoning: the follow-up's assistant turn keeps it.
+		msg, _ = sjson.Set(msg, "reasoning_content", reasoning.String())
+	}
+	sort.Slice(order, func(a, b int) bool { return order[a] < order[b] })
+	for _, i := range order {
+		c := calls[i]
+		tc, _ := sjson.Set(`{"type":"function","function":{}}`, "id", c.id)
+		tc, _ = sjson.Set(tc, "function.name", c.name)
+		tc, _ = sjson.Set(tc, "function.arguments", c.args.String())
+		msg, _ = sjson.SetRaw(msg, "tool_calls.-1", tc)
+	}
+	out := `{"object":"chat.completion","choices":[{"index":0}]}`
+	out, _ = sjson.Set(out, "id", id)
+	out, _ = sjson.Set(out, "model", model)
+	out, _ = sjson.SetRaw(out, "choices.0.message", msg)
+	out, _ = sjson.Set(out, "choices.0.finish_reason", finish)
+	if usage != "" {
+		out, _ = sjson.SetRaw(out, "usage", usage)
 	}
 	return []byte(out), true
 }

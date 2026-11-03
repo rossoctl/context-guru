@@ -54,3 +54,27 @@ func TestAggregateSSENonAnthropicBails(t *testing.T) {
 		t.Fatal("non-anthropic dialect must return ok=false")
 	}
 }
+
+// The Chat Completions stream: text, tool calls joined by index, finish reason, usage, and the
+// reasoning deltas GLM and Kimi stream (#825).
+func TestAggregateSSEChat(t *testing.T) {
+	raw := "data: {\"id\":\"x\",\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"think\",\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"context_guru_tools\",\"arguments\":\"\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"names\\\":[\\\"Mon\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"itor\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"
+	msg, ok := AggregateSSE("openai", []byte(raw))
+	if !ok {
+		t.Fatal("not rebuilt")
+	}
+	tc := gjson.GetBytes(msg, "choices.0.message.tool_calls.0")
+	if tc.Get("id").String() != "c1" || tc.Get("function.name").String() != "context_guru_tools" ||
+		gjson.Get(tc.Get("function.arguments").String(), "names.0").String() != "Monitor" {
+		t.Fatalf("tool call = %s", tc.Raw)
+	}
+	if gjson.GetBytes(msg, "choices.0.message.reasoning_content").String() != "think" {
+		t.Fatalf("reasoning lost: %s", msg)
+	}
+	if gjson.GetBytes(msg, "usage.prompt_tokens").Int() != 10 || gjson.GetBytes(msg, "choices.0.finish_reason").String() != "tool_calls" {
+		t.Fatalf("msg = %s", msg)
+	}
+}
