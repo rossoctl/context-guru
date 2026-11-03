@@ -1291,10 +1291,12 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 	return PingsPerSpan(s.gap, idleSeconds, maxPings)
 }
 
-// planPings is how many pings this span attracts under the per-wait plan (#868). The count comes
-// from keepalive.Policy.SpanPings, the keeper's own rule; the span's length caps it as in pings.
-func (s pingSpan) planPings(idleSeconds float64, pol keepalive.Policy) int {
-	return s.pings(idleSeconds, pol.SpanPings(s.facts))
+// planPings is how many pings this span attracts under the per-wait plan (#868). The count and the
+// spacing come from keepalive.Policy.SpanPings, the keeper's own rule (pol.Idle is the 5-minute spacing);
+// the span's length caps the count as in pings.
+func (s pingSpan) planPings(pol keepalive.Policy) int {
+	n, idle := pol.SpanPings(s.facts)
+	return s.pings(idle.Seconds(), n)
 }
 
 // toolStopList is keepalive.ToolStopReasons as a SQL list of string literals. The names are fixed
@@ -1307,26 +1309,42 @@ func toolStopList() string {
 	return strings.Join(q, ",")
 }
 
-// factsCTE reads each request with the facts the plan needs. toolSeen is true when this request or an
-// earlier one of the same THREAD called a tool: a tool stop reason, or a stored wait on its own tool.
-// Pings are excluded by the filter, as in every replay. One extra window, partitioned by thread.
+// factsCTE reads each request with the facts the plan needs.
+//
+//   - seen is true when this request or an earlier one of the same THREAD called a tool: a tool stop
+//     reason, or a stored wait on its own tool.
+//   - hour is the BILLED tier, as keepalive.ResolveTier decides it: the request asked 1 hour
+//     (cache_ttl) and the last write of the thread (this row's own, or the latest before it) was billed
+//     entirely at 1 hour (cache_write_1h >= cache_write). A row that wrote nothing inherits.
+//
+// Pings are excluded by the filter, as in every replay. Two extra windows, partitioned by thread.
 func factsCTE(cond string) string {
-	return `t AS (
+	return `a AS (
 		SELECT r.id AS id, r.tenant_id AS tenant_id, r.session_id AS session_id, r.thread_id AS thread_id,
 		       r.ts AS ts, r.cache_read + r.cache_write AS prefix, r.cache_write AS cache_write,
 		       r.cost_usd AS cost_usd, r.model AS model, r.provider AS provider,
 		       r.cache_miss_reason AS cache_miss_reason, r.cache_ttl AS cache_ttl,
 		       COALESCE(r.stop_reason, '') AS stop, COALESCE(r.waiting_for, '') AS wf,
-		       MAX(CASE WHEN r.stop_reason IN (` + toolStopList() + `) OR r.waiting_for = 'own_tool'
-		                THEN 1 ELSE 0 END)
-		         OVER (PARTITION BY r.tenant_id, r.session_id, r.thread_id ORDER BY r.ts, r.id) AS seen
-		FROM requests r WHERE ` + cond + `)`
+		       CASE WHEN r.stop_reason IN (` + toolStopList() + `) OR r.waiting_for = 'own_tool' THEN 1 ELSE 0 END AS tool,
+		       CASE WHEN r.cache_write > 0 THEN
+		              ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id, r.thread_id ORDER BY r.ts, r.id) * 2
+		              + CASE WHEN r.cache_ttl = '` + apply.TTLEphemeral1h + `' AND r.cache_write_1h >= r.cache_write
+		                     THEN 1 ELSE 0 END
+		            END AS wcode
+		FROM requests r WHERE ` + cond + `),
+	b AS (
+		SELECT *, MAX(tool) OVER w AS seen, MAX(wcode) OVER w AS lastw
+		FROM a WINDOW w AS (PARTITION BY tenant_id, session_id, thread_id ORDER BY ts, id
+		                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)),
+	t AS (
+		SELECT *, CASE WHEN cache_ttl = '` + apply.TTLEphemeral1h + `' AND COALESCE(lastw, 0) % 2 = 1
+		               THEN 1 ELSE 0 END AS hour FROM b)`
 }
 
 // scanFacts builds the SpanFacts of one stored row.
-func scanFacts(thread, stop, wf, provider, cacheTTL string, seen int64) keepalive.SpanFacts {
+func scanFacts(thread, stop, wf, provider string, seen, hour int64) keepalive.SpanFacts {
 	return keepalive.SpanFacts{Cause: wf, StopReason: stop, Subagent: keepalive.IsSubagentThread(thread),
-		ToolSeen: seen > 0, OpenAI: provider == "openai", OneHour: cacheTTL == apply.TTLEphemeral1h}
+		ToolSeen: seen > 0, OpenAI: provider == "openai", OneHour: hour > 0}
 }
 
 // DefaultWaitPolicy is the shipped keep-alive policy for the replay: the per-wait plan on, with
@@ -1354,9 +1372,9 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at 20k (the shipped default since #858) and not at the account's own configured floor, because this
-// package does not read tenant configuration — an account that tuned its floor sees a replay of
-// the default policy, and the panel's copy names 20k so the page stays self-consistent.
+// gates at 20k (the shipped default since #858) and not at the account's own configured floor: the host
+// hands this package only the plan settings (SetWaitPolicy), not the floor. An account that tuned its
+// floor sees a replay of the default policy, and the panel's copy names 20k so the page stays self-consistent.
 //
 // THE COUNT (#858, #868). The live policy picks the count per wait (keepalive.Policy.WaitPings: a tool
 // wait up to 8, background K+3, a person K+1, no tool call yet 0). With withFacts, every span carries the
@@ -1405,11 +1423,11 @@ func (d *DB) pingSpans(f Filter, minPrefix int64, withFacts bool) ([]pingSpan, e
 // windows run over the same filtered rows.
 func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pingSpan, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH `+factsCTE(cond)+`, s AS (
-		SELECT session_id, thread_id, provider, cache_ttl, stop, wf, seen, prefix,
+		SELECT session_id, thread_id, provider, hour, stop, wf, seen, prefix,
 		       ROW_NUMBER() OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - 1 AS turn,
 		       (LEAD(ts) OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - ts) / 1000.0 AS gap_s
 		FROM t)
-		SELECT session_id, gap_s, thread_id, provider, cache_ttl, stop, wf, seen FROM s
+		SELECT session_id, gap_s, thread_id, provider, hour, stop, wf, seen FROM s
 		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
 		append(args, minPrefix)...)
 	if err != nil {
@@ -1418,14 +1436,14 @@ func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pin
 	defer rows.Close()
 	var out []pingSpan
 	for rows.Next() {
-		var sess, thread, prov, ttl, stop, wf string
+		var sess, thread, prov, stop, wf string
 		var gap sql.NullFloat64
-		var seen int64
-		if err := rows.Scan(&sess, &gap, &thread, &prov, &ttl, &stop, &wf, &seen); err != nil {
+		var seen, hour int64
+		if err := rows.Scan(&sess, &gap, &thread, &prov, &hour, &stop, &wf, &seen); err != nil {
 			return nil, err
 		}
 		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid,
-			facts: scanFacts(thread, stop, wf, prov, ttl, seen)})
+			facts: scanFacts(thread, stop, wf, prov, seen, hour)})
 	}
 	return out, rows.Err()
 }
@@ -1468,11 +1486,11 @@ func (d *DB) expiries(f Filter, withFacts bool) ([]expiry, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH `+factsCTE(cond)+`, s AS (
 		SELECT session_id, ts, cost_usd, model, provider, cache_miss_reason, cache_write,
 		       LAG(ts) OVER w AS prev_ts, LAG(thread_id) OVER w AS p_thread, LAG(stop) OVER w AS p_stop,
-		       LAG(wf) OVER w AS p_wf, LAG(provider) OVER w AS p_prov, LAG(cache_ttl) OVER w AS p_ttl,
+		       LAG(wf) OVER w AS p_wf, LAG(provider) OVER w AS p_prov, LAG(hour) OVER w AS p_hour,
 		       LAG(seen) OVER w AS p_seen
 		FROM t WINDOW w AS (PARTITION BY tenant_id, session_id ORDER BY ts, id))
 		SELECT session_id, (ts - prev_ts) / 1000.0, cost_usd, provider, model,
-		       p_thread, p_stop, p_wf, p_prov, p_ttl, p_seen FROM s
+		       p_thread, p_stop, p_wf, p_prov, p_hour, p_seen FROM s
 		WHERE cache_miss_reason = 'ttl_expiry' AND cache_write > 0 AND prev_ts IS NOT NULL`, args...)
 	if err != nil {
 		return nil, err
@@ -1480,16 +1498,27 @@ func (d *DB) expiries(f Filter, withFacts bool) ([]expiry, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e expiry
-		var prov, mod, pThread, pStop, pWf, pProv, pTTL string
-		var pSeen int64
-		if err := rows.Scan(&e.session, &e.gap, &e.usd, &prov, &mod, &pThread, &pStop, &pWf, &pProv, &pTTL, &pSeen); err != nil {
+		var prov, mod, pThread, pStop, pWf, pProv string
+		var pSeen, pHour int64
+		if err := rows.Scan(&e.session, &e.gap, &e.usd, &prov, &mod, &pThread, &pStop, &pWf, &pProv, &pHour, &pSeen); err != nil {
 			return nil, err
 		}
 		e.ttl = missLifetime(prov, mod)
-		e.facts = scanFacts(pThread, pStop, pWf, pProv, pTTL, pSeen)
+		e.facts = scanFacts(pThread, pStop, pWf, pProv, pSeen, pHour)
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// planReaches reports whether the plan's schedule for the wait before an expiry reaches it. A thread on
+// the 1-hour tier keeps an entry that lives an hour, so its reach is judged against that lifetime.
+func planReaches(pol keepalive.Policy, e expiry) bool {
+	n, idle := pol.SpanPings(e.facts)
+	ttl := e.ttl
+	if e.facts.OneHour {
+		ttl = time.Hour
+	}
+	return covers(idle.Seconds(), n, e.gap, ttl)
 }
 
 // covers reports whether n pings at idle X reach an expiry that came after `gap` seconds of idle, on a
@@ -1550,6 +1579,8 @@ type KeepAliveCalc struct {
 	// off (#858). With "wait_plan" the ladder carries a rung of the live plan, marked current, and the
 	// fixed-K rungs are the comparison. Each rung also states its own model.
 	Plan string `json:"plan"`
+	// Counts are the account's plan counts, present with "wait_plan", so the page can state them.
+	Counts *PlanCounts `json:"plan_counts,omitempty"`
 	// PrefixSource says where the prefill came from, so nobody reads a number as measured when
 	// it was typed: "session", "account_median" or "given".
 	PrefixSource string `json:"prefix_source,omitempty"`
@@ -1578,10 +1609,19 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	if k <= 0 {
 		k = recMaxPings
 	}
-	wait.MaxPings = k
+	// The keeper applies per-wait counts only below 300 s of Idle: at 300 s or more it keeps the base.
+	if idleSeconds >= 300 {
+		wait.WaitPlan = false
+	}
+	wait.MaxPings, wait.Idle = k, time.Duration(idleSeconds*float64(time.Second))
 	out := &KeepAliveCalc{IdleSeconds: idleSeconds, Prefix: prefix, Model: model, Rows: []CalcRow{}, Plan: PlanFixed}
 	if wait.WaitPlan {
 		out.Plan = PlanWait
+		out.Counts = &PlanCounts{
+			ToolWaitMax:     orInt(wait.ToolWaitMaxPings, keepalive.DefaultToolWaitMaxPings),
+			BackgroundExtra: orInt(wait.BackgroundExtraPings, keepalive.DefaultBackgroundExtraPings),
+			HumanExtra:      orInt(wait.HumanExtraPings, keepalive.DefaultHumanExtraPings),
+			MaxPings:        keepalive.MaxWaitPings}
 	}
 	var p modelinfo.Price
 	if price != nil && model != "" {
@@ -1642,13 +1682,13 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		// is its own count's (a tool wait up to 8, a thread with no tool call yet 0).
 		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k), Current: true, Plan: PlanWait}
 		for _, e := range exps {
-			if covers(idleSeconds, wait.SpanPings(e.facts), e.gap, e.ttl) {
+			if planReaches(wait, e) {
 				row.Convertible++
 				row.ConvertibleUSD += e.usd
 			}
 		}
 		for _, sp := range spans {
-			row.Pings += int64(sp.planPings(idleSeconds, wait))
+			row.Pings += int64(sp.planPings(wait))
 		}
 		finish(&row)
 		out.Rows = append(out.Rows, row)
@@ -1801,6 +1841,22 @@ type KeepAliveRecommendation struct {
 	KeepAliveCoverage
 }
 
+// PlanCounts are the counts of the per-wait plan in force: a tool wait up to ToolWaitMax pings,
+// background work base + BackgroundExtra, a person base + HumanExtra, none above MaxPings (or the base).
+type PlanCounts struct {
+	ToolWaitMax     int `json:"tool_wait_max"`
+	BackgroundExtra int `json:"background_extra"`
+	HumanExtra      int `json:"human_extra"`
+	MaxPings        int `json:"max_pings"`
+}
+
+func orInt(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
 // RecInterval is a 90% range in dollars. Never a point.
 type RecInterval struct {
 	LoUSD float64 `json:"lo_usd"`
@@ -1829,7 +1885,7 @@ const (
 // recMaxPings) and the fixed-K interval comes beside it; with WaitPlan off the interval is the
 // fixed-K one, as before #858.
 func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveRecommendation, error) {
-	wait.MaxPings = recMaxPings
+	wait.MaxPings, wait.Idle = recMaxPings, recIdleSeconds*time.Second
 	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD, Plan: PlanFixed}
 	if wait.WaitPlan {
 		out.Plan = PlanWait
@@ -1925,7 +1981,7 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 		var v float64
 		for _, m := range bySession[s] {
 			if planned {
-				if covers(recIdleSeconds, pol.SpanPings(m.facts), m.gap, m.ttl) {
+				if planReaches(pol, m) {
 					v += m.usd * recRecoverableShare
 				}
 			} else if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
@@ -1934,7 +1990,7 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 		}
 		for _, sp := range bySpan[s] {
 			if planned {
-				v -= float64(sp.planPings(recIdleSeconds, pol)) * pingUSD
+				v -= float64(sp.planPings(pol)) * pingUSD
 			} else {
 				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,16 +38,25 @@ const planBody = `{"model":"aws/claude-sonnet-5","max_tokens":32000,"stream":tru
 type turn struct {
 	names []string
 	stop  string
+	// status is the HTTP status (0: 200). hour asks the 1-hour tier on every breakpoint; billed1h says the
+	// response billed its write at 1 hour. read says the turn only reads the cache (writes nothing).
+	status         int
+	hour, billed1h bool
+	read           bool
 }
 
+func (t turn) withHour(billed bool) turn { t.hour, t.billed1h = true, billed; return t }
+func (t turn) readOnly() turn            { t.read = true; return t }
+func (t turn) failed() turn              { t.status = 500; return t }
+
 var (
-	tCall = turn{[]string{"Bash"}, "tool_use"}
-	tEnd  = turn{nil, "end_turn"}
+	tCall = turn{names: []string{"Bash"}, stop: "tool_use"}
+	tEnd  = turn{stop: "end_turn"}
 )
 
 // keeperPings is the ping count the KEEPER plans for the wait after the last of seq, on thread.
 // 0 when the keeper plans no ping (no tool yet, done).
-func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) int {
+func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) (int, time.Duration) {
 	t.Helper()
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	d := &nopDispatcher{}
@@ -57,35 +67,65 @@ func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) 
 		MaxUSDPerPing: 0.25, MinPrefixTokens: 20000, WaitPlan: true}
 	key := keepalive.Key{Tenant: "t1", Session: "s1", Thread: thread}
 	for i, r := range seq {
+		if i > 0 {
+			k.Arrive(key) // the next request arrives: the earlier entry is retired, as live
+		}
 		hdr := http.Header{}
 		hdr.Set("Authorization", "Bearer sk-x")
 		hdr.Set("Anthropic-Version", "2023-06-01")
+		body, status := planBody, r.status
+		if status == 0 {
+			status = 200
+		}
+		if r.hour {
+			body = strings.ReplaceAll(body, `"cache_control":{"type":"ephemeral"}`, `"cache_control":{"type":"ephemeral","ttl":"1h"}`)
+		}
+		u := keepalive.Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop}
+		if r.read {
+			u.CacheWrite = 0
+		}
+		if r.billed1h {
+			u.CacheWrite1h = u.CacheWrite
+		}
 		k.Record(keepalive.Record{Key: key, StartedAt: now.Add(-time.Duration(len(seq)-1-i) * time.Second),
-			Body: []byte(planBody), Provider: bschemas.Anthropic, Route: "/v1/messages", Status: 200,
-			Usage:        keepalive.Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop},
+			Body: []byte(body), Provider: bschemas.Anthropic, Route: "/v1/messages", Status: status,
+			Usage:        u,
 			ToolUseNames: r.names, UsageOK: true, Policy: pol, Header: hdr,
 			Hold: func() dispatch.Ref { d.next++; return dispatch.Ref(fmt.Sprint(d.next)) }})
 	}
-	return k.Plans("t1", false, "s1")[thread].PingsLeft
+	pl := k.Plans("t1", false, "s1")[thread]
+	return pl.PingsLeft, pl.Idle
 }
 
 // dashPings is the count the DASHBOARD replay gives the same thread: it stores the rows the proxy
 // would write (the wait cause comes from the same classifier), reads them back through pingSpans,
 // and asks the span for its count. The last span is open, so it gets its full count.
-func dashPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) int {
+func dashPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) (int, time.Duration) {
 	t.Helper()
 	db := openTestDB(t)
 	var evs []*Event
 	for i, r := range seq {
 		e := kaAgent(1_000_000+int64(i)*1000, "s1", 0.01)
 		e.CacheRead, e.CacheWrite, e.ThreadID, e.StopReason = 48576, 1200, thread, r.stop
+		if r.read {
+			e.CacheWrite = 0
+		}
+		if r.hour {
+			e.CacheTTL = "ephemeral_1h"
+		}
+		if r.billed1h {
+			e.CacheWrite1h = e.CacheWrite
+		}
+		if r.status != 0 {
+			e.Status = r.status
+		}
 		// What the proxy stores: the classifier's answer for this response. The last row's open-task
 		// counts are the ones the keeper's OpenTasks hook reports.
 		b, m := 0, 0
 		if i == len(seq)-1 {
 			b, m = bg, tm
 		}
-		e.WaitingFor, e.WaitTool = waitcause.ClassifyWaitingFor(r.names, r.stop, false, true, b, m)
+		e.WaitingFor, e.WaitTool = waitcause.ClassifyWaitingFor(r.names, r.stop, r.status != 0, true, b, m)
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -95,21 +135,25 @@ func dashPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) in
 	if err != nil {
 		t.Fatal(err)
 	}
-	pol := keepalive.Policy{WaitPlan: true, MaxPings: base}
-	n := 0
-	for _, sp := range spans {
-		if sp.open {
-			n = sp.planPings(280, pol)
+	pol := keepalive.Policy{WaitPlan: true, MaxPings: base, Idle: 280 * time.Second}
+	var open *pingSpan
+	for i := range spans {
+		if spans[i].open {
+			open = &spans[i]
 		}
 	}
-	return n
+	if open == nil {
+		return 0, 0
+	}
+	_, idle := pol.SpanPings(open.facts)
+	return open.planPings(pol), idle
 }
 
 // TestDashboardReplayMatchesTheKeeper pins the dashboard's plan to the keeper's: the same responses
 // give the same ping count through both paths. It fails when either side changes a rule alone.
 func TestDashboardReplayMatchesTheKeeper(t *testing.T) {
 	sub := "a:abc"
-	ask := turn{[]string{"AskUserQuestion"}, "tool_use"}
+	ask := turn{names: []string{"AskUserQuestion"}, stop: "tool_use"}
 	for _, base := range []int{2, 10} {
 		for _, tc := range []struct {
 			name   string
@@ -125,18 +169,28 @@ func TestDashboardReplayMatchesTheKeeper(t *testing.T) {
 			{"main, end_turn, teammate", "", []turn{tCall, tEnd}, 0, 1},
 			{"subagent, end_turn", sub, []turn{tCall, tEnd}, 0, 0},
 			{"subagent, end_turn, background", sub, []turn{tCall, tEnd}, 1, 0},
-			{"subagent, handback", sub, []turn{tCall, {[]string{"SubagentHandback"}, "tool_use"}}, 0, 0},
-			{"done", "", []turn{tCall, {[]string{"StructuredOutput"}, "tool_use"}}, 0, 0},
+			{"subagent, handback", sub, []turn{tCall, {names: []string{"SubagentHandback"}, stop: "tool_use"}}, 0, 0},
+			{"done", "", []turn{tCall, {names: []string{"StructuredOutput"}, stop: "tool_use"}}, 0, 0},
 			{"no tool call yet", "", []turn{tEnd, tEnd}, 0, 0},
 			{"no tool call yet, background open", "", []turn{tEnd, tEnd}, 1, 0},
 			{"earlier tool call counts", "", []turn{tCall, tEnd, tEnd}, 0, 0},
-			{"tool stop, no names, background open", "", []turn{tCall, {nil, "tool_use"}}, 1, 0},
+			{"tool stop, no names, background open", "", []turn{tCall, {stop: "tool_use"}}, 1, 0},
+			{"1-hour tier, own tool", "", []turn{tCall.withHour(true), tCall.withHour(true)}, 0, 0},
+			{"1-hour tier, a person", "", []turn{tCall.withHour(true), tEnd.withHour(true)}, 0, 0},
+			{"1-hour tier, no tool call yet", "", []turn{tEnd.withHour(true), tEnd.withHour(true)}, 0, 0},
+			{"1-hour tier, read-only turn inherits", "", []turn{tCall.withHour(true), tEnd.withHour(true).readOnly()}, 0, 0},
+			{"mixed: asked 1 hour, billed 5 minutes", "", []turn{tCall.withHour(false), tCall.withHour(false)}, 0, 0},
+			{"mixed: 1 hour then billed 5 minutes", "", []turn{tCall.withHour(true), tCall.withHour(false)}, 0, 0},
+			{"failed call after a tool call", "", []turn{tCall, tEnd.failed()}, 0, 0},
 		} {
 			t.Run(fmt.Sprintf("%s/base%d", tc.name, base), func(t *testing.T) {
-				want := keeperPings(t, base, tc.thread, tc.bg, tc.tm, tc.seq)
-				got := dashPings(t, base, tc.thread, tc.bg, tc.tm, tc.seq)
+				want, wantIdle := keeperPings(t, base, tc.thread, tc.bg, tc.tm, tc.seq)
+				got, gotIdle := dashPings(t, base, tc.thread, tc.bg, tc.tm, tc.seq)
 				if got != want {
 					t.Errorf("dashboard replay = %d pings, keeper = %d", got, want)
+				}
+				if want > 0 && gotIdle != wantIdle {
+					t.Errorf("dashboard replay spaces pings %v apart, keeper %v", gotIdle, wantIdle)
 				}
 			})
 		}
@@ -146,13 +200,16 @@ func TestDashboardReplayMatchesTheKeeper(t *testing.T) {
 // One known gap, stated and pinned (not hidden): a tool stop with NO tool name and nothing open is stored
 // as a wait for a person, as an ask-a-person tool is. The row cannot tell the two apart. The keeper reads
 // the first as a tool wait (8 pings), the replay as a person (base + 1). The case needs a spliced
-// sniff window, which is rare.
+// sniff window, which is rare. The same window gives the second known gap: the keeper counts a response
+// with an incomplete name list as a tool call (calledATool), and the stored row has no such fact, so the
+// replay's "tool seen" misses it (a thread whose only tool calls were spliced reads "no tool yet" until a
+// tool stop is stored).
 func TestDashboardReplayKnownGapSplicedToolStop(t *testing.T) {
-	seq := []turn{tCall, {nil, "tool_use"}}
-	if got := keeperPings(t, 2, "", 0, 0, seq); got != 8 {
+	seq := []turn{tCall, {stop: "tool_use"}}
+	if got, _ := keeperPings(t, 2, "", 0, 0, seq); got != 8 {
 		t.Fatalf("keeper = %d, want 8", got)
 	}
-	if got := dashPings(t, 2, "", 0, 0, seq); got != 3 {
+	if got, _ := dashPings(t, 2, "", 0, 0, seq); got != 3 {
 		t.Errorf("dashboard replay = %d, want 3 (base + 1)", got)
 	}
 }
@@ -298,5 +355,30 @@ func TestPlanReplayStaysNearTheFixedKCost(t *testing.T) {
 	t.Logf("%d rows: fixed-K reads %v, plan reads %v", n, fixed, plan)
 	if plan > 6*fixed+2*time.Second {
 		t.Errorf("plan reads %v against fixed-K reads %v", plan, fixed)
+	}
+}
+
+// At an idle of 300 s or more the keeper keeps the base count, so the plan rung models fixed K.
+func TestCalculatorAtThreeHundredSecondsModelsFixedK(t *testing.T) {
+	fx := planFixture(t)
+	c, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 300, 100_000, "aws/claude-sonnet-5", planPrice, 2, keepalive.Policy{WaitPlan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Plan != PlanFixed || len(c.Rows) != 4 {
+		t.Errorf("plan = %q, rows = %d, want fixed_k and 4", c.Plan, len(c.Rows))
+	}
+}
+
+// The plan's counts reach the response, so the page does not hard-code them.
+func TestCalculatorStatesThePlanCounts(t *testing.T) {
+	fx := planFixture(t)
+	c, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, "aws/claude-sonnet-5", planPrice, 2,
+		keepalive.Policy{WaitPlan: true, ToolWaitMaxPings: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Counts == nil || c.Counts.ToolWaitMax != 6 || c.Counts.HumanExtra != keepalive.DefaultHumanExtraPings {
+		t.Errorf("plan_counts = %+v", c.Counts)
 	}
 }

@@ -9524,8 +9524,9 @@ function kaRungName(r) {
 
 /** kaRungCoverage says how far a rung reaches. The plan's reach depends on the wait, so it has no single figure. */
 function kaRungCoverage(r) {
+  const pc = kaState.calc && kaState.calc.plan_counts;
   return r.plan === 'wait_plan'
-    ? 'by wait: a tool up to 8, a person base+1'
+    ? (pc ? `by wait: a tool up to ${pc.tool_wait_max}, a person base+${pc.human_extra}` : 'by wait')
     : r.coverage_seconds.toFixed(0) + 's = ' + r.max_pings + '×' + kaState.x + ' + 300';
 }
 
@@ -9577,7 +9578,7 @@ async function loadKACalc() {
   for (const r of c.rows) {
     // Emphasis by weight, not by a new hue: the current row is the accent, the rest recede.
     tb.appendChild(el('tr', { class: r.current ? 'is-current' : 'muted-row',
-      'data-testid': 'ka-ladder-k' + r.max_pings },
+      'data-testid': r.plan === 'wait_plan' ? 'ka-ladder-plan' : 'ka-ladder-k' + r.max_pings },
       el('td', {}, kaRungName(r)),
       el('td', {}, kaRungCoverage(r)),
       el('td', { class: 'num' }, num(r.convertible_misses)),
@@ -9612,9 +9613,12 @@ async function loadKACalc() {
     'what they cost, and what the pings cost. A replay of your past gaps, not a forecast. ' +
     (c.plan === 'wait_plan'
       ? 'The first row is the live plan: it picks the count from what each thread waits for ' +
-        '(up to 8 for a tool wait, the base plus 3 for background work, the base plus 1 for a person, ' +
+        (c.plan_counts
+          ? `(up to ${c.plan_counts.tool_wait_max} for a tool wait, the base plus ${c.plan_counts.background_extra} for background work, ` +
+            `the base plus ${c.plan_counts.human_extra} for a person, `
+          : '(') +
         'none before the thread has called a tool). The fixed rows send the same count for every wait, ' +
-        'for comparison. '
+        'for comparison. It shows your account setting after campaigns and manager strategies, not a per-session override. '
       : 'Your account has the per-wait plan switched off, so every row is a fixed count and the row ' +
         'with your count is the current one. ') +
     'Catching grows sharply from one ping to two, then flattens while ping cost keeps climbing.'));

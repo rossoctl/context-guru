@@ -6,6 +6,12 @@
  "keepalive_recorded_rows": 585,
  "model": "m-unpriced",
  "plan": "wait_plan",
+ "plan_counts": {
+  "background_extra": 3,
+  "human_extra": 1,
+  "max_pings": 11,
+  "tool_wait_max": 8
+ },
  "prefix_source": "account_median",
  "prefix_tokens": 30998,
  "priced": false,

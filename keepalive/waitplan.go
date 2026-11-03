@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"strings"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
@@ -133,8 +134,9 @@ type SpanFacts struct {
 	ToolSeen bool
 	// OpenAI is true for an OpenAI request. The plan does not cover OpenAI: it keeps the base count.
 	OpenAI bool
-	// OneHour is true when the request asked for the 1-hour cache tier. That tier keeps its own
-	// schedule: the base count.
+	// OneHour is true when the thread's BILLED tier is the 1-hour one, as ResolveTier decides it
+	// (the request asked 1 hour on every breakpoint, and the last write was billed at 1 hour).
+	// The thread then keeps the schedule of Policy.ForOneHour.
 	OneHour bool
 }
 
@@ -147,28 +149,37 @@ func storedWait(cause, stopReason string) string {
 	return toolStopWait(cause, cause != waitcause.WaitingHuman && cause != waitcause.WaitingOwnTool, stopReason)
 }
 
-// SpanPings is the ping count the plan gives the idle span after a response, from the facts a stored
-// row holds. It is the keeper's decision in one place, for a replay:
+// SpanPings is the schedule the plan gives the idle span after a response, from the facts a stored
+// row holds: the ping count and the spacing between pings. It is the keeper's decision in one place,
+// for a replay. p.Idle is the 5-minute spacing; p.KeepAlive must be on.
 //
-//   - the count WaitPings gives for the wait cause;
-//   - 0 for a thread with no tool call yet (the no-tool rule);
-//   - 0 for a finished thread (waiting_for done) and for a failed call (retry): the keeper holds nothing for them;
-//   - MaxPings with WaitPlan off, for OpenAI, for the 1-hour tier, and for a row that stored neither a
-//     wait cause nor a stop reason (an old row: nothing to replay from).
+//   - 5-minute tier: the count WaitPings gives for the wait cause, at p.Idle. Only when p.Idle is under
+//     300 s, as in the keeper; at 300 s or more the base count stays.
+//   - 1-hour tier: the schedule of ForOneHour (MaxPings1h pings, Idle1h apart; 1 ping at 59 minutes by default).
+//   - 0 pings for a thread with no tool call yet (the no-tool rule) and for a finished thread (done).
+//     The no-tool rule holds on both tiers.
+//   - A stored "retry" wait (a non-2xx response) gets 0 pings: the keeper does not track a response
+//     whose status is not 2xx (Record returns first), so it holds nothing for the span.
+//   - MaxPings with WaitPlan off, for OpenAI, and for a row that stored neither a wait cause nor a stop
+//     reason (an old row: nothing to replay from).
 //
 // TestDashboardReplayMatchesTheKeeper (package dash) runs the keeper and this function on the same cases.
-func (p Policy) SpanPings(s SpanFacts) int {
+func (p Policy) SpanPings(s SpanFacts) (pings int, idle time.Duration) {
 	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
-		return p.MaxPings
+		return p.MaxPings, p.Idle
 	}
 	w := storedWait(s.Cause, s.StopReason)
 	if w == waitcause.WaitingDone || w == waitcause.WaitingRetry || !s.ToolSeen {
-		return 0
+		return 0, p.Idle
 	}
 	if s.OneHour {
-		return p.MaxPings
+		q := p.ForOneHour()
+		return q.MaxPings, q.Idle
 	}
-	return p.WaitPings(w, s.Subagent)
+	if p.Idle >= 300*time.Second {
+		return p.MaxPings, p.Idle
+	}
+	return p.WaitPings(w, s.Subagent), p.Idle
 }
 
 // calledATool reports whether a response called a tool: a tool_use name or a tool stop reason. A

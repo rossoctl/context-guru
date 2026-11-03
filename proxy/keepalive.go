@@ -547,26 +547,51 @@ func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session strin
 	return out
 }
 
-// DashWaitPolicy is the dashboard's READ hook for an account's per-wait ping plan settings (#868):
-// keepalive_wait_plan and the three counts. The calculator replays the plan with them. Wired in
-// cmd/context-guru-proxy beside the keep-alive plans.
+// DashWaitPolicy is the dashboard's READ hook for an account's EFFECTIVE per-wait ping plan (#868). The
+// calculator replays the plan with it. It reports WaitPlan false, the fixed-K model, whenever the
+// request path would turn the plan off for the account:
+//
+//   - keepalive_wait_plan is false;
+//   - an active campaign owns the count (resolvePolicyWindows), where the tenant's keep-alive is on;
+//   - an active manager strategy sits in the 1-hour band (Idle of 300 s or more), where the keeper
+//     applies no per-wait counts;
+//   - the account cannot be read (fail to the old model, not to the new one).
+//
+// A per-session override also turns the plan off, but it is per session: no account-wide figure can
+// carry it. Wired in cmd/context-guru-proxy beside the keep-alive plans.
 func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 	return func(id string) keepalive.Policy {
+		off := keepalive.Policy{}
 		tn := h.static.Load()
 		if reg := h.registry(); reg != nil && h.opts.Tenants != nil {
 			t, err := reg.Get(id)
 			if err != nil {
-				return dash.DefaultWaitPolicy(0)
+				return off
 			}
 			if tn, err = h.opts.Tenants.ForTenant(t); err != nil {
-				return dash.DefaultWaitPolicy(0)
+				return off
 			}
 		}
 		if tn == nil {
-			return dash.DefaultWaitPolicy(0)
+			return off
 		}
 		c := tn.Cache
-		return keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
-			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings}
+		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
+			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
+		if pc := h.predRT().forTenant(tn.ID); pc != nil && c.KeepAlive {
+			pc.mu.Lock()
+			active := pc.meta.Mode == campaignModeActive
+			pc.mu.Unlock()
+			if active {
+				return off
+			}
+		}
+		if h.keeper != nil {
+			if best := h.keeper.bestStrategy(tn.ID, h.keeper.now(), true); best != nil &&
+				time.Duration(best.IdleSeconds)*time.Second >= 300*time.Second {
+				return off
+			}
+		}
+		return pol
 	}
 }
