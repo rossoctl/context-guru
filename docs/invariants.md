@@ -268,7 +268,7 @@ pays one cache rewrite. 3 reasons:
 
 - **What counts as a `break` (#900):** only a deferred tool's own error result: "not loaded",
   "no such tool" or "does not exist". A direct call that worked is a use, not a break.
-- **Signals (from PR #900, in review round 2, not merged; names can still change):**
+- **Signals (from PR #900, merged to main as 44f8318d on 2026-11-04; not released yet):**
   - `/stats` `tool_defer.client_loads`: the loads the proxy added to Claude Code's ToolSearch
     results. `tool_defer.direct_calls`: deferred tools that the model called with no load.
   - `add_backs` now counts the #825 path only.
@@ -326,7 +326,7 @@ pays one cache rewrite. 3 reasons:
 | G7 | A `cg_*` metric for tool deferral. Only `/stats` and the database show it today. | Export the `/stats` `tool_defer` counters as `cg_tooldefer_*`. | No |
 | G9 | The expand rate of `extract_llm` alone (E2). The database counts expands per request, not per component that made the marker. Only the sweep has its own column. | Record the component that made each restored marker, as a count per component (for example `expands_by_component` in `request_components`). | No |
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
-| G6 | Tool deferral disables, by reason (T1 to T4). The names exist in PR #900, which is not merged. T4 needs the log, because the dashboard database does not store a disable. | Merge #900. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
+| G6 | Tool deferral disables, by reason (T1 to T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
