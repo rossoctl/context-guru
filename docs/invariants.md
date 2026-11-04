@@ -138,7 +138,58 @@ Not written yet. Inputs, from the release checks done by hand (RELEASING.md Part
 - Every read-only `cg.py` command exits 0. This check found #781.
 - The default release binary links no OpenTelemetry, gRPC or protobuf.
 
-## Tool deferral, option B (#898)
+## Tool deferral (`toolfilter` defer, preset `ultrahigh`)
+
+**Purpose:** cut the weight of tool definitions that the user does not use. It never removes a
+tool, and it never rewrites the cached prefix. A deferred tool is sent with `defer_loading: true`.
+The model sees only its name, and loads its definition through a search when it needs it.
+
+- **The rule:** the user's last 3 sessions declared the tool and did not use it. The project used it
+  in none of its last 10 sessions. It is not on the never-defer list. It weighs at least 200 tokens.
+  An MCP server counts as one unit. A load counts as a use.
+- **The deferred set is fixed per thread,** also across a restart (the `cg:tdf:` record).
+- **The search tool:** a native search when one exists, ours only when none exists.
+  - Claude Code with ToolSearch on: the server-side `tool_search_tool_bm25` today. After #900,
+    Claude Code's own ToolSearch.
+  - Codex, which has its own `tool_search`: nothing is deferred (#897).
+  - GPT, GLM, Kimi: our `context_guru_tool_search`, which removes the tool and adds it back in band
+    (#875).
+- **Opt-in and experimental.** Source: #861 and its follow-ups, `docs/tool-search-matrix.md` (#900).
+
+**Signals that exist on main (verified 2026-11-04):**
+- `/stats` `tool_defer`: `requests`, `decisions`, `rebuilds`, `rebuilds_unproven`, `history_live`,
+  `accounts`, `probes_pass`, `probes_fail`, `turned_off`, `retries_400`, `add_backs`,
+  `wrong_guesses`, `dropped_searches`, `mixed_searches`, and
+  `ledger{gross_usd, cost_usd, net_usd, requests, searches, deferred_tokens, unpriced_requests}`.
+- `requests` columns: `defer_tokens`, `defer_list_tokens`, `defer_searches`,
+  `defer_dropped_searches`, `defer_loaded`, `defer_wrong_guesses`, `defer_gross_usd`,
+  `defer_net_usd`. The table `tool_defer_history`.
+- **No `cg_*` metric** for tool deferral on main. The first is `cg_tooldefer_client_disabled_total`
+  in #900. Gap G7.
+- **The net saving** (#891): `defer_net_usd` = the gross weight of the deferred definitions, at the
+  tier each request paid, times the billed-token factor 1.6857, minus the names list, the searches
+  and the loaded definitions. It equals `/stats` `ledger.net_usd`.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | Baseline |
+|---|---|---|---|---|---|
+| D1 | intent | Tool deferral saves more than it costs. | `ledger.net_usd`; `sum(defer_net_usd)` | below $0 over 7 days | laptop 2026-11-04, about 8 h: net **+$1.07** (gross $1.09, cost $0.017), 361 requests |
+| D2 | side effect | It does not rewrite the cache in the middle of a thread. | `rebuilds`, `rebuilds_unproven`; misses on threads with `defer_tokens > 0` against threads without | any `rebuilds_unproven`; miss rate over the no-deferral rate + 2 points | rebuilds 0 |
+| D3 | side effect | A deferred tool is rarely needed. | `wrong_guesses / decisions` (deferred, then loaded) | to set after 7 days | 0 searches, 0 wrong guesses |
+| D4 | side effect | No user loses a tool. | `break` disables (T1); the #871 accuracy test | any `break`; #871 below its baseline | #871 Opus: 66 of 80 with deferral, 72 of 80 without |
+| D5 | contract | A 400 caused by deferral never reaches the user. | `retries_400`; `turned_off` per model | any `turned_off`; report each one | 0 and 0 |
+| D6 | contract | A request never carries 2 search tools. | `retries_400` with an "Only one tool_search" error | any | 0 |
+| D7 | side effect | Deferral does not make answers slower to start. | `ttfb_ms` on rows with `defer_tokens > 0` against rows without, same model | p50 over +20% | to measure |
+| D8 | intent | The probe passes before deferral starts. | `probes_pass`, `probes_fail` | any `probes_fail` | 1 and 0 |
+| D9 | contract | A purge deletes the tenant's deferral data. | **Gap G8.** `PurgeToolDefer` deletes the rows, but no counter shows it. | — | — |
+
+- **Not monitored, enforced in code and tests:** no `defer_loading` on Chat Completions; no deferral
+  when the user set `ENABLE_TOOL_SEARCH=false`. Neither has a counter.
+- **Baseline scope:** one user's laptop, from the switch to `ultrahigh` on 2026-11-04. It is not a
+  fleet baseline. cg2 runs `xhigh`, so it has no deferral traffic.
+- **Other figures:** #825 (option B on GPT, GLM, Kimi) measured a net saving of 9.68%.
+- **Owner:** David Amid (proposed).
+
+### Option B: Claude Code's own search (#898)
 
 **Purpose:** on preset `ultrahigh`, with Claude Code's own `ToolSearch` on, the proxy adds its own
 deferred tools to Claude Code's search results. It answers only the exact `select:Name1,Name2`
@@ -207,12 +258,14 @@ pays one cache rewrite. 3 reasons:
 | G3 | The kind of a keep-alive request. Today `max_tokens = 0` means "sweep question". This is a convention, not a field. | A `ping_kind` column: plain, sweep, summary, extra, manual. | No |
 | G4 | `/stats` counters reset on each restart. | Write the counters that the monitor needs into the database. | No |
 | G5 | The 12 components with no laptop baseline. | Real traffic on other presets. | No |
+| G7 | A `cg_*` metric for tool deferral. Only `/stats` and the database show it today. | Export the `/stats` `tool_defer` counters as `cg_tooldefer_*`. | No |
+| G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1 to T4). The names exist in PR #900, which is not merged. T4 needs the log, because the dashboard database does not store a disable. | Merge #900. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, S1, X1, X4, T1, T2, T3. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, S2, S4, X2, X3, and the per-component activity table.
+- **Daily:** K1, K3, K4, S1, X1, X4, T1, T2, T3, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
