@@ -57,7 +57,7 @@ func (u *csUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	answer, reject := u.script[i], u.reject400
 	u.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	if strings.HasPrefix(answer, "data:") {
+	if strings.HasPrefix(answer, "data:") || strings.HasPrefix(answer, "event:") {
 		w.Header().Set("Content-Type", "text/event-stream")
 	}
 	if reject && bytes.Contains(b, []byte(tooldefer.ClientSearchName)) {

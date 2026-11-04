@@ -539,6 +539,19 @@ func (h *Handler) Mux() *http.ServeMux {
 		path:   "/v1/responses",
 		setKey: bearerKey(h.opts.OpenAIKey),
 	}, pickOpenAI, "responses"))
+	// Codex tries a WebSocket first. This proxy serves Responses over HTTP only, and an unmatched
+	// GET answers 405, which Codex treats as a failure to retry (5 times, ~10 s) before it falls
+	// back. Only 426 Upgrade Required makes it fall back to HTTPS at once (codex-rs core/src/
+	// client.rs), so a WebSocket upgrade gets that. Any other GET keeps the mux's own 405.
+	// Plain http.Error, as the other routes here; no Upgrade header, as there is nothing to offer.
+	m.HandleFunc("GET /openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "WebSocket is not served here; use HTTPS POST", http.StatusUpgradeRequired)
+			return
+		}
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	})
 	m.HandleFunc("POST /anthropic/v1/messages", h.chat(bschemas.Anthropic, upstream{
 		base:   h.opts.AnthropicUpstream,
 		path:   "/v1/messages",
@@ -1792,6 +1805,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// response is held whenever the request declares it.
 	searchOn := di != nil && di.search && tooldefer.HasClientSearch(wire, body)
 	advertised = advertised || searchOn
+	// A Responses stream with our search is spliced only for a stateless request (#884): the
+	// client sends the full input each turn, so it never chains on the id of this response and
+	// round 1's id can stand for the whole stream. A request that may chain keeps the buffering.
+	respSplice := searchOn && schema.IsResponses(wire) && statelessResponses(body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -2062,7 +2079,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
 			h.deferRetry(di, refused, errBody, ok)
 			// The original declares no search tool of ours: nothing to hold or answer from here on.
-			di, searchOn = nil, false
+			di, searchOn, respSplice = nil, false, false
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
@@ -2160,14 +2177,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		var respBody []byte
 		switch {
-		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI)):
+		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI) || respSplice):
 			// Forward the events as they arrive and stop at the expand call, rather than
 			// buffering the response to find out whether it holds one. See ssepeek.go.
 			// Chat Completions with our own tool search (#879) takes the same splice: its text
 			// streams at once, and only a call to a proxy tool is held.
 			sse = true
 			if sp == nil {
-				if provider == bschemas.Anthropic {
+				if respSplice {
+					sp = newResponsesSSESplicer(w)
+				} else if provider == bschemas.Anthropic {
 					sp = newSSESplicer(w)
 				} else {
 					sp = newChatSSESplicer(w)
@@ -2474,6 +2493,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// only when a model asks for an id that has aged out of the store.
 		body = next // loop: re-invoke with the originals in hand
 	}
+}
+
+// statelessResponses reports whether a Responses request never relies on the server keeping
+// the response: store is false and there is no previous_response_id. Codex over HTTP sends
+// exactly this. A missing store field means the API default, which is true.
+func statelessResponses(body []byte) bool {
+	st := gjson.GetBytes(body, "store")
+	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
 }
 
 // writeRaw replays a fully-buffered upstream response (SSE or JSON) to the client
