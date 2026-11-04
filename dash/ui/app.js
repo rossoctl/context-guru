@@ -2701,8 +2701,9 @@ async function loadComponents() {
           class: 'num' + (savedKnown(c) && c.net_usd_first_removal < 0 ? ' warn-text' : ''),
           title: !savedKnown(c) ? '' : 'PER-TURN verdict: each piece of content credited ONCE at '
             + 'the rate it would have entered the prompt at ('
-            + usd(c.saved_usd_first_removal || 0) + ') − own LLM cost '
-            + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
+            + usd(c.saved_usd_first_removal || 0) + ')'
+            + (c.saved_usd_costs ? ' + the costs the component caused (breaks, added tokens) ' + usd(c.saved_usd_costs) : '')
+            + ' − own LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
         }, c.saved_gross
           ? usdOrNA(c.net_usd_first_removal, savedKnown(c),
             'the saving half of this net is not a number — ' + savedNAReason(c))

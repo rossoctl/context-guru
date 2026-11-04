@@ -289,7 +289,10 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 	}
 	for _, c := range out {
 		c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
-		c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
+		// The costs the accountant library netted into saved_usd (added tokens, breaks) are part of the verdict.
+		// /stats reports saved_usd, and this field is documented as what /stats reports: leaving them out showed a
+		// component that loses money as a gain (context-guru#768 B6: saved_usd -$0.0302, this field +$0.0113).
+		c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 		if c.SavedUSDFirstRemoval > 0 {
 			c.ReplayMultiple = (c.SavedUSDFirstRemoval + c.SavedUSDReplay) / c.SavedUSDFirstRemoval
 		}

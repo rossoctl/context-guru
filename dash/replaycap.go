@@ -490,9 +490,10 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 	pastReplay := cl.PastCapUSD - cl.PastCapFirstUSD
 	c.SavedUSDFirstRemoval = math.Max(c.SavedUSDFirstRemoval-cl.PastCapFirstUSD, 0)
 	c.SavedUSDReplay = math.Max(c.SavedUSDReplay-pastReplay, 0)
-	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
+	// The costs term (SavedUSDCosts) stays: the cap removes credit, never a cost (see walkCapConversation).
+	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
 	c.SavedUSDDecomposedStored = math.Max(c.SavedUSDDecomposedStored+delta, 0)
-	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
+	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 	c.ReplayMultiple = 0
 	if c.SavedUSDFirstRemoval > 0 {
 		c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
