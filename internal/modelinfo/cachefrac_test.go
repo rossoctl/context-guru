@@ -62,7 +62,7 @@ func TestFabricatedPremiumDoesNotReachNonAnthropicSavings(t *testing.T) {
 	if got, want := claude/gpt, 1.25; got != want {
 		t.Fatalf("premium ratio = %v, want %v", got, want)
 	}
-	// 100k tokens of savings, the shape the legacy baseline rule priced.
+	// 100k tokens of savings, the shape baselineDeltaUSD prices.
 	if over := 100_000 * (input*1.25 - gpt); over <= 0 {
 		t.Fatalf("expected the old flat multiple to over-report, got %v", over)
 	}

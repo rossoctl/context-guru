@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,36 +70,16 @@ func anthropicRequest(model string) []byte {
 	return b
 }
 
-// billedUpstream answers like a provider that bills the body it received: 4 bytes a token, the
-// first 80% read from cache and the rest written. A saving priced by the accountant library is
-// checked against the request's own size (PriceMode's plausibility bound), so a test that asserts
-// a saving needs a usage that bills the forwarded body, as a real provider's does.
-func billedUpstream(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		n := len(b) / 4
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
-		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
-		  "usage":{"input_tokens":12,"output_tokens":34,
-		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, n*8/10, n-n*8/10-12)
-	}))
-}
-
 // fakeUpstream returns an Anthropic-shaped response with real usage tiers.
-func fakeUpstream(t *testing.T) *httptest.Server { return fakeUpstreamUsage(t, 12, 9000, 1500) }
-
-// fakeUpstreamUsage is fakeUpstream with the prompt usage the caller chooses.
-func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Server {
+func fakeUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
+		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant",
 		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
-		  "usage":{"input_tokens":%d,"output_tokens":34,
-		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cacheRead, cacheWrite)
+		  "usage":{"input_tokens":12,"output_tokens":34,
+		           "cache_read_input_tokens":9000,"cache_creation_input_tokens":1500}}`))
 	}))
 }
 
@@ -222,9 +201,10 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 		t.Fatalf("the pipeline did not compact (%d -> %d); the assertions below would be vacuous",
 			e.TokensBefore, e.TokensAfter)
 	}
-	// The saving itself is the accountant library's, checked against a usage that bills the body
-	// (TestDashboardBooksTheAccountantSaving): this upstream's fixed usage does not, so the library's
-	// figure fails the plausibility bound and the event books no saving.
+	if e.BaselineCostUSD <= e.CostUSD {
+		t.Errorf("baseline %v is not above actual %v despite %d tokens removed",
+			e.BaselineCostUSD, e.CostUSD, e.TokensBefore-e.TokensAfter)
+	}
 	if e.CGLatencyMs <= 0 || e.UpstreamMs <= 0 {
 		t.Errorf("latency not captured: cg=%v upstream=%v", e.CGLatencyMs, e.UpstreamMs)
 	}
@@ -672,49 +652,5 @@ func TestDashboardUnderConcurrentTraffic(t *testing.T) {
 	}
 	if s.Errors > 0 {
 		t.Errorf("%d insert errors", s.Errors)
-	}
-}
-
-// A real request through the proxy books the accountant library's saving: the pipeline compacted,
-// the upstream billed the forwarded body, and the stored baseline is above the cost.
-func TestDashboardBooksTheAccountantSaving(t *testing.T) {
-	up := billedUpstream(t)
-	defer up.Close()
-	h, rec := dashHandler(t, up.URL, dash.Options{})
-	h.tracker.SetStartedAt(time.Now().Add(-2 * time.Hour).UnixMilli())
-	srv := httptest.NewServer(h.Mux())
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
-		strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-context-guru-session", "sess-acc")
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	waitForRows(t, rec, 1)
-	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := page.Requests[0]
-	if e.TokensBefore <= e.TokensAfter {
-		t.Fatalf("the pipeline did not compact (%d -> %d)", e.TokensBefore, e.TokensAfter)
-	}
-	if e.BaselineCostUSD <= e.CostUSD {
-		t.Fatalf("baseline %v is not above actual %v despite %d tokens removed",
-			e.BaselineCostUSD, e.CostUSD, e.TokensBefore-e.TokensAfter)
-	}
-	full, err := rec.DB().Request(e.ID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priced := false
-	for _, c := range full.Components {
-		priced = priced || c.PricedBy == dash.PricedByAccountant
-	}
-	if !priced {
-		t.Fatalf("no component row is priced by the accountant library: %+v", full.Components)
 	}
 }

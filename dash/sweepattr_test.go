@@ -28,15 +28,14 @@ func sweepEvent(ts int64, session string, miss string, cacheRead, cacheWrite, fr
 		Components: []CompRow{{Component: SweepComponent, Kind: "offload", Acted: removed > 0, Mutated: true,
 			SavedGross: removed, SavedUnique: unique}},
 	}
-	legacyPrice(e, sweepPrice) // the rows #404 was measured on: the legacy rule's figures
+	e.Price(sweepPrice, true)
 	return e
 }
 
-// ⭐ M1. Under the legacy rule (the rows #404 was measured on, still valued by the read passes) the
-// credit on the COLD request is removed tokens x the cache-write rate (1.25 x input): the removed
-// tokens are new content on that request. On each LATER request it is removed tokens x the rate that
-// request paid. New rows are priced by the accountant library, whose shared cases cover the same
-// rule by position (rewrite/deep-on-cold/then-hot-replay/5m).
+// ⭐ M1. The credit on the COLD request is removed tokens x the cache-write rate (1.25 x input): the
+// removed tokens are new content on that request. On each LATER request it is removed tokens x the rate
+// that request paid. Both come out of the one pricing path every component uses, so this asserts the
+// path gives the numbers point 9 states.
 func TestM1TheCreditIsTheWriteRateOnTheColdRequestAndTheRequestsRateAfter(t *testing.T) {
 	const removed = 10_000
 	factor, _ := tokens.BilledDeltaFactor("claude-sonnet-5")
@@ -203,7 +202,7 @@ func TestM2ReplayOfTheTwoLosingSweepsShowsNoLossAndNoFalseCredit(t *testing.T) {
 				CacheMissReason: CachePrefixChange,
 				Components: []CompRow{{Component: SweepComponent, Kind: "offload", Acted: true, Mutated: true,
 					SavedGross: s.removedLocal, SavedUnique: s.removedLocal}}}
-			legacyPrice(old, p)
+			old.Price(p, true)
 			if got := old.Components[0].SavedUSD; math.Abs(got-s.issueCredit) > 0.003 {
 				t.Fatalf("the pricing path gives a credit of %.4f; the issue's was %.3f. The fixture's price is not the issue's", got, s.issueCredit)
 			}
@@ -222,7 +221,7 @@ func TestM2ReplayOfTheTwoLosingSweepsShowsNoLossAndNoFalseCredit(t *testing.T) {
 				FreshInput: 50, CacheWrite: s.after, OutputTokens: 400, CacheMissReason: CacheTTLExpiry,
 				Components: []CompRow{{Component: SweepComponent, Kind: "offload", Acted: true, Mutated: true,
 					SavedGross: s.removedLocal, SavedUnique: s.removedLocal}}}
-			legacyPrice(coldWith, p)
+			coldWith.Price(p, true)
 			coldWithout := &Event{TS: 2, TenantID: "t", SessionID: s.name, Model: "claude-sonnet-5", Status: 200,
 				FreshInput: 50, CacheWrite: s.before, OutputTokens: 400, CacheMissReason: CacheTTLExpiry}
 			coldWithout.Price(p, true)
