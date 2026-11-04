@@ -9,8 +9,41 @@ import (
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
-// rePriceRow is the read-time twin of the legacy write path (legacyPrice): a row stored under the
-// old rule reads like a row written under the newer one. An accountant row is never re-priced.
+// The first removal of a summary is priced at the rate the previous turn paid for that content.
+// A live cache means the removed tokens, left in, would have been READ. A lapsed one means they
+// would have been re-created. Every other component keeps the write rate: its content is new.
+func TestSummarizeFirstRemovalIsPricedAtTheRateThePreviousTurnPaid(t *testing.T) {
+	price := handPrice["m1"]
+	for _, tc := range []struct {
+		name, component, reason string
+		want                    float64
+	}{
+		{"hit reads", SummarizerComponents[0], CacheHit, price.CacheRead},
+		{"our own rewrite of a live entry reads", SummarizerComponents[0], CachePrefixChange, price.CacheRead},
+		{"a lapsed entry re-creates", SummarizerComponents[0], CacheTTLExpiry, price.CacheWrite},
+		{"a cold start re-creates", SummarizerComponents[0], CacheColdStart, price.CacheWrite},
+		{"another component's new content is a write", "extract", CacheHit, price.CacheWrite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Event{
+				Model: "m1", TS: 1, TokensBefore: 10_000, TokensAfter: 9_000, SavedUnique: 1000,
+				FreshInput: 10, CacheRead: 50_000, TokenAccounting: AccountingComplete,
+				CacheMissReason: tc.reason,
+				Components: []CompRow{{Component: tc.component, Acted: true, Mutated: true,
+					SavedGross: 1000, SavedUnique: 1000}},
+			}
+			e.Price(price, true)
+			want := 1000 * tc.want * e.BilledTokenFactor
+			nearEq(t, "component saved_usd", e.Components[0].SavedUSD, want)
+			// The request-level baseline must agree with the component figure, or the headline and
+			// the Components tab part ways on the same turn.
+			nearEq(t, "baseline delta", e.BaselineCostUSD-e.CostUSD, want)
+		})
+	}
+}
+
+// rePriceRow is the read-time twin of Event.Price: a row stored under the old rule reads like a
+// row written under the new one.
 func TestRePriceRowMatchesWhatPriceWouldHaveStored(t *testing.T) {
 	price := handPrice["m1"]
 	e := &Event{
@@ -18,7 +51,7 @@ func TestRePriceRowMatchesWhatPriceWouldHaveStored(t *testing.T) {
 		CacheMissReason: CacheHit, TokenAccounting: AccountingComplete,
 		Components: []CompRow{{Component: SummarizerComponents[0], SavedGross: 589_000, SavedUnique: 589_000}},
 	}
-	legacyPrice(e, price)
+	e.Price(price, true)
 	r := compactRow{
 		Model: "m1", MissReason: CacheHit, FreshInput: 10, CacheRead: 49_000, CacheWrite: 7_400,
 		SavedGross: 589_000, SavedUnique: 589_000,
@@ -36,14 +69,6 @@ func TestRePriceRowMatchesWhatPriceWouldHaveStored(t *testing.T) {
 	rePriceRow(&replay, func(string) (modelinfo.Price, bool) { return price, true })
 	if replay.SavedUSD != 0.5 {
 		t.Errorf("a replay row was re-priced: %v", replay.SavedUSD)
-	}
-
-	// A row the accountant library priced keeps its figure and its stored first-removal part.
-	acc := compactRow{Model: "m1", MissReason: CacheHit, SavedGross: 1000, SavedUnique: 1000, SavedUSD: 0.5,
-		StoredUSD: 0.5, Accountant: true, storedFirstUSD: 0.2}
-	rePriceRow(&acc, func(string) (modelinfo.Price, bool) { return price, true })
-	if acc.SavedUSD != 0.5 || acc.FirstUSD != 0.2 {
-		t.Errorf("an accountant row was re-priced: saved %v first %v", acc.SavedUSD, acc.FirstUSD)
 	}
 }
 

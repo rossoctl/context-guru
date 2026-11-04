@@ -275,6 +275,17 @@ func RunProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path
 // client's auth betas (AuthBetas): a subscription token on direct Anthropic needs the OAuth beta,
 // and without it the probe gets a 401, which is no verdict, so deferral would stay off (#866, N12a).
 func RunProbeBeta(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path, model, beta string) (Verdict, error) {
+	return runProbe(ctx, d, ref, path, model, beta, ProbeBody, ProbeVerdict)
+}
+
+// RunClientProbeBeta is RunProbeBeta for client-search mode (#898): it checks that the API expands a
+// tool_reference the proxy wrote, for a deferred tool, with no server-side search declared.
+func RunClientProbeBeta(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path, model, beta string) (Verdict, error) {
+	return runProbe(ctx, d, ref, path, model, beta, ClientProbeBody, ClientProbeVerdict)
+}
+
+func runProbe(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, path, model, beta string,
+	build func(model, nonce string) []byte, read func(resp []byte, nonce string) Verdict) (Verdict, error) {
 	nonce := Nonce()
 	if path == "" {
 		path = "/v1/messages"
@@ -284,7 +295,7 @@ func RunProbeBeta(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, 
 		hdr.Set("Anthropic-Beta", beta)
 	}
 	resp, err := d.Do(ctx, dispatch.Request{Purpose: PurposeProbe, Ref: ref, Provider: bschemas.Anthropic,
-		Method: http.MethodPost, Path: path, Header: hdr, Body: ProbeBody(model, nonce)})
+		Method: http.MethodPost, Path: path, Header: hdr, Body: build(model, nonce)})
 	if err != nil {
 		return Unknown, err
 	}
@@ -304,7 +315,7 @@ func RunProbeBeta(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, 
 	if gjson.GetBytes(resp.Body, "stop_reason").String() == "pause_turn" {
 		return Unknown, errStatus(resp.Status) // the API paused a long server-tool turn: no answer yet
 	}
-	return ProbeVerdict(resp.Body, nonce), nil
+	return read(resp.Body, nonce), nil
 }
 
 // AuthBetas is the auth-related part of a client's anthropic-beta values: the oauth-* betas, comma

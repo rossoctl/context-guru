@@ -44,9 +44,8 @@ func OpenAI30MinuteCache(provider, model string) bool {
 // Gemini do not charge a per-token cache-write premium.
 //
 // Why that mattered even though those providers never report cache_write: Event.Price uses
-// CacheWrite for cost_usd, where a zero cache_write count makes the rate irrelevant, AND the
-// legacy savings rule (now the read-time estimate of old rows, Event.ComponentSavedUSD) used it
-// to price SAVED tokens, where the count is our own and the rate
+// CacheWrite for cost_usd, where a zero cache_write count makes the rate irrelevant, AND
+// baselineDeltaUSD uses it to price SAVED tokens, where the count is our own and the rate
 // is applied regardless of what the request billed. So the fabricated premium reached the
 // savings figure on traffic that could never have paid it.
 //

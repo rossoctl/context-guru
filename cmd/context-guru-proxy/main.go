@@ -321,7 +321,7 @@ func main() {
 	// `windows` is resolved — rather than reordering boot around a Recorder nothing else here
 	// needs yet. A pointer, so the SAME object threaded into `emitter` right now keeps
 	// working once both fields are set.
-	kaKeepAlive := &dashEmitter{pings: proxy.NewPingStore()}
+	kaKeepAlive := &dashEmitter{}
 	// metrics.Slog is deliberately NOT wired in here any more. It emitted one line per
 	// component plus one per run, at INFO, with no tenant and no session on any of them —
 	// so a busy proxy buried its own request lifecycle, and none of it could be correlated
@@ -422,8 +422,9 @@ func main() {
 		// means no ping ever reaches this far without --dashboard on.
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
-		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
-		// that turn.
+		// in flight reports a cold start on its next turn — and that flag also decides whether
+		// a cache hit counts as our saving, so a restart handed out one bonus credit per live
+		// session (see dash.Event.cachesplitSavedUSD).
 		if n, err := rec.SeedSessions(time.Now().UnixMilli()); err != nil {
 			slog.Warn("dashboard: could not recover session recency; the first turn of each live "+
 				"session will be reported as a cold start", "err", err)
@@ -702,8 +703,7 @@ func main() {
 		Windows:       windows,                // dynamic context-window resolver (fraction triggers)
 		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:        cfg.Preset,
-		Dashboard:     rec, // nil unless --dashboard
-		Pings:         kaKeepAlive.pings,
+		Dashboard:     rec,      // nil unless --dashboard
 		Record:        traceRec, // nil unless --record
 		Mode:          mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
@@ -955,9 +955,6 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer
-	// pings is the store shared with the Handler (proxy.Options.Pings). Each converted ping
-	// carries an accountant Result on its event.
-	pings *proxy.PingStore
 }
 
 // Component and Run are no-ops: dashEmitter exists only to be tee'd in for its
@@ -1008,9 +1005,6 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
-	if res, ok := proxy.PingSavings(r, d.pings); ok {
-		ev.SetAccountant(res)
-	}
 	d.rec.Record(ev)
 }
 

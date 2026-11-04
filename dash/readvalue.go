@@ -191,28 +191,8 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 	}
 	type dgVal struct{ unique, replay, nRows, nDiff int64 }
 	groups := map[dgKey]*dgVal{}
-	// Rows the accountant library priced carry their split already (saved_first_usd and
-	// saved_replay_usd): it is summed as stored, never re-priced, because the library priced from
-	// the thread's history, which the row does not keep. The formula below values only the rows
-	// written before the switch.
 	for k, g := range cgroups {
-		if !k.acc {
-			continue
-		}
-		seen[k.comp] += g.runs
-		differ[k.comp] += g.nDiff
-		if c, ok := by[k.comp]; ok {
-			c.SavedUSDFirstRemoval += g.firstUSD
-			c.SavedUSDReplay += g.replayUSD
-			// The stored side of the cross-check is saved_usd, which nets the costs (added tokens,
-			// breaks): they are part of this side too, so the two agree on an accountant row.
-			costs := g.usd - g.firstUSD - g.replayUSD
-			c.SavedUSDDecomposedStored += g.usd
-			c.SavedUSDCosts += costs
-		}
-	}
-	for k, g := range cgroups {
-		if k.acc || !k.gross || !k.complete {
+		if !k.gross || !k.complete {
 			continue
 		}
 		stored := 0
@@ -288,10 +268,10 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 		}
 	}
 	for _, c := range out {
-		c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
+		c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
 		c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
 		if c.SavedUSDFirstRemoval > 0 {
-			c.ReplayMultiple = (c.SavedUSDFirstRemoval + c.SavedUSDReplay) / c.SavedUSDFirstRemoval
+			c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
 		}
 		// Whether this component's `unique` is a DEDUP MEASUREMENT at all.
 		//
@@ -372,8 +352,7 @@ func estimateFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer,
 	// cannot say" and "it was worth nothing" are different answers.
 	unpriced := map[string]int64{}
 	for k, g := range cgroups {
-		// A row the accountant priced is never estimated: its saved_usd is a figure, also when 0.
-		if k.acc || k.usd || !k.gross {
+		if k.usd || !k.gross {
 			continue
 		}
 		if !k.complete {

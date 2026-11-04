@@ -20,6 +20,7 @@ import (
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func tdDecl(name string) string {
@@ -760,5 +761,52 @@ func TestToolDeferAlwaysDeferEndToEnd(t *testing.T) {
 	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
 	if got := tdTools(up.last()); !strings.Contains(got, "Workflow*") || !strings.Contains(got, "Monitor*") {
 		t.Fatalf("tools = %s; want Workflow (listed) and Monitor (unused) deferred", got)
+	}
+}
+
+// #898: with Claude Code's own ToolSearch in the request, a new thread gets no server-side search,
+// and the proxy answers a ToolSearch call that touches a tool it deferred. The same bytes go out on
+// the next turn. Without ToolSearch, the server-side search stays.
+func TestToolDeferClientSearchEndToEnd(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := tdHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	withSearch := func(b []byte, session string) []byte {
+		b = bytes.Replace(b, []byte("sess-1"), []byte(session), 1)
+		out, _ := sjson.SetRawBytes(b, "tools.-1", []byte(`{"name":"ToolSearch","description":"Fetches full schema definitions for deferred tools so they can be called.","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}`))
+		return out
+	}
+	tooldefer.AddKnownDescHash(tooldefer.DescHash(withSearch(tdBody(), "x")))
+	round := []string{
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{"query":"select:Workflow","max_results":1}}]}`,
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"No matching deferred tools found"}]}`,
+	}
+	// Session 1 asks for both probes; they pass. A NEW thread then runs in client mode.
+	tdPost(t, srv, withSearch(tdBody(), "sess-1"))
+	tdPost(t, srv, withSearch(tdBody(), "sess-2"))
+	first := up.last()
+	if got := tdTools(first); strings.Contains(got, "tool_search_tool_bm25") || !strings.Contains(got, "Workflow*") {
+		t.Fatalf("client mode tools = %s", got)
+	}
+	tdPost(t, srv, withSearch(tdBody(round...), "sess-2"))
+	one := up.last()
+	if got := gjson.GetBytes(one, "messages.3.content.0.content").Raw; got != `[{"type":"tool_reference","tool_name":"Workflow"}]` {
+		t.Fatalf("result not answered: %s", got)
+	}
+	more := append(append([]string{}, round...), `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"next"}`)
+	tdPost(t, srv, withSearch(tdBody(more...), "sess-2"))
+	two := up.last()
+	if gjson.GetBytes(two, "messages.3").Raw != gjson.GetBytes(one, "messages.3").Raw ||
+		gjson.GetBytes(two, "tools").Raw != gjson.GetBytes(one, "tools").Raw {
+		t.Fatal("the answered round changed between requests")
+	}
+	// A request without ToolSearch keeps the server-side search.
+	s4 := bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-4"), 1)
+	tdPost(t, srv, s4)
+	if got := tdTools(up.last()); !strings.Contains(got, "tool_search_tool_bm25") {
+		t.Fatalf("no ToolSearch: tools = %s", got)
 	}
 }
