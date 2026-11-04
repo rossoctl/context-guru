@@ -467,6 +467,10 @@ func (h *Handler) applyClientSearch(tn *Tenancy, wire, session, threadID string,
 	if view != nil {
 		ds.hist.Observe(tn.ID, session, project, view, time.Now().UnixMilli())
 	}
+	if loads := tooldefer.NativeLoads(orig); len(loads) > 0 && tooldefer.NativeSearch(wire, orig) {
+		// The client's own search loaded these: a load counts as a use, as for our search.
+		ds.hist.Observe(tn.ID, session, project, tooldefer.LoadView(loads), time.Now().UnixMilli())
+	}
 	o, loaded := tooldefer.ApplySearch(h.deferEnv(tn), wire, tooldefer.Req{Tenant: tn.ID, Session: session,
 		Thread: threadID, Project: project, Model: model, Orig: orig, Body: body, Keep: keep, AlwaysDefer: always})
 	if len(loaded) > 0 {

@@ -7,6 +7,7 @@ import (
 
 	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // chatDecl and respDecl are a function tool well over MinTokens, on Chat Completions and Responses.
@@ -369,5 +370,40 @@ func TestApplySearchChainedTurnWithoutTools(t *testing.T) {
 	o3, _ := ApplySearch(e, cgschema.WireResponses, sreq(chained))
 	if !o3.Changed || gjson.GetBytes(o3.Body, "tools").Raw != gjson.GetBytes(o.Body, "tools").Raw {
 		t.Fatalf("next chained turn: %s", show(o3))
+	}
+}
+
+// A Responses request that declares its own tool_search (Codex) never gets ours, and nothing is
+// deferred on it (#876). The same body without one gets today's rewrite.
+func TestApplySearchNativeSearchWins(t *testing.T) {
+	plain := respBody()
+	native, _ := sjson.SetRawBytes(plain, "tools.-1", []byte(`{"type":"tool_search","execution":"client"}`))
+	e := env(t, unusedHist())
+	o, _ := ApplySearch(e, cgschema.WireResponses, sreq(native))
+	if o.Changed || o.Why != "native_search" || strings.Contains(string(o.Body), ClientSearchName) {
+		t.Fatalf("native search: %s", show(o))
+	}
+	if strings.Contains(string(o.Body), "defer_loading") {
+		t.Fatalf("defer_loading sent: %s", o.Body)
+	}
+	if o, _ := ApplySearch(env(t, unusedHist()), cgschema.WireResponses, sreq(plain)); !o.Changed {
+		t.Fatalf("no native search: %s", show(o))
+	}
+	// Chat Completions has no tool_search: the check never fires there.
+	if NativeSearch(cgschema.WireOpenAI, native) {
+		t.Fatal("chat wire")
+	}
+}
+
+// The tool_search_output items the client echoes give the loads: a namespace's name and its tools.
+func TestNativeLoads(t *testing.T) {
+	b := respBody(`{"type":"tool_search_call","call_id":"c1","execution":"client","arguments":{"query":"w"}}`,
+		`{"type":"tool_search_output","call_id":"c1","execution":"client","tools":[{"type":"namespace","name":"mcp__w__","tools":[{"type":"function","name":"get_price"}]},{"type":"function","name":"Workflow"}]}`)
+	got := strings.Join(NativeLoads(b), ",")
+	if got != "mcp__w__,get_price,Workflow" {
+		t.Fatalf("loads: %q", got)
+	}
+	if NativeLoads(respBody()) != nil {
+		t.Fatal("no output items")
 	}
 }

@@ -324,6 +324,13 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 	case AnthropicModel(r.Model):
 		o.Why = "anthropic"
 		return o, nil
+	case NativeSearch(wire, r.Orig):
+		// A native search tool is used when there is one; ours is added only when there is none.
+		// OpenAI refuses a second tool_search with a 400. And the client's own search (Codex's, in
+		// client mode) loads only the tools the client deferred itself, so a tool we removed from
+		// `tools` would be out of its reach. Nothing is deferred here (#876).
+		o.Why = "native_search"
+		return o, nil
 	case env.Gate.Broken(r.Tenant, r.Model):
 		o.Why = "turned_off_after_400"
 		return o, nil
@@ -700,4 +707,50 @@ func HasClientSearch(wire string, body []byte) bool {
 		return !found
 	})
 	return found
+}
+
+// NativeSearch reports whether a Responses request declares the client's or provider's own tool
+// search (a `tool_search` tool, as Codex sends): then our search is never added (#876).
+func NativeSearch(wire string, body []byte) bool {
+	if !cgschema.IsResponses(wire) {
+		return false
+	}
+	found := false
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		found = t.Get("type").String() == "tool_search"
+		return !found
+	})
+	return found
+}
+
+// NativeLoads is the tool names the native search loaded in this transcript: the
+// tool_search_output items the client echoes in `input`. A load counts as a use (LoadView). A
+// namespace result gives its own name and each tool in it.
+func NativeLoads(body []byte) []string {
+	if !strings.Contains(string(body), "tool_search_output") {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(n string) {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	gjson.GetBytes(body, "input").ForEach(func(_, it gjson.Result) bool {
+		if it.Get("type").String() != "tool_search_output" {
+			return true
+		}
+		it.Get("tools").ForEach(func(_, t gjson.Result) bool {
+			add(t.Get("name").String())
+			t.Get("tools").ForEach(func(_, u gjson.Result) bool {
+				add(u.Get("name").String())
+				return true
+			})
+			return true
+		})
+		return true
+	})
+	return out
 }

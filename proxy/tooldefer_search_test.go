@@ -480,3 +480,39 @@ func TestClientSearchStreamMixedCall(t *testing.T) {
 		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
 	}
 }
+
+// Codex declares its own tool_search (#876): the request goes through unchanged, ours is not added,
+// and the tools its search loaded (echoed in `input`) count as a use in the history.
+func TestClientSearchNativeSearchLeftAlone(t *testing.T) {
+	up := &csUpstream{script: []string{csText("ok")}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	decl := func(n string) string {
+		return fmt.Sprintf(`{"type":"function","name":%q,"description":"%s","parameters":{"type":"object"}}`,
+			n, strings.Repeat("Detailed usage notes for this tool. ", 60))
+	}
+	body := []byte(`{"model":"gpt-5.5","instructions":"agent","tools":[` + decl("Bash") + `,` + decl("Workflow") +
+		`,{"type":"tool_search","execution":"client"}],"input":[{"role":"user","content":"hi"},` +
+		`{"type":"tool_search_call","call_id":"c1","execution":"client","arguments":{"query":"w"}},` +
+		`{"type":"tool_search_output","call_id":"c1","execution":"client","tools":[{"type":"function","name":"Loaded1"}]}]}`)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("x-context-guru-session", "n1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	sent := up.all()
+	if len(sent) != 1 || bytes.Contains(sent[0], []byte(tooldefer.ClientSearchName)) ||
+		bytes.Contains(sent[0], []byte("defer_loading")) || !bytes.Contains(sent[0], []byte(`"Workflow"`)) {
+		t.Fatalf("native search request was changed: %s", sent)
+	}
+	if s := h.toolDefer().hist.UserSessions("", "", 1); len(s) == 0 || !s[0].Used["Loaded1"] {
+		t.Fatalf("the native load is not a use: %+v", s)
+	}
+}
