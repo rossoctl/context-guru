@@ -278,7 +278,10 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 			if assumed {
 				l.WindowAssumedUSD += c.USD
 			}
-			if state == capOpen {
+			// The cap closes the credit of a replay. It never erases a cost: a break or a TTL premium is money that
+			// was spent whether or not the cap is open. A negative row counts, so DeltaUSD cannot raise the net
+			// (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+			if state == capOpen || c.USD < 0 {
 				l.CountedUSD += c.USD
 				l.FirstRemovalUSD += c.FirstUSD
 				l.ReplayUSD += c.USD - c.FirstUSD

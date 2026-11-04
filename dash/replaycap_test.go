@@ -669,3 +669,38 @@ func TestReplayLedgerThroughSQLReadsAgentCompaction(t *testing.T) {
 	}
 	nearEq(t, "past real", l.ByComponent["searchfold"].PastClientCompact, 1)
 }
+
+// The cap closes the credit of a replay. It must never erase a cost. Since the accountant library prices
+// breaks and TTL premiums, a stored saving can be negative, and a negative row after the cap is money that was
+// spent. Before, DeltaUSD removed every row past the cap, so a loss was taken out of the net and the "correction"
+// raised it (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+//
+// The row that reaches the ceiling is already past the cap: the walker closes the cap before it reads that row.
+func TestReplayCapNeverErasesACost(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),   // counted
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 1),  // cf 1,000k: closes the cap, so this credit is past it
+		capTestRow(3, 120_000, 500_000, 500_000, "extract_llm", -2), // after the cap: a cost
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "the credit past the cap", c.PastCapUSD, 1)
+	nearEq(t, "the cost stays in the net", c.CountedUSD, -1) // +1 counted, -2 kept
+	if d := l.DeltaUSD(); d > 1e-9 {
+		t.Fatalf("DeltaUSD = %g: a cap must never raise the net", d)
+	}
+	nearEq(t, "delta", l.DeltaUSD(), -1)
+}
+
+// A positive row past the cap is still removed: this is the cap's job, and it must not change.
+func TestReplayCapStillRemovesAPositiveCreditPastTheCap(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),   // counted
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 1),  // closes the cap: credit, removed
+		capTestRow(3, 120_000, 500_000, 500_000, "extract_llm", 3),  // after the cap: credit, removed
+		capTestRow(4, 130_000, 500_000, 500_000, "extract_llm", -2), // after the cap: a cost, kept
+	}
+	c := walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"]
+	nearEq(t, "past cap", c.PastCapUSD, 4)
+	nearEq(t, "counted", c.CountedUSD, -1) // +1 counted, -2 kept
+}
