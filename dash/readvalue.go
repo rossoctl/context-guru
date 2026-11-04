@@ -375,6 +375,13 @@ func estimateFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer,
 	// cannot say" and "it was worth nothing" are different answers.
 	unpriced := map[string]int64{}
 	for k, g := range cgroups {
+		// A request the accountant could not price (priced_by 'none') books no saving. The component still
+		// removed content on it, so the saving is not zero, it is unknown. Counted with the rows that could not
+		// be valued, so the column reads n/a and not a confident $0 (context-guru#768 B8).
+		if k.fallback && k.gross {
+			unpriced[k.comp] += g.runs
+			continue
+		}
 		// A row the accountant priced is never estimated: its saved_usd is a figure, also when 0.
 		if k.acc || k.usd || !k.gross {
 			continue
