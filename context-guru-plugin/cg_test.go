@@ -72,6 +72,8 @@ func cgProxyStub(t *testing.T, cache string) string {
 			w.Write([]byte(`{"ok":true,"applied":"revert","previous":"current","kind":"tools","effective":"next_session","note":"restored the configuration from before the last save-more tools change"}`))
 		case b.Option == "keep:mcp__playwright" && b.Basis == "9d4e2a7c":
 			w.Write([]byte(`{"ok":true,"applied":"keep:mcp__playwright","previous":"current","kind":"tools","effective":"next_session","note":"never deferring mcp__playwright","undo":{"option":"revert"}}`))
+		case b.Option == "defer:WebFetch" && b.Basis == "9d4e2a7c":
+			w.Write([]byte(`{"ok":true,"applied":"defer:WebFetch","previous":"current","kind":"tools","effective":"next_session","note":"always deferring WebFetch","undo":{"option":"revert"}}`))
 		default:
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(`{"error":"that option is not in a current report; run the report again"}`))
@@ -221,6 +223,7 @@ func TestCGGoldens(t *testing.T) {
 		{"save-more-tools", warm, []string{"save-more", "tools"}, 0},
 		{"save-more-tools-details", warm, []string{"save-more", "tools", "details"}, 0},
 		{"apply-deferral", warm, []string{"apply", "deferral", "keep:mcp__playwright@9d4e2a7c"}, 0},
+		{"apply-deferral-defer", warm, []string{"apply", "deferral", "defer:WebFetch@9d4e2a7c"}, 0},
 		{"apply-deferral-stale", warm, []string{"apply", "deferral", "keep:Bash@000000"}, 1},
 		{"apply-deferral-under-read", warm, []string{"save-more", "apply", "deferral", "keep:WebFetch@9d4e2a7c"}, 1},
 		{"revert-deferral", warm, []string{"revert", "deferral"}, 0},

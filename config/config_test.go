@@ -437,3 +437,36 @@ func TestHeadTTLMinKeysLoadFromYAML(t *testing.T) {
 		t.Error("a negative head_ttl_min_bytes was accepted")
 	}
 }
+
+// toolfilter's always_defer list (#878): parsed, sorted and trimmed; a skill name or junk is refused;
+// ultrahigh ships it empty.
+func TestToolfilterAlwaysDeferParses(t *testing.T) {
+	list := func(doc string) ([]string, error) {
+		t.Helper()
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			return nil, err
+		}
+		pipe, err := c.Build(components.NopEmitter{})
+		if err != nil {
+			return nil, err
+		}
+		tf, ok := pipe.Find("toolfilter").(interface{ AlwaysDefer() []string })
+		if !ok {
+			t.Fatal("toolfilter has no AlwaysDefer")
+		}
+		return tf.AlwaysDefer(), nil
+	}
+	got, err := list("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [mcp__pw, ' Monitor ', '']\n")
+	if err != nil || !reflect.DeepEqual(got, []string{"Monitor", "mcp__pw"}) {
+		t.Errorf("always_defer = %v (err %v), want [Monitor mcp__pw]", got, err)
+	}
+	for _, bad := range []string{"skill__dataviz", "a b", "x*"} {
+		if _, err := list("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    always_defer: ['" + bad + "']\n"); err == nil {
+			t.Errorf("always_defer %q was accepted", bad)
+		}
+	}
+	if got, err := list("preset: ultrahigh\n"); err != nil || len(got) != 0 {
+		t.Errorf("ultrahigh always_defer = %v (err %v), want empty", got, err)
+	}
+}

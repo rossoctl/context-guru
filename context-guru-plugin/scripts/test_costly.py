@@ -528,5 +528,30 @@ class SaveMoreToolsHeadline(unittest.TestCase):
         self.assertIn("cost $3.00", out)
         self.assertNotIn("no price", out)
 
+
+class SaveMoreToolsAlwaysDefer(unittest.TestCase):
+    """save-more tools (#878): the always-defer list shows on its rows, and defer / undefer are offered as commands
+    only when the report offers them."""
+
+    def render(self, rows, options):
+        rep = {"search_on": True, "rows": rows, "window": {}, "writable": True, "basis_id": "b1",
+               "options": options + [{"id": "search_off", "action": "search_off"}], "not_yet": []}
+        o = {"details": False, "days": 0, "tz_min": 0}
+        return "\n".join(cg.render_deferral(rep, o, T.Env(color=False, ascii_only=True, width=200)))
+
+    def test_defer_and_undefer_lines(self):
+        out = self.render([{"kind": "mcp_server", "name": "mcp__pw", "state": "deferred_cg", "always_deferred": True}],
+                          [{"id": "defer:WebFetch", "action": "defer", "name": "WebFetch"},
+                           {"id": "undefer:mcp__pw", "action": "undefer", "name": "mcp__pw"}])
+        self.assertIn("MCP server (always deferred)", out)
+        self.assertIn("apply deferral 'defer:<name>@b1'", out)
+        self.assertIn("apply deferral 'undefer:<name>@b1'", out)
+        self.assertNotIn("Not available yet", out)
+
+    def test_no_defer_line_when_not_offered(self):
+        out = self.render([{"kind": "tool", "name": "Bash", "state": "loaded"}], [])
+        self.assertNotIn("defer:<name>", out)
+        self.assertNotIn("always deferred", out)
+
 if __name__ == "__main__":
     unittest.main()

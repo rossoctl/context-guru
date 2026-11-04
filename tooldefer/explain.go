@@ -6,8 +6,9 @@ import "strings"
 // save-more tools (#869). name is a tool, or a whole MCP server as "mcp__<server>". It reads the
 // same history and the same thresholds as Decide, but without a request: the project veto, a use
 // in the thread, tool_choice and the 200-token floor are decided per request and are not checked
-// here, so a "yes" means "the user rule holds", not "this thread defers it".
-func Explain(h History, tenant, name string, keep []string) (defer_ bool, reason string) {
+// here, so a "yes" means "the user rule holds", not "this thread defers it". A name on always (the
+// always-defer list, #878) is a "yes" without history, unless keep or the never-defer list holds it.
+func Explain(h History, tenant, name string, keep, always []string) (defer_ bool, reason string) {
 	// An MCP tool is decided with its whole server, as Decide does.
 	key := name
 	if srv := mcpServer(name); srv != "" {
@@ -20,6 +21,8 @@ func Explain(h History, tenant, name string, keep []string) (defer_ bool, reason
 		return false, "never deferred: a core tool"
 	case inList(keep, name) || inList(keep, strings.TrimSuffix(key, "__")):
 		return false, "on your keep list"
+	case inList(always, name) || inList(always, strings.TrimSuffix(key, "__")):
+		return true, "on your always-defer list"
 	case h == nil:
 		return false, "no tool history on this proxy yet"
 	}

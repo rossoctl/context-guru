@@ -233,7 +233,7 @@ func seedAfterLoad(hist *tooldefer.Mem, tenants []string) []<-chan struct{} {
 func (h *Handler) deferTenantsAtStart() []string {
 	reg := h.registry()
 	if reg == nil {
-		if on, _ := deferOn(h.static.Load()); on {
+		if on, _, _ := deferOn(h.static.Load()); on {
 			return []string{""}
 		}
 		return nil
@@ -358,19 +358,21 @@ func (h *Handler) closeToolDefer() {
 	}
 }
 
-// deferOn reports whether this tenant's pipeline asks for deferral, and its keep list.
-func deferOn(tn *Tenancy) (on bool, keep []string) {
+// deferOn reports whether this tenant's pipeline asks for deferral, its keep list and its
+// always-defer list (#878).
+func deferOn(tn *Tenancy) (on bool, keep, always []string) {
 	if tn == nil || tn.Pipe == nil {
-		return false, nil
+		return false, nil, nil
 	}
 	tf, ok := tn.Pipe.Find("toolfilter").(interface {
 		Defers() bool
 		Keep() []string
+		AlwaysDefer() []string
 	})
 	if !ok || !tf.Defers() {
-		return false, nil
+		return false, nil, nil
 	}
-	return true, tf.Keep()
+	return true, tf.Keep(), tf.AlwaysDefer()
 }
 
 // deferInfo carries what serve needs for the retry and the ledger.
@@ -397,7 +399,7 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	if wire != schema.WireAnthropic || provider != bschemas.Anthropic {
 		return body, nil
 	}
-	on, keep := deferOn(tn)
+	on, keep, always := deferOn(tn)
 	if h.takeProbeAsk(tn) {
 		// The preset picker asked for a probe (POST /tool-defer/probe). It runs now, in the
 		// background, with this request's own upstream, model and credential: the proxy holds no
@@ -427,7 +429,7 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	key := tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path}
 	env := h.deferEnv(tn)
 	o := tooldefer.Apply(env, tooldefer.Req{Tenant: tn.ID, Session: session, Thread: threadID, Project: project,
-		Model: model, Orig: orig, Body: body, Probe: key, Keep: keep})
+		Model: model, Orig: orig, Body: body, Probe: key, Keep: keep, AlwaysDefer: always})
 	if o.Why == "no_durable_store" {
 		noDurableOnce.Do(func() {
 			slog.Warn("context-guru: ultrahigh defers no tools: no durable place for its per-thread record " +
@@ -452,7 +454,7 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 // a model that ignores defer_loading. Claude models are left to Apply's path. No probe: our search
 // needs no provider feature, and a 400 to a changed request sends the original (deferRetry).
 func (h *Handler) applyClientSearch(tn *Tenancy, wire, session, threadID string, orig, body []byte) ([]byte, *deferInfo) {
-	on, keep := deferOn(tn)
+	on, keep, always := deferOn(tn)
 	if !on {
 		return body, nil
 	}
@@ -466,7 +468,7 @@ func (h *Handler) applyClientSearch(tn *Tenancy, wire, session, threadID string,
 		ds.hist.Observe(tn.ID, session, project, view, time.Now().UnixMilli())
 	}
 	o, loaded := tooldefer.ApplySearch(h.deferEnv(tn), wire, tooldefer.Req{Tenant: tn.ID, Session: session,
-		Thread: threadID, Project: project, Model: model, Orig: orig, Body: body, Keep: keep})
+		Thread: threadID, Project: project, Model: model, Orig: orig, Body: body, Keep: keep, AlwaysDefer: always})
 	if len(loaded) > 0 {
 		// Added back on the request side: a search the client received (with a client tool call),
 		// or a tool tool_choice forces.

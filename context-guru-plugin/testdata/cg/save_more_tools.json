@@ -34,7 +34,7 @@
    "name": "mcp__playwright",
    "server": "playwright",
    "state": "deferred_cg",
-   "reason": "Context Guru defers it: declared and not used in your last 3 sessions",
+   "reason": "Context Guru defers it in new threads (on your always-defer list), unless the thread uses it or it is under 200 tokens",
    "tokens": 11200,
    "sessions_declared": 40,
    "sessions_used": 1,
@@ -42,8 +42,10 @@
    "carry_usd": 6.4,
    "carry_priced": true,
    "actions": [
-    "keep:mcp__playwright"
-   ]
+    "keep:mcp__playwright",
+    "undefer:mcp__playwright"
+   ],
+   "always_deferred": true
   },
   {
    "kind": "tool",
@@ -58,7 +60,8 @@
    "carry_usd": 1.1,
    "carry_priced": true,
    "actions": [
-    "keep:WebFetch"
+    "keep:WebFetch",
+    "defer:WebFetch"
    ]
   },
   {
@@ -105,9 +108,21 @@
    "name": "mcp__playwright"
   },
   {
+   "id": "undefer:mcp__playwright",
+   "label": "take mcp__playwright off the always-defer list",
+   "action": "undefer",
+   "name": "mcp__playwright"
+  },
+  {
    "id": "keep:WebFetch",
    "label": "never defer WebFetch",
    "action": "keep",
+   "name": "WebFetch"
+  },
+  {
+   "id": "defer:WebFetch",
+   "label": "always defer WebFetch, whatever your history says",
+   "action": "defer",
    "name": "WebFetch"
   },
   {
@@ -123,11 +138,8 @@
   }
  ],
  "basis_id": "9d4e2a7c",
- "not_yet": [
-  {
-   "action": "defer",
-   "label": "always defer a tool (toolfilter has no list for it yet)",
-   "issue": 878
-  }
+ "not_yet": [],
+ "always_defer": [
+  "mcp__playwright"
  ]
 }

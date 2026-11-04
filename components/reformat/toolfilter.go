@@ -35,6 +35,9 @@ type toolfilterConfig struct {
 	Defer string `yaml:"defer"`
 	// Keep names tools deferral must never touch (the account keep list).
 	Keep []string `yaml:"keep"`
+	// AlwaysDefer names tools `defer: auto` defers in every new thread, whatever the history says
+	// (#878): a tool name, or `mcp__<server>` for a whole server. The keep list wins over it.
+	AlwaysDefer []string `yaml:"always_defer"`
 }
 
 // Toolfilter is a marker component holding the opt-in list: `tools` is a top-level body
@@ -49,6 +52,7 @@ type Toolfilter struct {
 	remove []string
 	defers bool
 	keep   []string
+	always []string
 }
 
 func newToolfilter(raw []byte) (components.Component, error) {
@@ -96,6 +100,16 @@ func newToolfilter(raw []byte) (components.Component, error) {
 		tf.keep = append(tf.keep, n)
 	}
 	sort.Strings(tf.keep)
+	for _, n := range cfg.AlwaysDefer {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		if !validDeclName(n) || strings.HasPrefix(n, skills.RemovePrefix) {
+			return nil, fmt.Errorf("toolfilter: always_defer %q is not a tool name", n)
+		}
+		tf.always = append(tf.always, n)
+	}
+	sort.Strings(tf.always)
 	return tf, nil
 }
 
@@ -134,6 +148,9 @@ func (t Toolfilter) Defers() bool { return t.defers }
 // Keep is the account keep list for deferral, sorted.
 func (t Toolfilter) Keep() []string { return t.keep }
 
+// AlwaysDefer is the account always-defer list for deferral, sorted (#878).
+func (t Toolfilter) AlwaysDefer() []string { return t.always }
+
 // Reformat is a no-op: the rewrite already happened in apply, which reports it here through
 // Ctx.FilteredDecls so this component does not read "declined" on the requests where it just
 // acted — the mistake cachesplit's doc records.
@@ -161,6 +178,9 @@ func init() {
 				"off is the account opt-out"},
 		{Key: "keep", Type: components.FieldStrings,
 			Hint: "tool names deferral never touches"},
+		{Key: "always_defer", Type: components.FieldStrings,
+			Hint: "tool names, or `mcp__<server>` for a whole MCP server, that defer: auto defers in every new " +
+				"thread whatever your history says; a name on the keep list stays loaded"},
 		{Key: "remove", Type: components.FieldStrings,
 			Hint: "declaration names to stop sending: a tool name, `mcp__<server>` for a whole MCP " +
 				"server, or `skill__<skill>` for one skill's listing entry; a name still described " +

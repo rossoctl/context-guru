@@ -729,3 +729,36 @@ func TestToolDeferPurgeReachesAnUnopenedFile(t *testing.T) {
 		t.Fatalf("the purge created the file: %v", err)
 	}
 }
+
+// The always-defer list end to end (#878): the history says Workflow is used, and the account lists
+// it, so a new thread defers it. Monitor (unused, not listed) is deferred by the history rule.
+func TestToolDeferAlwaysDeferEndToEnd(t *testing.T) {
+	up := &tdUpstream{}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	cfg, err := config.LoadBytes([]byte("preset: ultrahigh\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [Workflow]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: us.URL,
+		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: tdPrices{}})
+	t.Cleanup(h.Close)
+	ds := h.toolDefer()
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"u1","name":"Workflow","input":{}}]}`
+	for i, s := range []string{"p1", "p2", "p3"} {
+		ds.hist.Observe("", s, "/w", tdBody(use), int64(i+1))
+	}
+	ds.prober.Go = func(fn func()) { fn() }
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tdPost(t, srv, tdBody()) // the probe runs; this thread is sent as is
+	tdPost(t, srv, bytes.Replace(tdBody(), []byte("sess-1"), []byte("sess-2"), 1))
+	if got := tdTools(up.last()); !strings.Contains(got, "Workflow*") || !strings.Contains(got, "Monitor*") {
+		t.Fatalf("tools = %s; want Workflow (listed) and Monitor (unused) deferred", got)
+	}
+}

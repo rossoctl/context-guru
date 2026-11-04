@@ -233,12 +233,14 @@ The words may come in either order (`apply cache X` or `apply X cache`). A chang
 |---|---|
 | keep a tool loaded (never defer it) | `/context-guru:save-more apply deferral keep:<name>@<basis>` |
 | take it off the keep list | `/context-guru:save-more apply deferral unkeep:<name>@<basis>` |
+| always defer a tool, whatever your history says | `/context-guru:save-more apply deferral defer:<name>@<basis>` |
+| take it off the always-defer list | `/context-guru:save-more apply deferral undefer:<name>@<basis>` |
 | tool search on or off for your account | `/context-guru:save-more apply deferral search_on@<basis>` (or `search_off`) |
 | undo the last of these changes | `/context-guru:save-more revert deferral` |
 
-"Always defer a tool" is not available yet: toolfilter has no list for it (#878). The screen says so.
+A tool on the always-defer list (#878) is deferred in every new thread, also without 3 sessions of history and also when this project used it. It still stays loaded when the thread uses it, when `tool_choice` forces it, when it weighs under 200 tokens (a server: all its tools together), when it is a core tool (Bash, Read, Edit, Write, Agent, Skill, ToolSearch, AskUserQuestion, Context Guru's own tools), and when it is on the keep list: the keep list wins. The screen marks a listed row `(always deferred)`. It does not offer `defer` for a core tool, a kept tool, a removed tool or a tool Claude Code defers itself. With tool search off, nothing is deferred.
 
-A change reaches new threads only: a thread keeps the set of tools it decided at its first request, so its cached prefix stays the same. The keep list is toolfilter's `keep`, and search is toolfilter's `defer: auto` or `off`. The routes are `GET /api/save-more/tools` and `POST /api/save-more/tools/apply`, with the same token and loopback rules as the other reports.
+A change reaches new threads only: a thread keeps the set of tools it decided at its first request, so its cached prefix stays the same. The keep list is toolfilter's `keep`, the always-defer list is toolfilter's `always_defer`, and search is toolfilter's `defer: auto` or `off`. The routes are `GET /api/save-more/tools` and `POST /api/save-more/tools/apply`, with the same token and loopback rules as the other reports.
 
 ## Settings that cost you money
 
