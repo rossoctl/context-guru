@@ -17,6 +17,7 @@ import (
 // through the shared adapt path (adaptapply.go), so a hosted account and a local proxy both work:
 //
 //   - keep / unkeep: add or take out a name on toolfilter's `keep` list (never defer it);
+//   - defer / undefer: add or take out a name on toolfilter's `always_defer` list (#878);
 //   - search_on / search_off: toolfilter `defer: auto` or `off` for the account;
 //   - revert: undo the last save-more tools change.
 //
@@ -24,38 +25,51 @@ import (
 
 const saveMoreToolsKind = "save-more-tools"
 
-// deferSettings reads toolfilter's `defer` and `keep` out of a configuration document.
-func deferSettings(doc string) (on bool, keep []string, ok bool, reason string) {
+// deferConf is toolfilter's deferral settings in a configuration document: `defer`, `keep` and
+// `always_defer`.
+type deferConf struct {
+	on           bool
+	keep, always []string
+}
+
+// deferSettings reads toolfilter's deferral settings out of a configuration document.
+func deferSettings(doc string) (c deferConf, ok bool, reason string) {
 	f, err := config.ParseForm(doc)
 	if err != nil || f.ParseError != "" {
-		return false, nil, false, "your stored configuration does not load, so it cannot be edited " +
+		return deferConf{}, false, "your stored configuration does not load, so it cannot be edited " +
 			"as fields; a manager must repair it on the account page"
 	}
 	blk := f.Components[toolFilterComponent]
-	switch list := blk["keep"].(type) {
+	return deferConf{on: docDefers(doc), keep: nameList(blk["keep"]), always: nameList(blk["always_defer"])}, true, ""
+}
+
+// nameList is one of toolfilter's name lists as a form value, sorted.
+func nameList(v any) []string {
+	var out []string
+	switch list := v.(type) {
 	case []string:
-		keep = append(keep, list...)
+		out = append(out, list...)
 	case []any:
 		for _, v := range list {
 			if s, isStr := v.(string); isStr && s != "" {
-				keep = append(keep, s)
+				out = append(out, s)
 			}
 		}
 	}
-	sort.Strings(keep)
-	return docDefers(doc), keep, true, ""
+	sort.Strings(out)
+	return out
 }
 
-// editDefer is doc with toolfilter's `defer` and `keep` rewritten by edit. Like editRemoved, it adds
-// toolfilter to the pipeline when it is absent and leaves every other key alone.
-func editDefer(current string, edit func(on bool, keep []string) (bool, []string)) (string, error) {
+// editDefer is doc with toolfilter's `defer`, `keep` and `always_defer` rewritten by edit. Like
+// editRemoved, it adds toolfilter to the pipeline when it is absent and leaves every other key alone.
+func editDefer(current string, edit func(deferConf) deferConf) (string, error) {
 	f, perr := config.ParseForm(current)
 	if perr != nil || f.ParseError != "" {
 		return "", statusError{http.StatusConflict, "your stored configuration does not load, so it cannot " +
 			"be edited as fields; a manager must repair it on the account page"}
 	}
-	on, keep, _, _ := deferSettings(current)
-	on, keep = edit(on, keep)
+	c, _, _ := deferSettings(current)
+	c = edit(c)
 	if f.Components == nil {
 		f.Components = map[string]map[string]any{}
 	}
@@ -65,10 +79,15 @@ func editDefer(current string, edit func(on bool, keep []string) (bool, []string
 		f.Components[toolFilterComponent] = blk
 	}
 	blk["defer"] = "off"
-	if on {
+	if c.on {
 		blk["defer"] = "auto"
 	}
-	blk["keep"] = keep
+	blk["keep"] = c.keep
+	if len(c.always) > 0 {
+		blk["always_defer"] = c.always
+	} else {
+		delete(blk, "always_defer") // an empty list is the default: leave no key behind
+	}
 	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, true)
 	f.PipelineKnown = []string{toolFilterComponent}
 	doc, err := config.ApplyForm(current, f)
@@ -107,16 +126,15 @@ func (h *Handler) saveMoreToolsReport(w http.ResponseWriter, r *http.Request) {
 	doc, cerr := h.adaptConfig(who)
 	host := dash.SaveMoreToolsHost{Writable: cerr == nil}
 	if cerr == nil {
-		var ok bool
-		host.SearchOn, host.Keep, ok, host.Reason = deferSettings(doc)
-		host.Writable = ok
+		c, ok, reason := deferSettings(doc)
+		host.SearchOn, host.Keep, host.AlwaysDefer, host.Writable, host.Reason = c.on, c.keep, c.always, ok, reason
 		host.Removed, _, _ = removedFrom(doc)
 	} else {
 		_, host.Reason = statusOf(cerr)
 	}
 	if ds, _ := h.deferPeek(); ds != nil {
-		keep := host.Keep
-		host.Explain = func(name string) (bool, string) { return tooldefer.Explain(ds.hist, tn.ID, name, keep) }
+		keep, always := host.Keep, host.AlwaysDefer
+		host.Explain = func(name string) (bool, string) { return tooldefer.Explain(ds.hist, tn.ID, name, keep, always) }
 	}
 	var price func(string) (modelinfo.Price, bool)
 	if h.opts.Prices != nil {
@@ -172,25 +190,36 @@ func (h *Handler) saveMoreToolsApply(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusConflict, "that option is not in a current report; run the report again")
 		return
 	}
-	// Defence in depth: only a tool or server name is written to the keep list, never Context Guru's own.
-	if (opt.Action == "keep" || opt.Action == "unkeep") && (opt.Name == "" || ownDecl.MatchString(opt.Name)) {
-		ctlErr(w, http.StatusBadRequest, "refusing to write "+opt.Name)
+	// Defence in depth: only a tool or server name is written to a name list, never Context Guru's own.
+	switch opt.Action {
+	case "keep", "unkeep", "defer", "undefer":
+		if opt.Name == "" || ownDecl.MatchString(opt.Name) {
+			ctlErr(w, http.StatusBadRequest, "refusing to write "+opt.Name)
+			return
+		}
+	}
+	if opt.Action == "defer" && tooldefer.NeverDefer(opt.Name) {
+		ctlErr(w, http.StatusBadRequest, "refusing to defer "+opt.Name+": it is on the never-defer list")
 		return
 	}
 	var note string
 	_, _, err = h.adaptWrite(who, saveMoreToolsKind, opt.ID, func(doc string) (string, error) {
-		return editDefer(doc, func(on bool, keep []string) (bool, []string) {
+		return editDefer(doc, func(c deferConf) deferConf {
 			switch opt.Action {
 			case "keep":
-				keep, note = withDecl(keep, opt.Name, true), "never deferring "+opt.Name
+				c.keep, note = withDecl(c.keep, opt.Name, true), "never deferring "+opt.Name
 			case "unkeep":
-				keep, note = withDecl(keep, opt.Name, false), "took "+opt.Name+" off the keep list"
+				c.keep, note = withDecl(c.keep, opt.Name, false), "took "+opt.Name+" off the keep list"
+			case "defer":
+				c.always, note = withDecl(c.always, opt.Name, true), "always deferring "+opt.Name
+			case "undefer":
+				c.always, note = withDecl(c.always, opt.Name, false), "took "+opt.Name+" off the always-defer list"
 			case "search_on":
-				on, note = true, "tool search on: tools your history shows unused are deferred"
+				c.on, note = true, "tool search on: tools your history shows unused are deferred"
 			case "search_off":
-				on, note = false, "tool search off: every tool is sent in full"
+				c.on, note = false, "tool search off: every tool is sent in full"
 			}
-			return on, keep
+			return c
 		})
 	})
 	if err != nil {

@@ -6,12 +6,13 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
+	"github.com/rossoctl/context-guru/tooldefer"
 )
 
 // save-more tools (#485 D3, #869 item 4): one row per tool, MCP server and skill, with its state,
 // its use, the cost of carrying it and the reason for its state, plus the actions an account can
-// take on tool deferral: keep a tool (never defer it), turn search on or off for the account, and
-// revert the last change.
+// take on tool deferral: keep a tool (never defer it), always defer a tool (#878), turn search on or
+// off for the account, and revert the last change.
 //
 // The rows come from the same inventory /api/tools reads (ToolReportFor), so the use and cost
 // figures are the dashboard's own. The deferral half (is it deferred by Context Guru, and why) is
@@ -34,8 +35,9 @@ const (
 type SaveMoreToolsHost struct {
 	// SearchOn is whether tool deferral is on for the account (toolfilter `defer: auto`).
 	SearchOn bool
-	// Keep is the account's keep list; Removed its removal list.
-	Keep, Removed []string
+	// Keep is the account's keep list, AlwaysDefer its always-defer list (#878), Removed its
+	// removal list.
+	Keep, AlwaysDefer, Removed []string
 	// Explain says whether Context Guru's history rule would defer name, and why. nil when the host
 	// has no history (deferral never ran in this process).
 	Explain func(name string) (deferred bool, reason string)
@@ -53,8 +55,10 @@ type SaveMoreToolsRow struct {
 	Reason string `json:"reason"`
 	// Builtin marks one of Claude Code's own tools.
 	Builtin bool `json:"builtin,omitempty"`
-	// Kept is true when the row is on the account's keep list.
-	Kept bool `json:"kept,omitempty"`
+	// Kept is true when the row is on the account's keep list; AlwaysDeferred when it is on the
+	// always-defer list (#878).
+	Kept           bool `json:"kept,omitempty"`
+	AlwaysDeferred bool `json:"always_deferred,omitempty"`
 	// Tokens is the weight on one request; SessionsDeclared/SessionsUsed/Calls its use.
 	Tokens           int   `json:"tokens"`
 	SessionsDeclared int   `json:"sessions_declared"`
@@ -73,7 +77,8 @@ type SaveMoreToolsRow struct {
 type SaveMoreToolsOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	// Action is keep | unkeep | search_on | search_off; Name the row it acts on, "" for the account.
+	// Action is keep | unkeep | defer | undefer | search_on | search_off; Name the row it acts on, ""
+	// for the account.
 	Action string `json:"action"`
 	Name   string `json:"name,omitempty"`
 }
@@ -85,20 +90,18 @@ type SaveMoreToolsNotYet struct {
 	Issue  int    `json:"issue"`
 }
 
-// deferNotYet is "always defer": toolfilter has no list for it yet (#878).
-var deferNotYet = SaveMoreToolsNotYet{Action: "defer", Issue: 878,
-	Label: "always defer a tool (toolfilter has no list for it yet)"}
-
 // SaveMoreToolsDoc is the GET /api/save-more/tools response.
 type SaveMoreToolsDoc struct {
-	Kind     string                `json:"kind"`
-	SearchOn bool                  `json:"search_on"`
-	Keep     []string              `json:"keep"`
-	Writable bool                  `json:"writable"`
-	Reason   string                `json:"reason,omitempty"`
-	Window   AdaptToolsWindow      `json:"window"`
-	Rows     []SaveMoreToolsRow    `json:"rows"`
-	Options  []SaveMoreToolsOption `json:"options"`
+	Kind     string   `json:"kind"`
+	SearchOn bool     `json:"search_on"`
+	Keep     []string `json:"keep"`
+	// AlwaysDefer is the account's always-defer list (#878).
+	AlwaysDefer []string              `json:"always_defer"`
+	Writable    bool                  `json:"writable"`
+	Reason      string                `json:"reason,omitempty"`
+	Window      AdaptToolsWindow      `json:"window"`
+	Rows        []SaveMoreToolsRow    `json:"rows"`
+	Options     []SaveMoreToolsOption `json:"options"`
 	// NotYet names the actions #485 D3 lists that this proxy does not offer yet, each with the
 	// issue that builds it, so a reader sees them as missing rather than absent.
 	NotYet []SaveMoreToolsNotYet `json:"not_yet"`
@@ -119,12 +122,14 @@ func (d *DB) SaveMoreTools(f Filter, price func(string) (modelinfo.Price, bool),
 
 // buildSaveMoreTools is the arithmetic, apart from the query so it is testable on its own.
 func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *SaveMoreToolsDoc {
-	keep, removed := set(host.Keep), set(host.Removed)
+	keep, always, removed := set(host.Keep), set(host.AlwaysDefer), set(host.Removed)
 	doc := &SaveMoreToolsDoc{Kind: SaveMoreToolsKind, SearchOn: host.SearchOn, Keep: append([]string{}, host.Keep...),
-		Writable: host.Writable, Reason: host.Reason, Rows: []SaveMoreToolsRow{}, Options: []SaveMoreToolsOption{},
-		NotYet: []SaveMoreToolsNotYet{deferNotYet}}
+		AlwaysDefer: append([]string{}, host.AlwaysDefer...),
+		Writable:    host.Writable, Reason: host.Reason, Rows: []SaveMoreToolsRow{}, Options: []SaveMoreToolsOption{},
+		NotYet: []SaveMoreToolsNotYet{}}
 	doc.Window = AdaptToolsWindow{Since: f.Since, Until: f.Until, Sessions: rep.Coverage.Captured, Requests: rep.Coverage.Requests}
 	sort.Strings(doc.Keep)
+	sort.Strings(doc.AlwaysDefer)
 
 	state := func(name string, clientDeferred bool) (string, string) {
 		// Client-deferred first: the removal filter removes only `tools` elements, so a name Claude
@@ -136,6 +141,10 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 			return StateRemoved, "on your removal list: the proxy does not send it"
 		case !host.SearchOn:
 			return StateLoaded, "tool search is off for your account"
+		case always[name] && !keep[name] && !tooldefer.NeverDefer(name):
+			// The always-defer list reads no history, so it holds without Explain too.
+			return StateDeferredCG, "Context Guru defers it in new threads (on your always-defer list), " +
+				"unless the thread uses it or it is under 200 tokens"
 		case host.Explain == nil:
 			return StateLoaded, "no tool history on this proxy yet"
 		}
@@ -150,7 +159,8 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 	}
 	add := func(r SaveMoreToolsRow) {
 		r.Kept = keep[r.Name] || (r.Kind == KindMCPServer && keep["mcp__"+r.Server])
-		// The keep list takes a bare tool name (toolfilter's charset); '@' would also split the
+		r.AlwaysDeferred = always[keepName(r)]
+		// The name lists take a bare tool name (toolfilter's charset); '@' would also split the
 		// plugin's option@basis token.
 		if r.Kind != KindSkill && !adaptToolsOwn.MatchString(r.Name) && adaptToolsSafe.MatchString(r.Name) &&
 			!strings.Contains(r.Name, "@") {
@@ -158,6 +168,14 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 				r.Actions = []string{"unkeep:" + keepName(r)}
 			} else {
 				r.Actions = []string{"keep:" + keepName(r)}
+			}
+			// Always defer: not for a never-defer tool or a kept one (the keep list wins), and not for
+			// one the proxy does not send or Claude Code defers itself. Undefer is always offered.
+			switch {
+			case r.AlwaysDeferred:
+				r.Actions = append(r.Actions, "undefer:"+keepName(r))
+			case !r.Kept && !tooldefer.NeverDefer(r.Name) && r.State != StateRemoved && r.State != StateDeferredCC:
+				r.Actions = append(r.Actions, "defer:"+keepName(r))
 			}
 		}
 		if r.Actions == nil {
@@ -227,7 +245,7 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 		doc.Rows = doc.Rows[:saveMoreToolsLimit]
 	}
 
-	// The options: one keep or unkeep per row that offers it, and the account switch.
+	// The options: each keep, unkeep, defer or undefer a row offers, and the account switch.
 	seen := map[string]bool{}
 	for _, r := range doc.Rows {
 		for _, id := range r.Actions {
@@ -237,8 +255,13 @@ func buildSaveMoreTools(rep *ToolReport, host SaveMoreToolsHost, f Filter) *Save
 			seen[id] = true
 			act, name, _ := strings.Cut(id, ":")
 			label := "never defer " + name
-			if act == "unkeep" {
+			switch act {
+			case "unkeep":
 				label = "take " + name + " off the keep list"
+			case "defer":
+				label = "always defer " + name + ", whatever your history says"
+			case "undefer":
+				label = "take " + name + " off the always-defer list"
 			}
 			doc.Options = append(doc.Options, SaveMoreToolsOption{ID: id, Label: label, Action: act, Name: name})
 		}

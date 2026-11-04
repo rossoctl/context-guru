@@ -28,6 +28,13 @@
 // Without 3 user sessions of history, nothing is deferred. A tool loaded through search counts as
 // used, so the user's next sessions keep it loaded.
 //
+// # The always-defer list
+//
+// A tool on the account's always-defer list (toolfilter `always_defer`, #878; a tool name, or
+// mcp__<server> for a whole server) skips rules 2 and 3, and the 3-session minimum: it reads no
+// history. It still obeys rule 1, rule 4 (the keep list wins when a name is on both lists) and
+// rule 5 (for a server: its total). The list reads no history, so Rebuild gives the same set.
+//
 // # Cache discipline
 //
 // `tools` hashes first, so a tool that moves between loaded and deferred rewrites the whole cached
@@ -115,6 +122,8 @@ type Input struct {
 	Session string
 	// Keep is the account's keep list: never deferred.
 	Keep []string
+	// AlwaysDefer is the account's always-defer list: deferred without the history rule (#878).
+	AlwaysDefer []string
 }
 
 // Decide returns the tool names to defer, sorted. Empty when the rule defers nothing.
@@ -124,20 +133,28 @@ func Decide(h History, in Input) []string {
 
 // decide is Decide with the transcript's uses given: a tool in used is never deferred.
 func decide(h History, in Input, used map[string]bool) []string {
-	if h == nil || in.Session == "" {
+	if in.Session == "" || (h == nil && len(in.AlwaysDefer) == 0) {
 		return nil
 	}
 	tools := gjson.GetBytes(in.Body, "tools")
 	if !tools.IsArray() {
 		return nil
 	}
-	past := h.UserSessions(in.Tenant, in.Session, UserSessions)
-	if len(past) < UserSessions {
-		return nil // without 3 user sessions: defer nothing
+	// Without 3 user sessions the history rule defers nothing; the always-defer list still applies.
+	var past []Session
+	if h != nil {
+		past = h.UserSessions(in.Tenant, in.Session, UserSessions)
 	}
-	keep := map[string]bool{}
+	history := len(past) >= UserSessions
+	if !history && len(in.AlwaysDefer) == 0 {
+		return nil
+	}
+	keep, always := map[string]bool{}, map[string]bool{}
 	for _, k := range in.Keep {
 		keep[k] = true
+	}
+	for _, k := range in.AlwaysDefer {
+		always[k] = true
 	}
 	forced := forcedTool(in.Body)
 	// MCP tools are decided per SERVER (mcp__<server>__*): the unit a user installs. A server is
@@ -147,6 +164,8 @@ func decide(h History, in Input, used map[string]bool) []string {
 		names  []string
 		tokens int
 		veto   bool // some member is excluded on its own: the whole unit stays loaded
+		listed int  // members on the always-defer list by their own name
+		always bool // the unit is on the always-defer list: the history rule is skipped
 	}
 	units := map[string]*unit{}
 	var order []string
@@ -170,14 +189,24 @@ func decide(h History, in Input, used map[string]bool) []string {
 		if NeverDefer(n) || keep[n] || keep[strings.TrimSuffix(key, "__")] || n == forced || used[n] {
 			u.veto = true
 		}
+		if always[n] {
+			u.listed++
+		}
+		u.always = always[strings.TrimSuffix(key, "__")]
 		return true
 	})
 	var out []string
 	for _, key := range order {
 		u := units[key]
+		// A server is listed as mcp__<server>, or by every tool it declares: one listed tool does
+		// not defer the rest of its server.
+		u.always = u.always || u.listed == len(u.names)
 		switch {
 		case u.veto:
 		case u.tokens < MinTokens:
+		case u.always:
+			out = append(out, u.names...)
+		case !history:
 		case !unusedIn(past, key):
 		case in.Project != "" && h.ProjectUsed(in.Tenant, in.Project, key, in.Session, ProjectSessions):
 		default:

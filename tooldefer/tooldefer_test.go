@@ -754,3 +754,112 @@ func TestApplyRebuildThatDriftedSendsTheOriginal(t *testing.T) {
 		t.Fatalf("Rebuild = %v %v", set, ok)
 	}
 }
+
+// ── the always-defer list (#878) ────────────────────────────────────────────
+
+// usedEverywhere is a history where every tool is declared and used, and the project used Workflow:
+// the history rule defers nothing.
+func usedEverywhere() hist {
+	return hist{sessions: []Session{sess(all, all...), sess(all, all...), sess(all, all...)},
+		project: map[string]bool{"Workflow": true, "mcp__a__b": true}}
+}
+
+// A listed tool skips the history rule and the project veto, and obeys every other rule.
+func TestDecideAlwaysDeferRuleCases(t *testing.T) {
+	use := `{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Monitor","input":{}}]}`
+	for _, c := range []struct {
+		name   string
+		h      History
+		always []string
+		keep   []string
+		extra  string
+		msgs   []string
+		want   string
+	}{
+		{"skips the history rule", usedEverywhere(), []string{"Monitor"}, nil, "", nil, "Monitor"},
+		{"skips the project veto", usedEverywhere(), []string{"Workflow"}, nil, "", nil, "Workflow"},
+		{"needs no history", nil, []string{"Monitor"}, nil, "", nil, "Monitor"},
+		{"needs no 3 sessions", hist{sessions: []Session{sess(all)}}, []string{"Monitor"}, nil, "", nil, "Monitor"},
+		{"a whole MCP server", usedEverywhere(), []string{"mcp__a"}, nil, "", nil, "mcp__a__b"},
+		{"never-defer wins", usedEverywhere(), []string{"Bash", "context_guru_expand"}, nil, "", nil, ""},
+		{"keep wins", usedEverywhere(), []string{"Monitor"}, []string{"Monitor"}, "", nil, ""},
+		{"keep on the server wins", usedEverywhere(), []string{"mcp__a"}, []string{"mcp__a"}, "", nil, ""},
+		{"used in the thread", usedEverywhere(), []string{"Monitor"}, nil, "", []string{use}, ""},
+		{"forced by tool_choice", usedEverywhere(), []string{"Monitor"}, nil, `"tool_choice":{"type":"tool","name":"Monitor"},`, nil, ""},
+		{"under 200 tokens", usedEverywhere(), []string{"Tiny"}, nil, "", nil, ""},
+		{"empty list", usedEverywhere(), nil, nil, "", nil, ""},
+		{"adds to the history rule", threeUnused(), []string{"ProjUsed"}, []string{"Kept"}, "", nil, "Monitor,ProjUsed,Workflow,mcp__a__b"},
+	} {
+		in := Input{Session: "s", Project: "/w", Body: body(catalogue(), c.extra, c.msgs...), Keep: c.keep, AlwaysDefer: c.always}
+		if got := strings.Join(Decide(c.h, in), ","); got != c.want {
+			t.Errorf("%s: deferred %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A server is one unit for the list too: its 200-token minimum is its total, and one listed tool of
+// it does not defer the rest.
+func TestDecideAlwaysDeferMCPServer(t *testing.T) {
+	big, small := serverTools("big", 30), serverTools("small", 1)
+	tools := append(append([]string{decl("Bash")}, big...), small...)
+	got := Decide(nil, Input{Session: "s", Body: body(tools, ""), AlwaysDefer: []string{"mcp__big", "mcp__small"}})
+	if len(got) != 30 || !strings.HasPrefix(got[0], "mcp__big__") {
+		t.Fatalf("deferred %v; want the 30 tools of mcp__big and not mcp__small (under %d tokens)", got, MinTokens)
+	}
+	if got := Decide(nil, Input{Session: "s", Body: body(tools, ""), AlwaysDefer: []string{"mcp__big__t1"}}); len(got) != 0 {
+		t.Fatalf("one listed tool deferred its server: %v", got)
+	}
+	// A tool of the server used in this thread keeps the whole server loaded.
+	load := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"mcp__big__t1","input":{}}]}`
+	if got := Decide(nil, Input{Session: "s", Body: body(tools, "", load), AlwaysDefer: []string{"mcp__big"}}); len(got) != 0 {
+		t.Fatalf("a server used in this thread was deferred: %v", got)
+	}
+}
+
+// The list applies at the thread's first request, and the set stays for the thread.
+func TestApplyAlwaysDeferAtTheFirstRequest(t *testing.T) {
+	e := env(t, usedEverywhere())
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	r := req(body(catalogue(), ""))
+	r.AlwaysDefer = []string{"Monitor"}
+	if o := Apply(e, r); !o.Changed || !o.Decided || strings.Join(o.Deferred, ",") != "Monitor" {
+		t.Fatalf("first: %s", show(o))
+	}
+	// The list changes mid-thread: the thread keeps its set.
+	later := req(body(catalogue(), "", `{"role":"assistant","content":"ok"}`, `{"role":"user","content":"more"}`))
+	later.AlwaysDefer = nil
+	if o := Apply(e, later); !o.Changed || o.Decided || strings.Join(o.Deferred, ",") != "Monitor" {
+		t.Fatalf("later: %s", show(o))
+	}
+	// defer: off (the account opt-out) defers nothing, list or not.
+	off := req(body(catalogue(), ""))
+	off.Thread, off.AlwaysDefer, off.AccountOff = "t2", []string{"Monitor"}, true
+	if o := Apply(e, off); o.Changed || o.Why != "account_off" {
+		t.Fatalf("defer: off: %s", show(o))
+	}
+}
+
+// After a restart that lost the record, Rebuild gives the same set: the list reads no history.
+func TestApplyAlwaysDeferRebuildsTheSameSet(t *testing.T) {
+	h := usedEverywhere()
+	e := env(t, h)
+	passProbe(e, ProbeKey{"u", "m", "r"})
+	r := req(body(catalogue(), ""))
+	r.AlwaysDefer = []string{"Monitor", "Workflow"}
+	o := Apply(e, r)
+	load := `{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"Workflow","limit":1}},` +
+		`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"Workflow"}]}},` +
+		`{"type":"tool_use","id":"t9","name":"Workflow","input":{}}]}`
+	res := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"done"}]}`
+	later := req(body(catalogue(), "", load, res))
+	later.AlwaysDefer = r.AlwaysDefer
+	before := Apply(e, later)
+	e2 := env(t, h) // a different file: the record is gone
+	after := Apply(e2, later)
+	if !after.Rebuilt || string(after.Body) != string(before.Body) {
+		t.Fatalf("rebuild changed the request:\nbefore %s\nafter  %s (%s)", names(before.Body), names(after.Body), show(after))
+	}
+	if strings.Join(after.Deferred, ",") != strings.Join(o.Deferred, ",") || strings.Join(o.Deferred, ",") != "Monitor,Workflow" {
+		t.Fatalf("set after rebuild = %v, first = %v; want Monitor,Workflow", after.Deferred, o.Deferred)
+	}
+}

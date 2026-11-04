@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/metrics"
 )
 
 // Apply writes exactly the names the caller's own report offers, refuses a stale basis or an
@@ -293,6 +296,35 @@ func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
 	if on, keep := tf(); !on || len(keep) != 0 {
 		t.Fatalf("after unkeep: defers %v keep %v", on, keep)
 	}
+	// #878: defer and undefer write toolfilter's always_defer list.
+	always := func() []string {
+		x, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ AlwaysDefer() []string })
+		if x == nil {
+			return nil
+		}
+		return x.AlwaysDefer()
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"defer:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("defer = %d %s", w.Code, w.Body)
+	}
+	if got := always(); strings.Join(got, ",") != "mcp__srv" {
+		t.Fatalf("after defer: always_defer %v", got)
+	}
+	rep = read()
+	if fmt.Sprint(rep["always_defer"]) != "[mcp__srv]" {
+		t.Fatalf("the report does not read the list back: %v", rep["always_defer"])
+	}
+	basis = rep["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"undefer:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("undefer = %d %s", w.Code, w.Body)
+	}
+	if got := always(); len(got) != 0 {
+		t.Fatalf("after undefer: always_defer %v", got)
+	}
+	if doc, _ := h.adaptConfig(adaptWho{Local: true}); strings.Contains(doc, "always_defer") {
+		t.Fatalf("an empty list left a key behind:\n%s", doc)
+	}
 	// An option no report offered is refused.
 	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:Bash","basis":"`+basis+`"}`); w.Code != http.StatusConflict {
 		t.Fatalf("unoffered option = %d %s", w.Code, w.Body)
@@ -300,7 +332,57 @@ func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
 	if w := do("POST", "/api/save-more/tools/apply", `{"option":"revert"}`); w.Code != http.StatusOK {
 		t.Fatalf("revert = %d %s", w.Code, w.Body)
 	}
-	if on, keep := tf(); !on || strings.Join(keep, ",") != "mcp__srv" {
-		t.Fatalf("after revert: defers %v keep %v; want the unkeep undone and search still on", on, keep)
+	if on, keep := tf(); !on || len(keep) != 0 || strings.Join(always(), ",") != "mcp__srv" {
+		t.Fatalf("after revert: defers %v keep %v always %v; want the undefer undone and search still on", on, keep, always())
+	}
+}
+
+// editDefer writes always_defer next to keep and leaves every other key alone (#878); an empty list
+// takes the key out. The hosted and the local path both write through it.
+func TestEditDeferWritesTheAlwaysDeferList(t *testing.T) {
+	doc := "pipeline: [format, toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    keep: [WebFetch]\n    remove: [mcp__ops]\n"
+	out, err := editDefer(doc, func(c deferConf) deferConf {
+		c.always = withDecl(c.always, "mcp__pw", true)
+		return c
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok, _ := deferSettings(out)
+	if !ok || !c.on || strings.Join(c.keep, ",") != "WebFetch" || strings.Join(c.always, ",") != "mcp__pw" {
+		t.Fatalf("after defer: %+v\n%s", c, out)
+	}
+	if r, _, _ := removedFrom(out); strings.Join(r, ",") != "mcp__ops" {
+		t.Fatalf("remove list changed: %v\n%s", r, out)
+	}
+	out, err = editDefer(out, func(c deferConf) deferConf {
+		c.always = withDecl(c.always, "mcp__pw", false)
+		return c
+	})
+	if err != nil || strings.Contains(out, "always_defer") {
+		t.Fatalf("after undefer (err %v):\n%s", err, out)
+	}
+}
+
+// The host reads the always-defer list out of the tenant's pipeline (#878), and only with defer: auto.
+func TestDeferOnReadsTheAlwaysDeferList(t *testing.T) {
+	read := func(doc string) (bool, []string, []string) {
+		t.Helper()
+		cfg, err := config.LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := cfg.Build(metrics.NewAggregator())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return deferOn(&Tenancy{Pipe: pipe})
+	}
+	on, keep, always := read("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    keep: [Kept]\n    always_defer: [mcp__pw, Monitor]\n")
+	if !on || strings.Join(keep, ",") != "Kept" || strings.Join(always, ",") != "Monitor,mcp__pw" {
+		t.Fatalf("defer: auto: on %v keep %v always %v", on, keep, always)
+	}
+	if on, _, always := read("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: off\n    always_defer: [Monitor]\n"); on || len(always) != 0 {
+		t.Fatalf("defer: off: on %v always %v; want nothing deferred", on, always)
 	}
 }

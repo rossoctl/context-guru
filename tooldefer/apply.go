@@ -43,8 +43,8 @@ type Req struct {
 	Body []byte
 	// Probe names the probe verdict that gates a NEW decision.
 	Probe ProbeKey
-	// Keep is the account's keep list.
-	Keep []string
+	// Keep is the account's keep list; AlwaysDefer its always-defer list (#878).
+	Keep, AlwaysDefer []string
 	// AccountOff is the account opt-out (toolfilter.defer: off).
 	AccountOff bool
 }
@@ -127,7 +127,8 @@ func Apply(env Env, r Req) (o Outcome) {
 			// stale verdict is still used until the new one lands; a Fail must not last forever.
 			o.NeedProbe = v == Unknown || env.Prober.Stale(r.Probe)
 		}
-		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep}
+		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep,
+			AlwaysDefer: r.AlwaysDefer}
 		switch {
 		case !HasAssistantTurn(r.Orig) || !hasSearchTurn(r.Orig):
 			// The thread's first request: it writes the cache anyway, so this is when to decide.

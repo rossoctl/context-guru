@@ -2,6 +2,7 @@ package dash
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -55,7 +56,7 @@ func TestSaveMoreToolsRowsAndStates(t *testing.T) {
 	if !rows["Bash"].Kept || len(rows["Bash"].Actions) != 1 || rows["Bash"].Actions[0] != "unkeep:Bash" {
 		t.Errorf("Bash = %+v, want kept with an unkeep action", rows["Bash"])
 	}
-	if a := rows["mcp__pw"].Actions; len(a) != 1 || a[0] != "keep:mcp__pw" {
+	if a := rows["mcp__pw"].Actions; len(a) != 2 || a[0] != "keep:mcp__pw" || a[1] != "defer:mcp__pw" {
 		t.Errorf("mcp__pw actions = %v", a)
 	}
 	if rows["mcp__pw"].LastUsedTS != 7 || rows["mcp__pw"].Kind != KindMCPServer {
@@ -74,8 +75,10 @@ func TestSaveMoreToolsRowsAndStates(t *testing.T) {
 	if !ids["search_off"] || ids["search_on"] || !ids["keep:WebFetch"] || !ids["unkeep:Bash"] {
 		t.Errorf("options = %v", doc.Options)
 	}
-	if len(doc.NotYet) != 1 || doc.NotYet[0].Action != "defer" || doc.NotYet[0].Issue != 878 || ids["defer"] {
-		t.Errorf("not_yet = %+v; want defer, issue 878, and no defer option", doc.NotYet)
+	// #878: always defer is offered now, except for a never-defer tool (Bash), one Claude Code defers
+	// itself (Monitor) and one the proxy does not send (mcp__gh).
+	if len(doc.NotYet) != 0 || !ids["defer:WebFetch"] || ids["defer:Bash"] || ids["defer:Monitor"] || ids["defer:mcp__gh"] {
+		t.Errorf("not_yet = %+v, options = %v", doc.NotYet, doc.Options)
 	}
 	if offers := doc.SaveMoreToolsOffers(); offers["keep:WebFetch"].(SaveMoreToolsOption).Name != "WebFetch" {
 		t.Errorf("offers = %v", offers)
@@ -123,5 +126,58 @@ func TestSaveMoreToolsServerAndRemovedEdges(t *testing.T) {
 	if len(doc.Rows) != saveMoreToolsLimit || doc.Truncated != 3 || doc.Rows[len(doc.Rows)-1].CarryUSD != 3 {
 		t.Errorf("rows %d, truncated %d, cheapest kept %v; want %d, 3, 3", len(doc.Rows), doc.Truncated,
 			doc.Rows[len(doc.Rows)-1].CarryUSD, saveMoreToolsLimit)
+	}
+}
+
+// The always-defer list (#878): a listed row reads deferred by Context Guru without history, offers
+// undefer, and the keep list wins over it.
+func TestSaveMoreToolsAlwaysDefer(t *testing.T) {
+	rep := &ToolReport{
+		Aside: []ToolStat{
+			{Kind: KindTool, Name: "WebFetch", Builtin: true, Tokens: 500},
+			{Kind: KindTool, Name: "Monitor", Builtin: true, Tokens: 500},
+			{Kind: KindTool, Name: "Bash", Builtin: true, Tokens: 900},
+		},
+		Tools:   []ToolStat{{Kind: KindMCPTool, Name: "mcp__pw__click", Server: "pw", Tokens: 300}},
+		Servers: []ServerStat{{Server: "pw", Tokens: 300}},
+	}
+	host := SaveMoreToolsHost{SearchOn: true, Writable: true, Keep: []string{"Monitor"},
+		AlwaysDefer: []string{"mcp__pw", "WebFetch", "Monitor", "Bash"}}
+	doc := buildSaveMoreTools(rep, host, Filter{})
+	rows := smtRows(doc)
+	for _, n := range []string{"WebFetch", "mcp__pw"} {
+		r := rows[n]
+		if r.State != StateDeferredCG || !r.AlwaysDeferred || r.Actions[len(r.Actions)-1] != "undefer:"+n ||
+			!strings.Contains(r.Reason, "always-defer") {
+			t.Errorf("%s = %+v, want deferred by CG from the always-defer list, with undefer", n, r)
+		}
+	}
+	if r := rows["Monitor"]; r.State != StateLoaded {
+		t.Errorf("Monitor = %+v, want loaded: the keep list wins", r)
+	}
+	if r := rows["Bash"]; r.State != StateLoaded {
+		t.Errorf("Bash = %+v, want loaded: a never-defer tool", r)
+	}
+	// A never-defer tool that is not kept and not listed offers no defer.
+	plain := smtRows(buildSaveMoreTools(rep, SaveMoreToolsHost{SearchOn: true, Writable: true}, Filter{}))
+	for _, a := range plain["Bash"].Actions {
+		if a == "defer:Bash" {
+			t.Errorf("Bash offers %v; a never-defer tool cannot be always deferred", plain["Bash"].Actions)
+		}
+	}
+	if strings.Join(doc.AlwaysDefer, ",") != "Bash,Monitor,WebFetch,mcp__pw" {
+		t.Errorf("always_defer = %v", doc.AlwaysDefer)
+	}
+	labels := map[string]string{}
+	for _, o := range doc.Options {
+		labels[o.ID] = o.Action + "|" + o.Name
+	}
+	if labels["undefer:mcp__pw"] != "undefer|mcp__pw" || labels["undefer:WebFetch"] != "undefer|WebFetch" {
+		t.Errorf("options = %v", doc.Options)
+	}
+	// With search off, nothing is deferred, list or not.
+	host.SearchOn = false
+	if r := smtRows(buildSaveMoreTools(rep, host, Filter{}))["WebFetch"]; r.State != StateLoaded {
+		t.Errorf("search off: WebFetch = %+v, want loaded", r)
 	}
 }

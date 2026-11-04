@@ -9,7 +9,7 @@
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
-                           (`save-more tools`: each tool, MCP server and skill, and tool deferral's keep and search switches)
+                           (`save-more tools`: each tool, MCP server and skill, and tool deferral's keep, always-defer and search switches)
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
     ping      keep this session's cache warm with one ping right now (POST /api/me/cache/ping)
     cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
@@ -1222,7 +1222,8 @@ def render_deferral(rep: dict, o: dict, e) -> list[str]:
         kind = {"tool": "tool", "mcp_server": "MCP server", "skill": "skill"}
         L += ["", f"Your items, most costly first ({len(shown)} of {len(rows)}):" if len(shown) < len(rows) else "Your items, most costly first:"]
         L += ["  " + r for r in T.cols([["kind", "name", "state", "used", "cost"]]
-                                       + [[kind.get(r.get("kind"), r.get("kind", "")) + (" (kept)" if r.get("kept") else ""),
+                                       + [[kind.get(r.get("kind"), r.get("kind", "")) + (" (kept)" if r.get("kept") else "")
+                                           + (" (always deferred)" if r.get("always_deferred") else ""),
                                            T.clip(r.get("name", ""), 36, e), STATE.get(r.get("state"), r.get("state", "")),
                                            f"{r.get('sessions_used', 0)} of {r.get('sessions_declared', 0)}",
                                            money(r.get("carry_usd") if r.get("carry_priced", True) else None)] for r in shown], "lllrr")]
@@ -1239,6 +1240,11 @@ def render_deferral(rep: dict, o: dict, e) -> list[str]:
     else:
         sw = next((x for x in rep.get("options") or [] if x.get("action") in ("search_on", "search_off")), None)
         act.append(f"Keep a tool loaded (never defer it), after a yes: {apply_line('deferral', 'keep:<name>@' + basis, o)}")
+        if any(x.get("action") == "defer" for x in rep.get("options") or []):
+            act.append(f"Always defer a tool, whatever your history says, after a yes: "
+                       f"{apply_line('deferral', 'defer:<name>@' + basis, o)}")
+        if any(x.get("action") == "undefer" for x in rep.get("options") or []):
+            act.append(f"Take a tool off the always-defer list, after a yes: {apply_line('deferral', 'undefer:<name>@' + basis, o)}")
         if sw:
             act.append(f"Turn tool search {'off' if sw['action'] == 'search_off' else 'on'} for your account, after a yes: "
                        f"{apply_line('deferral', sw['id'] + '@' + basis, o)}")

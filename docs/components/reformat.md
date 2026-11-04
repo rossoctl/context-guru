@@ -534,7 +534,42 @@ records).
 | Lossy? | Yes, deliberately and by name — a removed declaration is not sent |
 | Reversible? | Yes: delete the name from `remove`. Re-anchors the prefix once (~$0.70) |
 | In any preset? | **No.** It has no effect without an explicit list, and the list is a decision only the account can make |
-| Config | `remove: [<declaration name> ...]`, plus `mcp__<server>` for a whole MCP server |
+| Config | `remove: [<declaration name> ...]`, plus `mcp__<server>` for a whole MCP server. Tool deferral: `defer: auto\|off`, `keep: [...]`, `always_defer: [...]` |
+
+### Tool deferral: `defer`, `keep` and `always_defer`
+
+`defer: auto` (the `ultrahigh` preset) defers the tools the user's own history shows unused; see
+[Choose a preset](../reference/presets.md) for the rule. It removes nothing. Two lists change it:
+
+| Key | What it does |
+|---|---|
+| `keep: [<name> ...]` | Never defer these tools. |
+| `always_defer: [<name> ...]` | Defer these tools in every new thread, whatever the history says (#878). Empty by default. |
+
+A name is a tool name, or `mcp__<server>` for a whole MCP server. A tool on `always_defer` skips the
+history rule (the user's last 3 sessions) and the project veto (the project's last 10 sessions). It still
+stays loaded when:
+
+- it is on the never-defer list (Bash, Read, Edit, Write, Agent, Skill, ToolSearch, AskUserQuestion,
+  Context Guru's own tools);
+- it is on `keep`: the keep list wins when a name is on both;
+- the thread used or loaded it earlier, or `tool_choice` forces it;
+- it weighs under 200 tokens (a server: all its tools together).
+
+A server is one unit: list it as `mcp__<server>`. One listed tool of a server does not defer the rest.
+The set is decided at the thread's first request and stays for the thread, so a change to either list
+reaches new threads only. With `defer: off`, nothing is deferred.
+
+```yaml
+preset: ultrahigh
+components:
+  toolfilter:
+    defer: auto
+    always_defer: [mcp__playwright]
+```
+
+`/context-guru:save-more tools` writes both lists (`keep:`, `unkeep:`, `defer:`, `undefer:`); see
+[save-more](../plugin/save-more.md#tools).
 
 ### When it helps
 

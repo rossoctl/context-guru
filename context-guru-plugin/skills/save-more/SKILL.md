@@ -44,8 +44,8 @@ For each change the user chose, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.p
 settings file after a backup, and the output names the backup and the `Undo:` line.
 
 `tools` (the per-tool view of tool deferral) has no `Apply it?` line and no recommendation: ask nothing. If the user
-then asks to keep a tool loaded, or to turn tool search on or off, ask one yes/no question that names the tool or the
-switch. On yes run the matching printed line with `<name>` replaced by the row's name from the `name` column, e.g.
+then asks to keep a tool loaded, to always defer a tool (or take it off that list), or to turn tool search on or off,
+ask one yes/no question that names the tool or the switch. On yes run the matching printed line with `<name>` replaced by the row's name from the `name` column, e.g.
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" apply deferral keep:WebFetch@<basis>`. Never pick a tool yourself.
 
 If the user asks for another row of a table, ask first and quote that screen's own verdict, e.g. "The proxy

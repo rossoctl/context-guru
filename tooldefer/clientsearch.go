@@ -361,7 +361,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 		// the transcript has called, so a re-decision cannot remove a tool the model is using.
 		view := View(wire, r.Orig)
 		rec = SearchRecord{Deferred: Decide(env.History, Input{Tenant: r.Tenant, Project: r.Project, Body: view,
-			Session: r.Session, Keep: r.Keep})}
+			Session: r.Session, Keep: r.Keep, AlwaysDefer: r.AlwaysDefer})}
 		SaveSearch(rs, r.Session, r.Thread, rec)
 		o.Decided = true
 		if env.Gate != nil {
