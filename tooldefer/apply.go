@@ -43,6 +43,9 @@ type Req struct {
 	Body []byte
 	// Probe names the probe verdict that gates a NEW decision.
 	Probe ProbeKey
+	// ClientProbe names the verdict that gates client-search mode (#898); the zero key means the
+	// host has none, and the mode is off.
+	ClientProbe ProbeKey
 	// Keep is the account's keep list; AlwaysDefer its always-defer list (#878).
 	Keep, AlwaysDefer []string
 	// AccountOff is the account opt-out (toolfilter.defer: off).
@@ -65,6 +68,13 @@ type Outcome struct {
 	Decided, Rebuilt bool
 	// NeedProbe asks the host to start a probe for Req.Probe (no verdict, or a stale one).
 	NeedProbe bool
+	// NeedClientProbe asks for a probe of Req.ClientProbe (ClientProbeBody).
+	NeedClientProbe bool
+	// Client is true when the thread runs in client-search mode. Loads is the deferred tools the
+	// answers written on this request loaded, and Answered how many calls got a new answer.
+	Client   bool
+	Loads    []string
+	Answered int
 }
 
 // Apply defers the thread's set on one request. Fail open: on any problem Body is the input.
@@ -127,6 +137,12 @@ func Apply(env Env, r Req) (o Outcome) {
 			// stale verdict is still used until the new one lands; a Fail must not last forever.
 			o.NeedProbe = v == Unknown || env.Prober.Stale(r.Probe)
 		}
+		client := false
+		if env.Prober != nil && r.ClientProbe != (ProbeKey{}) && HasClientToolSearch(r.Orig) {
+			cv := env.Prober.Verdict(r.ClientProbe)
+			o.NeedClientProbe = cv == Unknown || env.Prober.Stale(r.ClientProbe)
+			client = cv == Pass
+		}
 		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep,
 			AlwaysDefer: r.AlwaysDefer}
 		switch {
@@ -135,10 +151,15 @@ func Apply(env Env, r Req) (o Outcome) {
 			// A thread with assistant turns but no record and no search of ours (a fork, or a resume
 			// under a new session id) is a first request too: the records are durable, so a missing
 			// one means a new thread, and only our own search turn proves an earlier set.
-			if v != Pass {
+			switch {
+			case client:
+				// Claude Code's own search, answered by us: the server-side search is not needed, so
+				// its probe does not gate the thread.
+				rec = Record{Deferred: Decide(env.History, in), Client: true}
+			case v != Pass:
 				o.Why = "probe_" + v.String()
 				rec = Record{} // decided: nothing, for this whole thread
-			} else {
+			default:
 				rec = Record{Deferred: Decide(env.History, in)}
 			}
 			o.Decided = true
@@ -176,10 +197,20 @@ func Apply(env Env, r Req) (o Outcome) {
 	for _, n := range rec.Deferred {
 		set[n] = true
 	}
-	out, names, changed := Rewrite(r.Body, set)
+	if rec.Client && !HasClientToolSearch(r.Body) {
+		// The thread was set up for the client's search and this request has none: no way to load a
+		// deferred tool. Send the request as it is.
+		o.Why = "client_search_gone"
+		return o
+	}
+	out, names, changed := rewrite(r.Body, set, rec.Client)
 	if !changed {
 		o.Why = "rewrite_declined"
 		return o
+	}
+	if rec.Client {
+		o.Client = true
+		out, o.Loads, o.Answered = AnswerSearches(rs, r.Session, r.Thread, out, set)
 	}
 	loaded := Loaded(r.Orig)
 	weigh := map[string]bool{}

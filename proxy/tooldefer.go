@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -428,8 +429,9 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	ds.hist.Observe(tn.ID, session, project, orig, time.Now().UnixMilli())
 	key := tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path}
 	env := h.deferEnv(tn)
+	ckey := tooldefer.ProbeKey{Upstream: up.base, Model: model, Route: up.path + tooldefer.ClientProbeRoute}
 	o := tooldefer.Apply(env, tooldefer.Req{Tenant: tn.ID, Session: session, Thread: threadID, Project: project,
-		Model: model, Orig: orig, Body: body, Probe: key, Keep: keep, AlwaysDefer: always})
+		Model: model, Orig: orig, Body: body, Probe: key, ClientProbe: ckey, Keep: keep, AlwaysDefer: always})
 	if o.Why == "no_durable_store" {
 		noDurableOnce.Do(func() {
 			slog.Warn("context-guru: ultrahigh defers no tools: no durable place for its per-thread record " +
@@ -439,6 +441,13 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	}
 	if o.NeedProbe {
 		h.startProbe(r, tn, provider, up, key)
+	}
+	if o.NeedClientProbe {
+		h.startProbe(r, tn, provider, up, ckey)
+	}
+	if len(o.Loads) > 0 {
+		// A ToolSearch answer written now loaded proxy-deferred tools (#898): each counts as a use.
+		h.noteSearchLoads(tn.ID, session, project, o.Loads)
 	}
 	if o.Decided || o.Changed {
 		slog.Debug("cg.tooldefer", "session", session, "thread", threadID, "deferred", len(o.Deferred),
@@ -559,8 +568,13 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	path := up.path
 	// The client's own auth betas: a subscription token on direct Anthropic needs the OAuth beta.
 	beta := tooldefer.AuthBetas(r.Header.Values("Anthropic-Beta"))
+	run := tooldefer.RunProbeBeta
+	if strings.HasSuffix(key.Route, tooldefer.ClientProbeRoute) {
+		// Client-search mode (#898): the probe sends to the real route, with its own verdict.
+		run, path = tooldefer.RunClientProbeBeta, strings.TrimSuffix(key.Route, tooldefer.ClientProbeRoute)
+	}
 	h.toolDefer().prober.Ensure(key, func(ctx context.Context) (tooldefer.Verdict, error) {
-		v, err := tooldefer.RunProbeBeta(ctx, d, ref, path, key.Model, beta)
+		v, err := run(ctx, d, ref, path, key.Model, beta)
 		slog.Info("cg.tooldefer_probe", "model", key.Model, "route", path, "verdict", v.String(), "err", err)
 		return v, err
 	})

@@ -331,6 +331,14 @@ type Record struct {
 	// Deferred is the set decided at the thread's first request. Empty means "decided: nothing",
 	// which is a decision too and is stored so the thread is never re-decided.
 	Deferred []string `json:"d"`
+	// Client is true when the thread runs in client-search mode (#898): the thread had Claude Code's
+	// own ToolSearch at its first request, so it has no server-side search tool, and the proxy answers
+	// the client's search calls itself (AnswerSearches). Decided once, with the set.
+	Client bool `json:"c,omitempty"`
+	// Answers is the names each ToolSearch call was answered with, by tool_use id: nil or empty means
+	// "the client's own result stands". Written the first time a call is seen and replayed from here,
+	// so the bytes of every later request are the same (also after a restart). Bounded by maxAnswers.
+	Answers map[string][]string `json:"a,omitempty"`
 }
 
 // Key is the store key of one thread's record.

@@ -39,6 +39,12 @@ func NamesList(names []string) string {
 //   - a tool `tool_choice` forces on THIS request stays loaded for this request (a forced deferred
 //     tool can draw a 400). The thread's set does not change; the names list still names it.
 func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok bool) {
+	return rewrite(body, set, false)
+}
+
+// rewrite is Rewrite; client=true is client-search mode (#898): no server-side search tool is added,
+// and the names list tells the model to load tools with the client's ToolSearch.
+func rewrite(body []byte, set map[string]bool, client bool) (out []byte, names []string, ok bool) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || len(set) == 0 {
 		return body, nil, false
@@ -119,7 +125,7 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 		elems[free] = raw
 		free--
 	}
-	if !hasSearch {
+	if !hasSearch && !client {
 		elems = append(elems, searchTool)
 	}
 	out, err := sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(elems, ",")+"]"))
@@ -132,7 +138,11 @@ func Rewrite(body []byte, set map[string]bool) (out []byte, names []string, ok b
 		list = append(append([]string{}, names...), f)
 	}
 	sort.Strings(list)
-	if out, ok = placeList(out, NamesList(list)); !ok {
+	text := NamesList(list)
+	if client {
+		text = ClientToolNamesList(list)
+	}
+	if out, ok = placeList(out, text); !ok {
 		return body, nil, false
 	}
 	return out, names, true
