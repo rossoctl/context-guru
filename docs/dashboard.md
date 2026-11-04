@@ -139,7 +139,8 @@ Limits:
   can be too high if a component broke the cache on that request (accountant design §6.4). The
   event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
   in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
-  The totals and charts add such a figure like any other: they do not mark it. A row written before
+  Overview counts them (`estimated_requests`, on the full and the lean path) and the Preset card says how many of
+  the window's requests they are. The totals and charts add such a figure like any other: they do not mark it. A row written before
   the column existed reads as exact.
 - The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
   every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active

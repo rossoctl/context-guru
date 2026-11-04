@@ -1824,6 +1824,9 @@ function renderSavedLedger(o, ka, partial) {
       o.requests > 0 && !partial ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
+      o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
+        text: 'Includes ' + num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests priced as an estimate: the first '
+          + 'request of a thread, or the first after a restart that lost its state. Their net saving can be too high.' }) : null,
     ]));
 
   // Tools and skills filter.

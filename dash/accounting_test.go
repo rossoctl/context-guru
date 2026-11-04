@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -1149,5 +1150,30 @@ func TestOnlyAFallbackRowThatRemovedContentCountsAsUnpriced(t *testing.T) {
 	}
 	if n := rows[0].SavedUSDUnpricedRows; n != 1 {
 		t.Fatalf("saved_usd_unpriced_rows = %d, want 1 (only the fallback row that removed content)", n)
+	}
+}
+
+// Overview counts the requests priced without knowing whether a component broke the cache, on both the full and
+// the lean path. After a restart that lost the state, the next request of every live session is one of them.
+func TestOverviewCountsEstimatedRequests(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	for i, est := range []bool{true, false, true, false, false} {
+		e := &Event{TS: now - int64(i)*1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 100, TokensAfter: 90, FreshInput: 5, CacheRead: 40, OutputTokens: 5,
+			TokenAccounting: AccountingComplete, PriceEstimated: est}
+		insertReq(t, db, e)
+	}
+	f := Filter{TenantAll: true, Since: now - 60_000}
+	full, err := db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean, err := db.OverviewLean(f, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.EstimatedRequests != 2 || lean.EstimatedRequests != 2 {
+		t.Fatalf("estimated requests: full %d, lean %d, want 2 and 2 (of %d)", full.EstimatedRequests, lean.EstimatedRequests, full.Requests)
 	}
 }
