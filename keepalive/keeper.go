@@ -45,6 +45,8 @@ type kaEntry struct {
 	// the host computed for the request, "" meaning a server-held key. Read by the route
 	// breaker's gate (see breaker.go) at Record and at Sweep time.
 	cred string
+	// touchAlias is Record.TouchAlias: the liveness-clock key a ping or substitute call touches.
+	touchAlias string
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// refreshedAt is the last moment this entry's provider-side cache entry is KNOWN refreshed:
@@ -371,11 +373,16 @@ type Record struct {
 	Key       Key
 	StartedAt time.Time // when the upstream request STARTED
 	Body      []byte    // exact bytes sent upstream; the keeper copies and masks it
-	Provider  bschemas.ModelProvider
-	Endpoint  string // upstream host, passed to Dispatcher.Price
-	Route     string // upstream path
-	Status    int
-	Usage     Usage
+	// TouchAlias is the key of the cold decision's liveness clock for this request (apply's
+	// Trace.TouchAlias), derived from the request as it ARRIVED. A ping touches this key. "" means
+	// the host has none, and the touch derives its key from Body, which is right only when the
+	// host sent the transcript unchanged. Tool deferral changes the head, so the proxy sets it.
+	TouchAlias string
+	Provider   bschemas.ModelProvider
+	Endpoint   string // upstream host, passed to Dispatcher.Price
+	Route      string // upstream path
+	Status     int
+	Usage      Usage
 	// Cred is an opaque credential id the host computes for the request's provider key; ""
 	// means a server-held key (never subject to the dead-credential mark, only ever the route
 	// breaker). The package scopes it by Key.Tenant itself, so the host passes the bare id with
@@ -926,7 +933,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	e := &kaEntry{
 		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt,
-		cred: r.Cred,
+		cred: r.Cred, touchAlias: r.TouchAlias,
 		body: owned, endpoint: r.Endpoint,
 		st:       r.Store,
 		emitter:  emitter,
@@ -1306,7 +1313,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			mask(raw)
 			due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 				route: e.route, provider: e.provider, model: e.model,
-				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
+				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
 				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt})
 			continue
 		}
@@ -1352,7 +1359,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		mask(raw)
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
-			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
+			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
 			ping: e.pings, prevStartedAt: prevStartedAt})
 	}
 	k.mu.Unlock()
@@ -1383,6 +1390,8 @@ type pingJob struct {
 	model           string
 	tenant, session string
 	thread          string
+	// touchAlias is e.touchAlias, copied out under the lock like the rest.
+	touchAlias string
 	// st is the tenant's store, copied here for the same reason everything else is: the job runs
 	// on its own goroutine and must hold a copy rather than a pointer into keeper state.
 	st store.Store
@@ -1709,7 +1718,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
 	if status >= 200 && status < 300 && u.CacheRead > 0 {
-		apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, startedAt.UnixMilli())
+		j.touch(provider, startedAt.UnixMilli())
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
@@ -2199,4 +2208,15 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 		return k.fireSummarySubstitute(j) || k.fireSweepSubstitute(j)
 	}
 	return false
+}
+
+// touch records that this job's request refreshed the provider's entry at nowMs, on the clock the
+// request path reads. It uses the alias the host derived from the arriving request when there is
+// one; else it derives the key from the job's body (#902).
+func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64) {
+	if j.touchAlias != "" {
+		apply.RecordCacheTouchAlias(j.st, j.touchAlias, nowMs)
+		return
+	}
+	apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, nowMs)
 }

@@ -220,6 +220,12 @@ func (s slot) lossless() bool { return jsonEqual([]byte(s.raw), s.pre) }
 // caller instead. Purely observational: nothing on it affects the rewrite.
 type Trace struct {
 	Session string
+	// TouchAlias is the key of the cold decision's liveness clock (cg:seen:<alias>), derived from the
+	// transcript as it arrived, before the host changes it. A host that records a keep-alive passes
+	// it on, and the ping touches this key through RecordCacheTouchAlias. Re-deriving it from the
+	// body that goes upstream gives another key when the host edits the head (tool deferral).
+	// "" when apply derived none.
+	TouchAlias string
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
@@ -489,6 +495,16 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	// The cold decision's clock key, derived ONCE from the transcript as it ARRIVED. It is also
+	// handed to the host on the Trace, so a keep-alive ping touches the key this request reads
+	// even when the host changes the head before sending (tool deferral, #902). With no explicit
+	// session id it IS the session id, so the head is not hashed twice.
+	alias := sessionID
+	if explicitSession(o.Session, body) != "" {
+		sys, firstUser := schema.SessionHead(norm)
+		alias = session.Scoped(o.Tenant, "", sys, firstUser)
+	}
+	tr.TouchAlias = alias
 	loadSessionState(st, sessionID)
 	o.resolveThread(tr, sessionID)
 	var restore restorePlan
@@ -555,8 +571,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// the keys the grace asks for and the keys the recorder warms cannot drift apart.
 			// alias below stays the bare content hash: it keys the cold decision's own clocks
 			// (aliasSeen, sessionTTL, RecordCacheTouch), which this change does not touch.
-			sys, firstUser := schema.SessionHead(norm)
-			alias := session.Scoped(o.Tenant, "", sys, firstUser)
 			graceAlias := graceAliasID(o.Tenant, body, norm)
 			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
 			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
@@ -1190,6 +1204,10 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 //
 // nowMs must be the time the ping's request STARTED, not its completion: the provider's lifetime runs
 // from request start, which is the same reasoning kaEntry.startedAt is anchored on.
+//
+// This form derives the alias from body. That is right only when body is the transcript the request
+// path hashed. A body the host changed after apply ran (tool deferral appends the names list to the
+// head) gives another alias, so such a host passes the one apply derived to RecordCacheTouchAlias.
 func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
 	if st == nil || nowMs <= 0 || len(body) == 0 {
 		return
@@ -1199,8 +1217,13 @@ func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bsche
 		return
 	}
 	sys, firstUser := schema.SessionHead(norm)
-	alias := session.Scoped(tenant, "", sys, firstUser)
-	if alias == "" {
+	RecordCacheTouchAlias(st, session.Scoped(tenant, "", sys, firstUser), nowMs)
+}
+
+// RecordCacheTouchAlias is RecordCacheTouch for a caller that holds the alias already: Trace.TouchAlias,
+// derived from the request as it arrived. It writes the same clock under the given key, monotone.
+func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
+	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
 	// Monotone: never move the clock BACKWARDS. A ping racing a real request must not make the

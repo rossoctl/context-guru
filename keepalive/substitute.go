@@ -5,7 +5,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -248,7 +247,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// offload.registerKeepAliveCandidate), so it refreshes the SAME liveness clock
 	// cache_state: pre_expiry reads, and only when it actually read something.
 	if u.CacheRead > 0 {
-		apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, startedAt.UnixMilli())
+		j.touch(provider, startedAt.UnixMilli())
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
