@@ -323,3 +323,15 @@ func TestPingSavingsDoesNotStoreFactsForAManualPing(t *testing.T) {
 		t.Fatal("an automatic ping stored no facts")
 	}
 }
+
+// The report's TS is the completion time. The library's entry gap runs from the START of the ping, so the mapped
+// At must be TS minus the ping's duration (context-guru#768 minor).
+func TestPingAtIsTheStartOfThePing(t *testing.T) {
+	r := components.KeepAliveReport{TS: 1_700_000_100_000, DurationMs: 90_000}
+	if got, want := pingFromReport(r).At, time.UnixMilli(1_700_000_010_000); !got.Equal(want) {
+		t.Fatalf("At = %v, want %v (completion minus 90 s)", got, want)
+	}
+	if got := pingFromReport(components.KeepAliveReport{TS: 1_700_000_100_000}).At; !got.Equal(time.UnixMilli(1_700_000_100_000)) {
+		t.Fatalf("a ping with no duration: At = %v, want TS", got)
+	}
+}
