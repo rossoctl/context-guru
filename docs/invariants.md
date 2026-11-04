@@ -156,14 +156,24 @@ pays one cache rewrite. 3 reasons:
 
 | # | Kind | Statement | Signal | Threshold (proposed) | Baseline |
 |---|---|---|---|---|---|
-| T1 | side effect | No user loses a tool. | disables with reason `break` | **any** | not shipped yet |
-| T2 | intent | A Claude Code release does not silently stop option B. | disables with reason `unknown_description`, with the Claude Code version | any; report the version | not shipped yet |
-| T3 | intent | The `select:` form is the only form used for the proxy's tools. | disables with reason `non_select_query_for_our_tool` | any | not shipped yet |
-| T4 | side effect | A disable costs only one cache rewrite on the live thread. | the miss rate of the requests after a disable, per thread | more than 1 miss per thread per disable | not shipped yet |
+| T1 | side effect | No user loses a tool. | `cg_tooldefer_client_disabled_total{reason="break"}`; `/stats` `tool_defer.client_search_disabled.break` | **any** | not shipped yet |
+| T2 | intent | A Claude Code release does not silently stop option B. | `cg_tooldefer_client_disabled_total{reason="unknown_description"}`, with the `desc_hash` from the log line and the Claude Code version | any; report the version and the hash | not shipped yet |
+| T3 | intent | The `select:` form is the only form used for the proxy's tools. | `cg_tooldefer_client_disabled_total{reason="non_select_query_for_our_tool"}` | any | not shipped yet |
+| T4 | side effect | A disable costs at most one cache rewrite on the live thread. `break` costs exactly one. `non_select_query_for_our_tool` happens on a live thread and costs at most one (the #900 review must confirm this). `unknown_description` is decided at thread start and costs none. | for each `break` or `non_select_query_for_our_tool` log line: misses (`cache_write > cache_read`) on the later requests of that `session` and `thread` | more than 1 miss per disable | not shipped yet |
 
-- **Signals:** a `cg_*` counter by reason, a field in the `/stats` `tool_defer` block, and one log
-  line with the reason and the hash prefix (no query text). **The exact names come with the PR.**
-  Until then this is gap G6.
+- **Signals (from PR #900, open and not reviewed; names can still change):**
+  - Metric: `cg_tooldefer_client_disabled_total{reason}`, with `reason` one of
+    `unknown_description`, `non_select_query_for_our_tool`, `break`.
+  - `/stats`: `tool_defer.client_search_disabled`, an object with the same 3 reasons.
+  - Log (warn): `cg.tooldefer_client_search_disabled`, with `reason`, `desc_hash` (8 characters),
+    `session` and `thread`. It holds no query text.
+- **How it counts:** `unknown_description` and `non_select_query_for_our_tool` count once per
+  tenant and hash per 24 h. `break` counts every time. So T2 and T3 count disables, not events.
+- **Disable scope:** per tenant and description hash, for 24 h. A proxy restart clears it.
+- **Known-good hash today:** `88033eceb421f1c2`. It was the only `ToolSearch` description in 109
+  captures. A T2 alert with any other hash means a new description.
+- **T4 needs a join** between the log line and the `requests` table on `session` and `thread`.
+  The dashboard database does not store the disable today, so T4 reads the log.
 - **Report:** every disable event, with its reason, and the Claude Code version if it is known.
   **A rise in `break` is the most urgent,** because a user lost a tool for one turn.
 - **No laptop baseline:** the laptop runs `xhigh`, not `ultrahigh`.
@@ -197,7 +207,7 @@ pays one cache rewrite. 3 reasons:
 | G3 | The kind of a keep-alive request. Today `max_tokens = 0` means "sweep question". This is a convention, not a field. | A `ping_kind` column: plain, sweep, summary, extra, manual. | No |
 | G4 | `/stats` counters reset on each restart. | Write the counters that the monitor needs into the database. | No |
 | G5 | The 12 components with no laptop baseline. | Real traffic on other presets. | No |
-| G6 | Tool deferral disables, by reason (T1 to T4). | The `cg_*` counter, the `/stats` `tool_defer` field and the log line from the #898 PR. | No |
+| G6 | Tool deferral disables, by reason (T1 to T4). The names exist in PR #900, which is not merged. T4 needs the log, because the dashboard database does not store a disable. | Merge #900. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
