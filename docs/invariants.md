@@ -65,17 +65,43 @@
 the cache instead of writing it again. The cache strategy sets how many pings go out and when. No
 other request may shorten it.
 
-| # | Kind | Statement | Signal | Threshold (proposed) | W1 | W2 |
-|---|---|---|---|---|---|---|
-| K1 | side effect | A planned ping reads the prefix and does not write it again. | `requests.keepalive = 1`, `request_lifecycle.ping_n`; miss = `cache_write > cache_read`. Split by `ping_n` and `model`. | over 2% for any `ping_n` or model | ping 1: 0 of 528. **Ping 2: 90 of 377 (23.9%, $113.66).** | ping 1: 0 of 44. Ping 2: 0 of 35. |
-| K2 | intent | A real turn that comes back inside the plan's warm period reads the cache. | The #716 walk ([Query Q1](#q1-pings-and-the-turn-after-them)). Gap from the last real turn, in buckets. On the 2-ping plan, warm is under 13 min. | over 5% missed | after 2 pings, 9 to 13 min: 12 of 76 missed ($34.95). After 1 ping, 5 to 9 min: 17 of 117 ($21.87). | 0 of 20 |
-| K3 | contract | After a text turn, no substitute takes a planned ping (#779). | Ping sequence per idle span ([Query Q2](#q2-the-ping-sequence-after-each-real-turn)). P = plain ping, Q = sweep question (`max_tokens = 0`). | any span that starts with Q after a text turn | 103 of 199 text-turn spans started with Q | **0 of 10** |
-| K4 | intent | Pings do not fail or time out. | ping rows with `status >= 400` or `upstream_ms >= 45000` | over 1% | 3 of 905 | 0 of 84 |
-| K5 | intent | Keep-alive saves more than its pings cost. | `/api/stats?since=<ms>`: `keepalive_net_usd` | below $0 over 7 days | +$66.50 | +$17.94 |
-| K6 | contract | The extra slot after the last planned ping sends at most one request per idle span, inside the hold limit. | rows with `ping_n = 3` and `max_tokens = 0`; `/stats` `keepalive_sweep_extra_asked` | more than 1 per span | — | 5 spans, 1 request each, wrote 0 to 6 tokens; `keepalive_sweep_extra_asked` = 5 |
+**The plan since #867 (v0.6.6).** The ping count depends on what the real turn waits for
+(`requests.waiting_for`). K is `keepalive_max_pings` (2 by default).
 
-- **K2 on 13 to 60 min is not a breach.** A user who comes back after the plan ends pays the
-  re-write that the strategy accepts. The monitor reports these numbers but does not alert on them.
+| `waiting_for` | Planned pings | The cache stays warm for about |
+|---|---|---|
+| `own_tool` | until the result, at most 8 | up to 37 min |
+| `background` (main thread) | K + 3 = 5 | 25 min |
+| `human` (main thread) | K + 1 = 3 | 17 min |
+| `teammate`, or a subagent at end of turn | K = 2 | 13 min |
+| `done` (#859), or no tool call yet on the thread | 0 | — |
+
+- The warm time is pings × 240 s + 300 s.
+- The plan covers the 5-minute Anthropic tier only. The 1-hour tier, OpenAI, session overrides and
+  campaigns keep a fixed count.
+- No sweep question while the thread waits for its own tool.
+- `/stats` has no new `keepalive_*` key for the plan. The database has no new keep-alive column.
+
+**Windows.** W1 and W2 are as in
+[Where the baselines come from](#where-the-baselines-come-from). **W3** starts at the v0.6.6 start,
+2026-11-03 21:27 UTC, and ends 2026-11-04 17:37 UTC. The proxy ran preset `xhigh` until 09:38 UTC
+and `ultrahigh` after that. W3 has 1,339 real requests and 257 pings.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | W1 | W2 | W3 |
+|---|---|---|---|---|---|---|---|
+| K1 | side effect | A planned ping reads the prefix and does not write it again. | `keepalive = 1` rows. Split by `request_lifecycle.ping_n`, the held turn's `waiting_for`, and `model`. A miss is `cache_write > cache_read`. | over 2% in any group | **ping 2: 90 of 377 (23.9%)** | 0 of 79 | 1 of 257 (one `own_tool` ping 2, $0.29) |
+| K2 | intent | A real turn that comes back while the cache should still be warm reads the cache. | The #716 walk ([Q1](#q1-pings-and-the-turn-after-them)), with the gap compared to pings sent × 240 s + 300 s. Split by `waiting_for`. | over 5% missed | — | — | `own_tool` 0 of 45. `teammate` 0 of 16. `human` 1 of 8. **`background` 10 of 21 ($5.98, B5).** |
+| K3 | contract | After a turn that does not end at a tool result, no substitute takes a planned ping (#779). | Ping kinds per idle span ([Q2](#q2-the-ping-sequence-after-each-real-turn)). P = plain ping, Q = sweep question (`max_tokens = 0`). The turn's shape is the held turn's `wake_cause`: `tool_result`, or not. | any span that starts with Q when `wake_cause` is not `tool_result` | 103 of 199 | 0 of 10 | **1 of 37 (B6)** |
+| K4 | intent | Pings do not fail or time out. | ping rows with `status >= 400` or `upstream_ms >= 45000` | over 1% | 3 of 905 | 0 of 84 | **3 of 257 (1.2%)** |
+| K5 | intent | Keep-alive saves more than its pings cost. | `/api/stats?since=<ms>`: `keepalive_net_usd` | below $0 over 7 days | +$66.50 | +$17.94 | restart the baseline after the release with #768 |
+| K6 | contract | The extra slot after the last planned ping sends at most one request per idle span. | rows with `max_tokens = 0` and `ping_n` = planned count + 1 for that `waiting_for` | more than 1 per span | — | 5 of 5 spans with 1 request | 4 spans (`teammate` 3, `human` 1), 1 request each |
+| K7 | contract | No sweep question while the thread waits for its own tool (#867). | spans where the held turn's `waiting_for = 'own_tool'` and a ping has `max_tokens = 0` | any | — | — | **1 of 45 (B6)** |
+| K8 | contract | A thread that is done gets no ping (#859, #867). | spans where the held turn's `waiting_for = 'done'` and a ping follows | any | — | — | 0 |
+
+- **A miss after the warm time ends is not a breach.** The strategy accepts that cost. The monitor
+  reports it but does not alert on it.
+- **Do not compare K5 across releases.** #855 lowered the cache-read prices. #768 (on main, not
+  released) changes how `keepalive_saved_usd` is computed.
 - **Breach meaning, K1:** a ping or a substitute did not renew the cache entry. First check: what
   the ping before it was (Q2), and the model.
 - **Owner:** David Amid (proposed).
@@ -95,6 +121,20 @@ give each one back.
 | S5 | side effect | The sweep question renews the cache entry it reads. | substitute rows (`keepalive = 1`, `max_tokens = 0`): miss rate, and the miss rate of the next ping | over 2% | 0 of 353 wrote; the next ping missed 90 times (#776) | 0 of 36 |
 
 - **Owner:** David Amid (proposed; the sweep row in `docs/data-dependence.md`).
+
+## Expand rate, by component
+
+**Why:** an `expand` call means the agent needed an output that a component removed. Each one
+costs a turn and the tokens it returns. A rising rate means a component removes too much.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | Laptop baseline | cg2 baseline |
+|---|---|---|---|---|---|---|
+| E1 | side effect | The agent rarely needs a removed output back from the sweep. | `sum(sweep_expands)` / the sweep's removals (`events.sweep_applied_cold`) | to set from the cg2 baseline | W1: 0 expands for 841 removals. W3: to measure | pending (subagent) |
+| E2 | side effect | The agent rarely needs a removed output back from `extract_llm`. | **Gap G9.** `expands` is the total for all components. `expands − sweep_expands` also holds `extract`, `dedup` and the other offloads. | to set | W1: 3 expands in total | pending (subagent) |
+| E3 | side effect | An expand of a sweep removal is counted as a false drop once. | `sum(sweep_false_expands)` ≤ `sum(sweep_expands)` | any row where it is greater | 0 and 0 | pending |
+
+- **The cg2 baseline goes into the internal repo**, with tenants as T1 to Tn. Only the fleet
+  totals may come here.
 
 ## Other components that run on the laptop
 
@@ -210,9 +250,15 @@ pays one cache rewrite. 3 reasons:
 | T1 | side effect | No user loses a tool. | `cg_tooldefer_client_disabled_total{reason="break"}`; `/stats` `tool_defer.client_search_disabled.break` | **any** | not shipped yet |
 | T2 | intent | A Claude Code release does not silently stop option B. | `cg_tooldefer_client_disabled_total{reason="unknown_description"}`, with the `desc_hash` from the log line and the Claude Code version | any; report the version and the hash | not shipped yet |
 | T3 | intent | The `select:` form is the only form used for the proxy's tools. | `cg_tooldefer_client_disabled_total{reason="non_select_query_for_our_tool"}` | any | not shipped yet |
-| T4 | side effect | A disable costs at most one cache rewrite on the live thread. `break` costs exactly one. `non_select_query_for_our_tool` happens on a live thread and costs at most one (the #900 review must confirm this). `unknown_description` is decided at thread start and costs none. | for each `break` or `non_select_query_for_our_tool` log line: misses (`cache_write > cache_read`) on the later requests of that `session` and `thread` | more than 1 miss per disable | not shipped yet |
+| T4 | side effect | A disable costs at most one cache rewrite on the live thread. `break` and `non_select_query_for_our_tool` stop deferral on the live thread and cost exactly one (confirmed in the #900 review). `unknown_description` is decided at thread start and costs none. | for each `break` or `non_select_query_for_our_tool` log line: misses (`cache_write > cache_read`) on the later requests of that `session` and `thread` | more than 1 miss per disable | not shipped yet |
 
-- **Signals (from PR #900, open and not reviewed; names can still change):**
+- **What counts as a `break` (#900):** only a deferred tool's own error result: "not loaded",
+  "no such tool" or "does not exist". A direct call that worked is a use, not a break.
+- **Signals (from PR #900, in review round 2, not merged; names can still change):**
+  - `/stats` `tool_defer.client_loads`: the loads the proxy added to Claude Code's ToolSearch
+    results. `tool_defer.direct_calls`: deferred tools that the model called with no load.
+  - `add_backs` now counts the #825 path only.
+  - The probe log line `cg.tooldefer_probe` carries `probe=server|client`.
   - Metric: `cg_tooldefer_client_disabled_total{reason}`, with `reason` one of
     `unknown_description`, `non_select_query_for_our_tool`, `break`.
   - `/stats`: `tool_defer.client_search_disabled`, an object with the same 3 reasons.
@@ -247,24 +293,28 @@ pays one cache rewrite. 3 reasons:
 | B1 | **Two counters give different false-drop rates for the sweep.** `/stats` says 28.7% (39 of 136) since the restart. The database says 6.7% (9 of 135) in the same window. 3 of 6 threads are at 33% to 56% in `/stats`. | S4 | Find what each counter counts. If 28.7% is right, the sweep removes too much. |
 | B2 | **Requests labelled `hit` that wrote the prefix again.** 260 non-ping rows have `cache_miss_reason = 'hit'` and `cache_write > cache_read + 10000`. 226 are a thread's first request. 34 are later, and 3 of those are in W2. 4 of them had a sweep apply. #759 meant to label a partial read as a miss. | X4, S1 | Check how `cache_miss_reason` is set for a first request and for a partial read. |
 | B3 | **`toolfilter` changes requests but reports `acted = 0`.** `mutated` is 3,204, the same as `/stats` `decl_filter_requests`. | the activity table | Check which flag `toolfilter` sets. The dashboard may undercount it. |
+| B5 | **After a wait for background work, half the real turns write the conversation again while it should still be warm.** In W3, 10 of 21 missed. Every one reads about 19k tokens and writes the rest. The last ping just before it read the whole prefix, and the model, tools and cache lifetime did not change. Most likely, the turn that wakes on a background result changes something early in the conversation, near 19k tokens. 18 more requests read about 19k and miss in the same way, at other times (`cache_read` between 18,000 and 20,500, `cache_write > 10000`). | K2 | Find what sits at about 19k tokens on these threads, with metadata only: the breakpoint positions (`cache_bp_*`), and `system_blocks`. |
+| B6 | **A sweep question during a tool wait, 3 s after the turn.** One span: `waiting_for = 'own_tool'`, `wake_cause = 'teammate'`. The question went out 3 s after the turn, not after about 240 s. Both K3 and K7 count it. | K3, K7 | Check how the keeper starts a question when the wait cause is a tool and the turn woke from a teammate. |
+| B7 | **Ping failures rose to 1.2%** (3 of 257) in W3, from 0 of 84 in W2. | K4 | Check the 3 rows: status, or slow. |
 | B4 | **`cachesplit` never acted** on 12,265 requests. `split_requests` and `cachesplit_saved_usd` are 0. | the activity table | Check if Claude Code requests have anything to split, or if the component is broken. |
 
 ## Gaps
 
 | # | What we cannot measure | What would fix it | Needs content? |
 |---|---|---|---|
-| G1 | Whether the held request ended at a text turn. K3 uses a proxy: the `stop_reason` of the real request before it. | Store the keeper's `endsAtText` flag on each ping row. | No |
+| G1 | ~~Whether the held request ended at a text turn.~~ **Closed:** `requests.wake_cause` gives the shape of the last message. | — | No |
 | G2 | `expand` gives back the original byte for byte. | A short hash of the original and of what `expand` returned, per expand event. | No (a hash is metadata) |
 | G3 | The kind of a keep-alive request. Today `max_tokens = 0` means "sweep question". This is a convention, not a field. | A `ping_kind` column: plain, sweep, summary, extra, manual. | No |
 | G4 | `/stats` counters reset on each restart. | Write the counters that the monitor needs into the database. | No |
 | G5 | The 12 components with no laptop baseline. | Real traffic on other presets. | No |
 | G7 | A `cg_*` metric for tool deferral. Only `/stats` and the database show it today. | Export the `/stats` `tool_defer` counters as `cg_tooldefer_*`. | No |
+| G9 | The expand rate of `extract_llm` alone (E2). The database counts expands per request, not per component that made the marker. Only the sweep has its own column. | Record the component that made each restored marker, as a count per component (for example `expands_by_component` in `request_components`). | No |
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1 to T4). The names exist in PR #900, which is not merged. T4 needs the log, because the dashboard database does not store a disable. | Merge #900. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, S1, X1, X4, T1, T2, T3, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, K7, K8, S1, X1, X4, T1, T2, T3, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
