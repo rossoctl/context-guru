@@ -1299,3 +1299,37 @@ func TestMedianPingUSDEmptyModelKeepsTheOldWriteMultiple(t *testing.T) {
 		t.Errorf("median ping with no model = %v, want 0.10", got)
 	}
 }
+
+// A ping that found the entry gone re-created it: it WROTE, it did not read. The accountant library
+// credits the rescue on the next request, because that request read the entry the ping wrote
+// (accountant case keepalive/ping-miss-restarts-clock/5m). The reachability gate asked for
+// cache_read > 0 on the ping, so it zeroed that credit and kept the ping's cost: the session read
+// -$0.01146 where the hand value is -$0.00094, 12x too negative (context-guru#768 B4).
+func TestTheGateKeepsTheRescueOfAPingThatWroteTheEntry(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = []CompRow{{Component: "mask", PricedBy: PricedByAccountant}}
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *SessionRow
+	for _, r := range rows {
+		if r.SessionID == "s1" {
+			got = r
+		}
+	}
+	if got == nil {
+		t.Fatal("session s1 is missing from the list")
+	}
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
