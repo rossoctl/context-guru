@@ -331,7 +331,7 @@ var (
 	// decoBedrock is Bedrock's version suffix: -v1:0, -v2.
 	decoBedrock = regexp.MustCompile(`-v\d+(:\d+)?$`)
 	// decoVendor is the dotted vendor prefix of a Bedrock or Vertex id: us.anthropic., eu.anthropic., anthropic.
-	decoVendor = regexp.MustCompile(`^(?:(?:us|eu|apac|global)\.)?(?:anthropic|amazon|meta|mistral|cohere)\.`)
+	decoVendor = regexp.MustCompile(`^(?:(?:us|eu|apac|au|jp|us-gov|global)\.)?(?:anthropic|amazon|meta|mistral|cohere)\.`)
 )
 
 // undecorate removes a dated or Bedrock-wrapped id's decoration: the vendor prefix, the version suffix and the

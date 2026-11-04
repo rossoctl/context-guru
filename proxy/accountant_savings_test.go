@@ -351,7 +351,8 @@ func TestComputeSafeTurnsAPanicIntoNoResult(t *testing.T) {
 // A summary splices away messages and one of them carries the client's cache mark. The splice's SizeBefore is the
 // wire size (marks included), and the library compares it with the client span's bytes to guess whether the splice
 // saw the original (sawOriginal). If the Body's byte table leaves the marks out while Pos.Bytes keeps them, the
-// guess is wrong and the sum check fails: the request books no saving (review of #893, finding 2).
+// byte counts disagree and the library fails a check (conservation here: its client token total is built from
+// mark-free bytes, the operations' deltas from wire bytes): the request books no saving (review of #893, finding 2).
 func TestSavings_ASpliceOverAMarkedMessageKeepsTheSumCheck(t *testing.T) {
 	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
 	long := strings.Repeat("tool result ", 300)

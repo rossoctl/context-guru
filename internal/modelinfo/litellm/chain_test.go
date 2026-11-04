@@ -284,6 +284,9 @@ func TestLiteLLMPriceFindsDatedAndWrappedIDs(t *testing.T) {
 		"anthropic.claude-sonnet-5-20260101-v2:0",
 		"eu.anthropic.claude-sonnet-5-v1:0[1m]",
 		"claude-sonnet-5@20260101",
+		"au.anthropic.claude-sonnet-5-v1:0",
+		"jp.anthropic.claude-sonnet-5-v1:0",
+		"us-gov.anthropic.claude-sonnet-5-v1:0",
 	} {
 		got, ok := l.Price(ctx, id)
 		if !ok || got != want {

@@ -159,8 +159,9 @@ Limits:
 - Every request is priced at the model's base rates. A model whose provider charges more above a prompt size
   (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields) is under-priced on those requests: its
   cost and its saving both use the base rate, so their ratio looks right and the dollars are low. Among Claude
-  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) and `claude-sonnet-4` and `claude-sonnet-4-5` a
-  200k tier (2x); Sonnet 5, Opus and Fable carry none. Models of other families carry tiers too.
+  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) on every listing, and Sonnet 4 and 4.5 carry a
+  200k tier (2x) on their Bedrock, Vertex and Azure listings but not on the Anthropic API ids; Sonnet 5, Opus and
+  Fable carry none. Models of other families carry tiers too.
   `MODEL_PRICES` sets one flat rate for a model, so it does not fix a tiered price.
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
