@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -286,6 +287,10 @@ type Trace struct {
 	Restored, RestoredTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
+	// Ops are the rewrite operations of this request for the savings computation, in pipeline
+	// order, with wire positions. OpsDropped counts changes that could not be placed.
+	Ops        []accountant.Operation
+	OpsDropped int
 	// Changes lists each rewritten message's before/after text (clipped).
 	Changes []Change
 }
@@ -464,8 +469,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// than re-parse the whole messages array to find each message again — that parse
 	// measured ~3x the cost of the whole-body copy it was meant to save.
 	shiftAt, shift := 0, 0
-	// splitStableTokens is what the split rescued from the cache-creation tier; the
-	// dashboard prices it (see dash.Event.cachesplitSavedUSD). 0 when nothing split.
+	// splitStableTokens is the size of the stable half the split moved the breakpoint onto, recorded
+	// on the dashboard row. The split's saving is the accountant library's split effect. 0 when
+	// nothing split.
 	splitStableTokens := 0
 	// splitTailHash identifies the volatile half, so a later turn can tell whether the
 	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
@@ -792,6 +798,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
+	// Operations are published only once the writeback has settled and we know which rewrites
+	// reached the forwarded body (Trace.Ops never describes a rewrite that is not on the wire).
+	// applied: the rewritten body is the one forwarded, which is every mode but observe.
+	wire, applied := wireGroups(slots), mode != components.ModeObserve
+	// giveUp is every return that forwards the original body: no operation is real.
+	giveUp := func() {
+		tr.Ops = nil
+		if rr != nil {
+			ops, d := opsFromRun(*rr, wire, applied, nil)
+			tr.OpsDropped = len(ops) + d
+		}
+	}
 	if debug && rr != nil {
 		logDecisions(lg, rr)
 	}
@@ -814,6 +832,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// carries tool_result blocks and explicit breakpoints (explicitBreakpointProvider): an
 			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
 			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
+		}
+		if ok && rr != nil {
+			tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wire, applied)
+			outMsgs := messagesArray(nb).Array()
+			if !wireSizes(tr.Ops, rawLen(msgs), rawLen(outMsgs), rawTotal(msgs), rawTotal(outMsgs)) {
+				giveUp()
+			}
+		} else {
+			giveUp()
 		}
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
@@ -870,6 +897,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		return bi, rel, cur, true
 	}
+	// written: the req.Input indices whose content change really went into an edit.
+	written := map[int]bool{}
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
@@ -886,15 +915,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			bi, rel, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			nb, err := sjson.SetBytes(cur, rel, newText)
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			edits[bi] = nb
 			changed = true
+			written[i] = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
 			if _, was := touched[i]; trustTouched && !was {
@@ -903,6 +935,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if bytes.Equal(post, s.pre) {
@@ -911,6 +944,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			bi, _, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if !s.lossless() {
@@ -936,6 +970,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// that splice, at the cost of copying the whole body.
 			edits[bi] = post
 			changed = true
+			written[i] = true
 			var pm bschemas.ChatMessage
 			_ = json.Unmarshal(s.pre, &pm)
 			changes = append(changes,
@@ -962,9 +997,33 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
 		if !ok {
 			res.Body = body
+			giveUp()
 			return res
 		}
 		out = nb
+	}
+	if rr != nil {
+		tr.Ops, tr.OpsDropped = opsFromRun(*rr, wire, applied, func(idx int) bool { return written[idx] })
+		// The forwarded messages are the inbound ones with each edit swapped in (spliceMessages).
+		outLen := func(i int) (int, bool) {
+			if e, ok := edits[i]; ok {
+				return len(e), true
+			}
+			return rawLen(msgs)(i)
+		}
+		inTotal, outTotal := rawTotal(msgs), rawTotal(msgs)
+		for i, e := range edits {
+			if i >= 0 && i < len(msgs) {
+				outTotal += len(e) - len(msgs[i].Raw)
+			}
+		}
+		// outLen is keyed by the INPUT index, and wireSizes asks it for the OUTPUT index. They differ
+		// when a splice inserts a different count than it removed, which this equal-count writeback
+		// can carry when two count-changing components cancel out. Sizes taken from the wrong
+		// message would be published with no check able to catch them, so give up here.
+		if shiftingSplice(tr.Ops) || !wireSizes(tr.Ops, rawLen(msgs), outLen, inTotal, outTotal) {
+			giveUp()
+		}
 	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
@@ -2033,6 +2092,25 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 	return i, rel, true
 }
 
+// rawLen is the wire length of message i of msgs, for wireSizes.
+func rawLen(msgs []gjson.Result) func(i int) (int, bool) {
+	return func(i int) (int, bool) {
+		if i < 0 || i >= len(msgs) {
+			return 0, false
+		}
+		return len(msgs[i].Raw), true
+	}
+}
+
+// rawTotal is the wire length of every message of msgs.
+func rawTotal(msgs []gjson.Result) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Raw)
+	}
+	return n
+}
+
 // wireGroups builds components.Ctx.WireGroup (#457): for each slot, the wire (body) message
 // index its path names — i.e. the thing that must never be split by a span boundary. A
 // wholeMessage slot's path is always "messages.<i>" for a DISTINCT i (one wholeMessage slot per
@@ -2106,6 +2184,11 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	if len(plan) == 0 {
 		return res
 	}
+	// Either branch below changes the forwarded body after Trace.Ops was computed: the fallback
+	// forwards the pre-pipeline body, and an insertion shifts the wire index of every later
+	// message. No operation can be trusted to describe the wire any more, so all are dropped.
+	res.Trace.OpsDropped += len(res.Trace.Ops)
+	res.Trace.Ops = nil
 	nb, tokens, ok := plan.insert(wire, res.Body, client)
 	if !ok {
 		res.Body, res.Changed = fallback, true

@@ -3,7 +3,7 @@ package dash
 import (
 	"strings"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -120,6 +120,14 @@ type WaitCauseResult struct {
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
+	// accRes is the accountant Result (see accountant_event.go). Unexported: not serialized.
+	accRes *accountant.Result
+	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
+	accOpsDropped int
+	accObserve    bool
+	// accFallback is why PriceMode booked no saving (see AccountantFallback).
+	accFallback string
+
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
 	// TenantID owns this row; "" in single-tenant deployments.
@@ -360,9 +368,8 @@ type Event struct {
 	// distinguishes them.
 	KeepAlivePings int `json:"keepalive_pings"`
 	// KeepAliveRefreshed is what the last ping on this session actually read from cache —
-	// the tokens our ping demonstrably refreshed. Not persisted: it is the numerator's
-	// CEILING, and what gets stored is the credited dollars beside the cache_read they were
-	// computed from. See keepaliveSavedUSD for why the credit is the smaller of the two.
+	// the tokens our ping demonstrably refreshed. Not persisted. The legacy credit rule capped
+	// the credit with it; the credit is now the accountant library's rescue.
 	KeepAliveRefreshed int64 `json:"-"`
 	// KeepAliveSavedUSD is the cache re-creation this request avoided because a ping kept
 	// its prefix alive.
@@ -430,7 +437,12 @@ type Event struct {
 	DeferGrossUSD        float64 `json:"defer_gross_usd,omitempty"`
 	DeferNetUSD          float64 `json:"defer_net_usd,omitempty"`
 
-	TokenAccounting    string `json:"token_accounting"`
+	TokenAccounting string `json:"token_accounting"`
+	// PriceEstimated is true when the accountant library priced this request without knowing whether a
+	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
+	// high. It is stored, so the dashboard marks such a figure after a restart. False on an exact
+	// figure, on an event that books no saving, and on a row from before the column existed.
+	PriceEstimated     bool   `json:"price_estimated,omitempty"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
@@ -606,14 +618,21 @@ type CompRow struct {
 	SavedUnique int    `json:"saved_unique"`
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
-	// paid — the same rule and the same rates as baselineDeltaUSD, so the per-component
-	// figures sum to the request-level saving. It exists because the components view had
+	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
+	// request-level saving. It exists because the components view had
 	// only a bare COST for the components that spend, and a dollar value improvised
 	// client-side from hardcoded rates is wrong by whatever the deployment's model
 	// actually charges.
-	SavedUSD   float64 `json:"saved_usd"`
-	DurationMs float64 `json:"duration_ms"`
-	Err        string  `json:"err,omitempty"`
+	SavedUSD float64 `json:"saved_usd"`
+	// SavedFirstUSD and SavedReplayUSD split SavedUSD by the tier the accountant library priced the
+	// saved tokens at: the write or input tier (a first removal) and the read tier (a replay of
+	// content in the cached prefix). SavedUSD minus both is the costs. PricedBy is "accountant" when
+	// the library priced the row; "" on a row priced before it (see the request_components schema).
+	SavedFirstUSD  float64 `json:"saved_first_usd"`
+	SavedReplayUSD float64 `json:"saved_replay_usd"`
+	PricedBy       string  `json:"priced_by,omitempty"`
+	DurationMs     float64 `json:"duration_ms"`
+	Err            string  `json:"err,omitempty"`
 	// Gates counts, per named gate, the candidates this component turned away. It is the
 	// only answer to "why did nothing happen?", and it never left the pipeline before:
 	// /stats had it service-wide, the log line had it per request, and the dashboard —
@@ -798,50 +817,38 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 	return ReasonNoSavings
 }
 
-// Price fills the cost columns AT WRITE TIME, from this request's four billed
-// token tiers plus a baseline counterfactual.
+// Price fills the cost columns AT WRITE TIME, from this request's four billed token tiers: CostUSD,
+// the provider's own cache saving (CacheSavedUSD, a measurement, never ours), and the accounting
+// fields. It books NO saving of ours: BaselineCostUSD equals CostUSD, and every component's SavedUSD,
+// CachesplitSavedUSD and KeepAliveSavedUSD are 0. The savings are the accountant library's, applied
+// by PriceMode. An event the library cannot price (AccountantFallback) keeps these zeros: a saving
+// nothing measured is not shown.
 //
-// The baseline is what the SAME request would have cost had context-guru not
-// removed anything. Getting this right is the whole point of the dashboard, and
-// there are two ways to get it wrong, both of which inflate it:
-//
-//   - Pricing GROSS savings. `Saved()` is tokens_before − tokens_after for THIS
-//     turn, and the agent re-sends its whole transcript every turn, so the same
-//     compaction is re-counted once per remaining turn. On a real 63-request
-//     window that is a 13.1x overcount — a factor this dashboard computes and
-//     displays as `overcount_ratio` right beside the dollar figure. Only
-//     SavedUnique is content that genuinely never reached the provider.
-//   - Pricing everything at the cache-WRITE rate. That rate (12.5x a read) is
-//     right for content entering the prompt for the first time. The re-sent
-//     remainder, on a turn whose cache HIT, would have been served from the
-//     provider's cache, so the most it could have been billed at is the
-//     cache-READ rate. Pricing it as a write multiplies the overcount by ~12.5.
-//
-// So: unique savings at the write rate, and the re-sent remainder at the rate the
-// request itself actually paid — see repeatRate, which is where "whose cache hit"
-// stopped being an assumption. Restored (expanded) content is content we removed
-// and then had to serve back, so it is added to the ACTUAL cost side, never
-// subtracted from baseline.
-//
-// accountingComplete=false leaves every cost at zero and the row is marked
-// partial/missing: a cost we cannot compute must read as unknown, not as free.
+// accountingComplete=false leaves every cost at zero and the row is marked partial/missing: a cost we
+// cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
+	e.accFallback, e.PriceEstimated = "", false
+	e.priceCost(p, accountingComplete)
+}
+
+// priceCost is Price without clearing the accountant state. It reports whether the cost was
+// computed (accounting complete and a price known).
+func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	if !accountingComplete || p.Zero() {
 		if e.TokensBefore > 0 {
 			e.TokenAccounting = AccountingPartial
 		} else {
 			e.TokenAccounting = AccountingMissing
 		}
-		return
+		return false
 	}
 	e.TokenAccounting = AccountingComplete
-	// Resolve the tokenizer correction ONCE per request, before anything prices a saving.
-	// It multiplies counterfactual token counts only — never a provider-reported count, so
-	// CostUSD below is untouched.
+	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
+	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
 	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
 	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
-	e.BaselineCostUSD = e.CostUSD + e.baselineDeltaUSD(p)
+	e.BaselineCostUSD = e.CostUSD
 	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
 	// billed at the read rate instead of the fresh rate it would have cost with no cache at
 	// all. Kept as a measurement, reported as one, and never called a saving of ours — it is
@@ -852,31 +859,27 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	// NOT on a keep-alive ping. A ping's whole job is to read the prefix, so it reports a large
 	// cache_read and would book ~$0.13 of "provider cache saving" per 48k ping against $0.0073
 	// of real cost — a fabricated saving on a figure PR #83 puts on the page, and at production
-	// ping volumes it is on the order of a thousand dollars. The counterfactual is the tell:
-	// without the keep-alive that ping does not exist, so there is no unbatched-fresh-input
-	// alternative for it to have saved anything against.
+	// ping volumes it is on the order of a thousand dollars. Without the keep-alive that ping
+	// does not exist, so there is no unbatched-fresh-input alternative for it to have saved
+	// anything against.
 	if !e.KeepAlive {
 		e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
 		if e.CacheSavedUSD < 0 {
 			e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
 		}
 	}
-	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
-	e.KeepAliveSavedUSD = e.keepaliveSavedUSD(p)
-	// Per-component dollars, same rule and same rates as baselineDeltaUSD above: the unique
-	// part at the write rate it would have entered as, the re-sent remainder at the tier this
-	// request actually paid. Summed over a component's turns this IS the amortization — value
-	// realized turn by turn as the frozen reduction replays, not a projection.
+	e.CachesplitSavedUSD, e.KeepAliveSavedUSD = 0, 0
 	for i := range e.Components {
-		c := &e.Components[i]
-		c.SavedUSD = e.ComponentSavedUSD(p, c.Component, c.SavedGross, c.SavedUnique)
+		e.Components[i].SavedUSD = 0
 	}
+	return true
 }
 
-// ComponentSavedUSD is ONE component's share of the baseline delta on this request: the
-// single pricing path for a removal. Price stores it at write time; the read-time passes
-// (dash/summarizeattr.go) call it again on a stored row so an old row and a new row are valued
-// by the same arithmetic and cannot drift apart.
+// ComponentSavedUSD is the LEGACY per-component rule: a removal priced from a row's own token
+// counts. Nothing stores it any more; the accountant library prices every new row (PriceMode). It
+// stays for rows written before the switch (priced_by ”), which the read-time passes value with it
+// (readvalue.go, summarizeattr.go, replaycap.go), because a stored row has no thread history for
+// the library to price from. A row the library priced is never re-priced with it.
 //
 // The first (unique) removal is priced by uniqueRate, the re-sent remainder by repeatRate.
 func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, unique int) float64 {
@@ -884,7 +887,7 @@ func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, un
 		gross = 0
 	}
 	if unique > gross {
-		unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
+		unique = gross // shared content keys can over-attribute
 	}
 	if unique < 0 {
 		unique = 0
@@ -933,213 +936,6 @@ func (e *Event) uniqueRate(p modelinfo.Price, component string) float64 {
 		}
 	}
 	return p.CacheWrite
-}
-
-// cachesplitSavedUSD is the cache saving this project is willing to sign its name to.
-//
-// The mechanism: Claude Code appends a live environment snapshot (branch, git status, recent
-// commits) to the END of its big system block, and that block is ONE cacheable unit whose
-// breakpoint sits after the churn. So the provider's hash covers the volatile tail and the
-// block re-bills as cache CREATION every time the snapshot changes. cachesplit splits the
-// block in two and moves the breakpoint onto the stable half — same bytes to the model, a
-// hash boundary that excludes the snapshot.
-//
-// Three conditions, each ruling out a way of being wrong:
-//
-//   - SplitStableTokens > 0, i.e. the split actually happened on this request. It is set
-//     only where splitVolatileTail rewrote the block, which is exactly when cachesplit
-//     reports `mutated`, so this is the component test as well as the size.
-//
-//   - the provider READ from cache, and read AT LEAST as much as the half we split off while
-//     WRITING less than that. A hit alone is not enough: on the first request after the
-//     stable half itself changed — someone edited CLAUDE.md, the tool list changed — an
-//     earlier agent breakpoint still hits, so cache_read > 0 while OUR half is being billed
-//     as creation on that very request. The write test is what excludes it. Neither test can
-//     isolate our breakpoint from the usage block, so both are deliberately blunt and both
-//     err towards refusing the credit.
-//
-//   - the volatile TAIL CHANGED since this session's previous request (a session's first
-//     request counts as changed — there was nothing there to match). This is the condition
-//     that makes the hit ours: with the block unsplit, a moved snapshot re-creates the whole
-//     thing, while a tail that did not move would have been served from cache either way.
-//
-//     It replaced "the session's first request", which sounded conservative and was simply
-//     wrong about how this traffic behaves. Measured over 1,127 stored sessions: 1,105 of
-//     the first requests were COLD — the previous session's cache had expired before the
-//     next one began — so that test reported ~$0 while the component was demonstrably
-//     serving the system prompt from cache on hundreds of mid-session turns. The turn that
-//     matters is the one where the agent commits or edits and the snapshot moves, which is
-//     mid-session, and which the SWE-bench A/B (0% -> 96.7% hit) was measuring all along.
-//
-//     The comparison survives a restart: the tail hash is stored per request and the map is
-//     seeded from it (dash.Recorder.SeedSessions), so the first turn after a restart is not
-//     mistaken for a change.
-//
-// And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
-// found by running the control arm rather than by reasoning about it. Real Claude Code
-// sessions against litellm-gateway, each started after a fresh commit so the environment snapshot
-// genuinely differed, first request of each session:
-//
-//	                     first-request cache_read     cache_write
-//	cachesplit on                          54,304     1,030-1,065
-//	cachesplit off (control)               45,805     9,555-9,564
-//
-// The control still HIT. Claude Code sets several breakpoints and the ones before this block
-// match whatever we do — so crediting the whole 54,304 would have booked the agent's own cache
-// placement as ours. What the split moved is the difference the provider reports: 8,499
-// tokens, from the write tier to the read tier.
-//
-// We claim less than that. The split's own measurement of the half it moved is 5,654 tokens on
-// that traffic, and the two disagree because they count different things — the provider reports
-// block-granular usage over a prefix that also gained a block boundary, while this counts BPE
-// tokens over the text. Both are evidence; the smaller one is what gets billed, because
-// under-crediting is the only safe direction.
-//
-// In dollars on that request: $0.0099 ours against $0.0743 for the provider's whole cache read.
-// 7.5x, and that 7.5x is the claim this replaced.
-//
-// The counterfactual is a cache MISS, not fresh input: those tokens carry cache_control, so
-// a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, a
-// 1.15x-fresh spread rather than 0.9x. The max(CacheWrite, Input) floor covers a provider that
-// charges no write premium, where a miss still costs at least the fresh rate.
-//
-// It is a FLOOR: a stable prefix serves a whole session while this counts one request of it,
-// and a session resumed after the TTL expires starts another first-request hit this cannot
-// see. Under-crediting is the only direction a savings figure is allowed to be wrong in.
-func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
-	if !e.TailChanged || e.SplitStableTokens <= 0 {
-		return 0
-	}
-	// The read has to be big enough to have included our half, and the write small enough
-	// not to have re-created it. Either failing means the stable half was not what got served
-	// from cache on this request, whatever else was.
-	n := int64(e.SplitStableTokens)
-	if e.CacheRead < n || e.CacheWrite >= n {
-		return 0
-	}
-	miss := p.CacheWrite
-	if miss < p.Input {
-		miss = p.Input
-	}
-	delta := miss - p.CacheRead
-	if delta <= 0 {
-		return 0
-	}
-	return float64(n) * delta
-}
-
-// keepaliveSavedUSD is the cache re-creation a keep-alive ping avoided on THIS request.
-//
-// The mechanism, and why it is worth this much: the provider's default cache lifetime is
-// five minutes, "measured from the start of the request that writes or reads the cache
-// entry, not from the end of its response". A session idle longer than that loses its whole
-// cached prefix, and the next turn re-bills every token of it at the creation rate. Measured
-// over 19,805 production requests: 742 such requests cost $741.07 — 23.6% of all spend — at
-// $0.9987 each against $0.1178 for a request that hit. Comparing each one against its own
-// counterfactual (the same tokens billed as a read) puts the penalty at 11.35x, of which
-// 91.2% is pure re-write.
-//
-// A cache READ refreshes the lifetime for free — "the cache is refreshed for no additional
-// cost each time the cached content is used" — so a ping that re-reads the prefix at 0.1x
-// buys back a re-creation at 1.25x. That 11.5:1 ratio is the whole economics, and it is why
-// this is the one cache lever worth more than everything the transformation pipeline
-// delivers.
-//
-// Four conditions, and each rules out a specific way of claiming money that is not ours:
-//
-//   - A ping actually happened on this session during the idle span this request ended
-//     (KeepAlivePings > 0). Without it, every long-gap hit in the deployment would be
-//     credited to a mechanism that was switched off.
-//   - The gap exceeded the provider's lifetime. Inside the lifetime the entry would have
-//     survived on its own and the ping changed nothing — those pings are the measured waste
-//     the policy accepts (53 of 912 at the shipped X=280s, K=2, gated), and they must not also be
-//     credited.
-//   - The provider read from cache and read MORE than it wrote. A request that re-created
-//     most of its prefix did not get rescued, whatever else it read.
-//   - The credit is the smaller of what the ping refreshed and what this request read. The
-//     ping's own response says exactly how many tokens were in the entry it touched, so
-//     crediting more than that would claim tokens our ping never kept alive.
-//
-// One confound remains and is not removable from a single row: the provider's cache is keyed
-// on CONTENT, so another session sending a byte-identical prefix inside the window would
-// have refreshed the same entry for free. This is therefore the CEILING of what the ping
-// earned on this row, and the counts beside it (pings sent, pings that read nothing) are what
-// an operator checks it against.
-//
-// Priced against a cache MISS rather than fresh input, for the same reason
-// cachesplitSavedUSD is: these tokens carry cache_control, so a miss bills them as creation
-// at 1.25x, not at 1.0x.
-func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
-	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
-		return 0 // a ping never credits itself
-	}
-	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model, e.CacheTTL) {
-		return 0
-	}
-	if e.CacheWrite >= e.CacheRead {
-		return 0
-	}
-	n := e.CacheRead
-	if e.KeepAliveRefreshed > 0 && e.KeepAliveRefreshed < n {
-		n = e.KeepAliveRefreshed
-	}
-	miss := p.CacheWrite
-	if miss < p.Input {
-		miss = p.Input
-	}
-	delta := miss - p.CacheRead
-	if delta <= 0 {
-		return 0
-	}
-	return float64(n) * delta
-}
-
-// keepaliveCreditFloorMs is how long a gap must be before a ping can take credit for the return:
-// the cache lifetime of the thread. cacheTTL is the tier the returning request ASKED for, which
-// for a given client is constant across a session (Claude Code asks 1h on a subscription for every
-// request). A 1-hour thread is pinged at 59 min, so crediting any gap over 5 minutes would claim
-// returns the entry survived on its own.
-func keepaliveCreditFloorMs(provider, model, cacheTTL string) int64 {
-	if provider == string(bschemas.OpenAI) {
-		if !modelinfo.GPT56OrLater(model) {
-			return 1<<63 - 1 // no known lifetime means no defensible credit
-		}
-	}
-	return modelinfo.CacheLifetime(provider, model, cacheTTL == apply.TTLEphemeral1h).Milliseconds()
-}
-
-// baselineDeltaUSD is what the removed content would have cost had it been sent:
-// the unique part as new input (cache-write rate), the re-sent remainder as a
-// cache read — with the token counts corrected to the provider's own count.
-//
-// The correction (BilledTokenFactor) is issue #240: the counts here are
-// schema.MessagesTokens, an o200k_base estimate, while the RATE is the provider's. Pricing
-// one at the other under-reported this delta on every Claude row. See
-// tokens.BilledDeltaFactor for how the factor was measured and what it does not claim.
-func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
-	unique := e.SavedUnique
-	gross := e.Saved()
-	// SavedUnique is attributed per component and can exceed the request's own
-	// gross saving when several components stash the same content key; clamp it, so
-	// the repeat term can never go negative and inflate the baseline.
-	if unique > gross {
-		unique = gross
-	}
-	if unique < 0 {
-		unique = 0
-	}
-	// The part of the unique removal that belongs to a summarizer is priced by its own rate (see
-	// uniqueRate); every other component's unique part stays at the write rate.
-	sumUnique := 0
-	for _, c := range e.Components {
-		if IsSummarizer(c.Component) && c.SavedUnique > 0 {
-			sumUnique += min(c.SavedUnique, max(c.SavedGross, 0))
-		}
-	}
-	sumUnique = min(sumUnique, unique)
-	raw := float64(unique-sumUnique)*p.CacheWrite + float64(sumUnique)*e.uniqueRate(p, SummarizerComponents[0]) +
-		float64(gross-unique)*e.repeatRate(p)
-	return raw * e.BilledTokenFactor
 }
 
 // repeatRate is what the RE-SENT part of the removed content would have been billed

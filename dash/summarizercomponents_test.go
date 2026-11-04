@@ -43,26 +43,6 @@ func TestSummarizerComponentListIsOneSafeList(t *testing.T) {
 // would shrink with it and still pass when a name is dropped from the list.
 var namedSummarizers = []string{"summarize", "cache_aware_summarizer"}
 
-func TestEveryNamedSummarizerPricesItsFirstRemovalAsARead(t *testing.T) {
-	price := handPrice["m1"]
-	for _, name := range namedSummarizers {
-		for _, tc := range []struct {
-			reason string
-			want   float64
-		}{{CacheHit, price.CacheRead}, {CachePrefixChange, price.CacheRead}, {CacheTTLExpiry, price.CacheWrite}} {
-			e := &Event{
-				Model: "m1", FreshInput: 10, CacheRead: 50_000, TokenAccounting: AccountingComplete,
-				CacheMissReason: tc.reason, SavedUnique: 1000, TokensBefore: 10_000, TokensAfter: 9_000,
-				Components: []CompRow{{Component: name, SavedGross: 1000, SavedUnique: 1000}},
-			}
-			e.Price(price, true)
-			want := 1000 * tc.want * e.BilledTokenFactor
-			nearEq(t, name+"/"+tc.reason+" component", e.Components[0].SavedUSD, want)
-			nearEq(t, name+"/"+tc.reason+" baseline", e.BaselineCostUSD-e.CostUSD, want)
-		}
-	}
-}
-
 func asComponent(e *Event, name string) *Event {
 	e.Components[0].Component = name
 	return e
