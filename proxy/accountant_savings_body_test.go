@@ -95,3 +95,48 @@ func TestCfBreakpointsOnePerPositionLongerTTL(t *testing.T) {
 		}
 	}
 }
+
+// The client moves its cache mark: turn 2 has the mark on message 1 and none on message 0, turn 3 moves it to
+// message 2. The text of messages 0 and 1 did not change, so their hashes must not change. If the mark were
+// in the hash, message 1 would look edited on turn 3 and the library would find no common prefix after the
+// system block (accountant#21, context-guru#768 B1).
+func TestAccBodies_AMovedCacheMarkDoesNotChangeTheHash(t *testing.T) {
+	const mark = `,"cache_control":{"type":"ephemeral"}`
+	turn := func(m0, m1, m2 string) []byte {
+		return []byte(`{"system":"s","messages":[` +
+			`{"role":"user","content":[{"type":"text","text":"a"` + m0 + `}]},` +
+			`{"role":"assistant","content":[{"type":"text","text":"b"` + m1 + `}]},` +
+			`{"role":"user","content":[{"type":"text","text":"c"` + m2 + `}]}]}`)
+	}
+	t2, t3 := accBodies(turn("", mark, "")), accBodies(turn("", "", mark))
+	for i := 0; i < 3; i++ { // system, message 0, message 1: the same text on both turns
+		if t2.Pos[i].Hash != t3.Pos[i].Hash {
+			t.Errorf("position %d hashes differ only by a moved cache mark", i)
+		}
+	}
+	// The size is the wire size: the mark is bytes the provider received.
+	if with, without := t2.Pos[2].Bytes, t3.Pos[2].Bytes; with <= without || int(with-without) != len(mark) {
+		t.Errorf("message 1 is %d bytes with the mark and %d without, want a difference of %d", with, without, len(mark))
+	}
+}
+
+// A mark on the element itself (not on a content block) is left out of the hash too.
+func TestAccBodies_AnElementMarkIsLeftOutOfTheHash(t *testing.T) {
+	a := accBodies([]byte(`{"messages":[{"role":"user","content":"x","cache_control":{"type":"ephemeral"}}]}`))
+	b := accBodies([]byte(`{"messages":[{"role":"user","content":"x"}]}`))
+	if a.Pos[0].Hash != b.Pos[0].Hash {
+		t.Fatal("an element mark changed the hash")
+	}
+	if a.Pos[0].Bytes <= b.Pos[0].Bytes {
+		t.Fatal("the marked element should be larger on the wire")
+	}
+}
+
+// A different text still changes the hash: leaving out the mark must not hide a real edit.
+func TestAccBodies_ARealEditStillChangesTheHash(t *testing.T) {
+	a := accBodies([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}]}`))
+	b := accBodies([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"b","cache_control":{"type":"ephemeral"}}]}]}`))
+	if a.Pos[0].Hash == b.Pos[0].Hash {
+		t.Fatal("an edited text kept the same hash")
+	}
+}

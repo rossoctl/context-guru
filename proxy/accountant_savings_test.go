@@ -218,3 +218,45 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 }
 
 var accPrice = modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6, Output: 15e-6}
+
+// The client moves its cache mark to the newest message every turn, as Claude Code does. A change made on turn 1
+// and replayed on turns 2 and 3 sits inside what the provider keeps reading, so on a hot turn it is priced at
+// the READ tier. With the mark in the hash, the previous message looked edited every turn, the library found
+// no common prefix, and the replay was priced at the WRITE tier: the booked saving grew each turn while the
+// real one did not (context-guru#768 B1: 2.0x, 2.9x, 3.7x on turns 2 to 4).
+func TestSavings_AMovingCacheMarkDoesNotRepriceAReplayAtTheWriteRate(t *testing.T) {
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	const id = "cg:mask:mm"
+	big, nBig := msg("user", strings.Repeat("tool result ", 400))
+	small, nSmall := msg("user", "[masked]")
+	// withMark puts the mark on a message's single text block.
+	withMark := func(text string) string {
+		return fmt.Sprintf(`{"role":"assistant","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]}`, text)
+	}
+	plain := func(text string) string {
+		return fmt.Sprintf(`{"role":"assistant","content":[{"type":"text","text":%q}]}`, text)
+	}
+	m0 := mustMsg("user", "first")
+	op := rewriteOp(id, 1, nBig, nSmall)
+
+	// turn 1: the mark is on message 2. Nothing cached before it.
+	c.do(1, body(m0, big, withMark("a")), body(m0, small, withMark("a")), Usage{CacheWrite: 3000}, op)
+	// turn 2 and 3: the mark moves to the newest message. The text of the earlier ones did not change.
+	c.do(2, body(m0, big, plain("a"), withMark("b")), body(m0, small, plain("a"), withMark("b")),
+		Usage{CacheRead: 3000, CacheWrite: 100}, op)
+	res := c.do(3, body(m0, big, plain("a"), plain("b"), withMark("c")), body(m0, small, plain("a"), plain("b"), withMark("c")),
+		Usage{CacheRead: 3100, CacheWrite: 100}, op)
+
+	var got *accountant.PricedOp
+	for i := range res.Ops {
+		if res.Ops[i].ChangeID == id {
+			got = &res.Ops[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the replayed change is not priced: %+v", res.Ops)
+	}
+	if got.Saved.CacheWrite5m != 0 || got.Saved.Input != 0 || got.Saved.CacheRead == 0 {
+		t.Fatalf("turn 3 priced the replay at %+v, want the read tier (the provider read it)", got.Saved)
+	}
+}
