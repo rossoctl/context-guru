@@ -20,7 +20,8 @@ import (
 // deferNetSum is the one SQL expression for deferral's net dollars over a set of request rows. The
 // panel, the Savings totals (SavingsTotals, Overview, OverviewLean) and the daily series all use
 // it, so they cannot disagree. Net is stored per request; nothing is priced on read.
-const deferNetSum = "COALESCE(SUM(r.defer_net_usd),0)"
+const deferNetCol = "r.defer_net_usd"
+const deferNetSum = "COALESCE(SUM(" + deferNetCol + "),0)"
 
 // ToolDeferDay is one account's deferral on one UTC day.
 type ToolDeferDay struct {

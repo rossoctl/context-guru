@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The panel sums deferral's per-request facts per account and per UTC day. A request deferral did
@@ -177,5 +178,29 @@ func TestDeferNetIsItsOwnLeverInTheTotal(t *testing.T) {
 	}
 	if js, _ := json.Marshal(rb[0]); strings.Contains(string(js), "defer_net_usd") {
 		t.Errorf("an account with no deferral has a deferral series: %s", js)
+	}
+}
+
+// The per-thread money view carries deferral's net too, in both x and y; a thread that never
+// deferred reads as before.
+func TestThreadMoneyIncludesDeferNet(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	d := mkEvent(now-60_000, "sd", "m", 100, 100)
+	d.DeferTokens, d.DeferGrossUSD, d.DeferNetUSD = 5000, 0.010, 0.004
+	n := mkEvent(now-60_000, "sn", "m", 100, 100)
+	if err := db.InsertEvents([]*Event{d, n}); err != nil {
+		t.Fatal(err)
+	}
+	money := func(session string) ThreadMoney {
+		_, m, err := db.ThreadsFor(Filter{Session: session}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Main
+	}
+	with, none := money("sd"), money("sn")
+	if math.Abs(with.SavedUSD-none.SavedUSD-0.004) > 1e-12 || math.Abs(with.BaselineUSD-none.BaselineUSD-0.004) > 1e-12 {
+		t.Errorf("thread with deferral %+v, without %+v: want exactly 0.004 more in saved and baseline", with, none)
 	}
 }
