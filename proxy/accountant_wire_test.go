@@ -42,6 +42,12 @@ func accHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *accTap) {
 // accHandlerYAML is accHandler with the config document spelled out.
 func accHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *accTap) {
 	t.Helper()
+	return accHandlerOpts(t, up, yaml, nil)
+}
+
+// accHandlerOpts is accHandlerYAML with a hook that edits the handler options before New.
+func accHandlerOpts(t *testing.T, up, yaml string, edit func(*Options)) (*Handler, *dash.Recorder, *accTap) {
+	t.Helper()
 	cfg, err := config.LoadBytes([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
@@ -58,10 +64,14 @@ func accHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *a
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+	opts := Options{
 		AnthropicUpstream: up, OpenAIUpstream: up, Preset: cfg.Preset,
 		Dashboard: rec, Prices: fixedPricer{},
-	})
+	}
+	if edit != nil {
+		edit(&opts)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, opts)
 	t.Cleanup(h.Close)
 	return h, rec, tap
 }
