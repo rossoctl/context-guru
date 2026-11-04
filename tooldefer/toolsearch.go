@@ -1,52 +1,89 @@
 package tooldefer
 
 import (
-	"sort"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
-	"unicode"
 
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// The client's own search answers the proxy's deferred tools (#898, option B, Claude Code).
+// The proxy adds its own deferred tools to Claude Code's ToolSearch result (#898, option B).
 //
-// Claude Code sends its own client-side `ToolSearch`. It finds the tools Claude Code deferred, but
-// not the ones the proxy deferred. So on a thread with ToolSearch (Record.Client) the proxy adds no
-// server-side search. It answers the client's search calls itself, on the REQUEST side: a search
-// runs in the client, free, and its tool_result comes back on the next request. There the proxy
-// replaces the result with tool_reference blocks over every deferred tool, the client's and its own.
-// This is the pattern of repairSearchResults (clientsearch.go). It needs no second upstream round,
-// and a search next to another tool call needs no special case: each result is replaced on its own.
+// Claude Code sends its own client-side `ToolSearch`. It finds the tools Claude Code deferred, not the
+// ones the proxy deferred. So on a thread with ToolSearch (Record.Client) the proxy adds no
+// server-side search. Every ToolSearch call goes to Claude Code, as before. In the NEXT request, the
+// result is the tail of the transcript, and the proxy adds tool_reference blocks for its own deferred
+// tools to it. Claude Code's own result stays as it is. The API expands a tool_reference for a tool
+// with defer_loading, with no server-side search in `tools` (measured live, #898).
 //
-// The API expands a tool_reference to the tool's definition for any tool with defer_loading, with no
-// server-side search in `tools` (measured live, #898).
+// The accepted query is only the exact select form (selectNames). Every other query passes through.
+// The proxy does not read a query in any other way. The measured behavior of Claude Code's search:
+//   - `select:` is matched in any case ("Select:"), names are split on "," and trimmed, so a space
+//     after the comma is fine;
+//   - a name it does not know is dropped; when no name is known, the result is the text
+//     noMatchText (not an error);
+//   - the result is capped at max_results (default 5).
 //
-// A query that matches only the client's own deferred tools passes through: the client's result
-// stays as it is. Every answer, and every pass-through, is written to the thread's record by tool
-// call id (Record.Answers) the first time, and read from there on every later request. The bytes are
-// then the same on every request, also after a restart, and the cached prefix holds. A search whose
-// query is changed or deleted by the client in a later request is not our concern: the id is the key.
+// Fail closed on a format change, never switch to another search tool: a hash of ToolSearch's
+// description (DescHash) is the version key. An unknown hash defers nothing on the thread. A query that
+// names one of our tools in any other form, or a call to a deferred tool that no result loaded, marks
+// the hash disabled (Gate.DisableClient) and the thread stops deferring: `tools` changes once, so that
+// thread pays one cache rewrite.
+//
+// Every added list is written to the thread's record by tool_use id the first time, and replayed from
+// there on every later request. The bytes are then the same on every request, also after a restart.
+
+// knownDescHashes are the ToolSearch description hashes whose select syntax was checked live (#898):
+// the hash is the format version. Add a hash here only after the live probe passes with that
+// client version (see docs/tool-search-matrix.md). Any other hash defers nothing.
+var knownDescHashes = map[string]bool{
+	"88033eceb421f1c2": true, // Claude Code, Nov 2026 (109 captures)
+}
+
+// AddKnownDescHash marks a description hash as verified. For tests; production adds to the list above.
+func AddKnownDescHash(h string) { knownDescHashes[h] = true }
+
+// KnownDescHash reports whether the proxy has verified the select syntax of this description.
+func KnownDescHash(h string) bool { return knownDescHashes[h] }
 
 // maxAnswers bounds Record.Answers. Past it an answer is computed again each time (a pure function
-// of the call and the declared tools) and not kept.
+// of the call and the result) and not kept.
 const maxAnswers = 256
 
-// defaultResults is ToolSearch's max_results default (its schema says "default: 5").
+// defaultResults is ToolSearch's max_results default.
 const defaultResults = 5
 
-// maxResults caps a model-chosen max_results.
-const maxResults = 25
+// noMatchText is Claude Code's result when no name matched.
+const noMatchText = "No matching deferred tools found"
 
 // HasClientToolSearch reports whether body declares Claude Code's own search: a client tool, loaded.
 func HasClientToolSearch(body []byte) bool {
-	found := false
+	return clientSearchTool_(body).Exists()
+}
+
+func clientSearchTool_(body []byte) gjson.Result {
+	var found gjson.Result
 	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
-		found = t.Get("name").String() == claudeCodeSearch && !t.Get("type").Exists() && !t.Get("defer_loading").Bool()
-		return !found
+		if t.Get("name").String() == claudeCodeSearch && !t.Get("type").Exists() && !t.Get("defer_loading").Bool() {
+			found = t
+		}
+		return !found.Exists()
 	})
 	return found
+}
+
+// DescHash is a short hash of ToolSearch's description, which documents the query syntax: the key of
+// the format check. "" when body has no ToolSearch.
+func DescHash(body []byte) string {
+	t := clientSearchTool_(body)
+	if !t.Exists() {
+		return ""
+	}
+	h := sha256.Sum256([]byte(t.Get("description").String()))
+	return hex.EncodeToString(h[:8])
 }
 
 // clientNamesListHead starts the names list when the client's search loads the tools. Fixed text.
@@ -59,28 +96,45 @@ func ClientToolNamesList(names []string) string {
 	return clientNamesListHead + "\n" + strings.Join(names, "\n")
 }
 
-// searchCall is one ToolSearch call of the transcript.
-type searchCall struct {
-	query string
-	max   int
-}
-
-// candidate is one deferred tool a search may return.
-type candidate struct {
-	name, desc string
-	ours       bool
-}
-
-// AnswerSearches replaces, in body, the result of every ToolSearch call whose answer touches a tool
-// the proxy deferred (deferred is the thread's set). It returns the new body, the names newly loaded
-// by an answer written now (for the history and the ledger), and how many answers that was. rs,
-// session and thread name the record that keeps the answers. Fail open: any problem returns body.
-func AnswerSearches(rs store.Store, session, thread string, body []byte, deferred map[string]bool) (out []byte, loads []string, n int) {
-	out = body
-	if !strings.Contains(string(body), claudeCodeSearch) {
-		return body, nil, 0
+// selectNames reads the exact select form: "select:" in any case, then names split on ",", each
+// trimmed. ok=false for any other query.
+func selectNames(q string) (names []string, ok bool) {
+	q = strings.TrimSpace(q)
+	if len(q) < 7 || !strings.EqualFold(q[:7], "select:") {
+		return nil, false
 	}
-	calls := map[string]searchCall{}
+	for _, n := range strings.Split(q[7:], ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names, true
+}
+
+// Augment is what AugmentSearches did on one request.
+type Augment struct {
+	Body []byte
+	// Loads is the deferred tools that results written now carry; Answered how many calls were new.
+	Loads    []string
+	Answered int
+	// Bad is true when a new query names one of our tools in a form other than the exact select form.
+	// Body is then the input.
+	Bad bool
+}
+
+// AugmentSearches adds, to the result of every ToolSearch call in body, a tool_reference for each
+// deferred tool (deferred is the thread's set) that the call's exact select query names. rs, session
+// and thread name the record that keeps the lists. Fail open: any problem returns body.
+func AugmentSearches(rs store.Store, session, thread string, body []byte, deferred map[string]bool) (a Augment) {
+	a.Body = body
+	if !strings.Contains(string(body), claudeCodeSearch) {
+		return a
+	}
+	type call struct {
+		query string
+		max   int
+	}
+	calls := map[string]call{}
 	msgs := gjson.GetBytes(body, "messages").Array()
 	for _, m := range msgs {
 		if m.Get("role").String() != "assistant" {
@@ -92,80 +146,76 @@ func AnswerSearches(rs store.Store, session, thread string, body []byte, deferre
 				if max <= 0 {
 					max = defaultResults
 				}
-				if max > maxResults {
-					max = maxResults
-				}
-				calls[b.Get("id").String()] = searchCall{query: b.Get("input.query").String(), max: max}
+				calls[b.Get("id").String()] = call{b.Get("input.query").String(), max}
 			}
 			return true
 		})
 	}
 	if len(calls) == 0 {
-		return body, nil, 0
+		return a
 	}
-	var cands []candidate
-	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
-		name := t.Get("name").String()
-		if name != "" && !t.Get("type").Exists() && t.Get("defer_loading").Bool() {
-			cands = append(cands, candidate{name: name, desc: t.Get("description").String(), ours: deferred[name]})
-		}
-		return true
-	})
 	recMu.Lock()
 	defer recMu.Unlock()
 	rec, ok := Load(rs, session, thread)
 	if !ok {
-		return body, nil, 0
+		return a
 	}
-	changed := false
+	out, changed := body, false
 	for i, m := range msgs {
-		if m.Get("role").String() != "user" {
+		if m.Get("role").String() != "user" || !m.Get("content").IsArray() {
 			continue
 		}
-		blocks := m.Get("content")
-		if !blocks.IsArray() {
-			continue
-		}
-		for j, b := range blocks.Array() {
+		for j, b := range m.Get("content").Array() {
 			id := b.Get("tool_use_id").String()
-			call, isCall := calls[id]
+			c, isCall := calls[id]
 			if b.Get("type").String() != "tool_result" || !isCall {
 				continue
 			}
+			res := b.Get("content")
 			names, known := rec.Answers[id]
 			if !known {
-				names = searchNames(call, cands)
+				if sel, isSel := selectNames(c.query); isSel {
+					names = ourNames(sel, deferred, res, c.max)
+				} else if namesOurs(c.query, deferred) {
+					a.Bad = true
+					return a // the format is not what the proxy knows: it adds nothing
+				}
 				if len(rec.Answers) < maxAnswers {
 					if rec.Answers == nil {
 						rec.Answers = map[string][]string{}
 					}
-					rec.Answers[id] = append([]string{}, names...)
+					rec.Answers[id] = append([]string{}, names...) // empty: the client's result stands
 					changed = true
 				}
-				for _, nm := range names {
-					if deferred[nm] {
-						loads = append(loads, nm)
-					}
-				}
-				n++
+				a.Loads = append(a.Loads, names...)
+				a.Answered++
 			}
 			if len(names) == 0 {
-				continue // a pure client query: the client's result stays
+				continue
 			}
-			refs := make([]string, len(names))
-			for k, nm := range names {
-				r, _ := sjson.Set(`{"type":"tool_reference"}`, "tool_name", nm)
-				refs[k] = r
+			var refs []string
+			switch {
+			case res.Type == gjson.String && res.String() == noMatchText:
+			case res.IsArray() && onlyRefs(res):
+				res.ForEach(func(_, r gjson.Result) bool {
+					refs = append(refs, r.Raw)
+					return true
+				})
+			default:
+				continue // an error or a shape we do not know: the client's result stands
 			}
-			path := "messages." + itoa(i) + ".content." + itoa(j)
-			next, err := sjson.SetRawBytes(out, path+".content", []byte("["+strings.Join(refs, ",")+"]"))
-			if err != nil {
-				return body, nil, 0
-			}
-			if b.Get("is_error").Exists() {
-				if next, err = sjson.DeleteBytes(next, path+".is_error"); err != nil {
-					return body, nil, 0
+			have := map[string]bool{}
+			res.ForEach(func(_, r gjson.Result) bool { have[r.Get("tool_name").String()] = true; return true })
+			for _, nm := range names {
+				if !have[nm] {
+					r, _ := sjson.Set(`{"type":"tool_reference"}`, "tool_name", nm)
+					refs = append(refs, r)
 				}
+			}
+			next, err := sjson.SetRawBytes(out, "messages."+itoa(i)+".content."+itoa(j)+".content", []byte("["+strings.Join(refs, ",")+"]"))
+			if err != nil {
+				a.Body = body
+				return Augment{Body: body}
 			}
 			out = next
 		}
@@ -173,101 +223,79 @@ func AnswerSearches(rs store.Store, session, thread string, body []byte, deferre
 	if changed {
 		Save(rs, session, thread, rec)
 	}
-	return out, loads, n
+	a.Body = out
+	return a
 }
 
-// searchNames is the answer to one call: the names to load, or nil when the call matches only the
-// client's own deferred tools (the client answers it) or nothing at all.
-func searchNames(c searchCall, cands []candidate) []string {
-	var names []string
-	if rest, ok := strings.CutPrefix(strings.TrimSpace(c.query), "select:"); ok {
-		have := map[string]bool{}
-		for _, cd := range cands {
-			have[cd.name] = true
-		}
-		seen := map[string]bool{}
-		for _, nm := range strings.Split(rest, ",") {
-			if nm = strings.TrimSpace(nm); nm != "" && have[nm] && !seen[nm] {
-				seen[nm] = true
-				names = append(names, nm)
-			}
-		}
-	} else {
-		names = rank(c, cands)
-	}
-	ours := map[string]bool{}
-	for _, cd := range cands {
-		if cd.ours {
-			ours[cd.name] = true
-		}
-	}
-	for _, nm := range names {
-		if ours[nm] {
-			return names
-		}
-	}
-	return nil
+// onlyRefs reports whether every element of a result array is a tool_reference block.
+func onlyRefs(res gjson.Result) bool {
+	ok := true
+	res.ForEach(func(_, r gjson.Result) bool {
+		ok = ok && r.Get("type").String() == "tool_reference"
+		return ok
+	})
+	return ok
 }
 
-// rank is a keyword search over the deferred tools: terms are matched against the tool name (3
-// points) and its description (1 point); "+term" is required. Highest score first, ties in the
-// order the tools are declared. At most c.max names.
-func rank(c searchCall, cands []candidate) []string {
-	var terms, need []string
-	for _, w := range strings.Fields(strings.ToLower(c.query)) {
-		req := strings.HasPrefix(w, "+")
-		for _, t := range strings.FieldsFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-			terms = append(terms, t)
-			if req {
-				need = append(need, t)
-			}
-		}
+// ourNames is the deferred tools to add for the names of a select query, in query order, once each.
+// The client's own result holds some of the cap; ours fill what is left of max.
+func ourNames(sel []string, deferred map[string]bool, res gjson.Result, max int) []string {
+	room := max
+	if res.IsArray() {
+		room -= len(res.Array())
 	}
-	if len(terms) == 0 {
-		return nil
-	}
-	type scored struct {
-		name  string
-		score int
-		at    int
-	}
-	var hits []scored
-	for i, cd := range cands {
-		name, desc := strings.ToLower(cd.name), strings.ToLower(cd.desc)
-		match := func(t string) int {
-			s := 0
-			if strings.Contains(name, t) {
-				s += 3
-			}
-			if strings.Contains(desc, t) {
-				s++
-			}
-			return s
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range sel {
+		if room <= 0 {
+			break
 		}
-		ok := true
-		for _, t := range need {
-			ok = ok && match(t) > 0
+		if deferred[n] && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+			room--
 		}
-		if !ok {
-			continue
-		}
-		s := 0
-		for _, t := range terms {
-			s += match(t)
-		}
-		if s > 0 {
-			hits = append(hits, scored{cd.name, s, i})
-		}
-	}
-	sort.SliceStable(hits, func(a, b int) bool { return hits[a].score > hits[b].score })
-	if len(hits) > c.max {
-		hits = hits[:c.max]
-	}
-	out := make([]string, len(hits))
-	for i, h := range hits {
-		out[i] = h.name
 	}
 	return out
+}
+
+// namesOurs reports whether a query holds the exact name of a deferred tool.
+func namesOurs(q string, deferred map[string]bool) bool {
+	for n := range deferred {
+		if strings.Contains(q, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnloadedCall reports whether the transcript holds a break: the model called a deferred tool that no
+// tool_reference loaded, or a result says a deferred tool is not loaded. Only the proxy's own set is
+// read.
+func UnloadedCall(body []byte, deferred map[string]bool) bool {
+	loaded := Loaded(body)
+	called := map[string]string{} // tool_use id -> name
+	broke := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
+		m.Get("content").ForEach(func(_, b gjson.Result) bool {
+			switch b.Get("type").String() {
+			case "tool_use":
+				n := b.Get("name").String()
+				if deferred[n] {
+					called[b.Get("id").String()] = n
+					broke = broke || !loaded[n]
+				}
+			case "tool_result":
+				if _, ok := called[b.Get("tool_use_id").String()]; ok && b.Get("is_error").Bool() {
+					t := strings.ToLower(b.Get("content").Raw)
+					broke = broke || strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool")
+				}
+			}
+			return !broke
+		})
+		return !broke
+	})
+	return broke
 }
 
 // ClientProbeRoute is added to the probe key's route, so the client-search probe has its own verdict.

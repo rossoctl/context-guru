@@ -776,9 +776,10 @@ func TestToolDeferClientSearchEndToEnd(t *testing.T) {
 	defer srv.Close()
 	withSearch := func(b []byte, session string) []byte {
 		b = bytes.Replace(b, []byte("sess-1"), []byte(session), 1)
-		out, _ := sjson.SetRawBytes(b, "tools.-1", []byte(`{"name":"ToolSearch","description":"Fetch deferred tools.","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}`))
+		out, _ := sjson.SetRawBytes(b, "tools.-1", []byte(`{"name":"ToolSearch","description":"Fetches full schema definitions for deferred tools so they can be called.","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}`))
 		return out
 	}
+	tooldefer.AddKnownDescHash(tooldefer.DescHash(withSearch(tdBody(), "x")))
 	round := []string{
 		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{"query":"select:Workflow","max_results":1}}]}`,
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"No matching deferred tools found"}]}`,

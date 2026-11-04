@@ -23,7 +23,10 @@ type Gate struct {
 	// broken holds, per tenant, the models a 400/422 turned off. Same shape and same bounds as
 	// pending (putCapped, same caps), so one tenant's 400s cannot push out another's turn-offs.
 	broken map[string]map[string]time.Time
-	now    func() time.Time
+	// disabled holds, per tenant, the ToolSearch description hashes whose client-search mode is
+	// disabled (#898). Same shape, TTL and caps as broken: the hash plays the model's part.
+	disabled map[string]map[string]time.Time
+	now      func() time.Time
 
 	// Counters, for /stats.
 	Retries   atomic.Int64 // every 400/422 on a changed request answered with the original, any cause
@@ -35,7 +38,18 @@ type Gate struct {
 	// Our own search (#825).
 	AddBacks      atomic.Int64 // deferred tools a search added back to `tools`
 	MixedSearches atomic.Int64 // searches in the same response as a client tool call
+	// Client-search mode (#898): disables by reason. The production monitor reads these.
+	DisabledUnknown atomic.Int64 // reason unknown_description
+	DisabledNonSel  atomic.Int64 // reason non_select_query_for_our_tool
+	DisabledBreak   atomic.Int64 // reason break
 }
+
+// The reasons ClientDisabled is set, as logged and exported.
+const (
+	ReasonUnknownDescription = "unknown_description"
+	ReasonNonSelectQuery     = "non_select_query_for_our_tool"
+	ReasonBreak              = "break"
+)
 
 // gateTTL bounds the turn-off map and a pending flag: a turn-off is re-tried a day later, after a
 // fresh probe, and a flag whose session never sends a request is dropped.
@@ -50,7 +64,8 @@ const (
 
 // NewGate returns an empty Gate.
 func NewGate() *Gate {
-	return &Gate{pending: map[string]map[string]time.Time{}, broken: map[string]map[string]time.Time{}, now: time.Now}
+	return &Gate{pending: map[string]map[string]time.Time{}, broken: map[string]map[string]time.Time{},
+		disabled: map[string]map[string]time.Time{}, now: time.Now}
 }
 
 // NoteToolSearch records the raw ENABLE_TOOL_SEARCH value a session's hook sent (SearchOffValue).
@@ -148,6 +163,7 @@ func (g *Gate) DropTenant(tenant string) {
 	defer g.mu.Unlock()
 	delete(g.pending, tenant)
 	delete(g.broken, tenant)
+	delete(g.disabled, tenant)
 }
 
 // SearchOffValue reports whether a raw ENABLE_TOOL_SEARCH value turns tool search off on purpose:
@@ -182,6 +198,44 @@ func (g *Gate) Break(tenant, model string) {
 	if putCapped(g.broken, tenant, model, g.now(), maxPerTenant, maxTenants) {
 		g.TurnedOff.Add(1)
 	}
+}
+
+// ClientDisabled reports whether client-search mode is disabled for this tenant and ToolSearch
+// description hash. The mark expires after gateTTL; clear it sooner by restarting the proxy.
+func (g *Gate) ClientDisabled(tenant, hash string) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	at, ok := g.disabled[tenant][hash]
+	return ok && g.now().Sub(at) < gateTTL
+}
+
+// DisableClient disables client-search mode for this tenant and description hash, and counts it by
+// reason. It counts a reason once per live mark, so a client that sends the same unknown description
+// on every request is one event, not thousands. It reports whether it counted.
+func (g *Gate) DisableClient(tenant, hash, reason string) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if at, live := g.disabled[tenant][hash]; live && g.now().Sub(at) < gateTTL && reason != ReasonBreak {
+		return false
+	}
+	if !putCapped(g.disabled, tenant, hash, g.now(), maxPerTenant, maxTenants) {
+		return false
+	}
+	switch reason {
+	case ReasonUnknownDescription:
+		g.DisabledUnknown.Add(1)
+	case ReasonNonSelectQuery:
+		g.DisabledNonSel.Add(1)
+	default:
+		g.DisabledBreak.Add(1)
+	}
+	return true
 }
 
 // pruneOldest deletes the oldest entry of m.

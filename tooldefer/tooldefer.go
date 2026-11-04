@@ -333,7 +333,7 @@ type Record struct {
 	Deferred []string `json:"d"`
 	// Client is true when the thread runs in client-search mode (#898): the thread had Claude Code's
 	// own ToolSearch at its first request, so it has no server-side search tool, and the proxy answers
-	// the client's search calls itself (AnswerSearches). Decided once, with the set.
+	// the client's search results (AugmentSearches). Decided once, with the set.
 	Client bool `json:"c,omitempty"`
 	// Answers is the names each ToolSearch call was answered with, by tool_use id: nil or empty means
 	// "the client's own result stands". Written the first time a call is seen and replayed from here,

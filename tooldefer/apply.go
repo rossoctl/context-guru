@@ -75,6 +75,9 @@ type Outcome struct {
 	Client   bool
 	Loads    []string
 	Answered int
+	// ClientDisabled is the reason client-search mode was disabled on this request ("" if not), and
+	// DescHash the ToolSearch description hash it concerns. The host logs the pair.
+	ClientDisabled, DescHash string
 }
 
 // Apply defers the thread's set on one request. Fail open: on any problem Body is the input.
@@ -137,11 +140,24 @@ func Apply(env Env, r Req) (o Outcome) {
 			// stale verdict is still used until the new one lands; a Fail must not last forever.
 			o.NeedProbe = v == Unknown || env.Prober.Stale(r.Probe)
 		}
-		client := false
+		client, unknownHash := false, false
 		if env.Prober != nil && r.ClientProbe != (ProbeKey{}) && HasClientToolSearch(r.Orig) {
-			cv := env.Prober.Verdict(r.ClientProbe)
-			o.NeedClientProbe = cv == Unknown || env.Prober.Stale(r.ClientProbe)
-			client = cv == Pass
+			h := DescHash(r.Orig)
+			o.DescHash = h
+			switch {
+			case !KnownDescHash(h):
+				// A ToolSearch whose syntax the proxy has not verified: defer nothing on this thread.
+				unknownHash = true
+				if env.Gate.DisableClient(r.Tenant, h, ReasonUnknownDescription) {
+					o.ClientDisabled = ReasonUnknownDescription
+				}
+			case env.Gate.ClientDisabled(r.Tenant, h):
+				unknownHash = true
+			default:
+				cv := env.Prober.Verdict(r.ClientProbe)
+				o.NeedClientProbe = cv == Unknown || env.Prober.Stale(r.ClientProbe)
+				client = cv == Pass
+			}
 		}
 		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep,
 			AlwaysDefer: r.AlwaysDefer}
@@ -152,6 +168,9 @@ func Apply(env Env, r Req) (o Outcome) {
 			// under a new session id) is a first request too: the records are durable, so a missing
 			// one means a new thread, and only our own search turn proves an earlier set.
 			switch {
+			case unknownHash:
+				o.Why = "client_search_disabled"
+				rec = Record{} // decided: nothing, for this whole thread
 			case client:
 				// Claude Code's own search, answered by us: the server-side search is not needed, so
 				// its probe does not gate the thread.
@@ -210,7 +229,26 @@ func Apply(env Env, r Req) (o Outcome) {
 	}
 	if rec.Client {
 		o.Client = true
-		out, o.Loads, o.Answered = AnswerSearches(rs, r.Session, r.Thread, out, set)
+		a := AugmentSearches(rs, r.Session, r.Thread, out, set)
+		reason := ""
+		switch {
+		case a.Bad:
+			reason = ReasonNonSelectQuery
+		case UnloadedCall(a.Body, set):
+			reason = ReasonBreak
+		}
+		if reason != "" {
+			// A format change. Disable the description hash and stop deferring on this thread. This
+			// changes `tools` once, so the live thread pays one cache rewrite, on purpose: a broken
+			// load costs the model its turns until the end of the thread. We never switch to another
+			// search tool.
+			h := DescHash(r.Orig)
+			env.Gate.DisableClient(r.Tenant, h, reason)
+			Save(rs, r.Session, r.Thread, Record{})
+			o.Client, o.Why, o.ClientDisabled, o.DescHash = false, "client_search_disabled", reason, h
+			return o
+		}
+		out, o.Loads, o.Answered = a.Body, a.Loads, a.Answered
 	}
 	loaded := Loaded(r.Orig)
 	weigh := map[string]bool{}

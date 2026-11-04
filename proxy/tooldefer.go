@@ -445,6 +445,11 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	if o.NeedClientProbe {
 		h.startProbe(r, tn, provider, up, ckey)
 	}
+	if o.ClientDisabled != "" {
+		// No query text: the reason and a prefix of the description hash only.
+		slog.Warn("cg.tooldefer_client_search_disabled", "reason", o.ClientDisabled, "desc_hash", o.DescHash[:min(8, len(o.DescHash))],
+			"session", session, "thread", threadID)
+	}
 	if len(o.Loads) > 0 {
 		// A ToolSearch answer written now loaded proxy-deferred tools (#898): each counts as a use.
 		h.noteSearchLoads(tn.ID, session, project, o.Loads)
@@ -741,8 +746,15 @@ func (h *Handler) deferStats() any {
 		// made together with a client tool call, answered on the next request.
 		"add_backs":      g.AddBacks.Load(),
 		"mixed_searches": g.MixedSearches.Load(),
-		"probes_pass":    pass,
-		"probes_fail":    fail,
-		"history_live":   ds.hist.Ready(),
+		// Client-search mode (#898) disabled, by reason. Each counts once per live mark (24 h per
+		// tenant and ToolSearch description hash). The same numbers are cg_tooldefer_client_disabled_total.
+		"client_search_disabled": map[string]int64{
+			tooldefer.ReasonUnknownDescription: g.DisabledUnknown.Load(),
+			tooldefer.ReasonNonSelectQuery:     g.DisabledNonSel.Load(),
+			tooldefer.ReasonBreak:              g.DisabledBreak.Load(),
+		},
+		"probes_pass":  pass,
+		"probes_fail":  fail,
+		"history_live": ds.hist.Ready(),
 	}
 }

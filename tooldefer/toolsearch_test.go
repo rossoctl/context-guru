@@ -65,47 +65,125 @@ func TestServerSideSearchStaysWithoutToolSearch(t *testing.T) {
 	}
 }
 
-// A pure Claude Code query passes through; a query that touches a proxy-deferred tool is answered.
-func TestClientModeAnswersOnlyProxyQueries(t *testing.T) {
+func init() {
+	// The test catalogue's ToolSearch is a verified client version.
+	knownDescHashes[DescHash(body(catalogue(), ""))] = true
+}
+
+const noMatch = `"No matching deferred tools found"`
+
+func result(b []byte, i int) string {
+	return gjson.GetBytes(b, "messages."+itoa(i)+".content.0.content").Raw
+}
+
+// Only the exact select form is answered. Claude Code's own result stays; ours are appended.
+func TestClientModeAddsOnlyOurToolsToSelectQueries(t *testing.T) {
 	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
 	first := Apply(e, creq(body(catalogue(), "")))
 	if strings.Join(first.Deferred, ",") != "Monitor,Workflow,mcp__a__b" {
 		t.Fatalf("set: %v", first.Deferred)
 	}
-	// CronList is deferred by the client itself.
 	cc := `{"name":"CronList","description":"List cron jobs","input_schema":{"type":"object"},"defer_loading":true}`
 	tools := append(catalogue(), cc)
+	// A pure Claude Code query is left alone.
 	own := searchRound("t1", "select:CronList", `[{"type":"tool_reference","tool_name":"CronList"}]`)
 	o := Apply(e, creq(body(tools, "", own...)))
-	if len(o.Loads) != 0 || strings.Contains(string(o.Body), `"tool_name":"Workflow"`) {
-		t.Fatalf("a pure client query was changed: %s", gjson.GetBytes(o.Body, "messages").Raw)
+	if len(o.Loads) != 0 || result(o.Body, 3) != `[{"type":"tool_reference","tool_name":"CronList"}]` {
+		t.Fatalf("a pure client query was changed: %s", result(o.Body, 3))
 	}
-	if gjson.GetBytes(o.Body, "messages.3.content.0.content").Raw != `[{"type":"tool_reference","tool_name":"CronList"}]` {
-		t.Fatal("client result did not stay as it was")
+	// Ours alone: the client said "no match"; we add the reference. Spacing and case are as the client reads them.
+	for id, q := range map[string]string{"t2": "select:Workflow", "t3": "Select: Workflow"} {
+		o = Apply(e, creq(body(tools, "", searchRound(id, q, noMatch)...)))
+		if result(o.Body, 3) != `[{"type":"tool_reference","tool_name":"Workflow"}]` || strings.Join(o.Loads, ",") != "Workflow" {
+			t.Fatalf("%q: result %s loads %v", q, result(o.Body, 3), o.Loads)
+		}
 	}
-	// A proxy tool, with the client's own "not found" result.
-	prox := searchRound("t2", "select:Workflow,CronList", `"No matching deferred tools found"`)
-	o = Apply(e, creq(body(tools, "", prox...)))
-	got := gjson.GetBytes(o.Body, "messages.3.content.0.content").Raw
-	want := `[{"type":"tool_reference","tool_name":"Workflow"},{"type":"tool_reference","tool_name":"CronList"}]`
-	if got != want || strings.Join(o.Loads, ",") != "Workflow" || o.Answered != 1 {
-		t.Fatalf("answer = %s loads=%v answered=%d", got, o.Loads, o.Answered)
+	// Mixed: the client's reference stays first, ours follows. The cap (3 in searchRound) covers both.
+	mix := searchRound("t4", "select:CronList,Workflow,Monitor", `[{"type":"tool_reference","tool_name":"CronList"}]`)
+	o = Apply(e, creq(body(tools, "", mix...)))
+	want := `[{"type":"tool_reference","tool_name":"CronList"},{"type":"tool_reference","tool_name":"Workflow"},{"type":"tool_reference","tool_name":"Monitor"}]`
+	if result(o.Body, 3) != want {
+		t.Fatalf("mixed = %s", result(o.Body, 3))
 	}
-	// A keyword query finds a proxy tool too.
-	kw := searchRound("t3", "workflow orchestrates", `"No matching deferred tools found"`)
-	o = Apply(e, creq(body(tools, "", kw...)))
-	if got := gjson.GetBytes(o.Body, "messages.3.content.0.content.0.tool_name").String(); got != "Workflow" {
-		t.Fatalf("keyword answer = %s", gjson.GetBytes(o.Body, "messages.3").Raw)
+	// An error result is not touched.
+	o = Apply(e, creq(body(tools, "", searchRound("t5", "select:Workflow", `"Error: boom"`)...)))
+	if result(o.Body, 3) != `"Error: boom"` {
+		t.Fatalf("error result changed: %s", result(o.Body, 3))
 	}
 }
 
-// The answer has the same bytes on every later request, also when the history or the cands change,
-// and also after a restart.
+// A keyword query that does not name our tools passes through. One that names them is a format
+// change: the hash is disabled and the thread stops deferring.
+func TestClientModeNonSelectQueryDisables(t *testing.T) {
+	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+	Apply(e, creq(body(catalogue(), "")))
+	o := Apply(e, creq(body(catalogue(), "", searchRound("t1", "cron jobs", noMatch)...)))
+	if !o.Changed || result(o.Body, 3) != noMatch || o.ClientDisabled != "" {
+		t.Fatalf("keyword query: %s", show(o))
+	}
+	o = Apply(e, creq(body(catalogue(), "", searchRound("t2", "+Workflow script", noMatch)...)))
+	if o.Changed || o.ClientDisabled != ReasonNonSelectQuery || e.Gate.DisabledNonSel.Load() != 1 {
+		t.Fatalf("a non-select query for our tool: %s (%q)", show(o), o.ClientDisabled)
+	}
+	h := DescHash(body(catalogue(), ""))
+	if !e.Gate.ClientDisabled("", h) {
+		t.Fatal("hash not marked disabled")
+	}
+	// The live thread stays undeferred, and a new thread defers nothing.
+	if o = Apply(e, creq(body(catalogue(), "", searchRound("t3", "x", noMatch)...))); o.Changed {
+		t.Fatalf("live thread still deferred: %s", show(o))
+	}
+	r := creq(body(catalogue(), ""))
+	r.Thread = "new"
+	if o = Apply(e, r); o.Changed || o.Why != "client_search_disabled" {
+		t.Fatalf("new thread: %s", show(o))
+	}
+}
+
+// An unknown description hash defers nothing, and is counted once.
+func TestClientModeUnknownDescriptionDefersNothing(t *testing.T) {
+	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+	b := []byte(strings.Replace(string(body(catalogue(), "")), "Does the ToolSearch job.", "A changed description.", 1))
+	for i := 0; i < 3; i++ {
+		r := creq(b)
+		r.Thread = itoa(i)
+		o := Apply(e, r)
+		if o.Changed || o.Why != "client_search_disabled" {
+			t.Fatalf("%s", show(o))
+		}
+	}
+	if e.Gate.DisabledUnknown.Load() != 1 {
+		t.Fatalf("counted %d, want 1", e.Gate.DisabledUnknown.Load())
+	}
+}
+
+// A call to a deferred tool that no search loaded is a break.
+func TestClientModeBreakDisables(t *testing.T) {
+	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+	Apply(e, creq(body(catalogue(), "")))
+	call := `{"role":"assistant","content":[{"type":"tool_use","id":"w1","name":"Workflow","input":{}}]}`
+	res := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","is_error":true,"content":"tool not loaded"}]}`
+	o := Apply(e, creq(body(catalogue(), "", call, res)))
+	if o.Changed || o.ClientDisabled != ReasonBreak || e.Gate.DisabledBreak.Load() != 1 {
+		t.Fatalf("%s (%q)", show(o), o.ClientDisabled)
+	}
+	// A call after a good load is not a break.
+	e2, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+	Apply(e2, creq(body(catalogue(), "")))
+	fine := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"done"}]}`
+	ok := append(searchRound("t1", "select:Workflow", noMatch), call, fine)
+	if o = Apply(e2, creq(body(catalogue(), "", ok...))); !o.Changed || o.ClientDisabled != "" {
+		t.Fatalf("good load flagged: %s", show(o))
+	}
+}
+
+// The added list has the same bytes on every later request, also after a restart, and also when
+// Claude Code's own result changes (the stored list wins).
 func TestClientModeReplaysByteForByteAfterRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 	e, f := clientEnv(t, path)
 	Apply(e, creq(body(catalogue(), "")))
-	rounds := searchRound("t2", "select:Workflow", `"No matching deferred tools found"`)
+	rounds := searchRound("t2", "select:Workflow", noMatch)
 	one := Apply(e, creq(body(catalogue(), "", rounds...)))
 	if len(one.Loads) != 1 {
 		t.Fatalf("not answered: %s", show(one))
