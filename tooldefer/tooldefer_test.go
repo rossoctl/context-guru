@@ -414,7 +414,7 @@ func TestGateBreakEvictsOldestPerTenant(t *testing.T) {
 	g.now = func() time.Time { return now }
 	now = now.Add(time.Second)
 	g.Break("quiet", "q")
-	for i := 0; i < maxBrokenPerTenant; i++ {
+	for i := 0; i < maxPerTenant; i++ {
 		now = now.Add(time.Second)
 		g.Break("noisy", "m"+itoa(i))
 	}
@@ -429,7 +429,7 @@ func TestGateBreakEvictsOldestPerTenant(t *testing.T) {
 	g.mu.Lock()
 	n := len(g.broken["noisy"])
 	g.mu.Unlock()
-	if n > maxBrokenPerTenant {
+	if n > maxPerTenant {
 		t.Fatalf("%d turn-offs for one tenant", n)
 	}
 	g.DropTenant("noisy")
@@ -638,11 +638,11 @@ func TestApplyOptOutAfterFirstRequestKeepsTheThread(t *testing.T) {
 // first request; one tenant's flags cannot push out another's.
 func TestGatePendingOptOutIsPerTenant(t *testing.T) {
 	g := NewGate()
-	for i := 0; i < maxPendingPerTenant+10; i++ {
+	for i := 0; i < maxPerTenant+10; i++ {
 		g.NoteToolSearch("noisy", "s"+itoa(i), "false", nil, false)
 	}
 	g.NoteToolSearch("quiet", "q", "false", nil, false)
-	for i := 0; i < maxPendingPerTenant+10; i++ {
+	for i := 0; i < maxPerTenant+10; i++ {
 		g.NoteToolSearch("noisy", "x"+itoa(i), "false", nil, false)
 	}
 	st := e2Durable(t)
@@ -658,7 +658,7 @@ func TestGatePendingOptOutIsPerTenant(t *testing.T) {
 	g.mu.Lock()
 	n := len(g.pending["noisy"])
 	g.mu.Unlock()
-	if n > maxPendingPerTenant {
+	if n > maxPerTenant {
 		t.Fatalf("%d pending for one tenant", n)
 	}
 }

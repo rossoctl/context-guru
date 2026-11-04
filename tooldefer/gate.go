@@ -21,7 +21,7 @@ type Gate struct {
 	// another's.
 	pending map[string]map[string]time.Time
 	// broken holds, per tenant, the models a 400/422 turned off. Same shape and same bounds as
-	// pending (putCapped), so one tenant's 400s cannot push out another's turn-offs.
+	// pending (putCapped, same caps), so one tenant's 400s cannot push out another's turn-offs.
 	broken map[string]map[string]time.Time
 	now    func() time.Time
 
@@ -41,17 +41,11 @@ type Gate struct {
 // fresh probe, and a flag whose session never sends a request is dropped.
 const gateTTL = 24 * time.Hour
 
-// maxPendingPerTenant and maxPendingTenants bound the pending opt-outs.
+// maxPerTenant and maxTenants bound each per-tenant map of the Gate: the pending opt-outs and the
+// turn-offs. A turn-off lost to the cap costs one more 400 and retry.
 const (
-	maxPendingPerTenant = 64
-	maxPendingTenants   = 10000
-)
-
-// maxBrokenPerTenant and maxBrokenTenants bound the turn-off map. A turn-off lost to a full map
-// only costs one more 400 and retry.
-const (
-	maxBrokenPerTenant = 256
-	maxBrokenTenants   = 10000
+	maxPerTenant = 64
+	maxTenants   = 10000
 )
 
 // NewGate returns an empty Gate.
@@ -81,7 +75,7 @@ func (g *Gate) NoteToolSearch(tenant, session, raw string, rs store.Store, seen 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	// Full: the flag is lost, and the session is deferred as without it.
-	putCapped(g.pending, tenant, session, g.now(), maxPendingPerTenant, maxPendingTenants)
+	putCapped(g.pending, tenant, session, g.now(), maxPerTenant, maxTenants)
 }
 
 // putCapped sets m[tenant][key] to at. A tenant at perTenant entries loses its oldest one first. A
@@ -164,7 +158,7 @@ func (g *Gate) Break(tenant, model string) {
 	g.TurnedOff.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	putCapped(g.broken, tenant, model, g.now(), maxBrokenPerTenant, maxBrokenTenants)
+	putCapped(g.broken, tenant, model, g.now(), maxPerTenant, maxTenants)
 }
 
 // pruneOldest deletes the oldest entry of m.
