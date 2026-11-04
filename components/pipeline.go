@@ -106,14 +106,11 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 	// messages were re-cloned unchanged six times over.
 	snap := schema.CloneMessages(req.Input)
 	own := ownOutputs(req)
-	// clientHash is the hash of each changed message's text as the client sent it, filled by the
-	// first component that changes the message (see changesOf).
-	clientHash := map[int]string{}
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c, &snap, own, clientHash)
+		rep := p.runOne(comp, req, c, &snap, own)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -137,7 +134,7 @@ func safeEmit(fn func()) {
 // snap is the run's live snapshot: on entry it holds an independent deep copy of
 // req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
 // what changed, or the lot after a revert or a count change).
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool, clientHash map[int]string) (rep Report) {
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := *snap
 	// revert installs the snapshot and re-establishes an independent one, because
@@ -220,18 +217,6 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		if restoreOwn(&rep, before, req.Input, own) {
 			after = tokensOf(req.Input)
 		}
-		// After restoreOwn: it can rewrite req.Input once changedIdx has run.
-		rep.CountChanged = len(before) != len(req.Input)
-		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx, clientHash)
-		if rep.CountChanged {
-			if c, ok := spliceOf(before, req.Input); ok {
-				rep.Changes = []Change{c}
-			}
-			// Indices before and after a count change do not line up, so the client hashes no
-			// longer name the right messages. Every later change is dropped by the savings code
-			// anyway (apply.OpsFromRun); clearing keeps a stale hash from being reused.
-			clear(clientHash)
-		}
 		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
 		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
@@ -243,79 +228,6 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		resync(snap, req.Input, rep.ChangedIdx)
 	}
 	return rep
-}
-
-// changesOf sizes each changed message and hashes its text AS THE CLIENT SENT IT. clientHash
-// holds that hash for every message an earlier component of the run already changed; the first
-// component to change a message sees the client's own text in before, so it records the hash. The
-// hash therefore does not depend on what earlier components did: if one of them starts or stops
-// acting between turns, a later component keeps the same ChangeID (accountant replay).
-func changesOf(before, after []schemas.ChatMessage, idx []int, clientHash map[int]string) []Change {
-	if len(idx) == 0 {
-		return nil
-	}
-	out := make([]Change, 0, len(idx))
-	for _, i := range idx {
-		if i < 0 || i >= len(before) || i >= len(after) {
-			continue
-		}
-		bt, at := schema.MessageText(before[i]), schema.MessageText(after[i])
-		h, ok := clientHash[i]
-		if !ok {
-			sum := sha256.Sum256([]byte(bt))
-			h = hex.EncodeToString(sum[:6])
-			if clientHash != nil {
-				clientHash[i] = h
-			}
-		}
-		out = append(out, Change{Idx: i, BytesBefore: len(bt), BytesAfter: len(at), Hash: h})
-	}
-	return out
-}
-
-// spliceOf finds the one contiguous range that differs between before and after, by a common
-// prefix and suffix scan with the same equality changedIdx uses (reflect.DeepEqual). The scan
-// always yields a single range; if the true change was several, the range is wider than needed,
-// which only makes the operation coarser, never wrong. The hash covers the removed messages' text
-// before the run (the inserted text when nothing was removed, so the ChangeID is not constant).
-func spliceOf(before, after []schemas.ChatMessage) (Change, bool) {
-	p := 0
-	for p < len(before) && p < len(after) && reflect.DeepEqual(before[p], after[p]) {
-		p++
-	}
-	s := 0
-	for s < len(before)-p && s < len(after)-p &&
-		reflect.DeepEqual(before[len(before)-1-s], after[len(after)-1-s]) {
-		s++
-	}
-	removed, inserted := before[p:len(before)-s], after[p:len(after)-s]
-	if len(removed) == 0 && len(inserted) == 0 {
-		return Change{}, false
-	}
-	var bb, ba int
-	h := sha256.New()
-	// A 0x00 byte separates the messages, so ["ab","c"] and ["a","bc"] hash apart.
-	for k, m := range removed {
-		t := schema.MessageText(m)
-		bb += len(t)
-		if k > 0 {
-			h.Write([]byte{0})
-		}
-		h.Write([]byte(t))
-	}
-	for k, m := range inserted {
-		t := schema.MessageText(m)
-		ba += len(t)
-		if len(removed) == 0 {
-			if k > 0 {
-				h.Write([]byte{0})
-			}
-			h.Write([]byte(t))
-		}
-	}
-	return Change{Idx: p, BytesBefore: bb, BytesAfter: ba,
-		Hash:   hex.EncodeToString(h.Sum(nil)[:6]),
-		Splice: &Splice{At: p, Removed: len(removed), Inserted: len(inserted)}}, true
 }
 
 // reformatKeys gives a Reformat the content-derived dedup keys an Offload gets for free

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -119,28 +118,6 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
-	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
-	// request's record (nil when it was skipped); accDone guards a double finish.
-	savings *savingsTracker
-	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
-	// and the accountant figure must not be booked.
-	observe bool
-	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings  *PingStore
-	accReq *accountant.Request
-	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
-	accClient []byte
-	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
-	accThread string
-	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
-	// newer ping that arrived while the request was in flight.
-	accPingWindow string
-	accDone       bool
-	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
-	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
-	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so
-	// the record is not computed.
-	rounds int
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -164,8 +141,6 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		unique:   map[string]int{},
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
-		savings:  h.savings, pings: h.opts.Pings,
-		observe: tn.Mode == components.ModeObserve,
 	}
 }
 
@@ -624,8 +599,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	cgCacheWrite, cgCacheRead := c.llm.CacheTotals()
 	cgModel := c.llm.Model()
 
-	// Cache attribution, with a cold start treated as the non-failure it is. The verdict is a
-	// label on the row; the savings are the accountant library's.
+	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
+	// pricing, because whether this is the session's first request is an input to a dollar
+	// figure and not only to a label — see Event.cachesplitSavedUSD.
 	//
 	// Per THREAD (#423). Keyed on the session alone, a subagent's requests reset the main
 	// thread's idle gap, so the main thread's TTL expiries fell through to prefix_change — on
@@ -703,8 +679,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
-	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
-	// saving is the accountant library's rescue, not computed from these.
+	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
+	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
@@ -714,25 +690,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.pricer != nil && c.model != "" {
 		price, priced = c.pricer.Price(context.Background(), c.model)
 	}
-	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
-	// state stays untouched and the event carries no result. Not after several upstream rounds
-	// either (see rounds): no Result is attached, so PriceMode books no saving
-	// (acc_fallback reason no_result). The thread state is left as the
-	// previous request left it; the next request then sees a longer gap, which the library
-	// handles (a phase it cannot prove is unknown and falls back too).
-	if c.accReq != nil && usageOK && !c.accDone {
-		c.accDone = true
-		if c.rounds <= 1 {
-			e.SetAccountant(c.savings.compute(c.accReq, usage))
-			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
-		}
-	}
-	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	e.PriceMode(price, usageOK && priced)
-	if c.accReq != nil && e.AccountantFallback() != "" {
-		logFallback(e)
-	}
+	e.Price(price, usageOK && priced)
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
 		cgPrice, cgPriced := price, priced
 		if c.pricer != nil && cgModel != "" && cgModel != c.model {
@@ -830,18 +788,4 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
 		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
-}
-
-// noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
-func (c *capture) noteRounds(n int) {
-	if c != nil {
-		c.rounds = n
-	}
-}
-
-// accDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
-func (c *capture) accDrop() {
-	if c != nil {
-		c.accReq = nil
-	}
 }

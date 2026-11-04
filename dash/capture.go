@@ -14,13 +14,6 @@ import (
 // database, content capture on, 7-day / 512 MiB retention, loopback-only access
 // to per-request content and effective config.
 type Options struct {
-	// Tap, when non-nil, is called on the writer goroutine with each event once it is stored,
-	// before the live feed gets its summary copy. It must not block or keep the event after
-	// it returns. It is the SOLE test seam for the in-memory fields the store does not keep
-	// (the accountant Result, read through Event.AccountantResult): the database drops them
-	// and the Hub's subscribe is unexported, so no other route reaches them. No production
-	// code sets it.
-	Tap func(*Event)
 	// DBPath is the SQLite file. "" or ":memory:" keeps everything in RAM (the
 	// no-persistence mode), which is also the automatic fallback when the path
 	// cannot be opened — the proxy must never fail to start over a dashboard.
@@ -530,9 +523,6 @@ func (r *Recorder) run() {
 			slog.Debug("dash: wrote a batch of captured requests", "n", len(batch),
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
-				if r.opts.Tap != nil {
-					r.opts.Tap(e)
-				}
 				r.hub.Publish(e)
 				r.enqueueCount(e)
 			}
@@ -586,7 +576,7 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 
 // ObserveSplit is Observe plus the volatile-tail comparison: tailChanged reports whether this
 // request's tail differs from the previous request's in the same session, which is the turn on
-// which the split is worth money (the accountant library prices it). A session's FIRST request
+// which the split is worth money (see dash.Event.cachesplitSavedUSD). A session's FIRST request
 // counts as changed — there was nothing there to match.
 //
 // tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
@@ -637,9 +627,9 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	//
 	// By AGE, not by clearing the map. The old code emptied lastSeen entirely at 20,000
 	// entries, which made every live session's next turn report a cold start at once —
-	// and under the legacy rule `seenSession` decided whether a cache hit was credited
-	// as ours, so a wholesale reset was a wholesale over-claim. It is still the cache
-	// verdict's input. Dropping entries by age cannot do that: a session with no
+	// and `seenSession` is no longer only a label: it decides whether a cache hit is
+	// credited as ours (see Event.cachesplitSavedUSD), so a wholesale reset was a
+	// wholesale over-claim. Dropping entries by age cannot do that: a session with no
 	// request for staleSession really has lost its provider cache, so treating its next
 	// turn as a cold start is not a guess, it is correct.
 	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
