@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/expand"
@@ -128,8 +129,19 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 			ops = append(ops, envelopeOp(envelopeOwner(k, true, false),
 				accountant.Position{Section: accountant.SectionTools, Index: i}, 0, len(fw[i].Raw), "decl-added:"+hashOf(k)))
 		case cl[j].Raw != fw[i].Raw:
-			ops = append(ops, envelopeOp(envelopeOwner(k, false, false),
-				accountant.Position{Section: accountant.SectionTools, Index: j}, len(cl[j].Raw), len(fw[i].Raw),
+			at := accountant.Position{Section: accountant.SectionTools, Index: j}
+			// apply rewrites the declaration first and relabels its mark to 1h last, so the rewrite ends
+			// at the forwarded bytes without the ttl. Reported as one operation, the relabel would carry
+			// no headttl ChangeID and the library would not book its premium.
+			if mid, ok := withoutHeadTTL(cl[j].Raw, fw[i].Raw); ok {
+				if mid != cl[j].Raw {
+					ops = append(ops, envelopeOp(envelopeOwner(k, false, false), at, len(cl[j].Raw), len(mid),
+						"decl-rewritten:"+hashOf(k)))
+				}
+				ops = append(ops, envelopeOpID("headttl", at, len(mid), len(fw[i].Raw), "headttl:"+hashOf(k)))
+				continue
+			}
+			ops = append(ops, envelopeOp(envelopeOwner(k, false, false), at, len(cl[j].Raw), len(fw[i].Raw),
 				"decl-rewritten:"+hashOf(k)))
 		}
 	}
@@ -173,7 +185,15 @@ func systemOps(cl, fw []string) []accountant.Operation {
 	for i, j := 0, 0; i < len(cl); i, j = i+1, j+1 {
 		pos := accountant.Position{Section: accountant.SectionSystem, Index: i}
 		if i == split {
-			ops = append(ops, envelopeOpID("cachesplit", pos, len(cl[i]), len(fw[j])+len(fw[j+1]),
+			// apply relabels the head to 1h before it splits the block, so the split starts from the
+			// relabelled bytes. The relabel is its own operation: the library books the 1h premium
+			// only through a headttl: ChangeID.
+			before := cl[i]
+			if relabelled := withHeadTTL(cl[i], fw[j]); relabelled != cl[i] {
+				ops = append(ops, envelopeOpID("headttl", pos, len(cl[i]), len(relabelled), "headttl:"+hashOf(textOf(cl[i]))))
+				before = relabelled
+			}
+			ops = append(ops, envelopeOpID("cachesplit", pos, len(before), len(fw[j])+len(fw[j+1]),
 				"cg:cachesplit:"+hashOf(textOf(cl[i]))))
 			j++
 			continue
@@ -185,6 +205,44 @@ func systemOps(cl, fw []string) []accountant.Operation {
 		}
 	}
 	return ops
+}
+
+// withHeadTTL is client with its cache mark relabelled to 1h, when forwarded carries a 1h mark and the
+// client's did not: the bytes upgradeHeadTTL leaves a block before anything else rewrites it. It is
+// client itself when there is no relabel to explain.
+func withHeadTTL(client, forwarded string) string {
+	if !headTTLRelabelled(client, forwarded) {
+		return client
+	}
+	out, err := sjson.Set(client, "cache_control.ttl", "1h")
+	if err != nil {
+		return client
+	}
+	return out
+}
+
+// withoutHeadTTL splits a tools declaration's change at the relabel: mid is the forwarded declaration
+// without the 1h label, the bytes the declaration's own rewrite produced. ok is false when the
+// forwarded declaration carries no relabel. When relabelling the client's declaration gives the
+// forwarded one exactly, mid is the client's, and the change is the relabel alone.
+func withoutHeadTTL(client, forwarded string) (mid string, ok bool) {
+	if !headTTLRelabelled(client, forwarded) {
+		return "", false
+	}
+	if withHeadTTL(client, forwarded) == forwarded {
+		return client, true
+	}
+	mid, err := sjson.Delete(forwarded, "cache_control.ttl")
+	if err != nil {
+		return "", false
+	}
+	return mid, true
+}
+
+// headTTLRelabelled is true when the forwarded mark asks for 1h and the client's did not.
+func headTTLRelabelled(client, forwarded string) bool {
+	cc := gjson.Get(client, "cache_control")
+	return cc.IsObject() && cc.Get("ttl").String() != "1h" && gjson.Get(forwarded, "cache_control.ttl").String() == "1h"
 }
 
 func textOf(raw string) string {

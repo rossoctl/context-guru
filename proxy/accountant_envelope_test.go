@@ -41,6 +41,7 @@ func TestEnvelopeOpsExplainEveryByte(t *testing.T) {
 	tB := `{"name":"b","description":"y"}`
 	tC := `{"name":"c","description":"z"}`
 	big := `{"type":"text","text":"STABLE\n<env>git</env>","cache_control":{"type":"ephemeral"}}`
+	tM := `{"name":"m","description":"x","input_schema":{"type":"object","$schema":"s"},"cache_control":{"type":"ephemeral"}}`
 	for _, tc := range []struct {
 		name      string
 		cl, fw    string
@@ -65,6 +66,19 @@ func TestEnvelopeOpsExplainEveryByte(t *testing.T) {
 		{name: "system relabelled to 1h",
 			cl:        `{"system":[` + big + `],` + msgs + `}`,
 			fw:        `{"system":[{"type":"text","text":"STABLE\n<env>git</env>","cache_control":{"type":"ephemeral","ttl":"1h"}}],` + msgs + `}`,
+			operators: []string{"context-guru.headttl"}},
+		// apply relabels the head first and splits second, so the forwarded first half carries the 1h mark.
+		{name: "system relabelled to 1h and split",
+			cl:        `{"system":[` + big + `],` + msgs + `}`,
+			fw:        `{"system":[{"type":"text","text":"STABLE\n","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"<env>git</env>"}],` + msgs + `}`,
+			operators: []string{"context-guru.headttl", "context-guru.cachesplit"}},
+		{name: "tool rewritten and relabelled to 1h",
+			cl:        `{"tools":[` + tM + `],` + msgs + `}`,
+			fw:        `{"tools":[{"name":"m","description":"x","cache_control":{"type":"ephemeral","ttl":"1h"}}],` + msgs + `}`,
+			operators: []string{"context-guru.toolschema", "context-guru.headttl"}},
+		{name: "tool relabelled to 1h only",
+			cl:        `{"tools":[` + tM + `],` + msgs + `}`,
+			fw:        `{"tools":[{"name":"m","description":"x","input_schema":{"type":"object","$schema":"s"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],` + msgs + `}`,
 			operators: []string{"context-guru.headttl"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,4 +186,45 @@ func TestHeadTTLRelabelBooksThePremium(t *testing.T) {
 		}
 	}
 	t.Fatalf("no ttlPremium effect for ChangeID %q: %+v", ops[0].ChangeID, res.CacheEffects)
+}
+
+// A head relabelled to 1h INSIDE a block that cachesplit then splits still books the premium: the
+// relabel is reported as its own headttl operation, not absorbed into the split.
+func TestHeadTTLRelabelOfASplitBlockBooksThePremium(t *testing.T) {
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	client := []byte(`{"system":[{"type":"text","text":"STABLE\n<env>git</env>","cache_control":{"type":"ephemeral"}}],` + msgs + `}`)
+	fwd := []byte(`{"system":[{"type":"text","text":"STABLE\n","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"<env>git</env>"}],` + msgs + `}`)
+	ops := envelopeOps(client, fwd)
+	assertPremiumBooked(t, client, fwd, ops)
+}
+
+// The same for a tool declaration that was rewritten and then relabelled.
+func TestHeadTTLRelabelOfARewrittenToolBooksThePremium(t *testing.T) {
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	client := []byte(`{"tools":[{"name":"m","description":"x","input_schema":{"type":"object","$schema":"s"},"cache_control":{"type":"ephemeral"}}],` + msgs + `}`)
+	fwd := []byte(`{"tools":[{"name":"m","description":"x","cache_control":{"type":"ephemeral","ttl":"1h"}}],` + msgs + `}`)
+	ops := envelopeOps(client, fwd)
+	assertPremiumBooked(t, client, fwd, ops)
+}
+
+func assertPremiumBooked(t *testing.T, client, fwd []byte, ops []accountant.Operation) {
+	t.Helper()
+	for _, s := range []accountant.Section{accountant.SectionTools, accountant.SectionSystem} {
+		if o, b := opsDelta(ops, s), sectionDelta(client, fwd, s); o != b {
+			t.Errorf("section %s: ops %d bytes, bodies %d bytes (ops %+v)", s, o, b, ops)
+		}
+	}
+	st := newSavingsTracker()
+	req := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, client)
+	st.end(req, accountant.Thread{ID: "main"}, fwd, ops, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
+	res := st.compute(req, Usage{CacheWrite: 2000, CacheWrite1h: 2000})
+	if len(res.Checks) != 0 {
+		t.Errorf("checks failed: %+v", res.Checks)
+	}
+	for _, e := range res.CacheEffects {
+		if e.Kind == accountant.EffectTTLPremium {
+			return
+		}
+	}
+	t.Fatalf("no ttlPremium effect: ops %+v, effects %+v", ops, res.CacheEffects)
 }
