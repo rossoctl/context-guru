@@ -89,6 +89,11 @@ func pingFromReport(r components.KeepAliveReport) accountant.Ping {
 // thread's next real request. ok is false, and nothing is stored, for a ping that is not
 // converted: no Window (its ChangeID would be shared by every such ping), a status outside
 // 200-299, or no usage (it billed nothing). Manual and sweep-substitute pings are converted.
+//
+// A MANUAL ping is priced, so its cost is on its row, but its facts are not stored. The write it avoided
+// is already booked on its own row as ManualSavedUSD, from the user's estimate. Storing the facts too
+// would let the next real request credit the same write again as a library rescue, and the total would
+// count it twice (context-guru#768 B3: $0.0200 booked, about $0.0096 true).
 func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result, bool) {
 	if r.Window.IsZero() || r.Status < 200 || r.Status > 299 ||
 		r.FreshInput+r.CacheRead+r.CacheWrite+r.CacheWrite1h+r.Output == 0 {
@@ -96,6 +101,8 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result
 	}
 	ops, facts := accountant.PingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
 	res := accountant.ComputeStandalone(ops)
-	st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
+	if !r.Manual {
+		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
+	}
 	return res, true
 }
