@@ -194,7 +194,8 @@ var envelopeComponents = map[string]bool{
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
 // out a break (penalty_unknown, accountant design §6.4). It is false when the override did not apply.
-func (e *Event) AccountantEstimated() bool { return e.accEstimated }
+// It reads PriceEstimated, the stored field the dashboard marks the figure by.
+func (e *Event) AccountantEstimated() bool { return e.PriceEstimated }
 
 // AccountantFallback is the reason PriceMode booked no saving, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
@@ -212,7 +213,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.accEstimated = "", false
+	e.accFallback, e.PriceEstimated = "", false
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		return
@@ -330,7 +331,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
 	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
 	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
-	e.accEstimated = estimated
+	e.PriceEstimated = estimated
 	return ""
 }
 

@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -301,5 +302,39 @@ func TestPriceMode_AnUnpricedEventSaysWhyItBooksNoSaving(t *testing.T) {
 		if fb := e.AccountantFallback(); fb != FallbackUnpriced {
 			t.Errorf("%s: fallback = %q, want %q", name, fb, FallbackUnpriced)
 		}
+	}
+}
+
+// The estimate flag outlives the process: it is written with the request and read back, so the
+// dashboard marks the figure after a restart, and an exact figure stays unmarked.
+func TestPriceEstimatedIsStoredAndReadBack(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "e.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	est, exact := switchEvent(), switchEvent()
+	est.TS, est.SessionID = 1, "est"
+	exact.TS, exact.SessionID = 2, "exact"
+	est.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
+	est.PriceMode(accTestPrice, true)
+	exact.PriceMode(accTestPrice, true)
+	if !est.PriceEstimated || exact.PriceEstimated {
+		t.Fatalf("PriceMode set estimated=%v on the penalty_unknown event and %v on the exact one (fallbacks %q, %q)",
+			est.PriceEstimated, exact.PriceEstimated, est.AccountantFallback(), exact.AccountantFallback())
+	}
+	if err := db.insertBatch([]*Event{est, exact}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := db.Requests(Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range page.Requests {
+		got[e.SessionID] = e.PriceEstimated
+	}
+	if len(got) != 2 || !got["est"] || got["exact"] {
+		t.Fatalf("stored price_estimated = %v, want est true and exact false", got)
 	}
 }

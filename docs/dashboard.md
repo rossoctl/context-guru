@@ -132,8 +132,10 @@ Limits:
   first request of a thread, and a request after a gap longer than the cache lifetime when the
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
   can be too high if a component broke the cache on that request (accountant design §6.4). The
-  event carries an estimate flag (`AccountantEstimated`), but it is **not stored or shown yet**: the
-  dashboard shows such a figure as an ordinary net figure. The design says a host must mark it.
+  event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
+  in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
+  The totals and charts add such a figure like any other: they do not mark it. A row written before
+  the column existed reads as exact.
 - A thread that continues another by content (a rewind, a fork) is priced as a first request. The
   proxy passes the parent thread to the library, but the library does not read it, so the new thread
   does not start from a copy of the parent's cache state (accountant design §4.1).

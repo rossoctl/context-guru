@@ -127,8 +127,6 @@ type Event struct {
 	accObserve    bool
 	// accFallback is why PriceMode booked no saving (see AccountantFallback).
 	accFallback string
-	// accEstimated says the applied accountant figure is an estimate (see AccountantEstimated).
-	accEstimated bool
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
@@ -420,7 +418,12 @@ type Event struct {
 	// column so the sweep's credit and its answer cost are never one number.
 	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
 
-	TokenAccounting    string `json:"token_accounting"`
+	TokenAccounting string `json:"token_accounting"`
+	// PriceEstimated is true when the accountant library priced this request without knowing whether a
+	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
+	// high. It is stored, so the dashboard marks such a figure after a restart. False on an exact
+	// figure, on an event that books no saving, and on a row from before the column existed.
+	PriceEstimated     bool   `json:"price_estimated,omitempty"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
@@ -805,7 +808,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked partial/missing: a cost we
 // cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.accEstimated = "", false
+	e.accFallback, e.PriceEstimated = "", false
 	e.priceCost(p, accountingComplete)
 }
 

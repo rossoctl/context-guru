@@ -101,6 +101,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- exactly this id. '' when there is no separate alias, and on every row written before this
   -- column existed. A hash, not content: the same kind of id session_id itself is.
   session_alias      TEXT    NOT NULL DEFAULT '',
+  -- 1 when the accountant library could not rule out a cache break (penalty_unknown), so the booked
+  -- net saving may be too high: the gross is right, the penalty is not known. 0 on an exact figure
+  -- and on every row written before this column existed, which is the claim those rows always made.
+  price_estimated    INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -747,6 +751,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},

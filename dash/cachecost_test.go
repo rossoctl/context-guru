@@ -130,7 +130,7 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project"}
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated"}
 	// An old database has no project index, and SQLite refuses to drop an indexed column.
 	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
 		t.Fatal(err)
@@ -161,6 +161,11 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 		if err := db2.sql.QueryRow(`SELECT COUNT(` + col + `) FROM requests`).Scan(&n2); err != nil {
 			t.Fatalf("%s was not added back: %v", col, err)
 		}
+	}
+	// A pre-migration row reads as an exact figure: that is the claim every such row always made.
+	var est int
+	if err := db2.sql.QueryRow(`SELECT price_estimated FROM requests LIMIT 1`).Scan(&est); err != nil || est != 0 {
+		t.Errorf("a row written before price_estimated reads %d (err %v), want 0", est, err)
 	}
 	// A pre-migration row reads as the default, which for `project` means "unattributed" rather
 	// than any real folder — the distinction the whole dimension depends on.

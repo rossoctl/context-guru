@@ -193,11 +193,11 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
 	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
-	r.session_alias`
+	r.session_alias, r.price_estimated`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive, agentComp, manual int
+	var byp, ca, stream, keepAlive, agentComp, manual, estimated int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
@@ -217,7 +217,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
 		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
-		&e.SessionAlias)
+		&e.SessionAlias, &estimated)
+	e.PriceEstimated = estimated != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
