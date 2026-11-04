@@ -36,7 +36,9 @@ type Gate struct {
 	Rebuilds  atomic.Int64 // threads whose set was rebuilt after a store miss
 	Unproven  atomic.Int64 // store misses sent as the original: the rule deferred a tool the transcript does not prove
 	// Our own search (#825).
-	AddBacks      atomic.Int64 // deferred tools a search added back to `tools`
+	AddBacks      atomic.Int64 // deferred tools our own search (#825) added back to `tools`
+	ClientLoads   atomic.Int64 // deferred tools a ToolSearch answer loaded in client-search mode (#898)
+	DirectCalls   atomic.Int64 // deferred tools called with no search having loaded them (#898)
 	MixedSearches atomic.Int64 // searches in the same response as a client tool call
 	// Client-search mode (#898): disables by reason. The production monitor reads these.
 	DisabledUnknown atomic.Int64 // reason unknown_description

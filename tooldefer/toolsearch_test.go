@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 var ckey = ProbeKey{"u", "m", "r#client-search"}
@@ -157,23 +159,61 @@ func TestClientModeUnknownDescriptionDefersNothing(t *testing.T) {
 	}
 }
 
-// A call to a deferred tool that no search loaded is a break.
-func TestClientModeBreakDisables(t *testing.T) {
+// A break is a deferred tool's own error that says it is not loaded. A direct call that worked is a
+// use, and so is a call to a tool tool_choice kept loaded.
+func TestClientModeBreakRule(t *testing.T) {
+	call := `{"role":"assistant","content":[{"type":"tool_use","id":"w1","name":"Workflow","input":{}}]}`
+	bad := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","is_error":true,"content":"tool not loaded"}]}`
+	fine := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"done"}]}`
+	run := func(forced bool, tail ...string) Outcome {
+		e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+		Apply(e, creq(body(catalogue(), "")))
+		b := body(catalogue(), "", tail...)
+		if forced {
+			b, _ = sjson.SetBytes(b, "tool_choice", map[string]string{"type": "tool", "name": "Workflow"})
+		}
+		return Apply(e, creq(b))
+	}
+	if o := run(false, call, bad); o.Changed || o.ClientDisabled != ReasonBreak {
+		t.Fatalf("true break: %s (%q)", show(o), o.ClientDisabled)
+	}
+	if o := run(false, call, fine); !o.Changed || o.ClientDisabled != "" || strings.Join(o.Direct, ",") != "Workflow" {
+		t.Fatalf("direct call: %s direct=%v", show(o), o.Direct)
+	}
+	if o := run(true, call, bad); !o.Changed || o.ClientDisabled != "" {
+		t.Fatalf("call after tool_choice: %s", show(o))
+	}
+	ok := append(searchRound("t1", "select:Workflow", noMatch), call, fine)
+	if o := run(false, ok...); !o.Changed || len(o.Direct) != 0 {
+		t.Fatalf("good load: %s direct=%v", show(o), o.Direct)
+	}
+}
+
+// An error result or an unknown shape books nothing and stays as the client wrote it.
+func TestClientModeErrorResultBooksNothing(t *testing.T) {
 	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
 	Apply(e, creq(body(catalogue(), "")))
-	call := `{"role":"assistant","content":[{"type":"tool_use","id":"w1","name":"Workflow","input":{}}]}`
-	res := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","is_error":true,"content":"tool not loaded"}]}`
-	o := Apply(e, creq(body(catalogue(), "", call, res)))
-	if o.Changed || o.ClientDisabled != ReasonBreak || e.Gate.DisabledBreak.Load() != 1 {
-		t.Fatalf("%s (%q)", show(o), o.ClientDisabled)
+	o := Apply(e, creq(body(catalogue(), "", searchRound("t1", "select:Workflow", `"Error: boom"`)...)))
+	if len(o.Loads) != 0 || o.Answered != 0 || result(o.Body, 3) != `"Error: boom"` {
+		t.Fatalf("error result: loads=%v answered=%d res=%s", o.Loads, o.Answered, result(o.Body, 3))
 	}
-	// A call after a good load is not a break.
-	e2, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
-	Apply(e2, creq(body(catalogue(), "")))
-	fine := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"done"}]}`
-	ok := append(searchRound("t1", "select:Workflow", noMatch), call, fine)
-	if o = Apply(e2, creq(body(catalogue(), "", ok...))); !o.Changed || o.ClientDisabled != "" {
-		t.Fatalf("good load flagged: %s", show(o))
+	// The same call, answered "no match" later, is still answerable: nothing was stored for it.
+	o = Apply(e, creq(body(catalogue(), "", searchRound("t1", "select:Workflow", noMatch)...)))
+	if len(o.Loads) != 1 {
+		t.Fatalf("not answered later: %v", o.Loads)
+	}
+}
+
+// After a client-mode load, the weight of the tool leaves DeferredTokens, and the list is the client list.
+func TestClientModeWeighsTheLoad(t *testing.T) {
+	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
+	before := Apply(e, creq(body(catalogue(), "")))
+	after := Apply(e, creq(body(catalogue(), "", searchRound("t1", "select:Workflow", noMatch)...)))
+	if !(after.DeferredTokens < before.DeferredTokens) || after.ListTokens != before.ListTokens || before.ListTokens == 0 {
+		t.Fatalf("deferred %d -> %d, list %d -> %d", before.DeferredTokens, after.DeferredTokens, before.ListTokens, after.ListTokens)
+	}
+	if before.ListTokens != tokens.Count(ClientToolNamesList(before.Deferred)) {
+		t.Fatal("list weight is not the client list's")
 	}
 }
 

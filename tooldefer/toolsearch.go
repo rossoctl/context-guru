@@ -171,28 +171,13 @@ func AugmentSearches(rs store.Store, session, thread string, body []byte, deferr
 			if b.Get("type").String() != "tool_result" || !isCall {
 				continue
 			}
+			if _, isSel := selectNames(c.query); !isSel && namesOurs(c.query, deferred) {
+				a.Bad = true
+				return a // the format is not what the proxy knows: it adds nothing
+			}
 			res := b.Get("content")
-			names, known := rec.Answers[id]
-			if !known {
-				if sel, isSel := selectNames(c.query); isSel {
-					names = ourNames(sel, deferred, res, c.max)
-				} else if namesOurs(c.query, deferred) {
-					a.Bad = true
-					return a // the format is not what the proxy knows: it adds nothing
-				}
-				if len(rec.Answers) < maxAnswers {
-					if rec.Answers == nil {
-						rec.Answers = map[string][]string{}
-					}
-					rec.Answers[id] = append([]string{}, names...) // empty: the client's result stands
-					changed = true
-				}
-				a.Loads = append(a.Loads, names...)
-				a.Answered++
-			}
-			if len(names) == 0 {
-				continue
-			}
+			// The result shapes the proxy extends: the no-match text, or references only. An error or
+			// any other shape stands as the client wrote it, and books nothing.
 			var refs []string
 			switch {
 			case res.Type == gjson.String && res.String() == noMatchText:
@@ -202,11 +187,42 @@ func AugmentSearches(rs store.Store, session, thread string, body []byte, deferr
 					return true
 				})
 			default:
-				continue // an error or a shape we do not know: the client's result stands
+				continue
+			}
+			names, known := rec.Answers[id]
+			if !known {
+				if sel, isSel := selectNames(c.query); isSel {
+					names = ourNames(sel, deferred, res, c.max)
+				}
 			}
 			have := map[string]bool{}
 			res.ForEach(func(_, r gjson.Result) bool { have[r.Get("tool_name").String()] = true; return true })
+			var add []string
 			for _, nm := range names {
+				if !have[nm] {
+					add = append(add, nm)
+				}
+			}
+			if !known && len(add) > 0 {
+				// Kept only when the proxy really writes a reference, so a call that gets no addition
+				// is not booked as a load.
+				if len(rec.Answers) < maxAnswers {
+					if rec.Answers == nil {
+						rec.Answers = map[string][]string{}
+					}
+					rec.Answers[id] = append([]string{}, add...)
+					changed = true
+				}
+				a.Loads = append(a.Loads, add...)
+				a.Answered++
+			}
+			if known {
+				add = names
+			}
+			if len(add) == 0 {
+				continue
+			}
+			for _, nm := range add {
 				if !have[nm] {
 					r, _ := sjson.Set(`{"type":"tool_reference"}`, "tool_name", nm)
 					refs = append(refs, r)
@@ -269,33 +285,45 @@ func namesOurs(q string, deferred map[string]bool) bool {
 	return false
 }
 
-// UnloadedCall reports whether the transcript holds a break: the model called a deferred tool that no
-// tool_reference loaded, or a result says a deferred tool is not loaded. Only the proxy's own set is
-// read.
-func UnloadedCall(body []byte, deferred map[string]bool) bool {
+// ReadCalls reads the proxy's deferred tools that the model called in the transcript. broke: a call's
+// own tool_result is an error that says the tool is not loaded or does not exist. direct: calls that
+// no search loaded and that did not fail that way. The API accepts a direct call, so it is a use, not a
+// break. keep is the set of tools tool_choice forced on this request: their calls are never a break.
+func ReadCalls(body []byte, deferred map[string]bool) (broke bool, direct []string) {
 	loaded := Loaded(body)
-	called := map[string]string{} // tool_use id -> name
-	broke := false
+	called := map[string]string{} // tool_use id -> deferred tool name
+	var order []string
 	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
 		m.Get("content").ForEach(func(_, b gjson.Result) bool {
 			switch b.Get("type").String() {
 			case "tool_use":
-				n := b.Get("name").String()
-				if deferred[n] {
+				if n := b.Get("name").String(); deferred[n] {
 					called[b.Get("id").String()] = n
-					broke = broke || !loaded[n]
+					order = append(order, b.Get("id").String())
 				}
 			case "tool_result":
-				if _, ok := called[b.Get("tool_use_id").String()]; ok && b.Get("is_error").Bool() {
+				id := b.Get("tool_use_id").String()
+				if _, ok := called[id]; ok && b.Get("is_error").Bool() {
 					t := strings.ToLower(b.Get("content").Raw)
-					broke = broke || strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool")
+					if strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool") ||
+						strings.Contains(t, "does not exist") {
+						broke = true
+						delete(called, id)
+					}
 				}
 			}
-			return !broke
+			return true
 		})
-		return !broke
+		return true
 	})
-	return broke
+	seen := map[string]bool{}
+	for _, id := range order {
+		if n, ok := called[id]; ok && !loaded[n] && !seen[n] {
+			seen[n] = true
+			direct = append(direct, n)
+		}
+	}
+	return broke, direct
 }
 
 // ClientProbeRoute is added to the probe key's route, so the client-search probe has its own verdict.

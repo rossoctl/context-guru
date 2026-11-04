@@ -452,7 +452,12 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 	}
 	if len(o.Loads) > 0 {
 		// A ToolSearch answer written now loaded proxy-deferred tools (#898): each counts as a use.
-		h.noteSearchLoads(tn.ID, session, project, o.Loads)
+		h.noteClientLoads(tn.ID, session, project, o.Loads)
+	}
+	if len(o.Direct) > 0 {
+		// Called with no search: it worked, so it is a use. Counted per request that sees it.
+		h.toolDefer().hist.Observe(tn.ID, session, project, tooldefer.LoadView(o.Direct), time.Now().UnixMilli())
+		h.deferGate().DirectCalls.Add(int64(len(o.Direct)))
 	}
 	if o.Decided || o.Changed {
 		slog.Debug("cg.tooldefer", "session", session, "thread", threadID, "deferred", len(o.Deferred),
@@ -507,6 +512,14 @@ func (h *Handler) noteSearchLoads(tenant, session, project string, names []strin
 	h.deferGate().AddBacks.Add(int64(len(names)))
 }
 
+// noteClientLoads books deferred tools that a ToolSearch answer loaded in client-search mode (#898):
+// each counts as a use in the history, and as a client load on /stats (not an add-back).
+func (h *Handler) noteClientLoads(tenant, session, project string, names []string) {
+	ds := h.toolDefer()
+	ds.hist.Observe(tenant, session, project, tooldefer.LoadView(names), time.Now().UnixMilli())
+	h.deferGate().ClientLoads.Add(int64(len(names)))
+}
+
 // searchLoad adds the named tools back to di's thread. It returns the thread's deferred set, for
 // the answer, and the names added now, which the follow-up must declare.
 func (h *Handler) searchLoad(tn *Tenancy, di *deferInfo, names []string) (set map[string]bool, now []string) {
@@ -550,6 +563,14 @@ func (h *Handler) noteLeakedSearches(tn *Tenancy, di *deferInfo, wire string, ss
 	}
 }
 
+// probeKind names a probe key's kind for the log: the server-side search probe, or the client-search one.
+func probeKind(k tooldefer.ProbeKey) string {
+	if strings.HasSuffix(k.Route, tooldefer.ClientProbeRoute) {
+		return "client"
+	}
+	return "server"
+}
+
 // startProbe runs a probe in the background, through the host's Dispatcher, with the caller's own
 // endpoint and credential (the same resolution as the incoming model).
 func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.ModelProvider, up upstream, key tooldefer.ProbeKey) {
@@ -580,7 +601,7 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 	}
 	h.toolDefer().prober.Ensure(key, func(ctx context.Context) (tooldefer.Verdict, error) {
 		v, err := run(ctx, d, ref, path, key.Model, beta)
-		slog.Info("cg.tooldefer_probe", "model", key.Model, "route", path, "verdict", v.String(), "err", err)
+		slog.Info("cg.tooldefer_probe", "probe", probeKind(key), "model", key.Model, "route", path, "verdict", v.String(), "err", err)
 		return v, err
 	})
 }
@@ -654,6 +675,7 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 		ListTokens: di.outcome.ListTokens, Tier: tooldefer.TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
 	n := u.Searches + st.n
 	loaded := append(append([]string(nil), u.SearchLoaded...), st.loaded...)
+	loaded = append(loaded, di.outcome.Loads...) // client-search mode (#898): answers written on this request
 	r.Searches = n
 	r.DroppedSearches = u.SearchDropped + st.dropped
 	r.LoadedTokens = tooldefer.LoadedWeight(di.original, loaded)
@@ -744,10 +766,15 @@ func (h *Handler) deferStats() any {
 		// Our own search (#825), counters of its own: tools it added back (one cache miss on `tools`
 		// each; those a search loaded count in wrong_guesses too, through the ledger), and searches
 		// made together with a client tool call, answered on the next request.
-		"add_backs":      g.AddBacks.Load(),
+		"add_backs": g.AddBacks.Load(),
+		// Client-search mode (#898): deferred tools a ToolSearch answer loaded, and deferred tools
+		// the model called with no search (the API accepts it; a use, not a break).
+		"client_loads":   g.ClientLoads.Load(),
+		"direct_calls":   g.DirectCalls.Load(),
 		"mixed_searches": g.MixedSearches.Load(),
-		// Client-search mode (#898) disabled, by reason. Each counts once per live mark (24 h per
-		// tenant and ToolSearch description hash). The same numbers are cg_tooldefer_client_disabled_total.
+		// Client-search mode (#898) disabled, by reason. unknown_description and
+		// non_select_query_for_our_tool count once per tenant and hash per 24 h; break counts every
+		// time. The same numbers are cg_tooldefer_client_disabled_total.
 		"client_search_disabled": map[string]int64{
 			tooldefer.ReasonUnknownDescription: g.DisabledUnknown.Load(),
 			tooldefer.ReasonNonSelectQuery:     g.DisabledNonSel.Load(),

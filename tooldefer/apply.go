@@ -78,6 +78,9 @@ type Outcome struct {
 	// ClientDisabled is the reason client-search mode was disabled on this request ("" if not), and
 	// DescHash the ToolSearch description hash it concerns. The host logs the pair.
 	ClientDisabled, DescHash string
+	// Direct is the deferred tools the transcript calls with no search having loaded them: they
+	// worked, so they are uses.
+	Direct []string
 }
 
 // Apply defers the thread's set on one request. Fail open: on any problem Body is the input.
@@ -234,8 +237,16 @@ func Apply(env Env, r Req) (o Outcome) {
 		switch {
 		case a.Bad:
 			reason = ReasonNonSelectQuery
-		case UnloadedCall(a.Body, set):
-			reason = ReasonBreak
+		}
+		if reason == "" {
+			// A break is a call to a deferred tool whose own result says it is not loaded. A call no
+			// search loaded that worked is a use (the API accepts it), counted as a direct call.
+			// A tool tool_choice kept loaded on this request is declared in full, so it never breaks.
+			broke, direct := ReadCalls(a.Body, set)
+			if broke && !forcedAny(r.Orig, set) {
+				reason = ReasonBreak
+			}
+			o.Direct = direct
 		}
 		if reason != "" {
 			// A format change. Disable the description hash and stop deferring on this thread. This
@@ -251,6 +262,12 @@ func Apply(env Env, r Req) (o Outcome) {
 		out, o.Loads, o.Answered = a.Body, a.Loads, a.Answered
 	}
 	loaded := Loaded(r.Orig)
+	if rec.Client {
+		// The references the proxy wrote (now or on an earlier request, replayed) load tools too.
+		for n := range Loaded(out) {
+			loaded[n] = true
+		}
+	}
 	weigh := map[string]bool{}
 	for _, n := range names {
 		if !loaded[n] {
@@ -265,10 +282,20 @@ func Apply(env Env, r Req) (o Outcome) {
 	})
 	o.Body, o.Changed, o.Deferred = out, true, names
 	o.ListTokens = tokens.Count(NamesList(names))
+	if rec.Client {
+		o.ListTokens = tokens.Count(ClientToolNamesList(names))
+	}
 	if env.Gate != nil {
 		env.Gate.Deferred.Add(1)
 	}
 	return o
+}
+
+// forcedAny reports whether tool_choice forces one of the thread's deferred tools: Rewrite keeps a
+// forced tool loaded for that request, so its call is no proof of a break.
+func forcedAny(body []byte, set map[string]bool) bool {
+	f := forcedTool(body)
+	return f != "" && set[f]
 }
 
 // SearchesIn reads one response message (an Anthropic message object): how many server-side
