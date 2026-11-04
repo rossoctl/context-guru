@@ -81,10 +81,9 @@ import (
 //     successful continuation, never reaches the client — while the continuation DID send it
 //     back upstream, so the model believes it said something the client never saw. The
 //     realistic shape is thinking interleaved after a tool call.
-//   - Chat Completions streams are spliced only when the request declares our own tool search
-//     (#825, #879): there the dialect differs only in how a call is detected and renumbered
-//     (see chatProxyToolCallName and rewriteChat). Other non-Anthropic streams, and Responses
-//     streams, are not spliced.
+//   - Non-Anthropic event streams are not inspected at all: AggregateSSE only reconstructs
+//     the Anthropic dialect, so there is nothing the loop could read even if we held the
+//     bytes.
 //   - The forwarded bytes are retained until the round ends, because Continuation needs the
 //     whole assistant turn — bounded by sseRetainMaxBytes. Measured on a 2.25 MB round, the
 //     largest a 128K-output model typically produces: the RETAINED bytes are what the old
@@ -121,37 +120,11 @@ type sseSplicer struct {
 	first    time.Time   // when the client got its first byte
 	thinking bool        // the client holds a thinking block from an earlier round
 	remap    map[int]int // this round's block index -> the client's index; -1 = withheld
-
-	// Chat Completions (#879). The same splice in another chunk format: a call's name arrives
-	// on the first chunk of choices[].delta.tool_calls[] for its index, blocks counts the
-	// tool-call indexes the client holds, and a later round's chunks take round 1's id.
-	chat   bool
-	rounds int    // upstream rounds started
-	chatID string // the chunk id the client sees
-	said   bool   // the client holds content or reasoning text
-	cutOff bool   // the last round's read stopped mid-event or on a read error, not on a clean EOF
 }
 
 func newSSESplicer(w http.ResponseWriter) *sseSplicer {
 	f, _ := w.(http.Flusher)
 	return &sseSplicer{w: w, flush: f}
-}
-
-// newChatSSESplicer is the splicer for a Chat Completions stream.
-func newChatSSESplicer(w http.ResponseWriter) *sseSplicer {
-	sp := newSSESplicer(w)
-	sp.chat = true
-	return sp
-}
-
-// opened reports whether the client holds any of the model's answer: a content block on
-// Anthropic, text, reasoning or a tool call on Chat Completions. A round whose proxy call came
-// before any of it made the client wait for the whole continuation.
-func (sp *sseSplicer) opened() bool {
-	if sp.chat {
-		return sp.said || sp.blocks > 0
-	}
-	return sp.blocks > 0
 }
 
 // round starts an upstream round. Its blocks are numbered from the end of what the client
@@ -160,7 +133,6 @@ func (sp *sseSplicer) opened() bool {
 func (sp *sseSplicer) round(resp *http.Response) {
 	sp.base = sp.blocks
 	sp.remap = nil
-	sp.rounds++
 	if sp.headers {
 		return
 	}
@@ -232,13 +204,7 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 		e, err := readSSEEvent(br, &ev)
 		if len(e) > 0 {
 			sent := false
-			var name string
-			if sp.chat {
-				name = chatProxyToolCallName(e, proxyTools)
-			} else {
-				name = proxyToolCallName(e, proxyTools)
-			}
-			if name != "" {
+			if name := proxyToolCallName(e, proxyTools); name != "" {
 				if !slices.Contains(called, name) {
 					called = append(called, name)
 				}
@@ -264,9 +230,6 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 			}
 		}
 		if err != nil {
-			// A clean EOF comes between events. A partial event or another read error means the
-			// upstream cut the round off, which terminateChat must tell from a clean close.
-			sp.cutOff = len(e) > 0 || err != io.EOF
 			if over {
 				return nil, nil, called
 			}
@@ -314,9 +277,6 @@ func (sp *sseSplicer) forward(ev []byte) {
 // already has. With no offset to apply it returns the event untouched — byte-for-byte,
 // which is what keeps a response that never calls expand an exact pass-through.
 func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
-	if sp.chat {
-		return sp.rewriteChat(ev), true
-	}
 	// With no offset to apply, the only events that can change what the client holds are a
 	// message_start (de-duplicated) and a content_block_start (counted) — one per block, so
 	// counting starts alone is exact. Every delta of a long turn skips the parse below, which
@@ -469,10 +429,6 @@ func (sp *sseSplicer) terminate(withheld []byte) {
 	if sp.ended || !sp.msgStart {
 		return
 	}
-	if sp.chat {
-		sp.terminateChat(withheld)
-		return
-	}
 	// Only the CLOSING events, never the content: the withheld bytes begin with the expand
 	// call, which is the one block the client must not receive. So this closes the message
 	// with the model's own message_delta and message_stop and invents nothing.
@@ -497,141 +453,6 @@ func (sp *sseSplicer) terminate(withheld []byte) {
 				sp.forward([]byte("event: error\ndata: {\"type\":\"error\",\"error\":" +
 					"{\"type\":\"api_error\",\"message\":\"upstream ended the turn " +
 					"without a terminator\"}}\n\n"))
-				sp.ended = true
-			}
-			return
-		}
-	}
-}
-
-// chatProxyToolCallName is proxyToolCallName for a Chat Completions chunk: the injected tool a
-// call STARTED in this chunk names, or "". Only a call's first chunk carries function.name, so
-// the chunks after it (arguments only) never match, and the cut lands on the first.
-func chatProxyToolCallName(ev []byte, proxyTools []string) string {
-	if !bytes.Contains(ev, []byte("tool_calls")) {
-		return "" // cheap reject: text and reasoning chunks skip the parse
-	}
-	found := ""
-	gjson.Get(sseEventPayload(ev), "choices").ForEach(func(_, ch gjson.Result) bool {
-		ch.Get("delta.tool_calls").ForEach(func(_, tc gjson.Result) bool {
-			name := tc.Get("function.name").String()
-			for _, t := range proxyTools {
-				if t != "" && name == t {
-					found = t
-					return false
-				}
-			}
-			return true
-		})
-		return found == ""
-	})
-	return found
-}
-
-// isChatDone reports whether an event is the stream's `data: [DONE]` terminator.
-func isChatDone(ev []byte) bool {
-	for _, line := range bytes.Split(ev, []byte("\n")) {
-		i := bytes.IndexByte(line, ':')
-		if i >= 0 && bytes.Equal(bytes.TrimSpace(line[:i]), []byte("data")) {
-			return bytes.Equal(bytes.TrimSpace(line[i+1:]), []byte("[DONE]"))
-		}
-	}
-	return false
-}
-
-// rewriteChat is rewrite for a Chat Completions chunk. Round 1's chunks go as they came,
-// byte-for-byte; the splicer only notes the id, the tool-call indexes and whether text has gone
-// out. A later round's chunks take round 1's id and have their tool-call indexes moved past the
-// ones the client holds, so the client reads one answer. A chunk it cannot parse goes as it came.
-func (sp *sseSplicer) rewriteChat(ev []byte) []byte {
-	sp.msgStart = true
-	if isChatDone(ev) {
-		sp.ended = true
-		return ev
-	}
-	// A finish_reason closes the answer too: a gateway that omits [DONE] must not get an error
-	// chunk appended to a complete stream (terminateChat). Every chunk carries the field, null
-	// until the last, so only a string value counts.
-	if bytes.Contains(ev, []byte(`"finish_reason":"`)) || bytes.Contains(ev, []byte(`"finish_reason": "`)) {
-		sp.ended = true
-	}
-	later := sp.rounds > 1
-	calls := bytes.Contains(ev, []byte("tool_calls"))
-	if !later && !calls && sp.chatID != "" && (sp.said || !bytes.Contains(ev, []byte("content"))) {
-		return ev // the common delta: nothing to note, nothing to change
-	}
-	payload := sseEventPayload(ev)
-	if payload == "" || !gjson.Valid(payload) {
-		return ev
-	}
-	p := gjson.Parse(payload)
-	np := payload
-	if id := p.Get("id"); id.Exists() {
-		if sp.chatID == "" {
-			sp.chatID = id.String()
-		} else if later && id.String() != sp.chatID {
-			np, _ = sjson.Set(np, "id", sp.chatID)
-		}
-	}
-	p.Get("choices").ForEach(func(ci, ch gjson.Result) bool {
-		d := ch.Get("delta")
-		if d.Get("content").String() != "" || d.Get("reasoning_content").String() != "" || d.Get("reasoning").String() != "" {
-			sp.said = true
-		}
-		d.Get("tool_calls").ForEach(func(ti, tc gjson.Result) bool {
-			idx := int(tc.Get("index").Int()) + sp.base
-			if idx >= sp.blocks {
-				sp.blocks = idx + 1
-			}
-			if later && sp.base > 0 {
-				path := "choices." + ci.String() + ".delta.tool_calls." + ti.String() + ".index"
-				if out, err := sjson.Set(np, path, idx); err == nil {
-					np = out
-				}
-			}
-			return true
-		})
-		return true
-	})
-	if np == payload {
-		return ev
-	}
-	return bytes.Replace(ev, []byte(payload), []byte(np), 1)
-}
-
-// terminateChat is terminate for Chat Completions: it forwards the withheld round's closing
-// chunks (the finish_reason chunk, the usage chunk and [DONE]) and never a chunk that carries
-// the withheld call or text. With no [DONE] anywhere, it ends the stream with an error chunk.
-func (sp *sseSplicer) terminateChat(withheld []byte) {
-	if withheld == nil && sp.rounds <= 1 && !sp.cutOff {
-		// One round, nothing withheld, and the upstream closed cleanly: a gateway that ends a
-		// complete answer without [DONE]. The client got the upstream's bytes, exactly.
-		return
-	}
-	br := bufio.NewReader(bytes.NewReader(withheld))
-	var ev bytes.Buffer
-	for {
-		e, err := readSSEEvent(br, &ev)
-		if len(e) > 0 {
-			if isChatDone(e) {
-				sp.forward(e)
-			} else if p := sseEventPayload(e); p != "" && gjson.Valid(p) {
-				closing := true
-				gjson.Get(p, "choices").ForEach(func(_, ch gjson.Result) bool {
-					d := ch.Get("delta")
-					closing = !d.Get("tool_calls").Exists() && d.Get("content").String() == "" &&
-						d.Get("reasoning_content").String() == "" && d.Get("reasoning").String() == ""
-					return closing
-				})
-				if closing {
-					sp.forward(e)
-				}
-			}
-		}
-		if err != nil {
-			if !sp.ended {
-				sp.forward([]byte("data: {\"error\":{\"type\":\"api_error\",\"message\":" +
-					"\"upstream ended the turn without a terminator\"}}\n\n"))
 				sp.ended = true
 			}
 			return

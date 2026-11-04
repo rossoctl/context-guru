@@ -86,6 +86,7 @@ var notExportedWhy = map[string]string{
 	// plugin's default preset, so the empty case is now the common one and has to be legible.
 	"Pipeline":    "configured component order, not a measurement; label data, not a series",
 	"PipelineLen": "static for the process lifetime; a gauge would restate the command line",
+	"Preset":      "the preset the proxy started with; a name, not a measurement, and fixed for the process lifetime",
 
 	// Derived: PromQL computes these from series that ARE exported, and a second series
 	// would be a number that can disagree with its own inputs.
