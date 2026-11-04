@@ -69,8 +69,9 @@ func TestDeferralChangesTheAliasTheKeeperWouldDerive(t *testing.T) {
 
 // coldAfterPing runs the real request path twice around a ping touch and returns the second
 // request's ColdCache. The ping lands 4m after the first request, the second request 8m after it:
-// without the ping that is past TTL + margin, with it the entry is 4m old.
-func coldAfterPing(t *testing.T, shape string, touch func(st store.Store, pre, post []byte, at int64)) bool {
+// without the ping that is past TTL + margin, with it the entry is 4m old. The client's own text is
+// the same on every turn, so only the deferral moves the alias.
+func coldAfterPing(t *testing.T, shape string, touch func(st store.Store, first Result, pre, post []byte, at int64)) bool {
 	t.Helper()
 	pre, post := deferBodyOf(t, shape)
 	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
@@ -82,12 +83,9 @@ func coldAfterPing(t *testing.T, shape string, touch func(st store.Store, pre, p
 			Provider: bschemas.Anthropic, Body: pre, Tracker: tr, Now: at,
 		})
 	}
-	run(base)
-	touch(st, pre, post, base.Add(4*time.Minute).UnixMilli())
-	res := run(base.Add(8 * time.Minute))
-	if res.Trace.TouchAlias == "" {
-		t.Fatal("the Trace carries no TouchAlias")
-	}
+	first := run(base)
+	touch(st, first, pre, post, base.Add(4*time.Minute).UnixMilli())
+	run(base.Add(8 * time.Minute))
 	if len(seen) != 2 {
 		t.Fatalf("coldspy saw %d runs, want 2", len(seen))
 	}
@@ -96,41 +94,39 @@ func coldAfterPing(t *testing.T, shape string, touch func(st store.Store, pre, p
 
 // The old keeper path: the key is derived from the body that went upstream.
 func TestAPingTouchDerivedFromTheDeferredBodyMissesTheRequestsClock(t *testing.T) {
-	cold := coldAfterPing(t, func(st store.Store, _, post []byte, at int64) {
-		RecordCacheTouch(st, "", post, bschemas.Anthropic, at)
-	})
-	if !cold {
-		t.Fatal("expected the old derivation to read cold (this documents #902); it read warm")
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			cold := coldAfterPing(t, shape, func(st store.Store, _ Result, _, post []byte, at int64) {
+				RecordCacheTouch(st, "", post, bschemas.Anthropic, at)
+			})
+			if !cold {
+				t.Fatal("expected the old derivation to read cold (this documents #902); it read warm")
+			}
+		})
 	}
 }
 
-// The fix: the ping touches the alias the request derived from the body as it arrived.
+// The fix: the ping touches the alias apply put on the Trace of the arriving request.
 func TestAPingTouchOnADeferredBodyKeepsTheNextRequestWarm(t *testing.T) {
-	var traceAlias string
-	cold := coldAfterPing(t, func(st store.Store, pre, _ []byte, at int64) {
-		// The alias apply put on the Trace of the first request is the one the keeper is handed.
-		traceAlias = aliasFor(t, "", pre)
-		RecordCacheTouchAlias(st, traceAlias, at)
-	})
-	if cold {
-		t.Fatal("the next request read COLD 4m after a ping: the sweep would cut a live prefix")
-	}
-}
-
-// The Trace carries the same alias the cold check reads.
-func TestTraceTouchAliasIsTheAliasOfTheArrivingBody(t *testing.T) {
-	pre, _ := deferBody(t)
-	res := BodyOpts(context.Background(), components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), Opts{
-		Provider: bschemas.Anthropic, Body: pre, Tracker: modes.NewTracker(0), Now: time.Unix(1_700_000_000, 0),
-	})
-	if want := aliasFor(t, "", pre); res.Trace.TouchAlias != want {
-		t.Fatalf("Trace.TouchAlias = %q, want %q", res.Trace.TouchAlias, want)
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			cold := coldAfterPing(t, shape, func(st store.Store, first Result, pre, _ []byte, at int64) {
+				key := first.Trace.TouchAlias
+				if want := aliasFor(t, "", pre); key == "" || key != want {
+					t.Fatalf("the ping's key %q is not the key the cold check reads %q", key, want)
+				}
+				RecordCacheTouchAlias(st, key, at)
+			})
+			if cold {
+				t.Fatal("the next request read COLD 4m after a ping: the sweep would cut a live prefix")
+			}
+		})
 	}
 }
 
 // xhigh defers nothing: the body is unchanged, so both derivations agree and RecordCacheTouch still works.
 func TestAPingTouchOnAnUndeferredBodyStillKeepsTheNextRequestWarm(t *testing.T) {
-	cold := coldAfterPing(t, func(st store.Store, pre, _ []byte, at int64) {
+	cold := coldAfterPing(t, deferredShape, func(st store.Store, _ Result, pre, _ []byte, at int64) {
 		RecordCacheTouch(st, "", pre, bschemas.Anthropic, at)
 	})
 	if cold {
