@@ -85,7 +85,7 @@ func sendReal(t *testing.T, srv *httptest.Server, session string) {
 // with the equivalent Filter, so the surface and the underlying query cannot silently
 // diverge.
 func TestStatsSavingsThreeScopesAgreeWithOverview(t *testing.T) {
-	up := billedUpstream(t) // a usage that bills the body, so the accountant library books a saving
+	up := savingsUpstream(t)
 	defer up.Close()
 	h, rec := savingsTestHandler(t, up.URL)
 	srv := httptest.NewServer(h.Mux())

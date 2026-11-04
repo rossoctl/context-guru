@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -212,36 +211,6 @@ func TestGuardNoPlannedPingIsReplacedAfterATextTurn(t *testing.T) {
 						kind, maxPings, i, fs.n(), subs)
 				}
 			}
-		}
-	}
-}
-
-// The request that takes the extra slot reports the idle gap it served, like a planned ping does.
-// A zero Window is not converted to a spend operation by the host, so the sweep's cost would never
-// reach the thread's next request.
-func TestTheExtraSlotReportCarriesTheGapWindow(t *testing.T) {
-	k, fs, clock := testKeeper(t)
-	fs.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
-	sink := &reportSink{}
-	gap := clock.now()
-	recordWithSink(k, sink, sess1, gap)
-	asker := &sweepAsker{cacheRead: 48576}
-	registerSweep(t, store.NewMemory(store.Options{MaxEntries: 400}), asker, "claude-sonnet-5", sweepConversation(3))
-	k.Sweep(clock.advance(281 * time.Second))
-	k.Sweep(clock.advance(281 * time.Second))
-	waitPings(t, k, 2)
-	k.Sweep(clock.advance(250 * time.Second))
-	waitSweepOutcome(t, k, fs)
-	if asker.calls.Load() != 1 {
-		t.Fatalf("sweep asks = %d, want 1 (the extra slot)", asker.calls.Load())
-	}
-	reps := sink.all()
-	if len(reps) != 3 {
-		t.Fatalf("reports = %d, want 2 planned pings and the extra request", len(reps))
-	}
-	for i, r := range reps {
-		if !r.Window.Equal(gap) {
-			t.Errorf("report %d Window = %v, want the real request's start %v", i, r.Window, gap)
 		}
 	}
 }

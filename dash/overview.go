@@ -167,7 +167,7 @@ type Overview struct {
 	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
 	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
 	// and the provider then read at least the stable half from cache while writing less than
-	// it. Priced against a cache miss. A floor. The accountant library's split effect.
+	// it. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
 	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
@@ -177,7 +177,7 @@ type Overview struct {
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
 	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
 	// 1,105 of 1,127 session starts had no cache to hit, because the previous session's had
-	// expired. That gate is gone (the split is priced by the accountant library now); the
+	// expired. That gate is gone (it is TailChanged now, see Event.cachesplitSavedUSD); the
 	// counts stay, because the replacement gate also fires rarely and for its own reason.
 	//
 	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
@@ -385,8 +385,8 @@ type Overview struct {
 	//
 	// DOLLARS ARE NOT UNAFFECTED. This comment used to end "Dollars are unaffected: they come
 	// from the provider's own reported usage", which is true of cost_usd and false of every
-	// savings figure beside it: baseline_cost_usd is cost_usd plus a delta that prices OUR
-	// token counts at the provider's rate (the accountant library's bytes-to-tokens ratio). A reader
+	// savings figure beside it: baseline_cost_usd is cost_usd + baselineDeltaUSD, and that
+	// delta prices OUR token counts (Saved(), SavedUnique) at the provider's rate. A reader
 	// auditing exactly this was told not to look, which is how #240 survived. The correction
 	// factor is NOT this ratio — see tokens.BilledDeltaFactor, which is a factor on a
 	// DIFFERENCE, measured against real bills, where the fixed overhead above cancels.
@@ -581,7 +581,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_saved_usd),0),
 		-- Our own cache saving. A plain SUM of a per-request column, because all three
 		-- conditions that qualify a request were settled at write time where the model's
-		-- rates and the session's history were both in hand (the accountant library).
+		-- rates and the session's history were both in hand (Event.cachesplitSavedUSD).
 		-- The predecessor did the component test here as a correlated EXISTS over
 		-- request_components, which was both slower and wrong: it credited every cache read
 		-- in a session, including the later turns that would have hit anyway.
