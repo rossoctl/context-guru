@@ -138,6 +138,37 @@ Not written yet. Inputs, from the release checks done by hand (RELEASING.md Part
 - Every read-only `cg.py` command exits 0. This check found #781.
 - The default release binary links no OpenTelemetry, gRPC or protobuf.
 
+## Tool deferral, option B (#898)
+
+**Purpose:** on preset `ultrahigh`, with Claude Code's own `ToolSearch` on, the proxy adds its own
+deferred tools to Claude Code's search results. It answers only the exact `select:Name1,Name2`
+form, and only for names it deferred. Source: the
+[#898 design update](https://github.com/rossoctl/context-guru/issues/898#issuecomment-6635851339).
+
+**On any fault, the proxy disables, and never switches.** It marks the `ToolSearch` description
+hash disabled, per tenant. It defers nothing for that hash until the mark expires. The live thread
+pays one cache rewrite. 3 reasons:
+
+1. `unknown_description`: the description hash is unknown. A new Claude Code version is likely.
+2. `non_select_query_for_our_tool`: a query names a tool the proxy deferred, but not in the
+   `select:` form. A format change is likely.
+3. `break`: the model called a deferred tool that was never loaded, or got a "not loaded" error.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | Baseline |
+|---|---|---|---|---|---|
+| T1 | side effect | No user loses a tool. | disables with reason `break` | **any** | not shipped yet |
+| T2 | intent | A Claude Code release does not silently stop option B. | disables with reason `unknown_description`, with the Claude Code version | any; report the version | not shipped yet |
+| T3 | intent | The `select:` form is the only form used for the proxy's tools. | disables with reason `non_select_query_for_our_tool` | any | not shipped yet |
+| T4 | side effect | A disable costs only one cache rewrite on the live thread. | the miss rate of the requests after a disable, per thread | more than 1 miss per thread per disable | not shipped yet |
+
+- **Signals:** a `cg_*` counter by reason, a field in the `/stats` `tool_defer` block, and one log
+  line with the reason and the hash prefix (no query text). **The exact names come with the PR.**
+  Until then this is gap G6.
+- **Report:** every disable event, with its reason, and the Claude Code version if it is known.
+  **A rise in `break` is the most urgent,** because a user lost a tool for one turn.
+- **No laptop baseline:** the laptop runs `xhigh`, not `ultrahigh`.
+- **Owner:** David Amid (proposed).
+
 ## Cross-component invariants
 
 | # | Statement | Signal | Threshold (proposed) | Baseline |
@@ -166,10 +197,11 @@ Not written yet. Inputs, from the release checks done by hand (RELEASING.md Part
 | G3 | The kind of a keep-alive request. Today `max_tokens = 0` means "sweep question". This is a convention, not a field. | A `ping_kind` column: plain, sweep, summary, extra, manual. | No |
 | G4 | `/stats` counters reset on each restart. | Write the counters that the monitor needs into the database. | No |
 | G5 | The 12 components with no laptop baseline. | Real traffic on other presets. | No |
+| G6 | Tool deferral disables, by reason (T1 to T4). | The `cg_*` counter, the `/stats` `tool_defer` field and the log line from the #898 PR. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, S1, X1, X4. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, S1, X1, X4, T1, T2, T3. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, S2, S4, X2, X3, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
