@@ -4138,7 +4138,7 @@ PRESETS: dict[str, str] = {
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
              "already gone cold",
     "ultrahigh": "xhigh plus tool deferral: tools your own last sessions never used are sent as "
-                 "names only and loaded through search when needed — opt-in, Claude models only",
+                 "names only and loaded through search when needed — experimental, opt-in",
 }
 DEFAULT_PRESET = "off"
 

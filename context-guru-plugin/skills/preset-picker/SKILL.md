@@ -38,7 +38,7 @@ a fault, just unset.
 | `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired |
 | `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full |
 | `xhigh` | `high` plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut |
-| `ultrahigh` | `xhigh` plus tool deferral: tools your own last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in, Claude models only. Turn it off for one session with `ENABLE_TOOL_SEARCH=false` |
+| `ultrahigh` | **Experimental.** `xhigh` plus tool deferral: tools your own last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in. Turn it off for one session with `ENABLE_TOOL_SEARCH=false` |
 
 Recommend `conservative` to someone who wants to carry less context but hasn't said they want an
 LLM pass: it is deterministic, so nothing about the request path depends on a model call
