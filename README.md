@@ -122,7 +122,7 @@ selection. Confirm the result with `/context-guru:status` on Claude Code or
 
 - **Accuracy:** on Sonnet 5.5 it picks the right tool as often as `xhigh`. On Opus 5.5 it is worse on vague tasks: 66 of 80 against 72 of 80 with no deferral, in the last run of the shipped setup (2026-11-03). The model sometimes uses Bash when the right tool is deferred.
 - **Measured before each release:** the result of each run is posted on [#871](https://github.com/rossoctl/context-guru/issues/871). `ultrahigh` stays experimental until 3 releases in a row pass.
-- **Known limits:** on GPT, GLM and Kimi, Chat Completions answers in a session with deferred tools arrive all at once, not word by word ([#879](https://github.com/rossoctl/context-guru/issues/879)). The provider's native tool search for newer GPT models is not used yet ([#876](https://github.com/rossoctl/context-guru/issues/876)).
+- **Known limits:** on GPT, GLM and Kimi, answers in a session with deferred tools arrive all at once, not word by word, on both Chat Completions and Responses ([#879](https://github.com/rossoctl/context-guru/issues/879) for Chat Completions). The provider's native tool search for newer GPT models is not used yet ([#876](https://github.com/rossoctl/context-guru/issues/876)).
 - **To turn it off:** pick another preset, or set `toolfilter: {defer: off}`. In Claude Code you can also set `ENABLE_TOOL_SEARCH=false` (the plugin's session-start hook sends it to the proxy; the Codex plugin has no such hook).
 
 Everything else — architecture, the full benchmark, every component, the proxy/gateway path,
