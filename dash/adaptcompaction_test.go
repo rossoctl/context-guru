@@ -829,3 +829,38 @@ func TestSaveMoreOffersThePresetWithoutTheAccountsOverrides(t *testing.T) {
 		}
 	}
 }
+
+// The adapt report's "savings to date" is what the rows booked. A row the library priced contributes
+// its stored dollars, not a re-pricing of its tokens; a fallback row booked nothing and contributes
+// nothing; a row from before the switch is re-priced from its tokens.
+func TestAdaptObservedFollowsWhatTheRowsBooked(t *testing.T) {
+	text := prettyJSON()
+	blocks := map[string]string{"messages.1.content.0.content": text}
+	db := adaptFixtureDB(t, "acct", map[string][]adaptFixtureReq{"s1": {
+		{ts: 1_000_000, fresh: 10, write: 5000, blocks: blocks},
+		{ts: 1_060_000, fresh: 10, read: 5000, write: 50, blocks: blocks},
+		{ts: 1_120_000, fresh: 10, read: 5050, write: 50, blocks: blocks},
+	}})
+	// Request 1 was priced by the library at $0.5 (its tokens would re-price to something else),
+	// request 2 fell back, request 3 predates the switch.
+	for _, r := range []struct {
+		ts       int64
+		usd      float64
+		pricedBy string
+	}{{1_000_000, 0.5, PricedByAccountant}, {1_060_000, 0, PricedByNone}, {1_120_000, 0, ""}} {
+		if _, err := db.sql.Exec(`INSERT INTO request_components(request_id, component, saved_gross, saved_unique, saved_usd, priced_by)
+			SELECT id, 'format', 4000, 4000, ?, ? FROM requests WHERE ts = ?`, r.usd, r.pricedBy, r.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cov := &AdaptCompactionCoverage{}
+	if _, err := db.adaptDataset(context.Background(), Filter{Tenant: "acct"}, staticTable{"m": adaptTestPrice}, cov); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-switch row re-prices 4000 tokens at the rate that turn paid: strictly positive, and far
+	// below the $0.5 the library booked, so the sum tells the three rows apart.
+	legacy := cov.ObservedUSD - 0.5
+	if legacy <= 0 || legacy >= 0.5 {
+		t.Fatalf("ObservedUSD %v: want 0.5 (library row) + a small re-priced legacy row + 0 (fallback row)", cov.ObservedUSD)
+	}
+}

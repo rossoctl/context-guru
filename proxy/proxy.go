@@ -28,6 +28,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -153,6 +154,11 @@ type Options struct {
 	// its help text and at startup.
 	Record *sessionRecorder
 
+	// Pings is the store the keep-alive emitter writes ping facts to and the next request of the
+	// same thread reads them from (see PingSavings). It must be the same instance on both sides.
+	// nil = none, and pings then feed no request.
+	Pings *PingStore
+
 	// PipelineFor builds a pipeline for a per-request override on /compact
 	// (?preset=… or x-context-guru-pipeline: a,b,c). nil = overrides ignored, the
 	// handler always uses the configured pipeline. Supplied by main (which holds
@@ -267,6 +273,10 @@ type Handler struct {
 	pool *modes.Pool
 	// observeSeq numbers observations so each request enqueues one.
 	observeSeq atomic.Uint64
+	// savings is nil without a dashboard recorder: the Result is attached to the recorded event.
+	savings *savingsTracker
+	// accSeq numbers requests for the accountant RequestMeta.RequestID.
+	accSeq atomic.Uint64
 	// shadow is observe mode's own state store, separate from the live one. Observe must
 	// not write into the live store — a real request would then replay a decision that was
 	// never enforced — but it also cannot simply discard its writes: offloaders FREEZE a
@@ -409,6 +419,10 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
+	// The tracker needs a dashboard: the Result is attached to the recorded event.
+	if opts.Dashboard != nil {
+		h.savings = newSavingsTracker()
+	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or
 	// a keep-alive ping that read the cache — and not by this process's start (#766). The
 	// recorder holds that time per thread — seeded from the database at startup
@@ -1314,6 +1328,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if rec := recover(); rec != nil {
 					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
 					body = orig
+					// The original goes upstream, so no operation of the savings record is on the
+					// wire: drop the record, and the event books no saving.
+					cp.accDrop()
 				}
 			}()
 			// A client that received our own expand tool_use answered it itself, with an
@@ -1401,6 +1418,21 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
+			// The savings tracker begins HERE, after applyMode, and not before it: the session
+			// (tr.Session) is known only once the pipeline has run, and BeginRequest only records
+			// the client body, so opening the record late loses nothing. `orig` is what the agent
+			// sent. An empty session means the pipeline did not run (bypassed, observe, no
+			// messages): there are no operations to price, so the request is skipped.
+			if cp != nil && cp.savings != nil && tr.Session != "" {
+				cp.accBegin(accountant.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+					Session:   tr.Session,
+					Model:     gjson.GetBytes(orig, "model").String(),
+					At:        cp.start,
+					// The proxy has no subscription detection, so every request is billed as api.
+					Billing: accountant.Billing{Mode: accountant.BillingAPI},
+				}, orig)
+			}
 			// A real request has arrived on this session: cancel any pending keep-alive
 			// (this request refreshes the entry itself, and a ping concurrent with it would
 			// be a second request against the tenant's budget for nothing), and pick up what
@@ -1523,6 +1555,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
 				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
 			}
+			// The savings record ends HERE, after both injections, with the body that goes
+			// upstream: the provider bills the injected tool declarations, so the library's
+			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
+			// message moves and the operations' positions stay valid.
+			cp.accEnd(th, body, tr.Ops)
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
@@ -1745,8 +1782,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
 	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
 	// and does the same job: sseSplicer withholds only the block that calls the expand tool
-	// and streams everything else as it arrives (see ssepeek.go). Non-Anthropic dialects are
-	// not inspected at all.
+	// and streams everything else as it arrives (see ssepeek.go). Of the other dialects, only a
+	// Chat Completions stream that declares our own tool search is spliced (#879).
 	// Advertised covers BOTH proxy-injected tools. The response loop is what keeps a
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
 	// adjudication call stream straight through on a request that advertised only that one.
@@ -1818,6 +1855,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				h.agg.RecordSSEAdjudicateAfterStream()
 			case expand.ToolName:
 				h.agg.RecordSSEExpandAfterStream()
+			case tooldefer.ClientSearchName:
+				// Counted where it is decided: mixed_searches, or kept for the next request. Past the
+				// retain bound or after a failed rebuild it is counted nowhere, but the next request
+				// still answers it from the transcript (tooldefer.ApplySearch).
 			default:
 				lg.Warn("cg.sse_splice: proxy tool leak with no counter of its own", "tool", name)
 			}
@@ -1916,6 +1957,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 			}
 		}
+		cp.noteRounds(rounds)
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
@@ -2118,22 +2160,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		var respBody []byte
 		switch {
-		case isSSE && provider == bschemas.Anthropic:
+		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI)):
 			// Forward the events as they arrive and stop at the expand call, rather than
 			// buffering the response to find out whether it holds one. See ssepeek.go.
+			// Chat Completions with our own tool search (#879) takes the same splice: its text
+			// streams at once, and only a call to a proxy tool is held.
 			sse = true
 			if sp == nil {
-				sp = newSSESplicer(w)
+				if provider == bschemas.Anthropic {
+					sp = newSSESplicer(w)
+				} else {
+					sp = newChatSSESplicer(w)
+				}
 			}
 			sp.round(resp)
 			// The PREVIOUS round's withheld events, because pass is about to overwrite
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
-			respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			if searchOn {
+				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
+			} else {
+				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			}
 			resp.Body.Close()
 			switch {
-			case len(called) > 0 && sp.blocks == 0:
+			case len(called) > 0 && !sp.opened():
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -2166,16 +2218,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// Raw Responses-API events. The recorder translates only the Anthropic stream, so
 				// this turn is kept and marked incomplete rather than written with an empty
 				// response -- the same outcome as the other non-Anthropic stream path below.
-				recBody, recIsSSE = respBody, true
-			}
-		case isSSE && searchOn:
-			// Our search on Chat Completions: the stream is buffered, so a call to it can be answered
-			// in band (expand.AggregateSSE rebuilds the message). The client loses its stream
-			// for the requests of a thread with deferred tools; see #825.
-			sse, sseBuffered = true, true
-			respBody, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if h.recorder != nil {
 				recBody, recIsSSE = respBody, true
 			}
 		case isSSE:

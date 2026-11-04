@@ -66,6 +66,11 @@ type kaEntry struct {
 	// over the production window, that one change takes X=280 from **+$164.46 to −$241.99**,
 	// with ping cost tripling to $408.85.
 	startedAt time.Time
+	// gapStart is the start of the last REAL upstream request on this entry, which is the start of
+	// the current idle gap. Set once when a real request is recorded (the same instant as
+	// startedAt then); NEVER moved by a ping, a manual press or a substitute call, unlike
+	// startedAt. Every ping of one gap reports it as KeepAliveReport.Window.
+	gapStart time.Time
 	// st is the tenant's state store, held so a successful ping can record that it refreshed the
 	// provider's entry — see apply.RecordCacheTouch and issue #243. Held for the same interval as
 	// the masked body below, and for the same reason: the entry exists exactly between one request
@@ -155,8 +160,8 @@ type kaEntry struct {
 	// spent is what this session's pings have cost so far. Reported, never a cap — see
 	// Policy.MaxUSDPerPing for why the guard is per ping.
 	spent float64
-	// refreshed is what the last ping read from cache. It is the ceiling on what the next
-	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
+	// refreshed is what the last ping read from cache, reported on the next real request's
+	// row. The keep-alive's credit is the accountant library's rescue.
 	refreshed int64
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
@@ -925,7 +930,7 @@ func (k *Keeper) Record(r Record) {
 		emitter = components.NopEmitter{}
 	}
 	e := &kaEntry{
-		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt,
+		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt, gapStart: startedAt,
 		cred: r.Cred,
 		body: owned, endpoint: r.Endpoint,
 		st:       r.Store,
@@ -1307,7 +1312,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 				route: e.route, provider: e.provider, model: e.model,
 				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt})
+				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt, gapStart: e.gapStart})
 			continue
 		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
@@ -1353,7 +1358,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-			ping: e.pings, prevStartedAt: prevStartedAt})
+			ping: e.pings, prevStartedAt: prevStartedAt, gapStart: e.gapStart})
 	}
 	k.mu.Unlock()
 
@@ -1403,6 +1408,9 @@ type pingJob struct {
 	// until this ping expires" instead of "how close was this ENTRY to expiring" — answering a
 	// different, always-nearly-full-TTL question.
 	prevStartedAt time.Time
+	// gapStart is e.gapStart when the job was created: the idle gap this ping serves, reported as
+	// KeepAliveReport.Window. Unlike prevStartedAt it is the same for every ping of the gap.
+	gapStart time.Time
 }
 
 // fire sends one ping and accounts for it. Always fails open and quietly: the agent is not
@@ -1736,6 +1744,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// column that is blank because nobody filled it in is the same defect at a smaller
 			// scale.
 			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
+			Window:    j.gapStart,
 		})
 	}
 	return cost
