@@ -12,10 +12,12 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Our own tool search (#825), end to end on Chat Completions: a GPT model, the ultrahigh preset and
@@ -55,6 +57,9 @@ func (u *csUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	answer, reject := u.script[i], u.reject400
 	u.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if strings.HasPrefix(answer, "data:") {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
 	if reject && bytes.Contains(b, []byte(tooldefer.ClientSearchName)) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"error":{"message":"Invalid tools","type":"invalid_request_error"}}`)
@@ -388,5 +393,90 @@ func TestClientSearchRoundCapKeepsTheCall(t *testing.T) {
 	rec, ok := tooldefer.LoadSearch(h.deferEnv(h.static.Load()).RecordStore(), "s1", "")
 	if !ok || len(rec.Calls["as"]) != 1 || rec.Calls["as"][0] != "Monitor" {
 		t.Fatalf("the leaked call is not kept: %+v", rec)
+	}
+}
+
+// #879: on a streamed Chat Completions answer, text reaches the client as it arrives and only a call
+// to our search is held. The follow-up streams as the rest of the same answer.
+func TestClientSearchStreamsAndSplicesInBand(t *testing.T) {
+	r1 := ccRole("r1") + ccText("r1", "Let me look.") + ccCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
+		ccCallArgs("r1", 0, `{"names":["Workflow"]}`) + ccFinish("r1", "tool_calls") + ccUsage("r1") + ccDone
+	r2 := ccRole("r2") + ccCallStart("r2", 0, "c2", "Workflow") + ccCallArgs("r2", 0, `{"x":"go"}`) +
+		ccFinish("r2", "tool_calls") + ccUsage("r2") + ccDone
+	up := &csUpstream{script: []string{r1, r2}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body, _ := sjson.SetBytes(csBody("s1"), "stream", true)
+	st, out := csPost(t, srv, "s1", body)
+	if st != http.StatusOK || strings.Contains(out, tooldefer.ClientSearchName) {
+		t.Fatalf("client got %d %q", st, out)
+	}
+	if !strings.HasPrefix(out, ccRole("r1")+ccText("r1", "Let me look.")) {
+		t.Fatalf("the text must reach the client verbatim, ahead of the splice: %q", out)
+	}
+	if strings.Count(out, ccDone) != 1 || strings.Contains(out, `"id":"r2"`) {
+		t.Fatalf("the client must see one answer: %q", out)
+	}
+	msg, ok := expand.AggregateSSE("openai", []byte(out))
+	if !ok || gjson.GetBytes(msg, "choices.0.message.tool_calls.#").Int() != 1 ||
+		gjson.GetBytes(msg, "choices.0.message.tool_calls.0.function.name").String() != "Workflow" ||
+		gjson.GetBytes(msg, "choices.0.message.tool_calls.0.index").Exists() {
+		t.Fatalf("the client's answer: %s", msg)
+	}
+	if !strings.Contains(out, `"tool_calls":[{"index":0,"id":"c2"`) {
+		t.Fatalf("the follow-up's call keeps index 0 (the client holds no call before it): %q", out)
+	}
+	b := up.all()
+	if len(b) != 2 || !strings.HasSuffix(csTools(b[1]), tooldefer.ClientSearchName+",Workflow") {
+		t.Fatalf("rounds = %d", len(b))
+	}
+	if !strings.Contains(gjson.GetBytes(b[1], "messages.@reverse.0.content").String(), "Loaded: Workflow") {
+		t.Fatalf("follow-up has no answer: %s", gjson.GetBytes(b[1], "messages").Raw)
+	}
+	if g := h.deferGate(); g.AddBacks.Load() != 1 || g.MixedSearches.Load() != 0 {
+		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
+	}
+}
+
+// A streamed answer with no call of ours goes to the client byte for byte, in one upstream round.
+func TestClientSearchStreamTextPassesThrough(t *testing.T) {
+	r1 := ccRole("r1") + ccReason("r1", "hmm") + ccText("r1", "Hello") + ccFinish("r1", "stop") + ccUsage("r1") + ccDone
+	up := &csUpstream{script: []string{r1}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	body, _ := sjson.SetBytes(csBody("s1"), "stream", true)
+	if _, out := csPost(t, srv, "s1", body); out != r1 {
+		t.Fatalf("the client must get the stream byte for byte:\n got  %q\n want %q", out, r1)
+	}
+	if !tooldefer.HasClientSearch("openai", up.all()[0]) {
+		t.Fatal("the test needs a request that declares our search")
+	}
+}
+
+// A streamed mixed answer: the client's call streams, ours is handed back after it, and the next
+// request answers it, as on the buffered path.
+func TestClientSearchStreamMixedCall(t *testing.T) {
+	r1 := ccRole("r1") + ccCallStart("r1", 0, "c1", "Bash") + ccCallArgs("r1", 0, `{"x":"ls"}`) +
+		ccCallStart("r1", 1, "c2", tooldefer.ClientSearchName) + ccCallArgs("r1", 1, `{"names":["Monitor"]}`) +
+		ccFinish("r1", "tool_calls") + ccDone
+	up := &csUpstream{script: []string{r1}}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	body, _ := sjson.SetBytes(csBody("s1"), "stream", true)
+	if _, out := csPost(t, srv, "s1", body); out != r1 || len(up.all()) != 1 {
+		t.Fatalf("the client must get the mixed answer whole, in one round:\n got  %q", out)
+	}
+	if g := h.deferGate(); g.AddBacks.Load() != 1 || g.MixedSearches.Load() != 1 {
+		t.Fatalf("add_backs=%d mixed=%d", g.AddBacks.Load(), g.MixedSearches.Load())
 	}
 }
