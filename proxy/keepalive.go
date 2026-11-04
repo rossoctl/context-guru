@@ -307,6 +307,9 @@ func (k *keeper) LiveSessionKeys() []string {
 // startedAt is the instant the upstream request STARTED, per the provider's lifetime rule.
 // The body is the exact bytes that went upstream. The entry, the deadline and the turn count
 // are per thread; a session override still applies to every thread of its session.
+//
+// record is a shim for tests: it passes no touch alias. Production calls recordTouch, with the alias
+// apply derived from the arriving request.
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {

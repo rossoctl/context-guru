@@ -491,7 +491,11 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	sys, first := schema.SessionHead(norm)
 	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
-	res.TouchAlias = session.Scoped(o.Tenant, "", sys, first)
+	// The cold clock's key (the bare content hash), derived once. It is also the Trace's TouchAlias,
+	// so a keep-alive ping touches the key this request reads even when our own tool search puts
+	// the names list at the head afterwards (#902).
+	alias := session.Scoped(o.Tenant, "", sys, first)
+	res.TouchAlias = alias
 	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
@@ -518,7 +522,6 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
 			// metadata id when the body carries one, else the content hash. alias below stays
 			// the bare content hash for the cold decision's own clock (aliasSeen).
-			alias := session.Scoped(o.Tenant, "", sys, first)
 			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
 			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
 			// wrote it — the store's alias keys use that id.

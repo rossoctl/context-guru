@@ -503,9 +503,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
 	// The cold decision's clock key, derived ONCE from the transcript as it ARRIVED. It is also
 	// handed to the host on the Trace, so a keep-alive ping touches the key this request reads
-	// even when the host changes the head before sending (tool deferral, #902).
-	sys, firstUser := schema.SessionHead(norm)
-	alias := session.Scoped(o.Tenant, "", sys, firstUser)
+	// even when the host changes the head before sending (tool deferral, #902). With no explicit
+	// session id it IS the session id, so the head is not hashed twice.
+	alias := sessionID
+	if explicitSession(o.Session, body) != "" {
+		sys, firstUser := schema.SessionHead(norm)
+		alias = session.Scoped(o.Tenant, "", sys, firstUser)
+	}
 	tr.TouchAlias = alias
 	loadSessionState(st, sessionID)
 	o.resolveThread(tr, sessionID)

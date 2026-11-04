@@ -42,3 +42,46 @@ func TestAPingTouchesTheAliasTheHostHandedIn(t *testing.T) {
 		t.Fatalf("clock = %d, want the ping's start %d", got, now.UnixMilli())
 	}
 }
+
+func seenAt(t *testing.T, st store.Store, alias string) int64 {
+	t.Helper()
+	b, ok := st.Get(store.SeenPrefix + alias)
+	if !ok {
+		return 0
+	}
+	n, _ := strconv.ParseInt(string(b), 10, 64)
+	return n
+}
+
+// The manual ping (PingNow) touches the alias the host handed in, not one derived from the held body.
+func TestAManualPingTouchesTheAliasTheHostHandedIn(t *testing.T) {
+	k, _, clock := manualKeeper(t)
+	st := store.NewMemory(store.Options{})
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	e.st, e.touchAlias = st, "arriving-alias"
+	k.mu.Unlock()
+	res, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("PingNow: %v", err)
+	}
+	if got := seenAt(t, st, "arriving-alias"); got != res.StartedAt.UnixMilli() || got == 0 {
+		t.Fatalf("clock = %d, want the press's start %d", got, res.StartedAt.UnixMilli())
+	}
+	_ = clock
+}
+
+// The substitute booking touches it too.
+func TestASubstituteCallTouchesTheAliasTheHostHandedIn(t *testing.T) {
+	k, _, clock := manualKeeper(t)
+	st := store.NewMemory(store.Options{})
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	k.mu.Unlock()
+	j := pingJob{e: e, tenant: e.tenant, session: e.session, key: e.key, st: st, touchAlias: "arriving-alias",
+		raw: []byte(`{"messages":[{"role":"user","content":"x"}]}`)}
+	k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, clock.now(), 0)
+	if got := seenAt(t, st, "arriving-alias"); got != clock.now().UnixMilli() {
+		t.Fatalf("clock = %d, want %d", got, clock.now().UnixMilli())
+	}
+}
