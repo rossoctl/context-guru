@@ -704,3 +704,18 @@ func TestReplayCapStillRemovesAPositiveCreditPastTheCap(t *testing.T) {
 	nearEq(t, "past cap", c.PastCapUSD, 4)
 	nearEq(t, "counted", c.CountedUSD, -1) // +1 counted, -2 kept
 }
+
+// After the cap removes credit, a component whose costs exceed what is left must not print a gain: its replay
+// multiple is the amortized verdict over the first-removal credit, and a negative verdict is 0, as in
+// decomposeFromGroups (review of #893).
+func TestReplayLedgerRowKeepsTheReplayMultipleAtZeroForALoss(t *testing.T) {
+	row := &ComponentRow{Component: "extract_llm", SavedUSDFirstRemoval: 1, SavedUSDReplay: 3, SavedUSDCosts: -9}
+	l := walkReplayCap([]capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 3),
+	}, fixedWindow(1_000_000))
+	applyReplayLedgerToRow(row, l)
+	if row.ReplayMultiple < 0 {
+		t.Fatalf("ReplayMultiple = %g for a loss, want 0", row.ReplayMultiple)
+	}
+}

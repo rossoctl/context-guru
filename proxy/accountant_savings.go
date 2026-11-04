@@ -27,6 +27,14 @@ type clientHash struct {
 	bps  []accountant.Breakpoint
 }
 
+// drop forgets the client hash of a request that will never end: a panic between accBegin and accEnd makes the proxy
+// send the original body, and end is the only other place that removes the entry. Nil-safe.
+func (s *savingsTracker) drop(req *accountant.Request) {
+	if s != nil && req != nil {
+		s.clients.Delete(req)
+	}
+}
+
 func newSavingsTracker() *savingsTracker {
 	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore()}
 }

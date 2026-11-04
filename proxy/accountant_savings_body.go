@@ -38,11 +38,16 @@ func accBodies(raw []byte) accountant.Body {
 		add(&system, s)
 	}
 	gjson.GetBytes(raw, "messages").ForEach(func(_, v gjson.Result) bool { add(&msgs, v); return true })
-	b := accountant.NewBody(tools, system, msgs)
-	for i := range b.Pos {
-		b.Pos[i].Bytes = int32(sizes[i])
+	built := accountant.NewBody(tools, system, msgs)
+	for i := range built.Pos {
+		built.Pos[i].Bytes = int32(sizes[i])
 	}
-	return b
+	// NewBody also keeps a table of cumulative bytes, built from the mark-free input, which the library prefers to
+	// summing Pos[i].Bytes. A Body without that table sums the positions, so every byte count the library reads
+	// (the token ratio, the span of a splice, sawOriginal) is the wire size, as the operations' sizes are. A body
+	// decoded from a snapshot has no table either, so a restart changes nothing. The table is unexported: build the
+	// value again from the exported fields, which drops it (review of #893, finding 2).
+	return accountant.Body{Start: built.Start, Pos: built.Pos}
 }
 
 // withoutCacheMarks is one element's JSON without any cache_control: the element's own, and the ones on

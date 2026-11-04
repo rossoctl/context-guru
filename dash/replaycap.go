@@ -496,7 +496,7 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 	c.ReplayMultiple = 0
 	if c.SavedUSDFirstRemoval > 0 {
-		c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
+		c.ReplayMultiple = math.Max(c.SavedUSDDecomposed, 0) / c.SavedUSDFirstRemoval
 	}
 	c.ReplayCreditPastCapUSD = cl.PastCapUSD
 }

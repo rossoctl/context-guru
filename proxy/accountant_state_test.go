@@ -141,3 +141,21 @@ func TestNoResultWhyNamesTheBranch(t *testing.T) {
 		}
 	}
 }
+
+// A panic between accBegin and accEnd makes the proxy forward the original body and call accDrop. The client hash
+// begin kept for end must go with it: it holds the whole body (review of #893, finding 1).
+func TestAccDropForgetsTheClientHash(t *testing.T) {
+	s := newSavingsTracker()
+	held := func() (n int) { s.clients.Range(func(any, any) bool { n++; return true }); return }
+	meta := accountant.RequestMeta{RequestID: "r1", Session: "s", At: time.Unix(1000, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
+	c := &capture{savings: s}
+	c.accBegin(meta, benchBody())
+	if held() != 1 {
+		t.Fatalf("accBegin kept %d client hashes, want 1", held())
+	}
+	c.accDrop()
+	if held() != 0 || c.accReq != nil {
+		t.Fatalf("accDrop left %d client hashes and accReq %v", held(), c.accReq)
+	}
+	(*capture)(nil).accDrop() // nil-safe, as before
+}

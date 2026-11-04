@@ -347,3 +347,33 @@ func TestComputeSafeTurnsAPanicIntoNoResult(t *testing.T) {
 		t.Fatalf("a normal request did not price through computeSafe: ok=%v phase=%q", ok, res.Phase)
 	}
 }
+
+// A summary splices away messages and one of them carries the client's cache mark. The splice's SizeBefore is the
+// wire size (marks included), and the library compares it with the client span's bytes to guess whether the splice
+// saw the original (sawOriginal). If the Body's byte table leaves the marks out while Pos.Bytes keeps them, the
+// guess is wrong and the sum check fails: the request books no saving (review of #893, finding 2).
+func TestSavings_ASpliceOverAMarkedMessageKeepsTheSumCheck(t *testing.T) {
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	long := strings.Repeat("tool result ", 300)
+	m0, n0 := msg("user", long)
+	m1, n1 := msg("assistant", long)
+	masked, nMasked := msg("assistant", "[masked]")
+	m2raw := fmt.Sprintf(`{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]}`, long)
+	n2 := len(m2raw)
+	m3, _ := msg("assistant", "answer")
+	sum, nSum := msg("user", "[summary]")
+
+	// Request 1: a mask reduces message 1.
+	c.do(1, body(m0, m1, m2raw, m3), body(m0, masked, m2raw, m3), Usage{CacheWrite: 1800},
+		rewriteOp("cg:mask:a", 1, n1, nMasked))
+	// Request 2: a summary replaces messages 0 to 2 with one. Its SizeBefore counts the wire bytes of those
+	// three messages as the pipeline saw them: message 1 is already masked.
+	splice := accountant.Operation{Kind: accountant.KindRewrite, Operator: "context-guru.summarize", ChangeID: "cg:sum:a",
+		At:         accountant.Position{Section: accountant.SectionMessages, Index: 0},
+		SizeBefore: accountant.Size{Bytes: n0 + nMasked + n2}, SizeAfter: accountant.Size{Bytes: nSum},
+		MessageSplice: &accountant.MessageSplice{At: 0, Removed: 3, Inserted: 1}}
+	res := c.do(2, body(m0, m1, m2raw, m3), body(sum, m3), Usage{CacheWrite: 30}, splice)
+	for _, ch := range res.Checks {
+		t.Errorf("check %s failed: %+v", ch.Check, ch)
+	}
+}

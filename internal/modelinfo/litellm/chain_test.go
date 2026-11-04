@@ -291,7 +291,8 @@ func TestLiteLLMPriceFindsDatedAndWrappedIDs(t *testing.T) {
 		}
 	}
 	// A different model must not be mistaken for it: the date and the wrapper are stripped, nothing else.
-	for _, id := range []string{"claude-sonnet-5-5-20260101", "us.anthropic.totally-absent-xyz-v1:0"} {
+	// A plain id that ends in a version is a model of its own, not Bedrock's suffix.
+	for _, id := range []string{"claude-sonnet-5-5-20260101", "us.anthropic.totally-absent-xyz-v1:0", "claude-sonnet-5-v2"} {
 		if p, ok := l.Price(ctx, id); ok && p == want {
 			t.Errorf("Price(%q) resolved to claude-sonnet-5's price", id)
 		}

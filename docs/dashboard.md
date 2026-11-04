@@ -152,13 +152,15 @@ Limits:
   one: the proxy then starts empty, as before. A crash (kill -9) loses up to one minute of state. A
   request that follows a lost state is priced as a first request and carries the estimate flag. The
   library also drops the least recently used threads past its own bound; that is not saved or restored.
+  Two proxies must not share one dashboard database: they would write the same state file and the last writer wins.
 - A thread that continues another by content (a rewind, a fork) is priced as a first request. The
   proxy passes the parent thread to the library, but the library does not read it, so the new thread
   does not start from a copy of the parent's cache state (accountant design §4.1).
 - Every request is priced at the model's base rates. A model whose provider charges more above a prompt size
-  (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields, for example `claude-haiku-5-5` above 100k
-  and `claude-sonnet-4-5` above 200k) is under-priced on those requests: its cost and its saving both use the
-  base rate, so their ratio looks right and the dollars are low. Only a few Claude ids carry such a tier.
+  (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields) is under-priced on those requests: its
+  cost and its saving both use the base rate, so their ratio looks right and the dollars are low. Among Claude
+  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) and `claude-sonnet-4` and `claude-sonnet-4-5` a
+  200k tier (2x); Sonnet 5, Opus and Fable carry none. Models of other families carry tiers too.
   `MODEL_PRICES` sets one flat rate for a model, so it does not fix a tiered price.
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the

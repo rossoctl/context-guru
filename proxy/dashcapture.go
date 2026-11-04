@@ -725,6 +725,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// (acc_fallback reason no_result). The thread state is left as the
 	// previous request left it; the next request then sees a longer gap, which the library
 	// handles (a phase it cannot prove is unknown and falls back too).
+	// Whatever way the request ended, the client hash begin kept for end is not needed past here. end removes it
+	// on the normal path and accDrop on a recovered panic; this covers any path that reached neither.
+	defer c.savings.drop(c.accReq)
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
 		if c.rounds <= 1 {
@@ -854,6 +857,7 @@ func (c *capture) noteRounds(n int) {
 // accDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
 func (c *capture) accDrop() {
 	if c != nil {
+		c.savings.drop(c.accReq)
 		c.accReq = nil
 	}
 }

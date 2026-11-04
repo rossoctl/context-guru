@@ -337,8 +337,13 @@ var (
 // undecorate removes a dated or Bedrock-wrapped id's decoration: the vendor prefix, the version suffix and the
 // release date. The result is looked up as an exact key, so a different model (claude-sonnet-5-5 against
 // claude-sonnet-5) is never reached by it.
+//
+// The version suffix (-v1:0) is stripped only from an id that carried a vendor prefix: that is Bedrock's form. A
+// plain id such as claude-x-v2 may be a model of its own, and would take the price of claude-x.
 func undecorate(id string) string {
-	id = decoVendor.ReplaceAllString(id, "")
-	id = decoBedrock.ReplaceAllString(id, "")
-	return decoDate.ReplaceAllString(id, "")
+	bare := decoVendor.ReplaceAllString(id, "")
+	if bare != id {
+		bare = decoBedrock.ReplaceAllString(bare, "")
+	}
+	return decoDate.ReplaceAllString(bare, "")
 }
