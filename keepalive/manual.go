@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
 )
@@ -111,7 +110,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	mask(raw)
 	job := pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref, route: e.route,
 		provider: e.provider, model: e.model, tenant: e.tenant, session: e.session,
-		thread: e.thread, st: e.st, emitter: e.emitter,
+		thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
 		// The gap this press serves began at the last real request; a press never moves it.
 		gapStart: e.gapStart}
 	endpoint, prefix, agent, preset := e.endpoint, e.prefix, e.agent, e.preset
@@ -166,7 +165,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		res.AvoidedUSD = r.RewriteUSD
 		// A ping that read the entry refreshed it; one that wrote refreshed nothing that was there.
 		// The same rule record1 applies, and the same two clocks it moves.
-		apply.RecordCacheTouch(job.st, job.tenant, raw, job.provider, start.UnixMilli())
+		job.touch(job.provider, start.UnixMilli())
 		k.mu.Lock()
 		e.refreshedAt = start
 		// An automatic entry's schedule restarts from a ping that read the cache. A manual-only hold does

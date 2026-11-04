@@ -310,6 +310,16 @@ func (k *keeper) LiveSessionKeys() []string {
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
+	k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK)
+}
+
+// recordTouch is record with the liveness-clock alias apply derived from the ARRIVING request
+// (apply.Trace.TouchAlias). The body here went through tool deferral, which changes the head the
+// alias hashes, so a ping that re-derived the alias from it would touch a key the request never
+// reads (#902). "" falls back to deriving it from the body.
+func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
+	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
+	u Usage, usageOK bool) {
 	if k == nil || tn == nil {
 		return
 	}
@@ -391,7 +401,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
 	// Built before `recorded` is set, so a panic evaluating any of its fields still departs.
-	rec := keepalive.Record{Key: key, StartedAt: startedAt, Body: body,
+	rec := keepalive.Record{Key: key, StartedAt: startedAt, Body: body, TouchAlias: touchAlias,
 		Cred: cred, Client: client,
 		Provider: provider, Endpoint: up.base, Route: route, Status: status,
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
