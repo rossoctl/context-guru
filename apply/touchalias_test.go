@@ -29,9 +29,25 @@ const deferredShape = `{"model":"claude-sonnet-5","tools":[` +
 	`{"role":"system","content":"the environment block"},` +
 	`{"role":"user","content":"go on"}]}`
 
-func deferBody(t *testing.T) (pre, post []byte) {
+// insertedShape: messages[1] is NOT a system message, so placeList INSERTS a new system message at
+// index 1, and the first system message (the alias input) goes from none to the names list.
+const insertedShape = `{"model":"claude-sonnet-5","tools":[` +
+	`{"name":"Read","description":"r","input_schema":{"type":"object"}},` +
+	`{"name":"Bash","description":"b","input_schema":{"type":"object"}},` +
+	`{"name":"mcp__x__one","description":"o","input_schema":{"type":"object"}},` +
+	`{"name":"mcp__x__two","description":"t","input_schema":{"type":"object"}}],` +
+	`"messages":[{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
+	`"cache_control":{"type":"ephemeral"}}]},` +
+	`{"role":"assistant","content":"ok"},{"role":"user","content":"go on"}]}`
+
+var shapes = map[string]string{"messages[1] is system (list appended)": deferredShape,
+	"messages[1] is not system (list inserted)": insertedShape}
+
+func deferBody(t *testing.T) (pre, post []byte) { return deferBodyOf(t, deferredShape) }
+
+func deferBodyOf(t *testing.T, shape string) (pre, post []byte) {
 	t.Helper()
-	pre = []byte(deferredShape)
+	pre = []byte(shape)
 	post, names, ok := tooldefer.Rewrite(pre, map[string]bool{"mcp__x__one": true, "mcp__x__two": true})
 	if !ok || len(names) == 0 {
 		t.Fatalf("fixture: tooldefer.Rewrite deferred nothing (ok=%v names=%v)", ok, names)
@@ -40,19 +56,23 @@ func deferBody(t *testing.T) (pre, post []byte) {
 }
 
 func TestDeferralChangesTheAliasTheKeeperWouldDerive(t *testing.T) {
-	pre, post := deferBody(t)
-	a, b := aliasFor(t, "t1", pre), aliasFor(t, "t1", post)
-	if a == b {
-		t.Fatalf("the alias is the same (%s) before and after deferral: the cause of #902 is something else", a)
+	for name, shape := range shapes {
+		t.Run(name, func(t *testing.T) {
+			pre, post := deferBodyOf(t, shape)
+			a, b := aliasFor(t, "t1", pre), aliasFor(t, "t1", post)
+			if a == b {
+				t.Fatalf("the alias is the same (%s) before and after deferral: the cause of #902 is something else", a)
+			}
+		})
 	}
 }
 
 // coldAfterPing runs the real request path twice around a ping touch and returns the second
 // request's ColdCache. The ping lands 4m after the first request, the second request 8m after it:
 // without the ping that is past TTL + margin, with it the entry is 4m old.
-func coldAfterPing(t *testing.T, touch func(st store.Store, pre, post []byte, at int64)) bool {
+func coldAfterPing(t *testing.T, shape string, touch func(st store.Store, pre, post []byte, at int64)) bool {
 	t.Helper()
-	pre, post := deferBody(t)
+	pre, post := deferBodyOf(t, shape)
 	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 	var seen []bool
 	pipe := components.NewPipeline([]components.Component{coldSpy{seen: &seen}}, nil)
