@@ -2827,6 +2827,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.Pipeline = h.pipe.Names()
 		snap.PipelineLen = len(snap.Pipeline)
 	}
+	// The preset the proxy runs, same single-tenant rule as the pipeline above.
+	if h.opts.Tenants == nil {
+		if tn := h.static.Load(); tn != nil {
+			snap.Preset = tn.Preset
+		}
+	}
 	// The expand-induced prefix flip, published beside the freeze-replay counters because it is the
 	// same mechanism seen from the other side: a replay that DIDN'T happen because the agent
 	// expanded content that was compacted before. See metrics.Snapshot.

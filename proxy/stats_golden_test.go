@@ -27,6 +27,8 @@ var statsGoldenTopLevel = []string{
 	// no components" and `null` means "no single pipeline describes this endpoint" (multi-tenant).
 	"pipeline",
 	"pipeline_len",
+	// The preset the proxy runs, so the plugin can show a saved preset that waits for a restart.
+	"preset",
 	// Stray calls the agent made to the proxy-injected adjudication tool. Added to the reviewed
 	// contract rather than loosening the assertion, per the rule above: it is the only figure that
 	// can show a "do not call this yourself" description having stopped working.
@@ -339,6 +341,21 @@ func TestStatsComponentShapeIsUnchanged(t *testing.T) {
 	// meaningless to a consumer.
 	if have["seenKeys"] || have["seen_keys"] {
 		t.Error("the unique-savings working set leaked into /stats")
+	}
+}
+
+// TestStatsReportsTheRunningPreset pins the value, not only the key: the plugin compares it with the
+// saved preset, so a wrong or empty value shows a false "after a restart" note.
+func TestStatsReportsTheRunningPreset(t *testing.T) {
+	h := New(nil, nil, metrics.NewAggregator(), Options{Preset: "ultrahigh"})
+	w := httptest.NewRecorder()
+	h.stats(w, httptest.NewRequest("GET", "/stats", nil))
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["preset"] != "ultrahigh" {
+		t.Errorf("/stats preset = %v; want ultrahigh", got["preset"])
 	}
 }
 
