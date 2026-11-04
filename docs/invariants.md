@@ -129,12 +129,25 @@ costs a turn and the tokens it returns. A rising rate means a component removes 
 
 | # | Kind | Statement | Signal | Threshold (proposed) | Laptop baseline | cg2 baseline |
 |---|---|---|---|---|---|---|
-| E1 | side effect | The agent rarely needs a removed output back from the sweep. | `sum(sweep_expands)` / the sweep's removals (`events.sweep_applied_cold`) | to set from the cg2 baseline | W1: 0 expands for 841 removals. W3: to measure | pending (subagent) |
-| E2 | side effect | The agent rarely needs a removed output back from `extract_llm`. | **Gap G9.** `expands` is the total for all components. `expands − sweep_expands` also holds `extract`, `dedup` and the other offloads. | to set | W1: 3 expands in total | pending (subagent) |
-| E3 | side effect | An expand of a sweep removal is counted as a false drop once. | `sum(sweep_false_expands)` ≤ `sum(sweep_expands)` | any row where it is greater | 0 and 0 | pending |
+| E1 | side effect | The agent rarely needs a removed output back from the sweep. | `sum(sweep_expands)` per 100 sweep removals (`events.sweep_applied_cold`) | over 5 per 100 removals over 7 days | 2026-10-27 to 11-04: **0 expands for 1,153 removals** | **6 per 337 removals = 1.78 per 100** (5 of them false drops = 1.48 per 100), 22,564 tokens back |
+| E2 | side effect | The agent rarely needs a removed output back from `extract_llm`. | **Gap G9.** No expand can be tied to `extract_llm`. The upper bound is `expands − sweep_expands`, which also holds `extract`, `dedup`, `searchfold`, `textclean`, `cmdfilter` and the other offloads. | none until G9 is fixed: the upper bound is too loose | at most 3 for 5 fresh `extract_llm` removals | **at most 7 for 8 fresh `extract_llm` removals** (428 replays, 20,151 tokens saved) |
+| E3 | contract | A sweep expand is counted as a false drop at most once. | rows with `sweep_false_expands > sweep_expands`, and rows with `sweep_expands > expands` | any row | 0 and 0 | 0 and 0 |
+| E4 | side effect | Expands stay rare in total. | `sum(expands)` per 1,000 real requests | over 3 per 1,000 over 7 days | 0.29 per 1,000 (3 of 10,490) | **0.97 per 1,000** (13 of 13,338; 0.07% of requests) |
 
-- **The cg2 baseline goes into the internal repo**, with tenants as T1 to Tn. Only the fleet
-  totals may come here.
+- **The cg2 window is short.** The scan ran on 2026-11-04. The cg2 database held 2 days. Nearly
+  all traffic is on one day: 12,200 of 13,338 real requests, and 335 of the 337 sweep removals.
+  98% of requests are on preset `xhigh`. Run the scan again after 7 days before you set the
+  thresholds.
+- **Why the `extract_llm` number is weak:** `expand` gives back the stored bytes for a hash, and it
+  records no component (`expand/expand.go`, `Resolve`). Only the sweep keeps its own ledger of
+  removals, so only the sweep's expands can be counted apart
+  (`components/offload/extract_sweep_apply.go`, `NoteSweepExpand`).
+- **A fresh `extract_llm` removal** is a request where it acted and saved tokens. A replay of an
+  earlier removal saves 0 tokens and is not counted.
+- **The per-tenant numbers stay private.** They go into the internal repo only, with tenants as
+  T1 to Tn.
+- **The script:** read-only, metadata only. It makes a backup copy of the cg2 database, reads the
+  copy, prints aggregates, and deletes the copy.
 
 ## Other components that run on the laptop
 
@@ -315,7 +328,7 @@ pays one cache rewrite. 3 reasons:
 ## Monitor spec (draft)
 
 - **Daily:** K1, K3, K4, K7, K8, S1, X1, X4, T1, T2, T3, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, and the per-component activity table.
+- **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, E1, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
