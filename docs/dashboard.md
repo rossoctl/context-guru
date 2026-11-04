@@ -126,6 +126,9 @@ When the library cannot price an event, the event books **no saving**, and the p
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
 measured is not shown.
 
+For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
+`upstream_rounds=N` (an expand loop) or `compute_panicked`.
+
 `unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
 `messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
 Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the

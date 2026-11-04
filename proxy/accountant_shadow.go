@@ -11,10 +11,16 @@ import (
 // logFallback writes the acc_fallback line for an event the accountant library could not price, so it
 // books no saving,
 // with the reason (dash.Fallback*).
-func logFallback(e *dash.Event) {
+//
+// why is set for no_result only: it names which of that reason's causes applied (noResultWhy).
+func logFallback(e *dash.Event, why string) {
 	r, _ := e.AccountantResult()
-	slog.Info("acc_fallback", "session", e.SessionID, "thread", e.ThreadID,
-		"reason", e.AccountantFallback(), "checks", checkNames(r), "recomputed", r.Recomputed)
+	attrs := []any{"session", e.SessionID, "thread", e.ThreadID,
+		"reason", e.AccountantFallback(), "checks", checkNames(r), "recomputed", r.Recomputed}
+	if why != "" && e.AccountantFallback() == dash.FallbackNoResult {
+		attrs = append(attrs, "why", why)
+	}
+	slog.Info("acc_fallback", attrs...)
 }
 
 // checkNames lists the names of the failed library checks, comma-separated, in order.

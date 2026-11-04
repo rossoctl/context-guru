@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,6 +131,8 @@ type capture struct {
 	accReq *accountant.Request
 	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
 	accUnsupportedWire bool
+	// accNoResult says why no Result was attached when Compute was reached and gave none.
+	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
@@ -727,6 +730,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		if c.rounds <= 1 {
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
+			} else {
+				c.accNoResult = "compute_panicked"
 			}
 			// The ping facts were read for this request; now that it is priced they are spent.
 			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
@@ -738,7 +743,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.PriceMode(price, usageOK && priced)
 	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
-		logFallback(e)
+		logFallback(e, c.noResultWhy(usageOK))
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
 		cgPrice, cgPriced := price, priced
@@ -851,4 +856,20 @@ func (c *capture) accDrop() {
 	if c != nil {
 		c.accReq = nil
 	}
+}
+
+// noResultWhy names the branch that left an event with no accountant Result, for the acc_fallback line. The reason
+// no_result covers four unrelated things, and the log line used to say only that.
+func (c *capture) noResultWhy(usageOK bool) string {
+	switch {
+	case c.accReq == nil:
+		return "no_record" // no session, or the pipeline did not run: accBegin never opened a record
+	case !usageOK:
+		return "no_usage"
+	case c.rounds > 1:
+		return "upstream_rounds=" + strconv.Itoa(c.rounds)
+	case c.accNoResult != "":
+		return c.accNoResult
+	}
+	return ""
 }

@@ -119,3 +119,25 @@ func TestSavingsEndReusesTheClientHashOnlyForIdenticalBytes(t *testing.T) {
 		t.Fatalf("the reused hash differs from a fresh one")
 	}
 }
+
+// The reason no_result stands for four unrelated things. The log line names which one applied, so the next
+// first-request-on-a-warm-cache case (review of #768, major 5) names its own cause.
+func TestNoResultWhyNamesTheBranch(t *testing.T) {
+	rec := &accountant.Request{}
+	for _, tc := range []struct {
+		name string
+		c    capture
+		ok   bool
+		want string
+	}{
+		{"no record", capture{}, true, "no_record"},
+		{"no usage", capture{accReq: rec}, false, "no_usage"},
+		{"expand rounds", capture{accReq: rec, rounds: 3}, true, "upstream_rounds=3"},
+		{"compute panicked", capture{accReq: rec, rounds: 1, accNoResult: "compute_panicked"}, true, "compute_panicked"},
+		{"nothing wrong", capture{accReq: rec, rounds: 1}, true, ""},
+	} {
+		if got := tc.c.noResultWhy(tc.ok); got != tc.want {
+			t.Errorf("%s: why = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
