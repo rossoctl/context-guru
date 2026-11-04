@@ -328,8 +328,9 @@ def configure(args):
 def ask_defer_probe(port):
     """For ultrahigh: ask the proxy to run tool deferral's provider check at the next request (#485).
 
-    On OpenAI models deferral does not run in v1, so the proxy ignores the ask there; it is sent the
-    same way as in the Claude Code plugin so the two pickers behave alike. Never raises.
+    On models that are not Claude the proxy ignores the ask: Context Guru's own search tool runs there
+    and needs no provider check (#825). It is sent the same way as in the Claude Code plugin so the
+    two pickers behave alike. Never raises.
     """
     if not port:
         return "no_port"
