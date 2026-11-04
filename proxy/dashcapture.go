@@ -725,7 +725,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
 		if c.rounds <= 1 {
-			e.SetAccountant(c.savings.compute(c.accReq, usage))
+			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
+				e.SetAccountant(res)
+			}
 			// The ping facts were read for this request; now that it is priced they are spent.
 			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
 		}

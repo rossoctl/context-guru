@@ -319,3 +319,24 @@ func TestSavings_ASplitOfAnUnchangedSystemBlockBooksNothingWhenTheMarkMoves(t *t
 		}
 	}
 }
+
+// The library asks the host to wrap Compute, and the repo's rule is to fail open (context-guru#768, major 1).
+// A panic in Compute used to unwind through finish and lose the request's log line and its dashboard row.
+// computeSafe turns it into "no result": the request is recorded with no saving. A nil request is a panic the
+// test can cause on purpose; the real library has none that anyone has triggered.
+func TestComputeSafeTurnsAPanicIntoNoResult(t *testing.T) {
+	s := newSavingsTracker()
+	if _, ok := s.computeSafe(nil, Usage{CacheRead: 10}); ok {
+		t.Fatal("a panic in Compute was reported as a result")
+	}
+	// A real request still prices, through the same wrapper.
+	c := accRun{s, accountant.Thread{ID: "main"}}
+	m0 := mustMsg("user", "hi")
+	req := c.s.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", At: time.Unix(1000, 0),
+		Billing: accountant.Billing{Mode: accountant.BillingAPI}}, body(m0))
+	c.s.end(req, c.th, body(m0), nil, accFacts)
+	res, ok := c.s.computeSafe(req, Usage{FreshInput: 10, CacheWrite: 100})
+	if !ok || res.Phase == "" {
+		t.Fatalf("a normal request did not price through computeSafe: ok=%v phase=%q", ok, res.Phase)
+	}
+}
