@@ -484,7 +484,9 @@ func TestClientSearchStreamMixedCall(t *testing.T) {
 // Codex declares its own tool_search (#876): the request goes through unchanged, ours is not added,
 // and the tools its search loaded (echoed in `input`) count as a use in the history.
 func TestClientSearchNativeSearchLeftAlone(t *testing.T) {
-	up := &csUpstream{script: []string{csText("ok")}}
+	up := &csUpstream{script: []string{`{"id":"resp_x","object":"response","status":"completed","output":[` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],` +
+		`"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":0}}}`}}
 	us := httptest.NewServer(up)
 	defer us.Close()
 	h := csHandler(t, "ultrahigh", us.URL)
@@ -509,7 +511,8 @@ func TestClientSearchNativeSearchLeftAlone(t *testing.T) {
 	resp.Body.Close()
 	sent := up.all()
 	if len(sent) != 1 || bytes.Contains(sent[0], []byte(tooldefer.ClientSearchName)) ||
-		bytes.Contains(sent[0], []byte("defer_loading")) || !bytes.Contains(sent[0], []byte(`"Workflow"`)) {
+		bytes.Contains(sent[0], []byte("defer_loading")) || !bytes.Contains(sent[0], []byte(`"Workflow"`)) ||
+		!bytes.Contains(sent[0], []byte(`{"type":"tool_search","execution":"client"}`)) {
 		t.Fatalf("native search request was changed: %s", sent)
 	}
 	if s := h.toolDefer().hist.UserSessions("", "", 1); len(s) == 0 || !s[0].Used["Loaded1"] {

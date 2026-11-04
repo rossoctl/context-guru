@@ -326,9 +326,9 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 		return o, nil
 	case NativeSearch(wire, r.Orig):
 		// A native search tool is used when there is one; ours is added only when there is none.
-		// OpenAI refuses a second tool_search with a 400. And the client's own search (Codex's, in
-		// client mode) loads only the tools the client deferred itself, so a tool we removed from
-		// `tools` would be out of its reach. Nothing is deferred here (#876).
+		// The client's own search (Codex's, in client mode) loads only the tools the client
+		// deferred itself, so a tool we removed from `tools` would be out of its reach. Nothing is
+		// deferred here (#876).
 		o.Why = "native_search"
 		return o, nil
 	case env.Gate.Broken(r.Tenant, r.Model):
