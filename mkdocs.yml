@@ -134,6 +134,7 @@ nav:
   - Components:
       - Overview: components.md
       - Choose a preset: reference/presets.md
+      - Tool search matrix: tool-search-matrix.md
       - Reformat components: components/reformat.md
       - Prompt caching: components/caching.md
       - "Offload: deterministic reducers": components/offload-reducers.md

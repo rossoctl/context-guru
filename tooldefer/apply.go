@@ -43,6 +43,9 @@ type Req struct {
 	Body []byte
 	// Probe names the probe verdict that gates a NEW decision.
 	Probe ProbeKey
+	// ClientProbe names the verdict that gates client-search mode (#898); the zero key means the
+	// host has none, and the mode is off.
+	ClientProbe ProbeKey
 	// Keep is the account's keep list; AlwaysDefer its always-defer list (#878).
 	Keep, AlwaysDefer []string
 	// AccountOff is the account opt-out (toolfilter.defer: off).
@@ -65,6 +68,19 @@ type Outcome struct {
 	Decided, Rebuilt bool
 	// NeedProbe asks the host to start a probe for Req.Probe (no verdict, or a stale one).
 	NeedProbe bool
+	// NeedClientProbe asks for a probe of Req.ClientProbe (ClientProbeBody).
+	NeedClientProbe bool
+	// Client is true when the thread runs in client-search mode. Loads is the deferred tools the
+	// answers written on this request loaded, and Answered how many calls got a new answer.
+	Client   bool
+	Loads    []string
+	Answered int
+	// ClientDisabled is the reason client-search mode was disabled on this request ("" if not), and
+	// DescHash the ToolSearch description hash it concerns. The host logs the pair.
+	ClientDisabled, DescHash string
+	// Direct is the deferred tools the transcript calls with no search having loaded them: they
+	// worked, so they are uses.
+	Direct []string
 }
 
 // Apply defers the thread's set on one request. Fail open: on any problem Body is the input.
@@ -127,6 +143,25 @@ func Apply(env Env, r Req) (o Outcome) {
 			// stale verdict is still used until the new one lands; a Fail must not last forever.
 			o.NeedProbe = v == Unknown || env.Prober.Stale(r.Probe)
 		}
+		client, unknownHash := false, false
+		if env.Prober != nil && r.ClientProbe != (ProbeKey{}) && HasClientToolSearch(r.Orig) {
+			h := DescHash(r.Orig)
+			o.DescHash = h
+			switch {
+			case !KnownDescHash(h):
+				// A ToolSearch whose syntax the proxy has not verified: defer nothing on this thread.
+				unknownHash = true
+				if env.Gate.DisableClient(r.Tenant, h, ReasonUnknownDescription) {
+					o.ClientDisabled = ReasonUnknownDescription
+				}
+			case env.Gate.ClientDisabled(r.Tenant, h):
+				unknownHash = true
+			default:
+				cv := env.Prober.Verdict(r.ClientProbe)
+				o.NeedClientProbe = cv == Unknown || env.Prober.Stale(r.ClientProbe)
+				client = cv == Pass
+			}
+		}
 		in := Input{Tenant: r.Tenant, Project: r.Project, Body: r.Orig, Session: r.Session, Keep: r.Keep,
 			AlwaysDefer: r.AlwaysDefer}
 		switch {
@@ -135,10 +170,18 @@ func Apply(env Env, r Req) (o Outcome) {
 			// A thread with assistant turns but no record and no search of ours (a fork, or a resume
 			// under a new session id) is a first request too: the records are durable, so a missing
 			// one means a new thread, and only our own search turn proves an earlier set.
-			if v != Pass {
+			switch {
+			case unknownHash:
+				o.Why = "client_search_disabled"
+				rec = Record{} // decided: nothing, for this whole thread
+			case client:
+				// Claude Code's own search, answered by us: the server-side search is not needed, so
+				// its probe does not gate the thread.
+				rec = Record{Deferred: Decide(env.History, in), Client: true}
+			case v != Pass:
 				o.Why = "probe_" + v.String()
 				rec = Record{} // decided: nothing, for this whole thread
-			} else {
+			default:
 				rec = Record{Deferred: Decide(env.History, in)}
 			}
 			o.Decided = true
@@ -176,12 +219,55 @@ func Apply(env Env, r Req) (o Outcome) {
 	for _, n := range rec.Deferred {
 		set[n] = true
 	}
-	out, names, changed := Rewrite(r.Body, set)
+	if rec.Client && !HasClientToolSearch(r.Body) {
+		// The thread was set up for the client's search and this request has none: no way to load a
+		// deferred tool. Send the request as it is.
+		o.Why = "client_search_gone"
+		return o
+	}
+	out, names, changed := rewrite(r.Body, set, rec.Client)
 	if !changed {
 		o.Why = "rewrite_declined"
 		return o
 	}
+	if rec.Client {
+		o.Client = true
+		a := AugmentSearches(rs, r.Session, r.Thread, out, set)
+		reason := ""
+		switch {
+		case a.Bad:
+			reason = ReasonNonSelectQuery
+		}
+		if reason == "" {
+			// A break is a call to a deferred tool whose own result says it is not loaded. A call no
+			// search loaded that worked is a use (the API accepts it), counted as a direct call.
+			// A tool tool_choice kept loaded on this request is declared in full, so it never breaks.
+			broke, direct := ReadCalls(a.Body, set)
+			if broke && !forcedAny(r.Orig, set) {
+				reason = ReasonBreak
+			}
+			o.Direct = direct
+		}
+		if reason != "" {
+			// A format change. Disable the description hash and stop deferring on this thread. This
+			// changes `tools` once, so the live thread pays one cache rewrite, on purpose: a broken
+			// load costs the model its turns until the end of the thread. We never switch to another
+			// search tool.
+			h := DescHash(r.Orig)
+			env.Gate.DisableClient(r.Tenant, h, reason)
+			Save(rs, r.Session, r.Thread, Record{})
+			o.Client, o.Why, o.ClientDisabled, o.DescHash = false, "client_search_disabled", reason, h
+			return o
+		}
+		out, o.Loads, o.Answered = a.Body, a.Loads, a.Answered
+	}
 	loaded := Loaded(r.Orig)
+	if rec.Client {
+		// The references the proxy wrote (now or on an earlier request, replayed) load tools too.
+		for n := range Loaded(out) {
+			loaded[n] = true
+		}
+	}
 	weigh := map[string]bool{}
 	for _, n := range names {
 		if !loaded[n] {
@@ -196,10 +282,20 @@ func Apply(env Env, r Req) (o Outcome) {
 	})
 	o.Body, o.Changed, o.Deferred = out, true, names
 	o.ListTokens = tokens.Count(NamesList(names))
+	if rec.Client {
+		o.ListTokens = tokens.Count(ClientToolNamesList(names))
+	}
 	if env.Gate != nil {
 		env.Gate.Deferred.Add(1)
 	}
 	return o
+}
+
+// forcedAny reports whether tool_choice forces one of the thread's deferred tools: Rewrite keeps a
+// forced tool loaded for that request, so its call is no proof of a break.
+func forcedAny(body []byte, set map[string]bool) bool {
+	f := forcedTool(body)
+	return f != "" && set[f]
 }
 
 // SearchesIn reads one response message (an Anthropic message object): how many server-side
