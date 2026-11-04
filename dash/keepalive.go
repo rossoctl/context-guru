@@ -198,14 +198,28 @@ func kaSavedGate(alias, pingFloor string) string {
 	// The `> 0` FIRST is not style: it short-circuits the probe to the credited rows. Measured on
 	// a 2.1 GB database, a full-table SUM is 314 ms this way and 61.9 SECONDS with the EXISTS
 	// first, for the identical answer. Do not reorder.
-	return `(CASE WHEN ` + col + ` > 0 AND EXISTS (
+	probe := func(touched string) string {
+		return `EXISTS (
 			SELECT 1 FROM requests kp
-			WHERE kp.keepalive = 1 AND kp.cache_read > 0
+			WHERE kp.keepalive = 1 AND ` + touched + `
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
 			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
-		alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)
-		THEN ` + col + ` ELSE 0 END)`
+			alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)`
+	}
+	// A row the accountant library priced carries a credit the library gave from usage: it credits a rescue
+	// when the ping RE-CREATED an expired entry and the next request read what the ping wrote (accountant
+	// case keepalive/ping-miss-restarts-clock/5m). So for such a row a ping that wrote reached the entry as
+	// well as one that read it, and the test is cache_read > 0 OR cache_write > 0. The strict test above
+	// stays for every other row: the legacy write path credited a row on keepalive_pings alone, and a ping
+	// that only re-created the entry earned it a credit it did not deserve (context-guru#768 B4).
+	//
+	// The order is still load-bearing: col > 0 first, so a probe runs once per CREDITED row. The library test
+	// is a second EXISTS inside the same AND, and it runs only for a row the strict probe refused.
+	libraryPriced := `EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = ` + alias + `id AND c.priced_by = '` +
+		PricedByAccountant + `')`
+	return `(CASE WHEN ` + col + ` > 0 AND (` + probe(`kp.cache_read > 0`) + ` OR (` + libraryPriced + ` AND ` +
+		probe(`kp.cache_write > 0`) + `)) THEN ` + col + ` ELSE 0 END)`
 }
 
 // KeepAliveCoverage is the "is this figure a measurement or an absence?" statement that

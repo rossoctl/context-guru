@@ -1061,3 +1061,93 @@ func TestDecompositionSumsTheAccountantSplitAsStored(t *testing.T) {
 		t.Fatalf("an accountant row was estimated again: %v", c.SavedUSDEstimated)
 	}
 }
+
+// NetUSDFirstRemoval is documented as what the proxy's /stats reports, and /stats reports saved_usd, which nets
+// the costs a component caused (added tokens, breaks). Leaving them out showed a component that loses money as a
+// gain: saved_usd -$0.0302 beside net_usd_first_removal +$0.0113 (context-guru#768 B6).
+func TestTheFirstRemovalVerdictIncludesTheCostsAComponentCaused(t *testing.T) {
+	db := openTestDB(t)
+	// First removal +0.0100, replay +0.0050, and a break costs -0.0600: saved_usd is -0.0450.
+	e := &Event{TS: 1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 20000, TokensAfter: 19000, FreshInput: 5, CacheRead: 40000, OutputTokens: 50,
+		TokenAccounting: AccountingComplete,
+		Components: []CompRow{{Component: "extract", Acted: true, Mutated: true, SavedGross: 1000, SavedUnique: 1000,
+			SavedUSD: -0.0450, SavedFirstUSD: 0.0100, SavedReplayUSD: 0.0050, PricedBy: PricedByAccountant}}}
+	insertReq(t, db, e)
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	c := rows[0]
+	nearEq(t, "costs", c.SavedUSDCosts, -0.0600)
+	nearEq(t, "first removal", c.SavedUSDFirstRemoval, 0.0100)
+	if c.NetUSDFirstRemoval >= 0 {
+		t.Fatalf("net_usd_first_removal = %g for a component whose saved_usd is %g: a loss must not read as a gain",
+			c.NetUSDFirstRemoval, c.SavedUSD)
+	}
+	// 0.0100 first removal - 0.0600 costs, and the component has no LLM spend of its own.
+	nearEq(t, "verdict", c.NetUSDFirstRemoval, -0.0500)
+	// The amortized verdict is -0.0450 too, so the factor between the two is not a gain: it printed 1.5x.
+	if c.ReplayMultiple != 0 {
+		t.Fatalf("replay_multiple = %g for a component whose amortized verdict is %g, want 0", c.ReplayMultiple, c.SavedUSDDecomposed)
+	}
+}
+
+// A request the accountant could not price books no saving: its components carry priced_by='none' and a stored
+// saved_usd of 0. The component still removed content there, so the saving is unknown, not zero. It was counted
+// nowhere: saved_usd_unpriced_rows stayed 0 and the column printed a confident $0 beside "accounting complete"
+// (context-guru#768 B8: 5 requests, 5,000 tokens removed, all priced_by none).
+func TestAComponentWhoseRequestsAllFellBackIsUnpricedNotZero(t *testing.T) {
+	db := openTestDB(t)
+	for i := 0; i < 5; i++ {
+		e := &Event{TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 20000, TokensAfter: 19000, FreshInput: 5, CacheRead: 40000, OutputTokens: 50,
+			TokenAccounting: AccountingComplete,
+			Components: []CompRow{{Component: "extract", Acted: true, Mutated: true, SavedGross: 1000, SavedUnique: 1000,
+				PricedBy: PricedByNone}}}
+		insertReq(t, db, e)
+	}
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EstimateComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	c := rows[0]
+	if c.SavedUSD != 0 {
+		t.Fatalf("saved_usd = %g, want the stored 0", c.SavedUSD)
+	}
+	if c.SavedUSDUnpricedRows != 5 {
+		t.Fatalf("saved_usd_unpriced_rows = %d, want 5: the component removed 5,000 tokens and its saving is unknown, not $0",
+			c.SavedUSDUnpricedRows)
+	}
+}
+
+// A row the library priced at $0 is a measured $0, and a row that removed nothing is not unknown either.
+func TestOnlyAFallbackRowThatRemovedContentCountsAsUnpriced(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, gross int, pricedBy string) *Event {
+		return &Event{TS: ts, SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 20000, TokensAfter: 19000, FreshInput: 5, CacheRead: 40000, OutputTokens: 50,
+			TokenAccounting: AccountingComplete,
+			Components: []CompRow{{Component: "extract", Acted: true, Mutated: true, SavedGross: gross, SavedUnique: gross,
+				PricedBy: pricedBy}}}
+	}
+	insertReq(t, db, mk(1000, 1000, PricedByAccountant)) // a measured $0
+	insertReq(t, db, mk(1001, 0, PricedByNone))          // fell back, removed nothing
+	insertReq(t, db, mk(1002, 1000, PricedByNone))       // fell back, removed content: unknown
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EstimateComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	if n := rows[0].SavedUSDUnpricedRows; n != 1 {
+		t.Fatalf("saved_usd_unpriced_rows = %d, want 1 (only the fallback row that removed content)", n)
+	}
+}

@@ -2514,7 +2514,8 @@ function savedNAReason(c) {
       + 'recorded per request instead, as the prefix-cache figure on Overview.';
   }
   return num(c.saved_usd_unpriced_rows) + ' of this component\u2019s acted rows ran on a model '
-    + 'with no entry in the operator\u2019s price list, so their saving could not be valued. '
+    + 'with no entry in the operator\u2019s price list, or on a request the accountant could not price '
+    + '(see acc_fallback in the proxy log), so their saving could not be valued. '
     + 'It is missing from this figure, not zero.';
 }
 
@@ -2533,8 +2534,9 @@ function savedTitle(c) {
     : usd(c.saved_usd) + ' recorded per request'];
   if (c.saved_usd_unpriced_rows) {
     parts.push(num(c.saved_usd_unpriced_rows) + ' row'
-      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no model '
-      + 'price for the model they ran on, so their saving is MISSING from this figure, not zero');
+      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no price for the model they '
+      + 'ran on, or the request fell back (see acc_fallback in the proxy log) — so their saving is MISSING from '
+      + 'this figure, not zero');
   }
   return parts.join(' · ');
 }
@@ -2570,8 +2572,9 @@ function renderUnpricedNote(components) {
     host.appendChild(el('div', {},
       el('strong', {}, num(rows) + ' acted rows across ' + unpriced.length + ' component'
         + (unpriced.length === 1 ? '' : 's') + ' could not be priced'),
-      ' — the model they ran on has no entry in the operator’s price list, so their saving is '
-      + 'absent from the dollar columns rather than zero. Set MODEL_PRICES to value them.'));
+      ' — the model they ran on has no entry in the operator’s price list (set MODEL_PRICES to value them), or the '
+      + 'accountant could not price the request (the proxy logs acc_fallback with the reason). Either way their '
+      + 'saving is absent from the dollar columns rather than zero.'));
     if (partial.length) {
       host.appendChild(el('div', {},
         'Partly unpriced, so the dollar figure shown is a ', el('strong', {}, 'lower bound'),
@@ -2717,8 +2720,9 @@ async function loadComponents() {
           class: 'num' + (savedKnown(c) && c.net_usd_first_removal < 0 ? ' warn-text' : ''),
           title: !savedKnown(c) ? '' : 'PER-TURN verdict: each piece of content credited ONCE at '
             + 'the rate it would have entered the prompt at ('
-            + usd(c.saved_usd_first_removal || 0) + ') − own LLM cost '
-            + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
+            + usd(c.saved_usd_first_removal || 0) + ')'
+            + (c.saved_usd_costs ? ' + the costs the component caused (breaks, added tokens) ' + usd(c.saved_usd_costs) : '')
+            + ' − own LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
         }, c.saved_gross
           ? usdOrNA(c.net_usd_first_removal, savedKnown(c),
             'the saving half of this net is not a number — ' + savedNAReason(c))

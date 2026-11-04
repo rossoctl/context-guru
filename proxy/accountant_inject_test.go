@@ -29,7 +29,7 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 		fwd.Store(b)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],`+
-			`"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":1,"cache_creation_input_tokens":50}}`)
+			`"stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":1,"cache_creation_input_tokens":300}}`)
 	}))
 	defer up.Close()
 	h, rec, tap := accHandlerYAML(t, up.URL, "pipeline: [extract, extract_llm_sweep]\n")

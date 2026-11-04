@@ -123,8 +123,13 @@ What the library prices:
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
 `check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name` or `acted_without_figure`. A saving nothing measured is not
-shown.
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+measured is not shown.
+
+`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
+`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
+Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
+keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
 
 Limits:
 
@@ -136,6 +141,13 @@ Limits:
   in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
   The totals and charts add such a figure like any other: they do not mark it. A row written before
   the column existed reads as exact.
+- The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
+  every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
+  changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.
+  A file older than one hour is ignored (no cache entry lives longer), and so is a missing or unreadable
+  one: the proxy then starts empty, as before. A crash (kill -9) loses up to one minute of state. A
+  request that follows a lost state is priced as a first request and carries the estimate flag. The
+  library also drops the least recently used threads past its own bound; that is not saved or restored.
 - A thread that continues another by content (a rewind, a fork) is priced as a first request. The
   proxy passes the parent thread to the library, but the library does not read it, so the new thread
   does not start from a copy of the parent's cache state (accountant design §4.1).

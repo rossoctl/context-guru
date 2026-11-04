@@ -703,9 +703,11 @@ func main() {
 		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:        cfg.Preset,
 		Dashboard:     rec, // nil unless --dashboard
-		Pings:         kaKeepAlive.pings,
-		Record:        traceRec, // nil unless --record
-		Mode:          mode,     // sync (default) | observe — explicit, never inferred
+		// The accountant's thread state survives a restart; it sits beside the dashboard database.
+		AccountantState: accountantStatePath(*dashDB, rec != nil),
+		Pings:           kaKeepAlive.pings,
+		Record:          traceRec, // nil unless --record
+		Mode:            mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,
@@ -1534,4 +1536,13 @@ func envOr0(v, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// accountantStatePath is where the savings tracker saves its thread state: next to the dashboard database,
+// or empty when there is no dashboard (the tracker does not run then) or the database is in memory.
+func accountantStatePath(dashDB string, dashboard bool) string {
+	if !dashboard || dashDB == "" || strings.HasPrefix(dashDB, ":memory:") || strings.HasPrefix(dashDB, "file::memory:") {
+		return ""
+	}
+	return dashDB + ".accountant-state.json"
 }

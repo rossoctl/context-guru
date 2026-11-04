@@ -1,34 +1,76 @@
 package proxy
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/accountant"
 )
 
 // accBodies hashes a request body in the provider's order: tools, system, messages. A string
-// system prompt is one block. Raw JSON is hashed as sent, so two hosts hash the same bytes alike.
-// Each element of messages is one position, so Position{messages, i} is the wire message index.
-// A body without messages (or with invalid JSON) gives an empty Body.
+// system prompt is one block. Raw JSON is hashed as sent, except for the cache marks (see below), so two
+// hosts hash the same bytes alike. Each element of messages is one position, so Position{messages, i} is
+// the wire message index. A body without messages (or with invalid JSON) gives an empty Body.
+//
+// THE HASH LEAVES OUT cache_control, THE SIZE KEEPS IT. The provider's own cache key ignores the marks,
+// and the client moves its marks: Claude Code puts one on the newest block every turn. If the mark were
+// in the hash, the previous message would have new bytes on each request, the library would find no
+// common prefix after the system block, and every token it saved earlier would be priced at the write rate
+// although the provider read it (accountant#21). The size is the wire size, with the marks, because the
+// library checks the operations' bytes against the bytes that really went upstream.
 func accBodies(raw []byte) accountant.Body {
 	if !gjson.GetBytes(raw, "messages").IsArray() {
 		return accountant.NewBody(nil, nil, nil)
 	}
 	var tools, system, msgs [][]byte
-	gjson.GetBytes(raw, "tools").ForEach(func(_, v gjson.Result) bool {
-		tools = append(tools, []byte(v.Raw))
-		return true
-	})
-	if s := gjson.GetBytes(raw, "system"); s.IsArray() {
-		s.ForEach(func(_, v gjson.Result) bool { system = append(system, []byte(v.Raw)); return true })
-	} else if s.Exists() {
-		system = append(system, []byte(s.Raw))
+	var sizes []int // the wire size of each element, in hash order
+	add := func(dst *[][]byte, v gjson.Result) {
+		*dst = append(*dst, withoutCacheMarks(v.Raw))
+		sizes = append(sizes, len(v.Raw))
 	}
-	gjson.GetBytes(raw, "messages").ForEach(func(_, v gjson.Result) bool {
-		msgs = append(msgs, []byte(v.Raw))
-		return true
-	})
-	return accountant.NewBody(tools, system, msgs)
+	gjson.GetBytes(raw, "tools").ForEach(func(_, v gjson.Result) bool { add(&tools, v); return true })
+	if s := gjson.GetBytes(raw, "system"); s.IsArray() {
+		s.ForEach(func(_, v gjson.Result) bool { add(&system, v); return true })
+	} else if s.Exists() {
+		add(&system, s)
+	}
+	gjson.GetBytes(raw, "messages").ForEach(func(_, v gjson.Result) bool { add(&msgs, v); return true })
+	b := accountant.NewBody(tools, system, msgs)
+	for i := range b.Pos {
+		b.Pos[i].Bytes = int32(sizes[i])
+	}
+	return b
+}
+
+// withoutCacheMarks is one element's JSON without any cache_control: the element's own, and the ones on
+// its content blocks. An element with none is returned as it is, byte for byte, so the common case costs
+// no allocation. The result is only hashed. It is never sent anywhere.
+func withoutCacheMarks(raw string) []byte {
+	if !strings.Contains(raw, "cache_control") {
+		return []byte(raw)
+	}
+	out := raw
+	if gjson.Get(out, "cache_control").Exists() {
+		if next, err := sjson.Delete(out, "cache_control"); err == nil {
+			out = next
+		}
+	}
+	if content := gjson.Get(out, "content"); content.IsArray() {
+		i := 0
+		content.ForEach(func(_, blk gjson.Result) bool {
+			if blk.Get("cache_control").Exists() {
+				if next, err := sjson.Delete(out, "content."+strconv.Itoa(i)+".cache_control"); err == nil {
+					out = next
+				}
+			}
+			i++
+			return true
+		})
+	}
+	return []byte(out)
 }
 
 // accBreakpoints lists the cache_control marks, as positions in the same space as accBodies, one per
