@@ -125,6 +125,8 @@ type Event struct {
 	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
 	accOpsDropped int
 	accObserve    bool
+	// accUnsupportedWire marks a request on a wire the accountant does not read (see SetAccountantUnsupportedWire).
+	accUnsupportedWire bool
 	// accFallback is why PriceMode booked no saving (see AccountantFallback).
 	accFallback string
 

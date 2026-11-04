@@ -123,8 +123,13 @@ What the library prices:
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
 `check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name` or `acted_without_figure`. A saving nothing measured is not
-shown.
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+measured is not shown.
+
+`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
+`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
+Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
+keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
 
 Limits:
 

@@ -128,6 +128,8 @@ type capture struct {
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	accReq *accountant.Request
+	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
+	accUnsupportedWire bool
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
@@ -729,8 +731,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 	}
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
+	if c.accUnsupportedWire {
+		e.SetAccountantUnsupportedWire()
+	}
 	e.PriceMode(price, usageOK && priced)
-	if c.accReq != nil && e.AccountantFallback() != "" {
+	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
 		logFallback(e)
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {

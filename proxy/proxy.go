@@ -1423,7 +1423,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the client body, so opening the record late loses nothing. `orig` is what the agent
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
-			if cp != nil && cp.savings != nil && tr.Session != "" {
+			//
+			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
+			// `messages`, and apply reports no operations there. The record would price nothing and fail the
+			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
+				cp.accUnsupportedWire = true
+			} else if cp != nil && cp.savings != nil && tr.Session != "" {
 				cp.accBegin(accountant.RequestMeta{
 					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
 					Session:   tr.Session,

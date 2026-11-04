@@ -236,3 +236,49 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 		t.Error("a handler with a dashboard must build the tracker")
 	}
 }
+
+// The OpenAI Responses API keeps its conversation in `input`. accBodies hashes `messages` and apply reports no
+// operations on that wire, so the accountant prices nothing there: the library's conservation check failed and
+// every component read priced_by=none with a bare no_result or acted_without_figure. A request on it is now
+// marked, and says why it has no saving (context-guru#768 B7). Chat Completions is unaffected.
+func TestResponsesWireBooksNoSavingAndSaysWhy(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_1","object":"response","status":"completed",
+		  "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+		  "usage":{"input_tokens":2000,"output_tokens":20,"input_tokens_details":{"cached_tokens":1500}}}`)
+	}))
+	defer up.Close()
+	h, rec, tap := accHandler(t, up.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	big := strings.Repeat("line of tool output\n", 400)
+	for i := 0; i < 2; i++ {
+		body := fmt.Sprintf(`{"model":"gpt-5.5","instructions":"agent","input":[`+
+			`{"role":"user","content":"run it"},`+
+			`{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},`+
+			`{"type":"function_call_output","call_id":"c1","output":%q}]}`, big)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-test")
+		req.Header.Set("x-context-guru-session", "sess-resp")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	waitForRows(t, rec, 2)
+	for i, e := range tap.all() {
+		if fb := e.AccountantFallback(); fb != dash.FallbackUnsupportedWire {
+			t.Errorf("request %d: fallback %q, want %q", i+1, fb, dash.FallbackUnsupportedWire)
+		}
+		if _, ok := e.AccountantResult(); ok {
+			t.Errorf("request %d: a Responses request got a library Result", i+1)
+		}
+		if saved := e.BaselineCostUSD - e.CostUSD; saved > 1e-12 {
+			t.Errorf("request %d: booked a saving of %g on a wire the accountant does not read", i+1, saved)
+		}
+	}
+}
