@@ -1249,7 +1249,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 				route: e.route, provider: e.provider, model: e.model,
 				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter,
-				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt})
+				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt, gapStart: e.gapStart})
 			continue
 		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {

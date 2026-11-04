@@ -162,8 +162,8 @@ func denseAcross(wire []int, at, end int) bool {
 // several slots), the boundaries between them split the wire delta in proportion to each
 // operation's text delta, so the chain is contiguous and its total exact. A splice's SizeBefore is
 // the bytes of the wire messages it removed, its SizeAfter the bytes of those it inserted. An
-// operation on a message a later splice removed keeps an approximate size (its text delta): the
-// library ends it, because the splice's SizeBefore then equals the client bytes of the range.
+// operation on a message a later splice removed keeps an approximate size (its text delta). The
+// library does not end it: the net check below fails instead, and every operation is dropped.
 //
 // It reports false when the sizes do not reconcile: the operations' net change must equal
 // inTotal - outTotal. A message that changed with no operation (a metadata-only write, a cache
