@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,5 +87,35 @@ func TestHandlerCloseSavesTheState(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o600 {
 		t.Errorf("state file mode %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+// begin keeps the client body's hash for end, so a request forwarded unchanged does not hash 600 KB twice. The
+// reuse must not change the answer, and the entry must not outlive the request.
+func TestSavingsEndReusesTheClientHashOnlyForIdenticalBytes(t *testing.T) {
+	s := newSavingsTracker()
+	client := benchBody()
+	meta := accountant.RequestMeta{RequestID: "r1", Session: "s", At: time.Unix(1000, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
+	held := func() (n int) { s.clients.Range(func(any, any) bool { n++; return true }); return }
+
+	r := s.begin(meta, client)
+	if held() != 1 {
+		t.Fatalf("begin kept %d client hashes, want 1", held())
+	}
+	s.end(r, accountant.Thread{ID: "main"}, client, nil, accFacts)
+	if held() != 0 {
+		t.Fatalf("end left %d client hashes behind", held())
+	}
+	same := s.compute(r, Usage{FreshInput: 100, CacheWrite: 30000})
+
+	// A changed body takes the other path, and the answer is the one a fresh hash gives.
+	changed := []byte(strings.Replace(string(client), "word word", "wurd word", -1))
+	r2 := s.begin(meta, client)
+	s.end(r2, accountant.Thread{ID: "main"}, changed, nil, accFacts)
+	if r2.Forwarded.Pos[len(r2.Forwarded.Pos)-1].Hash == r2.Client.Pos[len(r2.Client.Pos)-1].Hash {
+		t.Fatal("a changed forwarded body reused the client hash")
+	}
+	if want := accBodies(client); fmt.Sprint(r.Forwarded) != fmt.Sprint(want) || len(same.Checks) > 1 {
+		t.Fatalf("the reused hash differs from a fresh one")
 	}
 }

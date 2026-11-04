@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"log/slog"
+	"sync"
 
 	"github.com/rossoctl/accountant"
 )
@@ -11,8 +13,18 @@ import (
 type savingsTracker struct {
 	trackers *accountant.Trackers
 	siblings *siblingStore // each thread's last forwarded body, for EntryFacts.SharedWarm
+	// clients holds the hash of each open request's client body, by request, from begin to end.
+	clients sync.Map // *accountant.Request -> clientHash
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
 	onEnd func(*accountant.Request)
+}
+
+// clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does
+// not hash the same bytes again. Hashing a 600 KB body costs 3 to 4 ms.
+type clientHash struct {
+	raw  []byte
+	body accountant.Body
+	bps  []accountant.Breakpoint
 }
 
 func newSavingsTracker() *savingsTracker {
@@ -22,7 +34,10 @@ func newSavingsTracker() *savingsTracker {
 // begin opens the request record with the client body, before any component ran. The Trackers bound
 // their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	return s.trackers.BeginRequest(meta, accBodies(client), accBreakpoints(client))
+	body, bps := accBodies(client), accBreakpoints(client)
+	req := s.trackers.BeginRequest(meta, body, bps)
+	s.clients.Store(req, clientHash{raw: client, body: body, bps: bps})
+	return req
 }
 
 // end records the operations, then the thread and the forwarded body. Every op is added, replays
@@ -33,7 +48,13 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 	for _, op := range ops {
 		req.Add(op)
 	}
-	fwd, bps := accBodies(forwarded), accBreakpoints(forwarded)
+	var fwd accountant.Body
+	var bps []accountant.Breakpoint
+	if v, ok := s.clients.LoadAndDelete(req); ok && bytes.Equal(v.(clientHash).raw, forwarded) {
+		fwd, bps = v.(clientHash).body, v.(clientHash).bps
+	} else {
+		fwd, bps = accBodies(forwarded), accBreakpoints(forwarded)
+	}
 	facts.SharedWarm = s.siblings.sharedWarm(req.Meta.Session, th.ID, req.Meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
 	if s.onEnd != nil {
