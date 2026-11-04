@@ -1742,7 +1742,7 @@ function renderSavedLedger(o, ka, partial) {
     el('div', { class: 'ov-hero-head' },
       el('h3', { text: 'Total saved by context-guru' }),
       infoButton('total', 'Total saved', [
-        'Total saved is the sum of the parts below: the cache, your preset, and the tools and skills filter.',
+        'Total saved is the sum of the parts below: the cache, your preset, the tools and skills filter, and tool deferral.',
         'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
         'The cache part is the most it could have saved: another session can keep the same cache warm. The preset and filter parts are estimates.',
         '"Without context-guru" is what you spent plus what was saved. The percent is the saved share of that.',
@@ -1835,6 +1835,13 @@ function renderSavedLedger(o, ka, partial) {
       filterRan ? ovFigure('saved-filter-tokens', 'Tokens removed', compact(filterTok),
         'of ' + compact(inputWithout) + ' tokens', share(filterTok, inputWithout)) : null,
     ]));
+
+  // Tool deferral (ultrahigh). Drawn only on an account that deferred: no card for 0.
+  if (parts.defer !== 0) {
+    grid.appendChild(card('defer', 'saved-defer', 'Tool deferral', '#/tools',
+      'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches.',
+      [money('saved-defer-usd', parts.defer, true)]));
+  }
   host.appendChild(grid);
 }
 
@@ -2056,10 +2063,19 @@ function dailyColumns(host, totalHost, buckets) {
     const day = new Date(b.ts).toISOString().slice(0, 10);
     cols.appendChild(el('span', {
       class: 'daycol', tabindex: '0',
-      title: day + ': spent ' + usd(spent(b)) + ', saved ' + usd(b.saved_usd) + ', ' + num(b.requests) + ' requests',
-    }, el('i', { style: 'height:' + Math.max(2, (spent(b) / max) * 100) + '%;background:' + SERIES_SPENT })));
+      title: day + ': spent ' + usd(spent(b)) + ', saved ' + usd(b.saved_usd)
+        + ((b.defer_net_usd || 0) > 0 ? ', tool deferral saved ' + usd(b.defer_net_usd) : '') + ', ' + num(b.requests) + ' requests',
+    }, el('i', { style: 'height:' + Math.max(2, (spent(b) / max) * 100) + '%;background:' + SERIES_SPENT }),
+    // Tool deferral's net saving that day, its own series beside the spend. Only on a day that deferred.
+    (b.defer_net_usd || 0) > 0
+      ? el('i', { class: 'daycol-defer', style: 'height:' + Math.max(2, (b.defer_net_usd / max) * 100) + '%;background:' + SERIES_SAVED })
+      : null));
   }
   host.appendChild(cols);
+  if (buckets.some((b) => (b.defer_net_usd || 0) > 0)) {
+    host.appendChild(el('div', { class: 'daycols-key' }, el('i', { style: 'background:' + SERIES_SPENT }), 'spent ',
+      el('i', { style: 'background:' + SERIES_SAVED }), 'tool deferral saved'));
+  }
   host.appendChild(el('div', { class: 'daycols-axis' },
     el('span', { text: new Date(buckets[0].ts).toISOString().slice(0, 10) }),
     el('span', { text: 'tallest day ' + usd(max) }),

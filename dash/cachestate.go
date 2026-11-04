@@ -307,7 +307,7 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 // The user's own pings join both sides: the write they avoided raises y, and their cost lowers x
 // like any other spend, so pressing Ping moves `saved` by (avoided - cost).
 func threadMoney(baseline, cost, cgllm, split, kaSv, ping, manualSaved, manualCost float64) (saved, base float64) {
-	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping, manualSaved-manualCost)
+	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping, manualSaved-manualCost, 0)
 	return saved, baseline + split + kaSv + manualSaved
 }
 

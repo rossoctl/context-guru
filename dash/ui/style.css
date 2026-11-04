@@ -1704,6 +1704,8 @@ details.inv-details > summary { font-family: var(--serif); font-size: 17px; font
 .daycols { display: flex; align-items: flex-end; gap: 2px; height: 120px; border-bottom: 1px solid var(--hairline, var(--border)); }
 .daycol { flex: 1 1 0; min-width: 2px; height: 100%; display: flex; align-items: flex-end; }
 .daycol i { display: block; width: 100%; border-radius: 1px 1px 0 0; }
+.daycols-key { display: flex; gap: var(--sp-2); align-items: center; margin-top: 4px; font-size: var(--t-small, 12px); color: var(--fg-muted); }
+.daycols-key i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 .daycol:hover i, .daycol:focus-visible i { opacity: .7; }
 .daycols-axis { display: flex; justify-content: space-between; gap: var(--sp-2); margin-top: 4px; font-size: var(--t-small, 12px); color: var(--fg-muted); }
 .more-toggle { display: inline-flex; align-items: center; gap: 6px; margin: var(--sp-2) 0; font-size: var(--t-small, 12px); color: var(--fg-muted); }

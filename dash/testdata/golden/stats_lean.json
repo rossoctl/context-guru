@@ -45,6 +45,7 @@
  "decl_filter_reads": 0,
  "decl_filter_requests": 0,
  "decl_filter_usd": 0,
+ "defer_net_usd": 0,
  "denominators": [
   {
    "available": true,
@@ -251,8 +252,15 @@
    "total": false
   },
   {
+   "delta_usd": -0,
+   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, NET of the names list and the searches that cost. From the per-request ledger, so it is the same figure as the Tools page. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
+   "key": "defer_net",
+   "label": "Tool deferral",
+   "total": false
+  },
+  {
    "delta_usd": 0.24318150000000016,
-   "description": "Net compaction savings, plus prefix-cache savings, plus the idle keep-alive's NET — its savings minus what its pings cost — plus the manual pings' net, plus the declarations the removal filter stopped sending. FOUR disjoint token sets, all ours, so nothing is counted twice: compaction's removals never reached the provider, the split moved a breakpoint over tokens that did, the keep-alive refreshed entries that already existed, and the filter's declarations were dropped before the compaction baseline was even measured — so they are absent from the first line rather than counted in it. The keep-alive enters as a net because the pings' own spend is not in the billed-cost line above — ping rows are excluded from agent traffic — so this is the only place both halves are comparable, and its saving half is a CEILING (see Keep-alive savings). It is not the cost of a fully uncached world: the provider's own cache saved far more than this on the same traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that is credited here.",
+   "description": "Net compaction savings, plus prefix-cache savings, plus the idle keep-alive's NET — its savings minus what its pings cost — plus the manual pings' net, plus the declarations the removal filter stopped sending, plus tool deferral's net. FIVE disjoint token sets, all ours, so nothing is counted twice: compaction's removals never reached the provider, the split moved a breakpoint over tokens that did, the keep-alive refreshed entries that already existed, and the filter's declarations were dropped before the compaction baseline was even measured — so they are absent from the first line rather than counted in it. The keep-alive enters as a net because the pings' own spend is not in the billed-cost line above — ping rows are excluded from agent traffic — so this is the only place both halves are comparable, and its saving half is a CEILING (see Keep-alive savings). It is not the cost of a fully uncached world: the provider's own cache saved far more than this on the same traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that is credited here.",
    "key": "total_saved",
    "label": "Total cost avoided",
    "total": true
