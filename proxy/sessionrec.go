@@ -34,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/record"
 )
@@ -324,6 +325,11 @@ func (r *sessionRecorder) fillResponse(turn *record.Turn, e *recEvent) {
 	}
 	body := e.respBody
 	if e.respIsSSE {
+		// Anthropic only: record.OutputMessages reads an Anthropic message object.
+		if e.provider != bschemas.Anthropic {
+			turn.MarkIncomplete(record.IncompleteNoBody)
+			return
+		}
 		agg, ok := expand.AggregateSSE(string(e.provider), body)
 		if !ok {
 			turn.MarkIncomplete(record.IncompleteNoBody)

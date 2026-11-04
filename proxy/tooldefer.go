@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -379,13 +380,20 @@ type deferInfo struct {
 	tenant   string
 	model    string
 	probe    tooldefer.ProbeKey
-	original []byte // the client's pristine bytes, for weights
+	original []byte // the client's pristine bytes, for weights (search: their Anthropic-shaped view)
+	// search is set when our own search tool (#825) changed the request: serve holds the response
+	// and answers a call to it in band. session, thread and project name the thread's record.
+	search                   bool
+	session, thread, project string
 }
 
 // applyToolDefer runs deferral on the final outgoing body. orig is the client's pristine body.
 // Fail open: on any problem it returns body unchanged.
 func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas.ModelProvider, wire string,
 	up upstream, session, threadID string, orig, body []byte) ([]byte, *deferInfo) {
+	if provider == bschemas.OpenAI && tooldefer.ClientWire(wire) {
+		return h.applyClientSearch(tn, wire, session, threadID, orig, body)
+	}
 	if wire != schema.WireAnthropic || provider != bschemas.Anthropic {
 		return body, nil
 	}
@@ -438,6 +446,92 @@ func (h *Handler) applyToolDefer(r *http.Request, tn *Tenancy, provider bschemas
 		return body, nil
 	}
 	return o.Body, &deferInfo{orig: body, outcome: o, tenant: tn.ID, model: model, probe: key, original: orig}
+}
+
+// applyClientSearch runs our own tool search (#825) on a Chat Completions or Responses request, for
+// a model that ignores defer_loading. Claude models are left to Apply's path. No probe: our search
+// needs no provider feature, and a 400 to a changed request sends the original (deferRetry).
+func (h *Handler) applyClientSearch(tn *Tenancy, wire, session, threadID string, orig, body []byte) ([]byte, *deferInfo) {
+	on, keep := deferOn(tn)
+	if !on {
+		return body, nil
+	}
+	ds := h.toolDefer()
+	model := gjson.GetBytes(orig, "model").String()
+	project := tooldefer.NormProject(apply.ProjectFor(bschemas.OpenAI, orig))
+	ds.hist.SeedTenant(tn.ID)
+	// The rule and the history read Anthropic-shaped bodies: both get the view.
+	view := tooldefer.View(wire, orig)
+	if view != nil {
+		ds.hist.Observe(tn.ID, session, project, view, time.Now().UnixMilli())
+	}
+	o, loaded := tooldefer.ApplySearch(h.deferEnv(tn), wire, tooldefer.Req{Tenant: tn.ID, Session: session,
+		Thread: threadID, Project: project, Model: model, Orig: orig, Body: body, Keep: keep})
+	if len(loaded) > 0 {
+		// Added back on the request side: a search the client received (with a client tool call),
+		// or a tool tool_choice forces.
+		h.noteSearchLoads(tn.ID, session, project, loaded)
+	}
+	if o.Decided || o.Changed {
+		slog.Debug("cg.tooldefer_search", "session", session, "thread", threadID, "deferred", len(o.Deferred),
+			"why", o.Why, "decided", o.Decided, "tokens", o.DeferredTokens, "added_back", len(loaded))
+	}
+	if !o.Changed {
+		return body, nil
+	}
+	return o.Body, &deferInfo{orig: body, outcome: o, tenant: tn.ID, model: model, original: view,
+		search: true, session: session, thread: threadID, project: project}
+}
+
+// noteSearchLoads books tools our search added back: each counts as a use in the history, so the
+// user's later sessions keep it loaded, and as an add-back on /stats.
+func (h *Handler) noteSearchLoads(tenant, session, project string, names []string) {
+	ds := h.toolDefer()
+	ds.hist.Observe(tenant, session, project, tooldefer.LoadView(names), time.Now().UnixMilli())
+	h.deferGate().AddBacks.Add(int64(len(names)))
+}
+
+// searchLoad adds the named tools back to di's thread. It returns the thread's deferred set, for
+// the answer, and the names added now, which the follow-up must declare.
+func (h *Handler) searchLoad(tn *Tenancy, di *deferInfo, names []string) (set map[string]bool, now []string) {
+	rs := h.deferEnv(tn).RecordStore()
+	rec, ok := tooldefer.LoadSearch(rs, di.session, di.thread)
+	if !ok {
+		return nil, nil
+	}
+	set = make(map[string]bool, len(rec.Deferred))
+	for _, n := range rec.Deferred {
+		set[n] = true
+	}
+	now = tooldefer.AddBack(rs, di.session, di.thread, names)
+	if len(now) > 0 {
+		h.noteSearchLoads(di.tenant, di.session, di.project, now)
+	}
+	return set, now
+}
+
+// noteSearchCalls keeps the searches the client received in di's thread record.
+func (h *Handler) noteSearchCalls(tn *Tenancy, di *deferInfo, calls []tooldefer.SearchCall) {
+	tooldefer.NoteCalls(h.deferEnv(tn).RecordStore(), di.session, di.thread, calls)
+}
+
+// noteLeakedSearches keeps the calls to our search in a response the client gets whole (the round
+// cap), so a later request can answer them (tooldefer.NoteCalls).
+func (h *Handler) noteLeakedSearches(tn *Tenancy, di *deferInfo, wire string, sse bool, resp []byte) {
+	if !bytes.Contains(resp, []byte(tooldefer.ClientSearchName)) {
+		return
+	}
+	msg := resp
+	if sse {
+		agg, ok := expand.AggregateSSE(wire, resp)
+		if !ok {
+			return
+		}
+		msg = agg
+	}
+	if calls, _ := tooldefer.SearchCalls(wire, msg); len(calls) > 0 {
+		h.noteSearchCalls(tn, di, calls)
+	}
 }
 
 // startProbe runs a probe in the background, through the host's Dispatcher, with the caller's own
@@ -624,10 +718,15 @@ func (h *Handler) deferStats() any {
 		"requests":          g.Deferred.Load(),
 		// Every 400/422 to a changed request that the proxy answered with the original, whatever
 		// the cause; "turned_off" counts only those whose original succeeded, which turned it off.
-		"retries_400":  g.Retries.Load(),
-		"turned_off":   g.TurnedOff.Load(),
-		"probes_pass":  pass,
-		"probes_fail":  fail,
-		"history_live": ds.hist.Ready(),
+		"retries_400": g.Retries.Load(),
+		"turned_off":  g.TurnedOff.Load(),
+		// Our own search (#825), counters of its own: tools it added back (one cache miss on `tools`
+		// each; those a search loaded count in wrong_guesses too, through the ledger), and searches
+		// made together with a client tool call, answered on the next request.
+		"add_backs":      g.AddBacks.Load(),
+		"mixed_searches": g.MixedSearches.Load(),
+		"probes_pass":    pass,
+		"probes_fail":    fail,
+		"history_live":   ds.hist.Ready(),
 	}
 }

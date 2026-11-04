@@ -29,8 +29,9 @@ type toolfilterConfig struct {
 	Remove []string `yaml:"remove"`
 	// Defer turns on tool deferral (#485, package tooldefer): `auto` defers the tools the user's
 	// own history says are unused, with `defer_loading` and the API's search tool, so none is
-	// removed. `off` (the default, and the account opt-out) defers nothing. Only the `ultrahigh`
-	// preset sets `auto`.
+	// removed. On a model that ignores `defer_loading` (GPT, GLM, Kimi; #825) the tool is removed
+	// and comes back through our own search tool. `off` (the default, and the account opt-out)
+	// defers nothing. Only the `ultrahigh` preset sets `auto`.
 	Defer string `yaml:"defer"`
 	// Keep names tools deferral must never touch (the account keep list).
 	Keep []string `yaml:"keep"`
@@ -155,7 +156,8 @@ func init() {
 	components.RegisterFields("toolfilter", toolfilterConfig{}, []components.Field{
 		{Key: "defer", Type: components.FieldEnum, Options: []string{"off", "auto"}, Default: "off",
 			Hint: "auto defers the tools your own history shows you do not use: each stays in the request with " +
-				"defer_loading and loads through the API's search tool when the model needs it; Anthropic models only; " +
+				"defer_loading and loads through the API's search tool when the model needs it; on other models (GPT, GLM, " +
+				"Kimi) the tool is removed and loads through Context Guru's own search tool, then stays for the thread; " +
 				"off is the account opt-out"},
 		{Key: "keep", Type: components.FieldStrings,
 			Hint: "tool names deferral never touches"},

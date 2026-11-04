@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -649,26 +650,12 @@ func responseToolUseNames(sse bool, body []byte) []string {
 // body (or a sniffed window of one — see responseToolUseNames).
 func bufferedToolUseNames(body []byte) []string {
 	var names []string
-	root := gjson.ParseBytes(body)
-	// Anthropic Messages.
-	for _, c := range root.Get("content").Array() {
-		if c.Get("type").String() == "tool_use" {
-			if n := c.Get("name").String(); n != "" {
-				names = append(names, n)
-			}
-		}
-	}
-	// OpenAI chat.
-	for _, tc := range root.Get("choices.0.message.tool_calls").Array() {
-		if n := tc.Get("function.name").String(); n != "" {
-			names = append(names, n)
-		}
-	}
-	// OpenAI Responses.
-	for _, item := range root.Get("output").Array() {
-		if item.Get("type").String() == "function_call" {
-			if n := item.Get("name").String(); n != "" {
-				names = append(names, n)
+	// The body names no dialect, so all three are read; a body matches only one of them. A
+	// Responses custom tool call is not counted, as before.
+	for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
+		for _, c := range schema.OutputCalls(wire, body) {
+			if !c.Custom && c.Name != "" {
+				names = append(names, c.Name)
 			}
 		}
 	}

@@ -31,6 +31,9 @@ type Gate struct {
 	Decisions atomic.Int64 // threads decided
 	Rebuilds  atomic.Int64 // threads whose set was rebuilt after a store miss
 	Unproven  atomic.Int64 // store misses sent as the original: the rule deferred a tool the transcript does not prove
+	// Our own search (#825).
+	AddBacks      atomic.Int64 // deferred tools a search added back to `tools`
+	MixedSearches atomic.Int64 // searches in the same response as a client tool call
 }
 
 // gateTTL bounds the turn-off map and a pending flag: a turn-off is re-tried a day later, after a
