@@ -2066,7 +2066,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
 			h.deferRetry(di, refused, errBody, ok)
 			// The original declares no search tool of ours: nothing to hold or answer from here on.
-			di, searchOn = nil, false
+			di, searchOn, respSplice = nil, false, false
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than

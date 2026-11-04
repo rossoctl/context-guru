@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -322,5 +323,93 @@ func TestResponsesSearchStreamsEndToEnd(t *testing.T) {
 				t.Fatalf("merged completed: %s", last.Raw)
 			}
 		})
+	}
+}
+
+// A gateway that ends the stream with [DONE] after the terminal event gets nothing added.
+func TestResponsesSpliceDoneIsATerminator(t *testing.T) {
+	stream := rsCreated("a") + rsText(0, "m1", "Hi") + "data: [DONE]\n\n"
+	sp, rec := rsSplicer()
+	rsPass(sp, stream)
+	sp.terminate(nil)
+	if rec.Body.String() != stream {
+		t.Fatalf("got %q", rec.Body.String())
+	}
+}
+
+// The merged usage sums the nested counts too, and is written when the last round has none.
+func TestResponsesSpliceSumsUsage(t *testing.T) {
+	u := func(in, cached, out, reason int) string {
+		return fmt.Sprintf(`"usage":{"input_tokens":%d,"input_tokens_details":{"cached_tokens":%d},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":%d},"total_tokens":%d}`,
+			in, cached, out, reason, in+out)
+	}
+	done := func(id, usage string, items ...string) string {
+		return rsEv("response.completed", `"sequence_number":9,"response":{"id":"`+id+`","status":"completed","output":[`+strings.Join(items, ",")+`]`+usage+`}`)
+	}
+	for name, last := range map[string]string{
+		"with usage": done("resp_B", `,`+u(20, 10, 4, 2), rsMsgItem("m2", "Two.")),
+		"no usage":   done("resp_B", ``, rsMsgItem("m2", "Two.")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sp, rec := rsSplicer()
+			held := rsCall(1, "c1", tooldefer.ClientSearchName) +
+				done("resp_A", `,`+u(100, 64, 6, 3), rsMsgItem("m1", "One."), rsCallItem("c1", tooldefer.ClientSearchName))
+			_, withheld, _ := rsPass(sp, rsCreated("resp_A")+rsText(0, "m1", "One.")+held)
+			rsPass(sp, rsCreated("resp_B")+rsText(0, "m2", "Two.")+last)
+			sp.terminate(withheld)
+			ds := rsDatas(rec.Body.String())
+			got := ds[len(ds)-1].Get("response.usage")
+			want := map[string]int64{"input_tokens": 120, "output_tokens": 10, "total_tokens": 130,
+				"input_tokens_details.cached_tokens": 74, "output_tokens_details.reasoning_tokens": 5}
+			if name == "no usage" {
+				want = map[string]int64{"input_tokens": 100, "output_tokens": 6, "total_tokens": 106,
+					"input_tokens_details.cached_tokens": 64, "output_tokens_details.reasoning_tokens": 3}
+			}
+			for k, v := range want {
+				if got.Get(k).Int() != v {
+					t.Errorf("%s = %d, want %d (%s)", k, got.Get(k).Int(), v, got.Raw)
+				}
+			}
+		})
+	}
+}
+
+// The provider refuses the request with our search and accepts the original: the retried original
+// is not a spliced stream, and it reaches the client untouched.
+func TestResponsesSearchRetriesOriginalOn400(t *testing.T) {
+	respDecl := func(name string) string {
+		return fmt.Sprintf(`{"type":"function","name":%q,"description":"Does the %s job. %s","parameters":{"type":"object"}}`,
+			name, name, strings.Repeat("Detailed usage notes for this tool. ", 60))
+	}
+	body := []byte(`{"model":"gpt-5.5","stream":true,"store":false,"instructions":"agent","tools":[` + respDecl("Bash") + `,` + respDecl("Read") + `,` +
+		respDecl("Workflow") + `,` + respDecl("Monitor") + `],"input":[{"role":"user","content":"go"}]}`)
+	// No terminal event: a stream still wrapped in the splicer would get a response.failed added.
+	answer := rsCreated("resp_A") + rsText(0, "m1", "Hello")
+	up := &csUpstream{script: []string{answer}, reject400: true}
+	us := httptest.NewServer(up)
+	defer us.Close()
+	h := csHandler(t, "ultrahigh", us.URL)
+	ds := h.toolDefer()
+	for i, s := range []string{"r1", "r2", "r3"} {
+		ds.hist.Observe("", s, "", tooldefer.View("responses", body), int64(i+10))
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("x-context-guru-session", "rs1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	b := up.all()
+	if len(b) != 2 || bytes.Contains(b[1], []byte(tooldefer.ClientSearchName)) {
+		t.Fatalf("retry was not the original: %d rounds", len(b))
+	}
+	if resp.StatusCode != http.StatusOK || string(raw) != answer {
+		t.Fatalf("the client must get the retried stream untouched: %d %q", resp.StatusCode, raw)
 	}
 }

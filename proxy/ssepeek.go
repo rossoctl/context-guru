@@ -511,7 +511,7 @@ func (sp *sseSplicer) terminate(withheld []byte) {
 		return
 	}
 	if sp.resp {
-		sp.terminateResponses(withheld)
+		sp.terminateResponses()
 		return
 	}
 	// Only the CLOSING events, never the content: the withheld bytes begin with the expand
@@ -721,8 +721,18 @@ func (sp *sseSplicer) addUsage(ev []byte) {
 	if p.Get("type").String() != "response.completed" {
 		return
 	}
+	u := p.Get("response.usage")
 	for _, k := range []string{"input_tokens", "output_tokens", "total_tokens"} {
-		sp.usage[k] += p.Get("response.usage." + k).Int()
+		sp.usage[k] += u.Get(k).Int()
+	}
+	// The nested counts (cached_tokens, reasoning_tokens, ...) add up too.
+	for _, d := range []string{"input_tokens_details", "output_tokens_details"} {
+		u.Get(d).ForEach(func(k, v gjson.Result) bool {
+			if v.Type == gjson.Number {
+				sp.usage[d+"."+k.String()] += v.Int()
+			}
+			return true
+		})
 	}
 }
 
@@ -732,6 +742,10 @@ func (sp *sseSplicer) addUsage(ev []byte) {
 // client holds and sequence_number continued, and its response.completed is replaced by one that
 // lists every item the client saw. An event it cannot parse goes as it came.
 func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
+	if isChatDone(ev) {
+		sp.ended = true // a gateway that ends the stream with [DONE]: no response.failed after it
+		return ev, true
+	}
 	later := sp.rounds > 1
 	if !later && !bytes.Contains(ev, []byte("response.created")) && !bytes.Contains(ev, []byte("output_item.")) &&
 		!bytes.Contains(ev, []byte("response.completed")) && !bytes.Contains(ev, []byte("response.failed")) &&
@@ -798,10 +812,10 @@ func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
 			if o, err := sjson.SetRaw(np, "response.output", "["+strings.Join(out, ",")+"]"); err == nil {
 				np = o
 			}
-			if p.Get("response.usage").IsObject() {
-				for k, v := range sp.usage {
-					set("response.usage."+k, v)
-				}
+			// Written even when this round's own terminal event has no usage: the sum still
+			// holds every earlier round.
+			for k, v := range sp.usage {
+				set("response.usage."+k, v)
 			}
 		}
 	}
@@ -812,10 +826,11 @@ func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
 }
 
 // terminateResponses is terminate for Responses. The withheld round holds the call and the
-// terminal event, and the terminal event lists the call, so none of it is forwarded: a turn
+// terminal event, and the terminal event lists the call, so none of it is forwarded (hence no
+// withheld argument): a turn
 // that ends without a terminator of its own gets a response.failed, as an Anthropic one gets an
 // error event. sp.ended is checked by terminate, so this runs only when none went out.
-func (sp *sseSplicer) terminateResponses(withheld []byte) {
+func (sp *sseSplicer) terminateResponses() {
 	// A Responses stream always ends with a terminal event, so a missing one is a failed turn
 	// even when the upstream closed cleanly.
 	sp.forward([]byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" +
