@@ -1745,8 +1745,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
 	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
 	// and does the same job: sseSplicer withholds only the block that calls the expand tool
-	// and streams everything else as it arrives (see ssepeek.go). Non-Anthropic dialects are
-	// not inspected at all.
+	// and streams everything else as it arrives (see ssepeek.go). Of the other dialects, only a
+	// Chat Completions stream that declares our own tool search is spliced (#879).
 	// Advertised covers BOTH proxy-injected tools. The response loop is what keeps a
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
 	// adjudication call stream straight through on a request that advertised only that one.
@@ -1818,6 +1818,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				h.agg.RecordSSEAdjudicateAfterStream()
 			case expand.ToolName:
 				h.agg.RecordSSEExpandAfterStream()
+			case tooldefer.ClientSearchName:
+				// Counted where it is decided: mixed_searches, or kept for the next request. Past the
+				// retain bound or after a failed rebuild it is counted nowhere, but the next request
+				// still answers it from the transcript (tooldefer.ApplySearch).
 			default:
 				lg.Warn("cg.sse_splice: proxy tool leak with no counter of its own", "tool", name)
 			}
@@ -2118,22 +2122,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		var respBody []byte
 		switch {
-		case isSSE && provider == bschemas.Anthropic:
+		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI)):
 			// Forward the events as they arrive and stop at the expand call, rather than
 			// buffering the response to find out whether it holds one. See ssepeek.go.
+			// Chat Completions with our own tool search (#879) takes the same splice: its text
+			// streams at once, and only a call to a proxy tool is held.
 			sse = true
 			if sp == nil {
-				sp = newSSESplicer(w)
+				if provider == bschemas.Anthropic {
+					sp = newSSESplicer(w)
+				} else {
+					sp = newChatSSESplicer(w)
+				}
 			}
 			sp.round(resp)
 			// The PREVIOUS round's withheld events, because pass is about to overwrite
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
-			respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			if searchOn {
+				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
+			} else {
+				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+			}
 			resp.Body.Close()
 			switch {
-			case len(called) > 0 && sp.blocks == 0:
+			case len(called) > 0 && !sp.opened():
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -2166,16 +2180,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// Raw Responses-API events. The recorder translates only the Anthropic stream, so
 				// this turn is kept and marked incomplete rather than written with an empty
 				// response -- the same outcome as the other non-Anthropic stream path below.
-				recBody, recIsSSE = respBody, true
-			}
-		case isSSE && searchOn:
-			// Our search on Chat Completions: the stream is buffered, so a call to it can be answered
-			// in band (expand.AggregateSSE rebuilds the message). The client loses its stream
-			// for the requests of a thread with deferred tools; see #825.
-			sse, sseBuffered = true, true
-			respBody, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if h.recorder != nil {
 				recBody, recIsSSE = respBody, true
 			}
 		case isSSE:
