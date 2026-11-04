@@ -69,7 +69,9 @@ const (
 // campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
 const campaignDefaultMaxPings = 2
 
-// campaignDefaultHeadTTLMinTokens mirrors config.DefaultHeadTTLMinTokens. Every 1h-tier
+// campaignDefaultHeadTTLMinTokens mirrors config.DefaultHeadTTLMinTokens. A stored strategy keeps
+// the token-named field (database column and manager API); resolveHeadTTL reads it as
+// tokens x config.HeadTTLBytesPerToken bytes, so 50,000 here is the 200,000-byte gate. Every 1h-tier
 // arm needs a positive value here — see validStrategyBounds' own refusal of
 // HeadTTL1h=true paired with a zero token floor, which would silently create a
 // strategy that pings on the 1-hour schedule but never actually promotes the head to

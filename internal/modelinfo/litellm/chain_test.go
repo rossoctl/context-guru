@@ -2,6 +2,7 @@ package litellm
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -144,6 +145,9 @@ const priceSample = `{
                           "cache_read_input_token_cost": 2e-07,
                           "cache_creation_input_token_cost": 2.5e-06},
   "no-cache-model": {"max_input_tokens": 8192, "input_cost_per_token": 4e-06, "output_cost_per_token": 8e-06},
+  "claude-opus-5-5-bare": {"max_input_tokens": 8192, "input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05},
+  "claude-fable-5-1-bare": {"max_input_tokens": 8192, "input_cost_per_token": 1e-05, "output_cost_per_token": 5e-05},
+  "claude-opus-5-bare": {"max_input_tokens": 8192, "input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05},
   "claude-no-cache-rates": {"max_input_tokens": 8192, "input_cost_per_token": 4e-06, "output_cost_per_token": 8e-06}
 }`
 
@@ -225,4 +229,33 @@ func TestChainPriceSkipsNonPricers(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("Chain.Price never resolved through a non-Pricer element")
+}
+
+// A feed row with no cache_read follows the model's tier (0.05x, 0.025x, else 0.1x).
+func TestLiteLLMBlankCacheReadFollowsTheModelTier(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(priceSample))
+	}))
+	defer srv.Close()
+	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
+	ctx := context.Background()
+	for i := 0; i < 400; i++ {
+		if _, ok := l.Price(ctx, "claude-opus-5-5-bare"); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for model, frac := range map[string]float64{
+		"claude-opus-5-5-bare":  0.05,
+		"claude-fable-5-1-bare": 0.025,
+		"claude-opus-5-bare":    0.1,
+	} {
+		p, ok := l.Price(ctx, model)
+		if !ok {
+			t.Fatalf("%s not priced", model)
+		}
+		if want := p.Input * frac; math.Abs(p.CacheRead-want) > 1e-15 {
+			t.Errorf("%s: cache_read = %v, want %v (%vx)", model, p.CacheRead, want, frac)
+		}
+	}
 }

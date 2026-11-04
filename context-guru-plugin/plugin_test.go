@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -6380,6 +6381,55 @@ print(ns["PORT_SCAN_START"])
 	}
 }
 
+// Picking ultrahigh asks the routed proxy to run tool deferral's provider check (#485), and reports
+// it. Any other preset sends nothing.
+func TestPresetUltrahighAsksForAProbe(t *testing.T) {
+	asks := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asks <- r.Method + " " + r.URL.Path + " " + r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := settingsInDir(t, state, home, proj, "add", "--file", projLocal, "--url", url); code != 0 {
+		t.Fatal("fixture: routing add failed")
+	}
+	py := requireTool(t, "python3")
+	run := func(name string) string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", name)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("preset set %s: %v\n%s", name, err, out)
+		}
+		return string(out)
+	}
+	if out := run("high"); strings.Contains(out, "probe=") {
+		t.Fatalf("high asked for a probe:\n%s", out)
+	}
+	if out := run("ultrahigh"); !strings.Contains(out, "probe=asked") {
+		t.Fatalf("ultrahigh did not ask for a probe:\n%s", out)
+	}
+	select {
+	case got := <-asks:
+		if got != "POST /tool-defer/probe application/json" {
+			t.Fatalf("ask = %q", got)
+		}
+	default:
+		t.Fatal("no ask reached the proxy")
+	}
+	if len(asks) != 0 {
+		t.Fatalf("%d extra requests", len(asks))
+	}
+}
+
 // TestPresetFallbackInheritsRoutingScope: with nothing configured yet anywhere, `preset set`'s
 // fallback used to guess project-local independently of what routing actually chose. It must
 // instead land wherever THIS project's routing already lives.
@@ -8791,7 +8841,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 // TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed.
 //
-// `1-hour-head` ships `head_ttl_min_tokens: 50000`, and that number is the difference between the
+// `1-hour-head` ships `head_ttl_min_tokens: 50000` (the deprecated key, on purpose: see settings.py), and that number is the difference between the
 // strategy doing something and doing nothing. It was disclosed in none of the three places a user
 // reads before choosing it.
 //

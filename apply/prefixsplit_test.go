@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -130,7 +131,7 @@ func TestInertWithoutAVolatileTail(t *testing.T) {
 	if _, split := splitTail(sysBody(textBlock(big, true)), bschemas.Anthropic); split {
 		t.Fatal("split a block with no volatile marker")
 	}
-	// Below minSplitTokens on the stable half: the marker is present but the stable
+	// Below the cache minimum on the stable half: the marker is present but the stable
 	// part is tiny, so there is nothing worth caching separately.
 	small := "Current branch: main\nRecent commits:\nabc fix\n"
 	if _, split := splitTail(sysBody(textBlock(small, true)), bschemas.Anthropic); split {
@@ -480,7 +481,7 @@ func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {
 	if !split {
 		t.Fatal("did not split")
 	}
-	if stable < minSplitTokens {
+	if stable < modelinfo.MinCacheableO200k("claude-sonnet-5") {
 		t.Fatalf("stable half reported as %d tokens, below the minimum that permits a split", stable)
 	}
 	// It is the STABLE half, not the whole block: the volatile tail is excluded by
@@ -520,5 +521,62 @@ func TestSplitOnBedrockConverseKeepsCachePointAfterStableHalf(t *testing.T) {
 		if after, before := wireBreakpoints(got), wireBreakpoints(in); after != before {
 			t.Fatalf("%s: breakpoint count %d -> %d", p, before, after)
 		}
+	}
+}
+
+// stableOf returns a stable half of about n o200k tokens followed by the git tail.
+func stableOf(t *testing.T, n int) string {
+	t.Helper()
+	line := "You follow the repository conventions exactly.\n"
+	per := tokens.Count(line)
+	return strings.Repeat(line, n/per+1) + "\nCurrent branch: main\nRecent commits:\n0898367954 SWE-bench\n"
+}
+
+func bodyForModel(model, text string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"model":    model,
+		"system":   []map[string]any{textBlock(text, true)},
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	})
+	return b
+}
+
+// The split floor is the provider's minimum cacheable prefix FOR THE MODEL FAMILY, in o200k tokens
+// (modelinfo.MinCacheableO200k, the same rule cheapmodel uses). The old flat 1024 bytes/4 was wrong
+// both ways: on Haiku (floor 4096 billed) a 1,500-token stable half is ignored by the provider; on
+// Sonnet (floor 1024 billed, 1.2 factor) a 900-token stable half is cached.
+func TestSplitFloorFollowsTheModelFamily(t *testing.T) {
+	mid := stableOf(t, 1500) // above the Sonnet floor (853), below the Haiku floor (3413)
+	if n := tokens.Count(mid); n <= modelinfo.MinCacheableO200k("claude-sonnet-5") || n >= modelinfo.MinCacheableO200k("claude-haiku-4-5") {
+		t.Fatalf("fixture premise broken: %d tokens", n)
+	}
+	if _, split := splitTail(bodyForModel("claude-haiku-4-5", mid), bschemas.Anthropic); split {
+		t.Error("Haiku: split a stable half under the Haiku cache minimum; the provider ignores that breakpoint")
+	}
+	if _, split := splitTail(bodyForModel("claude-sonnet-5", mid), bschemas.Anthropic); !split {
+		t.Error("Sonnet: did not split a stable half over the Sonnet cache minimum")
+	}
+	// An unnamed model gets the larger (Haiku) floor, as in cheapmodel.
+	if _, split := splitTail(bodyForModel("some-alias", mid), bschemas.Anthropic); split {
+		t.Error("unnamed model: split under the larger floor")
+	}
+}
+
+// On Sonnet the floor is 1024 / 1.2 = 853 o200k tokens. 900 tokens split (the old flat 1024 refused
+// it); 700 do not.
+func TestSplitFloorOnSonnetIsInO200kUnits(t *testing.T) {
+	if _, split := splitTail(bodyForModel("claude-sonnet-5", stableOf(t, 900)), bschemas.Anthropic); !split {
+		t.Error("did not split a 900-token stable half on Sonnet")
+	}
+	if _, split := splitTail(bodyForModel("claude-sonnet-5", stableOf(t, 700)), bschemas.Anthropic); split {
+		t.Error("split a 700-token stable half on Sonnet")
+	}
+}
+
+// Bytes are not tokens: many bytes of few tokens do not clear the floor.
+func TestSplitFloorCountsRealTokensNotBytes(t *testing.T) {
+	sparse := strings.Repeat("=", 8000) + "\nCurrent branch: main\nRecent commits:\n0898367954 SWE-bench\n"
+	if _, split := splitTail(bodyForModel("claude-sonnet-5", sparse), bschemas.Anthropic); split {
+		t.Error("split a block with many bytes but few tokens")
 	}
 }

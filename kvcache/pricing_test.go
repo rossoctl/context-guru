@@ -196,3 +196,38 @@ func TestMultiplierDefaults(t *testing.T) {
 		t.Errorf("the shipped multiples moved: %+v", d)
 	}
 }
+
+// A blank cache_read follows the model's tier; Multipliers.CacheRead, when set, wins for all.
+func TestFromPriceBlankReadFollowsTheModelTier(t *testing.T) {
+	in := modelinfo.Price{Input: 10e-6, Output: 50e-6}
+	for model, frac := range map[string]float64{
+		"claude-opus-5-5": 0.05, "claude-sonnet-5-5": 0.05, "claude-fable-5-1": 0.025,
+		"claude-mythos-5-1": 0.025, "claude-opus-5": 0.1, "claude-fable-5": 0.1, "m": 0.1,
+	} {
+		got := FromPrice(model, in, Multipliers{}, SourcePriceList).CacheRead
+		if want := in.Input * frac; math.Abs(got-want) > 1e-15 {
+			t.Errorf("%s: cache_read = %v, want %v", model, got, want)
+		}
+		if got := FromPrice(model, in, Multipliers{CacheRead: 0.2}, SourcePriceList).CacheRead; math.Abs(got-in.Input*0.2) > 1e-15 {
+			t.Errorf("%s: an explicit multiple must win, got %v", model, got)
+		}
+	}
+	l := NewPriceList(context.Background(), []string{"claude-opus-5-5"}, stubPricer{"claude-opus-5-5": in}, Multipliers{}, nil)
+	if got := l.Models[0].CacheRead; math.Abs(got-in.Input*0.05) > 1e-15 {
+		t.Errorf("NewPriceList cache_read = %v, want 0.05x", got)
+	}
+}
+
+// PriceList.Multipliers states the read multiple as set (0 = per model), never a 0.1 that the
+// rows contradict.
+func TestPriceListStatesTheReadMultipleAsSet(t *testing.T) {
+	in := modelinfo.Price{Input: 10e-6, Output: 50e-6}
+	l := NewPriceList(context.Background(), []string{"claude-opus-5-5"}, stubPricer{"claude-opus-5-5": in}, Multipliers{}, nil)
+	if l.Multipliers.CacheRead != 0 || l.Multipliers.Write5m != 1.25 || l.Multipliers.Write1h != 2.0 {
+		t.Errorf("multipliers = %+v", l.Multipliers)
+	}
+	l = NewPriceList(context.Background(), []string{"m"}, stubPricer{"m": in}, Multipliers{CacheRead: 0.2}, nil)
+	if l.Multipliers.CacheRead != 0.2 {
+		t.Errorf("a set read multiple was lost: %+v", l.Multipliers)
+	}
+}

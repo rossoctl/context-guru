@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
 
@@ -51,6 +52,9 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
+	// did not change it.
+	deferFacts *deferFacts
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -88,6 +92,8 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
+	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
+	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
 	// body, the wire dialect, and the bypass flag — everything apply.EnforcedSessionIDFor
 	// needs to derive the id the pipeline's own turn will ask under. Stashed here because
@@ -154,10 +160,11 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
-		llm:     &cheapmodel.Sink{},
-		unique:  map[string]int{},
-		waits:   h.waits,
-		savings: h.savings, pings: h.opts.Pings,
+		llm:      &cheapmodel.Sink{},
+		unique:   map[string]int{},
+		waits:    h.waits,
+		terminal: h.opts.TerminalTools,
+		savings:  h.savings, pings: h.opts.Pings,
 		observe: tn.Mode == components.ModeObserve,
 	}
 }
@@ -460,6 +467,23 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	}
 }
 
+// deferFacts is what tool deferral did on one request, for the dashboard row (#869).
+type deferFacts struct {
+	tokens, list, searches, dropped, loaded, wrong int
+	gross, net                                     float64
+}
+
+// noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
+// booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
+// none) and how many different tools its searches loaded.
+func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
+	if c == nil {
+		return
+	}
+	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net}
+}
+
 // finish builds the event and hands it off. Called once, after the response has
 // been written, so nothing here is on the client's critical path. usage may be
 // zero-valued with ok=false, in which case the row is marked partial and left
@@ -527,7 +551,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
-	toolUseNames, stopReason := usage.ToolUseNames, usage.StopReason
+	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	if usage.ToolUseIncomplete {
+		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
+	}
 	failedCall := status != 0 && status/100 != 2
 	provider := bschemas.ModelProvider(c.provider)
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
@@ -551,8 +578,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
-		waitingFor, waitTool := waitcause.ClassifyWaitingFor(
-			toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
+			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
 		return dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
@@ -563,6 +590,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	if d := c.deferFacts; d != nil {
+		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
+		e.DeferDroppedSearches = d.dropped
+		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
+		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
+	}
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h

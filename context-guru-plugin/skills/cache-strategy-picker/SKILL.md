@@ -1,6 +1,6 @@
 ---
 name: cache-strategy-picker
-description: Show which named cache strategy is in effect and switch between them - `none`, `auto` (the default, which spends the caller's own credential on idle pings), `1-ping`, `2-ping` and `1-hour-head`. Use when the user asks which cache strategy is running, to change it, to turn idle keep-alive pings on or off, to stop spending money between turns, or to keep the cache warm.
+description: Show the cache strategy and switch it (`none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`). Use when asked which one runs, to turn keep-alive pings on or off, or to keep the cache warm.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 

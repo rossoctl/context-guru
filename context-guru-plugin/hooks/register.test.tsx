@@ -470,6 +470,7 @@ for (const [reason, want] of [
   ['below limits', /below its minimum/],
   ['pings used', /pings have run out/],
   ['stopped', /stopped keeping this thread warm/],
+  ['done', /agent has finished/],
   ['no entry', /knows nothing about this session/],
   ['unavailable', /route or credential is failing right now . try again shortly/],
   ['over budget', /per-ping limit/],

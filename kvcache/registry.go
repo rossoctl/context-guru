@@ -284,7 +284,7 @@ func (k KeepAlive) Describe() string {
 			"5-minute arm to hold the same span." + suffix
 	}
 	return "Hold every prefix at the 5-minute tier and refresh it with keep-alives while " +
-		"idle. The cheapest tier to create, refreshed at 0.1x." + suffix
+		"idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less." + suffix
 }
 
 // Extend1h writes every prefix at the CHEAP five-minute tier and buys the long hold only if

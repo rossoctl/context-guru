@@ -112,6 +112,10 @@ type Form struct {
 	// and with the YAML box gone there is no other way to correct the document from the
 	// page. Fixing it needs the account editor, which still takes a document.
 	ParseError string `json:"parse_error,omitempty"`
+	// CacheReset names cache tuning keys (for example "keepalive_max_pings") that a save deletes, so
+	// the key falls back to its default. A tuning field of 0 means "not stated" and leaves the
+	// stored key alone; this is how the form says "back to the default".
+	CacheReset []string `json:"cache_reset,omitempty"`
 }
 
 // CacheForm is the settings page's view of the `cache:` block.
@@ -123,7 +127,24 @@ type CacheForm struct {
 	KeepAliveMaxUSDPerPing     float64 `json:"keepalive_max_usd_per_ping,omitempty"`
 	KeepAliveMinPrefixTokens   int     `json:"keepalive_min_prefix_tokens,omitempty"`
 	HeadTTL1h                  bool    `json:"head_ttl_1h"`
-	HeadTTLMinTokens           int     `json:"head_ttl_min_tokens,omitempty"`
+	HeadTTLMinBytes            int     `json:"head_ttl_min_bytes,omitempty"`
+	// HeadTTLMinTokens is DEPRECATED, see CacheConfig. The form still reads it from an old
+	// document and keeps it, so a re-save does not drop a value the user set.
+	HeadTTLMinTokens int `json:"head_ttl_min_tokens,omitempty"`
+}
+
+// tuningValues is the ONE list of cache tuning keys the form writes, with the value the form states
+// for each (0 = not stated). ApplyForm's write loop and CacheReset's validation both read it.
+func (c *CacheForm) tuningValues() map[string]float64 {
+	return map[string]float64{
+		"keepalive_idle_seconds":        float64(c.KeepAliveIdleSeconds),
+		"keepalive_openai_idle_seconds": float64(c.KeepAliveOpenAIIdleSeconds),
+		"keepalive_max_pings":           float64(c.KeepAliveMaxPings),
+		"keepalive_min_prefix_tokens":   float64(c.KeepAliveMinPrefixTokens),
+		"keepalive_max_usd_per_ping":    c.KeepAliveMaxUSDPerPing,
+		"head_ttl_min_bytes":            float64(c.HeadTTLMinBytes),
+		"head_ttl_min_tokens":           float64(c.HeadTTLMinTokens),
+	}
 }
 
 // ExtractLLMForm is the RECOMMENDED prefill for the compaction-model component — a policy
@@ -329,7 +350,7 @@ func cacheForm(c CacheConfig) *CacheForm {
 		KeepAliveMaxPings:          c.KeepAliveMaxPings,
 		KeepAliveMaxUSDPerPing:     c.KeepAliveMaxUSDPerPing,
 		KeepAliveMinPrefixTokens:   c.KeepAliveMinPrefixTokens,
-		HeadTTL1h:                  c.HeadTTL1h, HeadTTLMinTokens: c.HeadTTLMinTokens,
+		HeadTTL1h:                  c.HeadTTL1h, HeadTTLMinBytes: c.HeadTTLMinBytes, HeadTTLMinTokens: c.HeadTTLMinTokens,
 	}
 }
 
@@ -394,23 +415,24 @@ func ApplyForm(doc string, f Form) (string, error) {
 		cb := child(m, "cache")
 		cb["keepalive"] = f.Cache.KeepAlive
 		cb["head_ttl_1h"] = f.Cache.HeadTTL1h
-		for k, v := range map[string]int{
-			"keepalive_idle_seconds":        f.Cache.KeepAliveIdleSeconds,
-			"keepalive_openai_idle_seconds": f.Cache.KeepAliveOpenAIIdleSeconds,
-			"keepalive_max_pings":           f.Cache.KeepAliveMaxPings,
-			"keepalive_min_prefix_tokens":   f.Cache.KeepAliveMinPrefixTokens,
-			"head_ttl_min_tokens":           f.Cache.HeadTTLMinTokens,
-		} {
-			if v > 0 {
+		// ONE rule for every tuning key. A value above 0 is written. 0 means "the form did not state
+		// it" (the settings page posts only keepalive and head_ttl_1h), so the stored key is LEFT
+		// ALONE: deleting it would erase a value tuned on the account page on every settings save.
+		// 0 is also the default for each key, so "back to the default" cannot be said by 0. It is
+		// said by naming the key in Form.CacheReset, which deletes it.
+		reset := map[string]bool{}
+		for _, k := range f.CacheReset {
+			reset[k] = true
+		}
+		for k, v := range f.Cache.tuningValues() {
+			switch {
+			case v > 0 && k == "keepalive_max_usd_per_ping":
 				cb[k] = v
-			} else {
+			case v > 0:
+				cb[k] = int(v)
+			case reset[k]:
 				delete(cb, k)
 			}
-		}
-		if f.Cache.KeepAliveMaxUSDPerPing > 0 {
-			cb["keepalive_max_usd_per_ping"] = f.Cache.KeepAliveMaxUSDPerPing
-		} else {
-			delete(cb, "keepalive_max_usd_per_ping")
 		}
 	}
 
@@ -576,6 +598,17 @@ func (f Form) validate() error {
 	if f.Mode != "" && f.Mode != "sync" && f.Mode != "observe" {
 		return fmt.Errorf("config: mode %q is not sync or observe", f.Mode)
 	}
+	known := (&CacheForm{}).tuningValues()
+	for _, k := range f.CacheReset {
+		if _, ok := known[k]; !ok {
+			names := make([]string, 0, len(known))
+			for n := range known {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			return fmt.Errorf("config: cache_reset: %q is not a cache tuning key (one of %s)", k, strings.Join(names, ", "))
+		}
+	}
 	if f.Cache != nil {
 		if err := (CacheConfig{
 			KeepAlive: f.Cache.KeepAlive, KeepAliveIdleSeconds: f.Cache.KeepAliveIdleSeconds,
@@ -583,7 +616,7 @@ func (f Form) validate() error {
 			KeepAliveMaxPings:          f.Cache.KeepAliveMaxPings,
 			KeepAliveMaxUSDPerPing:     f.Cache.KeepAliveMaxUSDPerPing,
 			KeepAliveMinPrefixTokens:   f.Cache.KeepAliveMinPrefixTokens,
-			HeadTTL1h:                  f.Cache.HeadTTL1h, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
+			HeadTTL1h:                  f.Cache.HeadTTL1h, HeadTTLMinBytes: f.Cache.HeadTTLMinBytes, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
 		}).validate(); err != nil {
 			return err
 		}

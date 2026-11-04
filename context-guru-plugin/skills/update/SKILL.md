@@ -1,6 +1,7 @@
 ---
 name: update
-description: Check whether a newer context-guru-proxy BINARY has been released and, if the user wants it, install it. Use when the user asks to update, upgrade, or check the version of context-guru or its proxy, or after a session-start note said a newer proxy is available. The plugin itself updates through the marketplace; this updates the proxy binary, which is released separately and does not move when the plugin does.
+description: Check for a newer context-guru-proxy binary and install it if you want. The plugin itself updates through the marketplace.
+disable-model-invocation: true
 ---
 
 # Update the context-guru proxy binary

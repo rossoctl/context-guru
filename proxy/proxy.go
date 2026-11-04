@@ -11,6 +11,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,8 @@ import (
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
@@ -121,6 +124,13 @@ type Options struct {
 	// transcripts to a fresh proxy wants, so it measures compaction, not the grace.
 	// Startup setting, not a live knob.
 	RestartGrace *bool
+	// ToolDeferPath is where tool deferral keeps its own on-disk state (#485): the per-thread
+	// records for a session store that does not survive a restart, and the history when there is
+	// no dashboard database. Opened at start when a configuration turns deferral on. "": there is no
+	// such place, and ultrahigh defers only with a durable session store. ToolDeferRetention bounds
+	// a row's age there (0: store.DefaultDiskRetention).
+	ToolDeferPath      string
+	ToolDeferRetention time.Duration
 	// Prices resolves a model's per-token rates so the dashboard can price each
 	// request AT WRITE TIME (so history does not reprice when a rate changes). nil =
 	// no pricing, and every captured row is marked partially accounted rather than
@@ -170,6 +180,10 @@ type Options struct {
 	// Cache is the single-tenant host's prompt-cache policy (the idle keep-alive and the
 	// mixed-TTL head). In hosted mode each tenant's own `cache:` block is used instead.
 	Cache CachePolicy
+	// TerminalTools names the tools whose call ends an agent (#857): the keep-alive plans no pings
+	// for such a thread and its wait cause reads "done". nil: the shipped list. A
+	// non-nil empty list turns the rule off. Process-wide, also in hosted mode.
+	TerminalTools []string
 	// AuthMode selects how a human authenticates to the control plane. The zero value is
 	// AuthPassword, which is today's behaviour, so an existing deployment is unaffected by this
 	// field existing. AuthExternal withdraws the password routes entirely — see authmode.go for
@@ -342,6 +356,9 @@ type Handler struct {
 	// never on the keep-alive ping path, so a ping can never make itself "current".
 	// Empty until the first real request arrives.
 	lastSession string
+
+	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
+	defer_ deferHost
 }
 
 // upstreamTransport is the default upstream client's transport, and the reason there is no
@@ -448,6 +465,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	}
 	h.keeper = newKeeper(h)
 	h.keeper.start()
+	// Tool deferral's stored state, loaded before the first request when a config turns it on.
+	h.startToolDefer()
 	h.threads = thread.New()
 	h.waits = waitcause.New()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
@@ -462,7 +481,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		// A write to an account or to the keep-alive strategies drops the cached dashboard reads that
 		// include that state, so a toggle shows on the next load and not after the stale window.
 		if reg := h.registry(); reg != nil {
-			reg.SetOnChange(h.api.InvalidateStateCaches)
+			reg.SetOnChange(h.onRegistryChange)
 		}
 		// Publish the off-path pool's counters to the dashboard, the same layering /stats
 		// uses: the pool lives in `modes`, which sits above both `metrics` and `dash`, so
@@ -477,7 +496,22 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 			})
 		}
 	}
+	if reg := h.registry(); reg != nil && h.api == nil {
+		reg.SetOnChange(h.onRegistryChange)
+	}
 	return h
+}
+
+// onRegistryChange runs after every committed account or strategy write: it drops the dashboard's
+// cached state reads, and lets an account that turned tool deferral on after the start load its
+// state as at the start (deferTenantsChanged).
+func (h *Handler) onRegistryChange(kind string) {
+	if h.api != nil {
+		h.api.InvalidateStateCaches(kind)
+	}
+	if kind == tenant.ChangeAccount {
+		h.deferTenantsChanged()
+	}
 }
 
 // Close shuts down the off-path worker pool and waits briefly for its goroutines to exit,
@@ -489,6 +523,7 @@ func (h *Handler) Close() {
 	// credentials. Stopping it drops both, which is why this is not optional on a host that
 	// builds and discards handlers.
 	h.keeper.Stop()
+	h.closeToolDefer() // flushes the tool history
 }
 
 // Mux wires the routes: chat proxying + health/stats/expand management.
@@ -515,6 +550,8 @@ func (h *Handler) Mux() *http.ServeMux {
 	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("POST /signal", h.clientSignal)
+	m.HandleFunc("POST /tool-search", h.toolSearchSignal)
+	m.HandleFunc("POST /tool-defer/probe", h.toolDeferProbe)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
 	// would otherwise answer it with a 401 — putting a red error in the console of every
@@ -550,6 +587,9 @@ func (h *Handler) Mux() *http.ServeMux {
 		m.HandleFunc("POST /api/adapt/compaction/apply", h.adaptCompactionApply)
 		m.HandleFunc("POST /api/save-more/config/apply", h.saveMoreConfigApply)
 		m.HandleFunc("POST /api/adapt/tools/apply", h.adaptToolsApply)
+		// save-more tools (#869): tool deferral's per-tool view and its keep / search actions.
+		m.HandleFunc("GET /api/save-more/tools", h.saveMoreToolsReport)
+		m.HandleFunc("POST /api/save-more/tools/apply", h.saveMoreToolsApply)
 		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
 		h.mountManualPing(m)
 	}
@@ -1281,6 +1321,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
 		// in the same coordinates the anchor is checked against on every later turn.
 		var anchor *expand.Anchor
+		// Tool deferral's facts for this request (#485), nil when it did not change the request.
+		var di *deferInfo
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1508,6 +1550,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
+				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
+				// the never-defer list, and the names list must see the tools as they go upstream.
+				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
+				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
 			}
 			// The savings record ends HERE, after both injections, with the body that goes
 			// upstream: the provider bills the injected tool declarations, so the library's
@@ -1524,7 +1570,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(r, provider, orig, tn))
+			h.newRecCtx(r, provider, orig, tn), di)
 	}
 }
 
@@ -1722,7 +1768,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo) {
 	wire := schema.WireFor(string(provider), up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
@@ -1742,6 +1788,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
 	// adjudication call stream straight through on a request that advertised only that one.
 	advertised := expand.HasTool(wire, body) || adjudicate.HasTool(wire, body)
+	// Our own tool search (#825) is a proxy tool too: its calls are answered in band, so the
+	// response is held whenever the request declares it.
+	searchOn := di != nil && di.search && tooldefer.HasClientSearch(wire, body)
+	advertised = advertised || searchOn
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -1756,6 +1806,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// can never delay or fail a request.
 	var usage Usage
 	var usageOK bool
+	// deferSearches adds up the server-side searches of every round this loop held: tool
+	// deferral's ledger reads them (#485). Counted per round, before the splice path's early
+	// return, so a spliced Claude Code turn counts its searches too (#871).
+	var deferSearches searchTally
 	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
 	// benign, three a measurement outage — and nothing distinguished them, so a run that had
 	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
@@ -1833,6 +1887,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		h.keeper.record(tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
 		// either way the deferral must resolve rather than wait indefinitely for a signal that
@@ -1979,6 +2034,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		upStart := time.Now()
 		lastUpStart = upStart
 		resp, err := h.doUpstream(r, up, body)
+		// Tool deferral changed this request and the provider refused it: the client must never see
+		// that 400 (Claude Code would turn its own search off for the session). Send the request
+		// without deferral, once, before answering. Round 0 only: a later round is the proxy's own.
+		if round == 0 && err == nil && resp != nil && di != nil &&
+			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+			resp.Body.Close()
+			refused := resp.StatusCode
+			body = di.orig
+			resp, err = h.doUpstream(r, up, body)
+			stubbed := false
+			// The missing-reference repair reads Anthropic shapes: not on our search's OpenAI wires.
+			if err == nil && !di.search {
+				if fixed, ok := repairOnMissingRef(resp, body); ok {
+					// The original failed the same way: it names a tool `tools` lacks. Send it once
+					// more with a stub for that tool, so the client never sees our 400 (#871). The
+					// refusal was then not deferral's, so deferral stays on (originalOK false).
+					body, stubbed = fixed, true
+					resp, err = h.doUpstream(r, up, body)
+				}
+			}
+			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
+			h.deferRetry(di, refused, errBody, ok)
+			// The original declares no search tool of ours: nothing to hold or answer from here on.
+			di, searchOn = nil, false
+		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
 			// anywhere earlier because only what was ACTUALLY forwarded and accepted is a valid
@@ -2112,7 +2193,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					recIncomplete = record.IncompleteRetainCap
 				}
 			}
-		case isSSE && schema.IsResponses(wire) && expand.HasMarkersInMessages(body):
+		case isSSE && schema.IsResponses(wire) && (searchOn || expand.HasMarkersInMessages(body)):
 			// Responses' terminal event includes the complete output array. Buffer
 			// only when a model-visible marker exists: advertising stays stable
 			// across turns, while marker-free ordinary traffic keeps streaming.
@@ -2123,6 +2204,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// Raw Responses-API events. The recorder translates only the Anthropic stream, so
 				// this turn is kept and marked incomplete rather than written with an empty
 				// response -- the same outcome as the other non-Anthropic stream path below.
+				recBody, recIsSSE = respBody, true
+			}
+		case isSSE && searchOn:
+			// Our search on Chat Completions: the stream is buffered, so a call to it can be answered
+			// in band (expand.AggregateSSE rebuilds the message). The client loses its stream
+			// for the requests of a thread with deferred tools; see #825.
+			sse, sseBuffered = true, true
+			respBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if h.recorder != nil {
 				recBody, recIsSSE = respBody, true
 			}
 		case isSSE:
@@ -2169,6 +2260,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
+		if di != nil {
+			deferSearches.add(isSSE, respBody)
+		}
 		if isSSE && sp != nil && withheld == nil {
 			// The whole round is already on the wire. Either it never called a proxy tool, or
 			// it ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
@@ -2207,6 +2301,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// The cap is reached, so this call cannot be answered — the client gets it, and
 			// bail is what counts that. Withholding first and handing back is the same bytes
 			// as streaming the round whole, and it is the only way the leak is visible.
+			if searchOn && di != nil {
+				// A call to our search that reaches the client here is kept by call id, so a
+				// chained Responses turn, which carries only the client's answer, is repaired.
+				h.noteLeakedSearches(tn, di, wire, isSSE, respBody)
+			}
 			bail()
 			return
 		}
@@ -2223,7 +2322,39 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName)
+		// Calls to our own tool search (#825). Together with a client tool call, the turn goes to the
+		// client whole (the loop cannot run the client's tool): the tools are added back now, and the
+		// next request answers our call (tooldefer.ApplySearch). Alone, they are answered below.
+		var searches []tooldefer.SearchCall
+		var searchSet map[string]bool
+		var searchNow []string
+		if searchOn && di != nil {
+			var client bool
+			searches, client = tooldefer.SearchCalls(wire, msg, expand.ToolName, adjudicate.ToolName)
+			if len(searches) > 0 {
+				var names []string
+				for _, c := range searches {
+					names = append(names, c.Names...)
+				}
+				searchSet, searchNow = h.searchLoad(tn, di, names)
+				deferSearches.n += len(searches)
+				deferSearches.loaded = append(deferSearches.loaded, searchNow...)
+				lg.Debug("cg.tooldefer_search_call", "round", round, "calls", len(searches), "added_back", len(searchNow),
+					"with_client_tool", client)
+				if client || searchSet == nil {
+					if client {
+						h.deferGate().MixedSearches.Add(int64(len(searches)))
+						// Kept by call id, so the next request answers them even if it chains on
+						// previous_response_id and does not carry the calls.
+						h.noteSearchCalls(tn, di, searches)
+					}
+					bail()
+					return
+				}
+			}
+		}
+
+		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName, tooldefer.ClientSearchName)
 		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
 		// called PROXY tools only: by the time the request-path repair runs, the client has already
 		// received a tool_use for a tool it does not implement, already answered "not found", and
@@ -2245,7 +2376,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// or maxExpandRounds is spent). An earlier version of this comment said the backstop was only
 		// for "a path this loop does not see", which was false for the first of those.
 		strays := adjudicate.ResponseCallIDs(wire, msg)
-		if (len(calls) == 0 && len(strays) == 0) || otherTools {
+		if (len(calls) == 0 && len(strays) == 0 && len(searches) == 0) || otherTools {
 			bail() // normal answer (or a CLIENT tool) — hand it over unchanged
 			return
 		}
@@ -2257,6 +2388,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// finish its turn instead of waiting on a tool nobody will run.
 		for _, id := range strays {
 			resolved[id] = adjudicate.StrayAnswer
+		}
+		for _, c := range searches {
+			resolved[c.ID] = tooldefer.SearchAnswer(c.Names, searchSet)
 		}
 		got := 0
 		for _, c := range calls {
@@ -2296,6 +2430,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		lg.Debug("cg.expand", "round", round, "calls", len(calls),
 			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(wire, body, msg, resolved)
+		if ok && len(searchNow) > 0 && di != nil {
+			// The loaded tools go at the end of `tools`, as on every later request of the thread
+			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
+			next, ok = tooldefer.AppendTools(wire, next, di.orig, searchNow)
+		}
 		if !ok {
 			bail() // malformed shapes — fail open, hand the response over unchanged
 			return
@@ -2494,7 +2633,20 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	// whole JSON document. The sniffer says whether it spliced, so responseUsageWhy reports a
 	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
 	// block that was present but rejected stays a dialect finding, whatever the window did.
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes(), sn.spliced())
+	win := sn.bytes()
+	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
+	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
+	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
+	// It counts events, so it reads the window with no byte twice (#866, N5).
+	if bytes.Contains(win, []byte(tooldefer.SearchName)) {
+		var sr tooldefer.SearchRead
+		if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+			sr = tooldefer.ReadSearchesSSE(sn.disjoint())
+		} else {
+			sr = tooldefer.ReadSearches(win)
+		}
+		u.Searches, u.SearchLoaded, u.SearchDropped = sr.Searches, sr.Loaded, sr.Dropped()
+	}
 	return firstByte, u, why, ok
 }
 
@@ -2744,17 +2896,22 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	if s := h.savingsStats(); s != nil && (s.Current != nil || s.Live != nil || s.All != nil) {
 		snap.Savings = s
 	}
+	snap.ToolDefer = h.deferStats()
 	json.NewEncoder(w).Encode(snap)
 }
 
 // Agent-model token rates used to VALUE saved tokens at /stats (claude-sonnet-5 class,
-// $3/MTok fresh, 0.1x cache read). Mirrors components/offload/extract_econ.go, which
+// $3/MTok fresh, 0.1x cache read: the Sonnet 4.5/4.6-class list price, where 0.1x is right;
+// the lower per-model tiers of modelinfo.CacheReadFracFor do not apply to a fixed class). Mirrors components/offload/extract_econ.go, which
 // applies the same rates inside the gate; kept as local constants rather than a shared
 // export because the two layers may legitimately be priced differently (the gate prices
 // the traffic it sees; /stats prices the aggregate).
 const (
-	agentFreshPerMTok     = 3.00
-	agentCacheReadPerMTok = 0.30
+	agentFreshPerMTok = 3.00
+	// A constant, not modelinfo.Price.CacheReadFor: a constant product is exact (0.3), while the
+	// same product at run time is 0.30000000000000004. TestAgentClassRatesMatchPrice pins the
+	// constant to that function for this class, so the two cannot drift.
+	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 )
 
 // expand resolves a stashed original by id — the HTTP side of reversibility (the

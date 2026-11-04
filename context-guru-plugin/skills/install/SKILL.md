@@ -1,6 +1,6 @@
 ---
 name: install
-description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. The Context Guru band above the prompt shows the savings, the cache clock and the context; the terminal status line is optional (--statusline). Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <none|auto|1-ping|2-ping|1-hour-head> to override the default cache strategy, --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one, and --statusline to also install the terminal status line.
+description: Install a local proxy and route Claude Code through it, so long sessions stop paying to re-create the prompt cache. Use when the user asks to install, set up, enable or start context-guru.
 ---
 
 # Install context-guru for Claude Code

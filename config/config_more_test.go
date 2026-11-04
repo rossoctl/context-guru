@@ -163,12 +163,12 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // else: what an exemption buys is that adding toon to a THIRD preset still has to be a
 // decision somebody makes here, rather than something that quietly spreads.
 //
-// conservative/medium/high/xhigh are exempt for the same reason as house/housellm: they carry
+// conservative/medium/high/xhigh/ultrahigh are exempt for the same reason as house/housellm: they carry
 // house's or housellm's pipeline verbatim, toon included, rather than re-deriving it.
 func TestToonIsInNoPreset(t *testing.T) {
 	byOperatorRequest := map[string]bool{
 		"house": true, "housellm": true,
-		"conservative": true, "medium": true, "high": true, "xhigh": true,
+		"conservative": true, "medium": true, "high": true, "xhigh": true, "ultrahigh": true,
 	}
 	for name, pipeline := range presets {
 		if byOperatorRequest[name] {

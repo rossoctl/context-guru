@@ -413,8 +413,10 @@ func indexN(msgs []Message, minOutputTokens int, tok func(string) int, priorGuar
 	return recs
 }
 
-// approxTokens is the ~4-chars/token proxy the offline pass uses, so an Index built
-// without a real tokenizer sizes outputs the same way the measurement did.
+// approxTokens is a BYTES proxy (len/4, minimum 1), not a token count. It is kept on purpose
+// with this exact value: it matches the offline Python measurement (coref.py), so an Index built
+// without a real tokenizer sizes outputs the same way that study did. Do not move it to
+// tokens.Count without redoing the study.
 func approxTokens(s string) int {
 	if n := len(s) / 4; n > 1 {
 		return n

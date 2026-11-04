@@ -3730,6 +3730,11 @@ STRATEGIES: dict[str, dict] = {
                 "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
+        # Keep the deprecated token key on purpose. The plugin updates through the marketplace and the
+        # proxy binary is released on its own, so this file can run against an OLDER proxy, and that
+        # proxy rejects an unknown key (strict YAML). Every proxy accepts head_ttl_min_tokens; a new
+        # proxy reads 50000 as the 200000-byte gate. Write head_ttl_min_bytes from the plugin only in
+        # a later release, once the oldest proxy in use knows it (#798).
         "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
         "spends": False,
         # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
@@ -4131,7 +4136,9 @@ PRESETS: dict[str, str] = {
     "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
-             "already gone cold — the deepest cut this picker offers",
+             "already gone cold",
+    "ultrahigh": "xhigh plus tool deferral: tools your own last sessions never used are sent as "
+                 "names only and loaded through search when needed — experimental, opt-in",
 }
 DEFAULT_PRESET = "off"
 
@@ -4202,17 +4209,44 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 3
 
     if options.get("preset") == name:
-        emit(result="unchanged", preset=name, file=target)
+        emit(result="unchanged", preset=name, file=target, **_ask_defer_probe(name))
         return 0
 
     if existed:
         backup(target)
     options["preset"] = name
     save(target, data)
-    emit(result="set", preset=name, file=target,
+    emit(result="set", preset=name, file=target, **_ask_defer_probe(name),
          note="takes effect the next time the proxy starts, not this session — stop and restart "
               "it, or start a new session, to pick it up")
     return 0
+
+
+def _ask_defer_probe(preset: str) -> dict:
+    """For `ultrahigh`: ask the routed proxy to run tool deferral's provider check (#485).
+
+    POST /tool-defer/probe. The proxy runs the check in the background at this account's next
+    request, with that request's own model and credential, so it has a verdict before the first
+    session that could be deferred. Returns at once (1 s ceiling); any failure is reported as
+    `probe=<reason>`, never raised. {} (no output line) for every other preset.
+    """
+    if preset != "ultrahigh":
+        return {}
+    return {"probe": _post_defer_probe()}
+
+
+def _post_defer_probe() -> str:
+    port, _src = resolve_routed_port()
+    if not port:
+        return "not_routed"
+    import urllib.request
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return "asked" if resp.status == 202 else f"status_{resp.status}"
+    except Exception:  # noqa: BLE001 - an older proxy, or none running: the probe runs later anyway
+        return "unavailable"
 
 
 # ---------------------------------------------------------------------------

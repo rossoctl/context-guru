@@ -168,7 +168,7 @@ type Event struct {
 	// compaction behaviour — it only writes them, so a later change can.
 	//
 	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
-	// right now (own_tool|human|background|teammate|retry|unknown); WaitTool is the LAST
+	// right now (own_tool|human|background|teammate|retry|done|unknown); WaitTool is the LAST
 	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
 	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
 	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the
@@ -417,6 +417,25 @@ type Event struct {
 	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
 	// column so the sweep's credit and its answer cost are never one number.
 	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
+	// Tool deferral's facts for this request (#485, #869), from the proxy's own deferral ledger:
+	// set only on a request deferral changed and the provider answered with usage. DeferTokens is
+	// the weight of the definitions it deferred (less those a search had already loaded), and
+	// DeferListTokens the names list's weight, in our tokenizer's units. DeferSearches is the
+	// server-side searches the response ran, DeferDroppedSearches the ones with no result (the
+	// client drops a search sent beside another tool call, and the model searches again),
+	// DeferLoaded the distinct tools they loaded, and DeferWrongGuesses the wrong guesses as
+	// tooldefer.WrongGuesses counts them: a tool this request deferred that a search loaded and no
+	// earlier message had loaded. DeferGrossUSD and DeferNetUSD are the ledger's
+	// prices (tooldefer.Price): gross is what the deferred definitions would have cost, net takes
+	// off the names list and the search costs. Both 0 when the model has no price.
+	DeferTokens          int     `json:"defer_tokens,omitempty"`
+	DeferListTokens      int     `json:"defer_list_tokens,omitempty"`
+	DeferSearches        int     `json:"defer_searches,omitempty"`
+	DeferDroppedSearches int     `json:"defer_dropped_searches,omitempty"`
+	DeferLoaded          int     `json:"defer_loaded,omitempty"`
+	DeferWrongGuesses    int     `json:"defer_wrong_guesses,omitempty"`
+	DeferGrossUSD        float64 `json:"defer_gross_usd,omitempty"`
+	DeferNetUSD          float64 `json:"defer_net_usd,omitempty"`
 
 	TokenAccounting string `json:"token_accounting"`
 	// PriceEstimated is true when the accountant library priced this request without knowing whether a

@@ -37,49 +37,13 @@ func ResponseCalls(provider string, resp []byte, otherProxyTools ...string) (cal
 		}
 		return false
 	}
-	switch provider {
-	case "anthropic":
-		gjson.GetBytes(resp, "content").ForEach(func(_, blk gjson.Result) bool {
-			if blk.Get("type").String() != "tool_use" {
-				return true
-			}
-			switch name := blk.Get("name").String(); {
-			case name == ToolName:
-				calls = append(calls, Call{CallID: blk.Get("id").String(), HashID: blk.Get("input.id").String()})
-			case !ours(name):
-				otherTools = true
-			}
-			return true
-		})
-	case "responses":
-		gjson.GetBytes(resp, "output").ForEach(func(_, item gjson.Result) bool {
-			typ := item.Get("type").String()
-			if typ != "function_call" && typ != "custom_tool_call" {
-				return true
-			}
-			name := item.Get("name").String()
-			if name == ToolName {
-				args := item.Get("arguments").String()
-				if typ == "custom_tool_call" {
-					args = item.Get("input").String()
-				}
-				calls = append(calls, Call{CallID: item.Get("call_id").String(), HashID: gjson.Get(args, "id").String()})
-			} else if !ours(name) {
-				otherTools = true
-			}
-			return true
-		})
-	default: // openai and compatibles
-		gjson.GetBytes(resp, "choices.0.message.tool_calls").ForEach(func(_, tc gjson.Result) bool {
-			switch name := tc.Get("function.name").String(); {
-			case name == ToolName:
-				hash := gjson.Get(tc.Get("function.arguments").String(), "id").String()
-				calls = append(calls, Call{CallID: tc.Get("id").String(), HashID: hash})
-			case !ours(name):
-				otherTools = true
-			}
-			return true
-		})
+	for _, c := range schema.OutputCalls(provider, resp) {
+		switch {
+		case c.Name == ToolName:
+			calls = append(calls, Call{CallID: c.ID, HashID: gjson.Get(c.Args, "id").String()})
+		case !ours(c.Name):
+			otherTools = true
+		}
 	}
 	return calls, otherTools
 }

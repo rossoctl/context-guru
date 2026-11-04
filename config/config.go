@@ -165,6 +165,32 @@ type CacheConfig struct {
 	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
 	// well as the efficiency one.
 	KeepAliveMinPrefixTokens int `yaml:"keepalive_min_prefix_tokens"`
+	// KeepAliveTerminalTools names the tools whose call ENDS an agent (#857). When the last tool
+	// call of a response is one of them, the thread is done: no tool result comes back, so the
+	// keep-alive plans no pings for it, and the wait cause reads "done". Absent: the shipped list
+	// (StructuredOutput). An empty list (`keepalive_terminal_tools: []`) turns the rule off, which
+	// is the behavior before #857: such a thread gets its pings.
+	KeepAliveTerminalTools []string `yaml:"keepalive_terminal_tools"`
+	// KeepAliveWaitPlan turns on the per-wait ping plan (#858). Absent: on. `false` is the one switch
+	// that brings back the behavior before #858: MaxPings for every wait, time windows for every wait,
+	// sweep questions during tool waits, and pings for a thread with no tool call yet. It does not
+	// bring back the 80k minimum prefix, which is only a default (keepalive_min_prefix_tokens).
+	//
+	// With the plan on, the ping count follows what the thread waits for. "Base" is
+	// keepalive_max_pings:
+	//   - its own tool (main or subagent): keep pinging until the result comes, at most
+	//     keepalive_tool_wait_max_pings (default 8);
+	//   - main, end_turn, background work: base + keepalive_background_extra_pings (default 3);
+	//   - main, end_turn, a person: base + keepalive_human_extra_pings (default 1);
+	//   - main waiting for a teammate, or a subagent waiting for its main agent: base;
+	//   - a finished thread, or one with no tool call yet: 0.
+	// Manager-strategy time windows then apply only to a wait for a person, and the sweep question is
+	// not asked while a thread waits for its own tool. It applies to the 5-minute tier. 0 on the three
+	// counts means the default. The three counts are at most 11, the highest strategy ping count.
+	KeepAliveWaitPlan             *bool `yaml:"keepalive_wait_plan"`
+	KeepAliveToolWaitMaxPings     int   `yaml:"keepalive_tool_wait_max_pings"`
+	KeepAliveBackgroundExtraPings int   `yaml:"keepalive_background_extra_pings"`
+	KeepAliveHumanExtraPings      int   `yaml:"keepalive_human_extra_pings"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -189,8 +215,9 @@ type CacheConfig struct {
 	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
 	// zero on a model the honest projection for it is $0.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
-	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
-	// DefaultHeadTTLMinTokens (50,000).
+	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
+	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
+	// (200,000). When both are set, this key wins.
 	//
 	// A dollar filter, not a probability filter, and that distinction is the whole result.
 	// Gating 1h on the best available predictor of a long gap leaves the net unchanged
@@ -198,6 +225,10 @@ type CacheConfig struct {
 	// SAME cache_write on the same requests, so multiplying both by a probability cannot
 	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
 	// requests that pay the premium and can never produce a large miss.
+	HeadTTLMinBytes int `yaml:"head_ttl_min_bytes"`
+	// HeadTTLMinTokens is DEPRECATED: use head_ttl_min_bytes. It is a byte gate with a token label
+	// (the gate always measured len(body)/4). It still works: when head_ttl_min_bytes is not set,
+	// this value x 4 is the gate, so an old config behaves exactly as before.
 	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
 	// TailBreakpoint adds one cache breakpoint at the end of a request whose client put its last
 	// breakpoint far from the end (#795): Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
@@ -225,8 +256,25 @@ const (
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
-	DefaultKeepAliveMinPrefix     = 80000
-	DefaultHeadTTLMinTokens       = 50000
+	// DefaultKeepAliveMinPrefix is 20000 since #858. No long subagent idle span had a prefix under
+	// 20k, so any floor at or under 20k gives the same result there. It was 80000 (#435).
+	DefaultKeepAliveMinPrefix = 20000
+	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
+	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.
+	DefaultKeepAliveToolWaitMaxPings     = 8
+	DefaultKeepAliveBackgroundExtraPings = 3
+	DefaultKeepAliveHumanExtraPings      = 1
+	// MaxKeepAliveWaitPings bounds each of the three counts: the highest strategy ping count.
+	MaxKeepAliveWaitPings  = 11
+	DefaultHeadTTLMinBytes = 200000
+	// DefaultHeadTTLMinTokens is DEPRECATED, kept for old callers: the old default of 50,000.
+	DefaultHeadTTLMinTokens = DefaultHeadTTLMinBytes / HeadTTLBytesPerToken
+	// HeadTTLBytesPerToken converts the deprecated head_ttl_min_tokens into bytes. It is the
+	// factor the old gate used (len(body)/4).
+	HeadTTLBytesPerToken = 4
+	// MaxHeadTTLMinBytes bounds the size gate. 1 GiB is far above any request body, and it keeps
+	// head_ttl_min_tokens x HeadTTLBytesPerToken from overflowing an int.
+	MaxHeadTTLMinBytes = 1 << 30
 )
 
 // The provider's cache lifetimes in seconds, for the validate caps below.
@@ -260,8 +308,21 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
-	if c.HeadTTLMinTokens <= 0 {
-		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
+	if c.KeepAliveToolWaitMaxPings <= 0 {
+		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
+	}
+	if c.KeepAliveBackgroundExtraPings <= 0 {
+		c.KeepAliveBackgroundExtraPings = DefaultKeepAliveBackgroundExtraPings
+	}
+	if c.KeepAliveHumanExtraPings <= 0 {
+		c.KeepAliveHumanExtraPings = DefaultKeepAliveHumanExtraPings
+	}
+	if c.HeadTTLMinBytes <= 0 {
+		if c.HeadTTLMinTokens > 0 {
+			c.HeadTTLMinBytes = c.HeadTTLMinTokens * HeadTTLBytesPerToken
+		} else {
+			c.HeadTTLMinBytes = DefaultHeadTTLMinBytes
+		}
 	}
 	return c
 }
@@ -273,10 +334,21 @@ func (c CacheConfig) Resolved() CacheConfig {
 // of reading at 0.1x.
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
-		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
+		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
-		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 {
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
+		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
+	}
+	if c.KeepAliveToolWaitMaxPings > MaxKeepAliveWaitPings || c.KeepAliveBackgroundExtraPings > MaxKeepAliveWaitPings ||
+		c.KeepAliveHumanExtraPings > MaxKeepAliveWaitPings {
+		return fmt.Errorf("config: cache: keepalive_tool_wait_max_pings, keepalive_background_extra_pings and "+
+			"keepalive_human_extra_pings must be at most %d (the credential hold is (K+1) x the idle time)",
+			MaxKeepAliveWaitPings)
+	}
+	if c.HeadTTLMinBytes > MaxHeadTTLMinBytes || c.HeadTTLMinTokens > MaxHeadTTLMinBytes/HeadTTLBytesPerToken {
+		return fmt.Errorf("config: cache: head_ttl_min_bytes must be at most %d (head_ttl_min_tokens at most %d)",
+			MaxHeadTTLMinBytes, MaxHeadTTLMinBytes/HeadTTLBytesPerToken)
 	}
 	if c.KeepAliveIdleSeconds >= lifetime5mSeconds {
 		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under %d "+
@@ -596,6 +668,9 @@ var presets = map[string][]string{
 	// The sweep is back in xhigh (#404 PR C), with no production shadow phase first: the false-drop
 	// signals (SweepDropCounters, the dashboard) are the watch on it.
 	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// ultrahigh = xhigh + tool deferral (#485): the same pipeline, with toolfilter's `defer: auto`.
+	// Opt-in only. Every other preset, xhigh included, leaves deferral off. See package tooldefer.
+	"ultrahigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -886,6 +961,35 @@ components:
       min_request_tokens: 3000
   extract_llm_sweep:
     min_tokens: 1000`,
+	// ultrahigh = xhigh + toolfilter `defer: auto` (#485). Everything else is xhigh's block, copied
+	// verbatim; TestUltrahighIsXhighPlusDeferral pins that the two cannot drift.
+	"ultrahigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+  toolfilter:
+    defer: auto`,
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
 	// reflection model being much cheaper than the agent's — the paper's own choice was
@@ -952,3 +1056,6 @@ func (c *Config) NewStore() store.Store {
 	}
 	return store.NewMemory(c.Store)
 }
+
+// WaitPlanOn reports whether the per-wait ping plan is on (#858). Absent is on.
+func (c CacheConfig) WaitPlanOn() bool { return c.KeepAliveWaitPlan == nil || *c.KeepAliveWaitPlan }

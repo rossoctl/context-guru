@@ -1,6 +1,7 @@
 ---
 name: heatmap
 description: A weekday-by-hour heat map of what cache misses cost you, so you can see when your pauses are expensive.
+disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tv.py" heatmap:*)
 ---
 

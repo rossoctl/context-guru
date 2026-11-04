@@ -144,9 +144,12 @@ type Policy struct {
 	// cache_write) a session must reach before it is pinged. With the first-request skip this
 	// sends 8.7x fewer pings for 3.3% less money.
 	MinPrefixTokens int
-	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinTokens gates
-	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
-	HeadTTL1h        bool
+	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinBytes gates
+	// it on the request body size in bytes. Passed through to apply.Opts — see apply/headttl.go.
+	HeadTTL1h       bool
+	HeadTTLMinBytes int
+	// HeadTTLMinTokens is DEPRECATED: the old name of HeadTTLMinBytes, kept so a host that still
+	// sets it builds and behaves as before. Read the gate through HeadTTLGateBytes.
 	HeadTTLMinTokens int
 	// PredictorID optionally names a registered predictor (see predictorFor, and the proxy
 	// host's knownPredictorIDs in proxy/keepalivestrategy.go) that pingable() must also clear before a
@@ -156,6 +159,18 @@ type Policy struct {
 	// PredictorThreshold is the minimum probability PredictorID must return. Ignored
 	// while PredictorID is "".
 	PredictorThreshold float64
+	// WaitPlan turns on the per-wait ping plan (waitplan.go, #858): the ping count follows what the
+	// thread waits for, time windows apply only to a wait for a person, the sweep question is not
+	// asked during a tool wait, and a thread with no tool call yet is not pinged. False is the
+	// behavior before #858: MaxPings for every wait. The zero Policy has it off, so a host that builds a
+	// Policy by hand keeps the old behavior until it asks.
+	WaitPlan bool
+	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
+	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
+	// while WaitPlan is on.
+	ToolWaitMaxPings     int
+	BackgroundExtraPings int
+	HumanExtraPings      int
 	// ManualHold is the host's reading of an opt-in on THIS request (the proxy: the
 	// x-context-guru-ping header): keep this thread for the Ping button even though no automatic
 	// ping will be sent for it. It never turns the schedule on, and never widens what is held: the
@@ -269,4 +284,17 @@ const DefaultMaxUSDPerPing = 0.50
 func Disabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_KEEPALIVE")))
 	return v == "off" || v == "0" || v == "false"
+}
+
+// headTTLBytesPerToken is the factor the old head-TTL gate used (len(body)/4). It equals
+// config.HeadTTLBytesPerToken; keepalive does not import config.
+const headTTLBytesPerToken = 4
+
+// HeadTTLGateBytes is the head-TTL size gate in bytes of the request body: HeadTTLMinBytes, or the
+// deprecated HeadTTLMinTokens x 4 when only that is set. 0 means the upgrade is off.
+func (p Policy) HeadTTLGateBytes() int {
+	if p.HeadTTLMinBytes > 0 {
+		return p.HeadTTLMinBytes
+	}
+	return p.HeadTTLMinTokens * headTTLBytesPerToken
 }

@@ -223,6 +223,7 @@ while the proxy holds the thread. When it is false, `ping_reason` is one of:
 `below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
 `over budget` (one ping would cost more than the per-ping cost ceiling),
 `too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
+`done` (the thread's last response ended with a terminal tool such as `StructuredOutput`, so the agent is finished and the proxy sends no pings),
 `unavailable` (the route is failing in a row, or the provider refused this credential),
 `pings used` (the planned pings ran out and the proxy let go of the thread),
 `stopped` (the proxy stopped the thread after a miss, a refused ping or a failure, and has let go of its copy),
@@ -334,7 +335,7 @@ Cost model (every rate is per-provider/model and editable in the page):
 
 ```text
 uncached input        input_tokens   × input_rate
-cache read             cache_read     × cache_read_rate      (default 0.1× input)
+cache read             cache_read     × cache_read_rate      (default 0.1× input; 0.05× Opus/Sonnet 5.5, 0.025× Fable/Mythos 5.1)
 cache write, 5m        written_tokens × write_5m_rate         (default 1.25× input)
 cache write, 1h        written_tokens × write_1h_rate         (default 2.0× input)
 cache premium          total_cost − uncached_cost   (negative = the cache paid for itself)

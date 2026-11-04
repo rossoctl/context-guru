@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -136,6 +137,13 @@ type kaEntry struct {
 	// wait cause the sweep's question stores with its held answer (#404, #453).
 	toolUseNames []string
 	usageOK      bool
+	// terminal is Options.TerminalTools as of record time (#857).
+	terminal []string
+	// wait is the wait cause this entry's pings were planned for (waitplan.go, #858). "" when the
+	// plan did not apply (plan off, a 1-hour thread, OpenAI). The sweep question reads it.
+	wait string
+	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
+	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
 	// (endsAtTextTurn, #776): roles and block types only. Never on OpenAI: its cache has no breakpoints
 	// and no text-turn rule, so a substitute there renews the prefix like a ping. Then the sweep's question cannot renew the
@@ -271,6 +279,18 @@ func ResolveTier(body []byte, u Usage, usageOK, prev bool) bool {
 	return prev
 }
 
+// terminalFor is the terminal-tool list for one response: the configured one, or an empty one
+// (rule off) when the response's name list may be incomplete (#857).
+func terminalFor(configured []string, incomplete bool) []string {
+	if incomplete {
+		return []string{}
+	}
+	return configured
+}
+
+// isDone: the establishing response ended with a terminal tool (#857).
+func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.terminal) }
+
 // pingable reports whether this session is worth holding state for at all. Every condition is
 // known when the request finishes, which is why it is checked there.
 //
@@ -307,6 +327,15 @@ func (e *kaEntry) pingable() bool {
 	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
+	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
+	// request follows, so a ping only spends money (#857). Tool names only.
+	if e.isDone() {
+		return false
+	}
+	// A thread with no tool call yet is not pinged (#858): it may be a side call.
+	if e.noTool {
+		return false
+	}
 	if e.pol.PredictorID == "" {
 		return true
 	}
@@ -336,6 +365,10 @@ type Options struct {
 	// OpenTasks reports a thread's open background-task and teammate-wait counts, for the wait cause
 	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
 	OpenTasks func(tenant, session, thread string) (background, teammate int)
+	// TerminalTools names the tools whose call ends an agent (#857). A thread whose last response
+	// ends with one is done: it is never pinged. nil: the shipped list. A non-nil
+	// empty list turns the rule off, which is the behavior before #857.
+	TerminalTools []string
 }
 
 // Record is one finished upstream request, handed to Keeper.Record by the host.
@@ -363,13 +396,16 @@ type Record struct {
 	// the thread is about to wait on (waitcause.ClassifyWaitingFor), which the sweep's held answer
 	// stores (#404, #453). A field of Record, not of Usage, so Usage stays comparable.
 	ToolUseNames []string
-	Policy       Policy // resolved by the host
-	Tag          string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent        string
-	Preset       string
-	Header       http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store        store.Store
-	Emitter      components.Emitter // nil: components.NopEmitter{}
+	// ToolUseIncomplete: ToolUseNames may miss the true last call (a spliced sniff window). The
+	// terminal-tool rule is then off for this response, so the thread is pinged as before (#857).
+	ToolUseIncomplete bool
+	Policy            Policy // resolved by the host
+	Tag               string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent             string
+	Preset            string
+	Header            http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store             store.Store
+	Emitter           components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -434,6 +470,9 @@ type Keeper struct {
 	// turn that only READS the cache bills no write, so it carries no tier of its own and
 	// inherits this. Written beside turns, so it is bounded and reset exactly as turns is.
 	tier1h map[string]bool
+	// toolSeen remembers, per THREAD (keyed like live), that a response of it called a tool (#858).
+	// Bounded and reset exactly as turns is.
+	toolSeen map[string]bool
 	// lastVary is, per THREAD (keyed like live), the output-budget step of the last ping actually
 	// handed to the Dispatcher. It outlives the entry, as turns does, so a new entry on the same
 	// thread never repeats the step its predecessor last sent (#706, #712 review). Bounded and reset
@@ -530,7 +569,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -607,6 +646,7 @@ func (k *Keeper) Shutdown() {
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
+	k.toolSeen = map[string]bool{}
 	k.lastVary = map[string]int{}
 }
 
@@ -859,6 +899,20 @@ func (k *Keeper) Record(r Record) {
 	if ttl1h && pol.On() {
 		pol = pol.ForOneHour()
 	}
+	// The per-wait ping plan (#858): the count follows what the thread waits for. The wait cause is read
+	// for every thread the plan covers (the sweep gate uses it); the COUNT changes only
+	// on the 5-minute tier. A 1-hour thread keeps its own bounded schedule, and OpenAI pings 28 minutes
+	// apart, so more pings would hold the credential for hours. A strategy that asks for the 1-hour head
+	// tier carries a 1-hour Idle even when the gateway granted 5 minutes; its count is the manager's.
+	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
+	planned := guard && !ttl1h && pol.Idle < 300*time.Second
+	wait := ""
+	if guard {
+		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+	}
+	if planned {
+		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
+	}
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
 	// overwrite the bytes on release without corrupting anything else that might still read
@@ -883,7 +937,8 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		toolUseNames: r.ToolUseNames, usageOK: usageOK, endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
+		wait:         wait,
+		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
 	}
@@ -895,6 +950,9 @@ func (k *Keeper) Record(r Record) {
 	// what lets a session's second request be recognised as such.
 	k.turns[key]++
 	e.turn = k.turns[key] - 1
+	seen := k.toolSeen[key] || calledATool(r.ToolUseNames, r.ToolUseIncomplete, u.StopReason)
+	k.toolSeen[key] = seen
+	e.noTool = guard && !seen
 	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
 	if usageOK && (u.CacheWrite > 0 || ttl1h) {
 		k.tier1h[key] = ttl1h
@@ -904,6 +962,7 @@ func (k *Keeper) Record(r Record) {
 		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
+		k.toolSeen = map[string]bool{key: seen}
 		// Keep the step of every thread that still holds a live entry, and of this one: a live
 		// thread that lost its step would send its next ping at step 0, the same bytes as a ping 1
 		// it may have just sent (#712 review). k.live is bounded, so this stays bounded too.
@@ -937,6 +996,9 @@ func (k *Keeper) Record(r Record) {
 			reason := ReasonBelowLimits
 			if e.pingUSD > pol.Ceiling() {
 				reason = ReasonOverBudget
+			}
+			if pol.On() && e.isDone() {
+				reason = ReasonDone
 			}
 			k.setReasonLocked(r.Key, reason)
 			k.skipped.Add(1)
@@ -1132,6 +1194,7 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.live, key)
 		delete(k.turns, key)
 		delete(k.tier1h, key)
+		delete(k.toolSeen, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	// Every step the tenant's threads left, including threads with no live entry: lastVary has no
@@ -2058,7 +2121,7 @@ func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
 	}
 	tk := thread.Key(e.session, e.thread)
 	_, _, hasSummary := offload.KeepAliveCandidateState(tk)
-	return hasSummary || offload.HasSweepPingCandidate(tk)
+	return hasSummary || (!e.toolWait() && offload.HasSweepPingCandidate(tk))
 }
 
 // fireExtra sends the one extra request (kaEntry.extraDue) under the same claim, ceilings and latches

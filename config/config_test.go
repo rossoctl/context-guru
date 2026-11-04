@@ -171,7 +171,7 @@ cache:
 		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
 		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
 		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
-		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
+		got.HeadTTLMinBytes != DefaultHeadTTLMinBytes {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}
 	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds1h != 59*60 || got.KeepAliveMaxPings1h != 1 {
@@ -266,12 +266,12 @@ func TestPresetLadderSummarizerModes(t *testing.T) {
 	}
 }
 
-// The recommended keep-alive policy (#435, B-policy-r2) is the default; pin the four knobs.
+// The recommended keep-alive policy (#435, B-policy-r2; floor 20000 since #858) is the default; pin the four knobs.
 func TestKeepAliveRecommendedDefaults(t *testing.T) {
 	r := CacheConfig{}.Resolved()
 	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
-		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveMaxUSDPerPing != 0.50 {
-		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 80000, 0.50",
+		r.KeepAliveMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 20000, 0.50",
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }
@@ -343,5 +343,97 @@ func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
 	list, ok := PresetPipeline("xhigh")
 	if !ok || !reflect.DeepEqual(list, want) {
 		t.Errorf("xhigh preset list = %v (ok=%v), want %v", list, ok, want)
+	}
+}
+
+// ultrahigh is xhigh plus tool deferral (#485), and only ultrahigh defers. The YAML is a copy of
+// xhigh's plus one toolfilter block, so it is compared block by block: a retune of xhigh that is not
+// copied here fails.
+func TestUltrahighIsXhighPlusDeferral(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	defers := func(c *Config) bool {
+		t.Helper()
+		pipe, err := c.Build(components.NopEmitter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tf, ok := pipe.Find("toolfilter").(interface{ Defers() bool })
+		return ok && tf.Defers()
+	}
+	u, x := load("ultrahigh"), load("xhigh")
+	if !reflect.DeepEqual(u.Pipeline, x.Pipeline) {
+		t.Errorf("ultrahigh pipeline = %v, want xhigh's %v", u.Pipeline, x.Pipeline)
+	}
+	for name, n := range x.Components {
+		var a, b any
+		n.Decode(&a)
+		un := u.Components[name]
+		un.Decode(&b)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("ultrahigh's %s block = %v, want xhigh's %v", name, b, a)
+		}
+	}
+	var tf map[string]any
+	if n := u.Components["toolfilter"]; n.Decode(&tf) != nil || tf["defer"] != "auto" || len(tf) != 1 {
+		t.Errorf("ultrahigh toolfilter block = %v, want exactly defer: auto", tf)
+	}
+	if !defers(u) {
+		t.Error("ultrahigh does not defer")
+	}
+	for name := range presets {
+		if name != "ultrahigh" && defers(load(name)) {
+			t.Errorf("%s defers tools: only ultrahigh may", name)
+		}
+	}
+	if list, ok := PresetPipeline("ultrahigh"); !ok || !reflect.DeepEqual(list, x.Pipeline) {
+		t.Errorf("ultrahigh preset list = %v (ok=%v)", list, ok)
+	}
+}
+
+// head_ttl_min_tokens is deprecated. The gate it set was always bytes/4, so an old value
+// x 4 is the same gate in bytes; head_ttl_min_bytes wins when both are set.
+func TestHeadTTLMinBytesResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		in   CacheConfig
+		want int
+	}{
+		{"nothing set: the default", CacheConfig{}, 200000},
+		{"old key only: tokens x 4", CacheConfig{HeadTTLMinTokens: 50000}, 200000},
+		{"old key, other value", CacheConfig{HeadTTLMinTokens: 12345}, 49380},
+		{"new key only", CacheConfig{HeadTTLMinBytes: 123456}, 123456},
+		{"both set: the new key wins", CacheConfig{HeadTTLMinBytes: 1000, HeadTTLMinTokens: 50000}, 1000},
+	}
+	for _, c := range cases {
+		if got := c.in.Resolved().HeadTTLMinBytes; got != c.want {
+			t.Errorf("%s: Resolved().HeadTTLMinBytes = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestHeadTTLMinKeysLoadFromYAML(t *testing.T) {
+	old, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n"))
+	if err != nil {
+		t.Fatalf("an old config with head_ttl_min_tokens did not load: %v", err)
+	}
+	if got := old.Cache.Resolved().HeadTTLMinBytes; got != 200000 {
+		t.Errorf("old config gate = %d bytes, want 200000", got)
+	}
+	both, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n  head_ttl_min_bytes: 300000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := both.Cache.Resolved().HeadTTLMinBytes; got != 300000 {
+		t.Errorf("config with both keys: gate = %d bytes, want 300000 (the new key)", got)
+	}
+	if _, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_min_bytes: -1\n")); err == nil {
+		t.Error("a negative head_ttl_min_bytes was accepted")
 	}
 }

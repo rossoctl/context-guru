@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/tooldefer"
 )
 
 // listenAndAnnounce binds addr and, ONLY once the bind succeeded, logs the line an operator, a
@@ -515,13 +517,13 @@ func main() {
 			DefaultUpBob:       defBob,
 			// Reject a bad configuration when a user SAVES it, so the failure is a 400
 			// on their settings page instead of a silent pass-through on their next turn.
-			Validate: config.Validate,
+			Validate: validateTenantDoc,
 		})
 		if err != nil {
 			log.Fatalf("control database: %v", err)
 		}
 		defer reg.Close()
-		tenants = proxy.NewTenantSource(reg, emitter, buildTenantConfig, *maxTenancies)
+		tenants = proxy.NewTenantSource(reg, emitter, buildHostedTenantConfig, *maxTenancies)
 		// Make the per-tenant row quota a manager can set actually bind. Wired here
 		// rather than in dash.Options because the recorder starts before the control
 		// database opens, and because the value has to be read fresh — a manager can
@@ -646,6 +648,13 @@ func main() {
 				"metadata_only", *sessionStateMetaOnly, "retention", *sessionStateRetention)
 		}
 	}
+	// Tool deferral's own file (#485), next to the dashboard database path. The proxy opens it at
+	// start when a configuration turns deferral on (ultrahigh), and only when it needs it (see
+	// proxy.Options.ToolDeferPath), so a setup that never defers creates no file.
+	tdPath := ""
+	if *dashDB != "" && *dashDB != ":memory:" {
+		tdPath = filepath.Join(filepath.Dir(*dashDB), tooldefer.FileName)
+	}
 	h := proxy.New(pipe, pstore, agg, proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
@@ -682,16 +691,21 @@ func main() {
 		// true, the grace on), so pass it through as-is — including an explicit false, which
 		// turns the grace off for benchmark runs.
 		RestartGrace: restartGrace,
+		// Tool deferral's own file and its row lifetime (#485).
+		ToolDeferPath:      tdPath,
+		ToolDeferRetention: *sessionStateRetention,
 		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
-		Cache:     cachePolicy(cfg.Cache),
-		Windows:   windows,                // dynamic context-window resolver (fraction triggers)
-		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
-		Preset:    cfg.Preset,
-		Dashboard: rec, // nil unless --dashboard
-		Pings:     kaKeepAlive.pings,
-		Record:    traceRec, // nil unless --record
-		Mode:      mode,     // sync (default) | observe — explicit, never inferred
+		Cache: cachePolicy(cfg.Cache),
+		// Tools whose call ends an agent: no pings after one (#857). nil = shipped list; [] = off.
+		TerminalTools: cfg.Cache.KeepAliveTerminalTools,
+		Windows:       windows,                // dynamic context-window resolver (fraction triggers)
+		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
+		Preset:        cfg.Preset,
+		Dashboard:     rec, // nil unless --dashboard
+		Pings:         kaKeepAlive.pings,
+		Record:        traceRec, // nil unless --record
+		Mode:          mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,
@@ -728,6 +742,8 @@ func main() {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		// The account's per-wait plan settings, so the calculator replays the policy that runs (#868).
+		h.API().SetWaitPolicy(h.DashWaitPolicy())
 		h.API().SetPingStates(h.KeepAlivePingStates)
 		// The configuration the adapt reports compare against: each account's in hosted mode, this
 		// proxy's own (with any applied override) otherwise.
@@ -1122,33 +1138,83 @@ func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, err
 		Cache: cachePolicy(cfg.Cache)}, nil
 }
 
+// errTerminalToolsHostOnly is the refusal for a tenant document that sets the host-wide
+// terminal-tool list (#857). The list is read once for the whole process, so a tenant's copy
+// would be ignored.
+var errTerminalToolsHostOnly = fmt.Errorf("cache.keepalive_terminal_tools is host configuration; a tenant document cannot set it")
+
+// refuseTenantHostKeys rejects keys that only the host's own config file may set.
+func refuseTenantHostKeys(doc []byte) error {
+	cfg, err := config.LoadBytes(doc)
+	if err != nil {
+		return nil // not this check's job: the caller's own parse reports it
+	}
+	if cfg.Cache.KeepAliveTerminalTools != nil {
+		return errTerminalToolsHostOnly
+	}
+	return nil
+}
+
+// validateTenantDoc is the save-time check for a TENANT document: config.Validate plus the
+// host-only keys. Wired to the tenant registry only (hosted mode), never to the host's own file.
+func validateTenantDoc(doc []byte) error {
+	if err := config.Validate(doc); err != nil {
+		return err
+	}
+	return refuseTenantHostKeys(doc)
+}
+
+// buildHostedTenantConfig builds a stored TENANT document. buildTenantConfig itself also builds
+// the host's own config on a single-tenant proxy (adapt applies and reverts), where the key is
+// allowed.
+func buildHostedTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, error) {
+	if err := refuseTenantHostKeys(doc); err != nil {
+		return proxy.BuiltConfig{}, err
+	}
+	return buildTenantConfig(doc, e)
+}
+
 // cachePolicy maps the configuration document's `cache:` block onto the proxy's own type.
 // The mapping lives here rather than in `proxy` for the reason ConfigBuilder exists: the
 // proxy package does not depend on the configuration loader.
 func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
+	r := c.Resolved()
+	// The per-wait ping plan (#858) rides on EVERY policy, a parked one too, because a manager
+	// strategy can switch the keep-alive on for an account whose own block has it off, and the plan
+	// then still has to apply. These fields alone never turn the keep-alive on (Policy.On reads
+	// KeepAlive).
+	plan := proxy.CachePolicy{
+		WaitPlan:             c.WaitPlanOn(),
+		ToolWaitMaxPings:     r.KeepAliveToolWaitMaxPings,
+		BackgroundExtraPings: r.KeepAliveBackgroundExtraPings,
+		HumanExtraPings:      r.KeepAliveHumanExtraPings,
+	}
 	// Resolve the defaults only when something is actually switched on. A parked block
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
-	// zero HeadTTLMinTokens must stay zero so a host that never configured this asks for
+	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
 	// nothing rather than asking on every request.
 	if !c.KeepAlive && !c.HeadTTL1h {
-		return proxy.CachePolicy{}
+		return plan
 	}
-	r := c.Resolved()
 	return proxy.CachePolicy{
-		KeepAlive:        c.KeepAlive,
-		Idle:             time.Duration(r.KeepAliveIdleSeconds) * time.Second,
-		OpenAIIdle:       time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
-		MaxPings:         r.KeepAliveMaxPings,
-		Idle1h:           time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
-		MaxPings1h:       r.KeepAliveMaxPings1h,
-		MaxUSDPerPing:    r.KeepAliveMaxUSDPerPing,
-		MinPrefixTokens:  r.KeepAliveMinPrefixTokens,
-		HeadTTL1h:        c.HeadTTL1h,
-		HeadTTLMinTokens: headTTLMin(c.HeadTTL1h, r.HeadTTLMinTokens),
+		WaitPlan:             plan.WaitPlan,
+		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
+		BackgroundExtraPings: plan.BackgroundExtraPings,
+		HumanExtraPings:      plan.HumanExtraPings,
+		KeepAlive:            c.KeepAlive,
+		Idle:                 time.Duration(r.KeepAliveIdleSeconds) * time.Second,
+		OpenAIIdle:           time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
+		MaxPings:             r.KeepAliveMaxPings,
+		Idle1h:               time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
+		MaxPings1h:           r.KeepAliveMaxPings1h,
+		MaxUSDPerPing:        r.KeepAliveMaxUSDPerPing,
+		MinPrefixTokens:      r.KeepAliveMinPrefixTokens,
+		HeadTTL1h:            c.HeadTTL1h,
+		HeadTTLMinBytes:      headTTLMin(c.HeadTTL1h, r.HeadTTLMinBytes),
 	}
 }
 
-// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinTokens > 0` is
+// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinBytes > 0` is
 // the single condition apply has to test.
 func headTTLMin(on bool, n int) int {
 	if !on {

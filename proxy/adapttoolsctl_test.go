@@ -216,3 +216,91 @@ func TestAdaptToolsApplyRefusesOwnAndNonMCPNames(t *testing.T) {
 		t.Fatalf("a refused name was written: %v", tf.Removed())
 	}
 }
+
+// save-more tools on a local proxy (#869): the report offers keep and the search switch, an apply
+// writes toolfilter's keep list and `defer` into the running pipeline, and revert undoes it.
+func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	mux := h.Mux()
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.RemoteAddr = "127.0.0.1:1"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	e := &dash.Event{TS: time.Now().UnixMilli(), SessionID: "s1", Model: "m", CacheRead: 1000,
+		TokenAccounting: dash.AccountingComplete, DeclDigest: "d1"}
+	e.Tools = 2
+	h.rec.Record(e)
+	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
+		Decls: []dash.Decl{{Kind: dash.KindTool, Name: "WebFetch", Tokens: 500},
+			{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
+	waitInventory(t, h.rec, 1)
+
+	read := func() map[string]any {
+		w := do("GET", "/api/save-more/tools", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("report = %d %s", w.Code, w.Body)
+		}
+		var rep map[string]any
+		json.Unmarshal(w.Body.Bytes(), &rep)
+		return rep
+	}
+	rep := read()
+	if rep["search_on"] != false || rep["writable"] != true {
+		t.Fatalf("report = %v", rep)
+	}
+	names := map[string]string{}
+	for _, r := range rep["rows"].([]any) {
+		row := r.(map[string]any)
+		names[row["name"].(string)] = row["state"].(string)
+	}
+	if names["WebFetch"] != dash.StateLoaded || names["mcp__srv"] != dash.StateLoaded {
+		t.Fatalf("rows = %v", names)
+	}
+	tf := func() (bool, []string) {
+		x, _ := h.static.Load().Pipe.Find("toolfilter").(interface {
+			Defers() bool
+			Keep() []string
+		})
+		if x == nil {
+			return false, nil
+		}
+		return x.Defers(), x.Keep()
+	}
+	basis := rep["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("keep = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after keep: defers %v keep %v", on, keep)
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"search_on","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("search_on = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after search_on: defers %v keep %v", on, keep)
+	}
+	if read()["search_on"] != true {
+		t.Fatal("the report does not read search on back")
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"unkeep:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("unkeep = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || len(keep) != 0 {
+		t.Fatalf("after unkeep: defers %v keep %v", on, keep)
+	}
+	// An option no report offered is refused.
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:Bash","basis":"`+basis+`"}`); w.Code != http.StatusConflict {
+		t.Fatalf("unoffered option = %d %s", w.Code, w.Body)
+	}
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"revert"}`); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after revert: defers %v keep %v; want the unkeep undone and search still on", on, keep)
+	}
+}

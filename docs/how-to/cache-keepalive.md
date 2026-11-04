@@ -27,10 +27,10 @@ Two sentences from the provider's documentation make this fixable:
 > **The lifetime is measured from the start of the request that writes or reads the cache
 > entry, not from the end of its response.**
 
-So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input where
+So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input (less on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1) where
 re-creating the prefix costs `1.25x`. After a session has been idle for `X` seconds, the
 proxy re-sends that session's last Anthropic request with `max_tokens: 1` — a pure cache read, which
-refreshes the entry. **One ping buys back about 11.5 of itself.**
+refreshes the entry. **One ping buys back about 11.5 times its own cost at a `0.1x` read rate.** The ratio is higher on a lower tier: about 24 times at `0.05x` (Opus 5.5, Sonnet 5.5) and about 49 times at `0.025x` (Fable 5.1, Mythos 5.1).
 
 Nothing else about the request changes. The prefix hash is cumulative over
 `tools` → `system` → `messages`, so a ping that altered any of it would *create* an entry
@@ -60,11 +60,54 @@ cache:
   keepalive_idle_seconds: 240          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
-  keepalive_min_prefix_tokens: 80000   # the gate
+  keepalive_min_prefix_tokens: 20000   # the gate (80000 before #858)
   keepalive_max_usd_per_ping: 0.50
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
+  keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
+  keepalive_wait_plan: true            # false: one fixed K for every wait, as before #858
+  keepalive_tool_wait_max_pings: 8     # a tool wait: ping until the result comes, at most this many
+  keepalive_background_extra_pings: 3  # end_turn, waiting for background work: K + 3
+  keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
+
+### The ping count follows what the thread waits for
+
+When a turn ends, the proxy picks the ping count from what the thread waits for (#858). "K" is
+`keepalive_max_pings` (2 by default). It reads only metadata: the stop reason, the tool names, the
+open-task counts, and whether the thread id starts with `a:` (a subagent).
+
+| The thread waits for | Pings | Time windows apply? |
+|---|---|---|
+| Its own tool (main or subagent) | until the result comes, at most 8 | No |
+| Main, `end_turn`, background work | K + 3 | No |
+| Main, `end_turn`, a teammate | K | No |
+| Subagent, `end_turn` or `SubagentHandback` (its main agent) | K | No |
+| Main, `end_turn`, a person | K + 1 | **Yes, only this row** |
+| Finished (`done`, #857), or **no tool call yet on the thread** | 0 | - |
+
+- **Time windows** (manager strategies) describe when a person answers. They gate only a wait for a
+  person. For any other wait, the highest-priority active strategy that targets the tenant applies at any
+  hour. With no such strategy, the account config applies, as before.
+- **The sweep question** is not asked while a thread waits for its own tool. That span stays warm until
+  the result comes back, so a cut can never follow. It is asked on a span that began with `end_turn`.
+  The rule "keep-alive never shortens the cache strategy" is unchanged.
+- **The hold limit** is still `(K+1) x X` with the plan at most 11 pings (unless K itself is higher) and X under 300 s, so at most 60 minutes. A
+  tool wait of 8 pings at 240 to 280 s holds at most 42 minutes. The plan never goes above 11 pings, unless
+  K itself is higher, and it never lowers K.
+- **Not covered:** a 1-hour thread keeps its own schedule. A session override or an active learned
+  campaign sets its own count, and the plan does not change it.
+- **One switch:** `keepalive_wait_plan: false` brings back one fixed K for every wait, time windows for
+  every wait, sweep questions as before, and pings for a thread with no tool call yet. It does not bring
+  back the 80,000 minimum prefix. The default is now 20,000 (`keepalive_min_prefix_tokens`). A value set
+  by a user or a strategy is not changed.
+
+### No pings after the final answer
+
+A response whose **last** tool call is a terminal tool (default: `StructuredOutput`) ends the agent.
+No tool result comes back. The wait cause reads `done`, and the proxy plans no pings for that thread.
+Set `keepalive_terminal_tools: []` to turn this off. The key is **host configuration only**: it applies to the whole proxy, and a hosted tenant document that sets it is refused. A `SubagentHandback` call reads as `human`
+(the subagent waits for its main agent), as an `end_turn` does.
 
 ### Each session follows its own cache lifetime
 
@@ -216,7 +259,7 @@ one governs writing content to **disk**, where a manager can read it and a reten
 applies. This is memory only, masked, overwritten on release, never persisted, and gone
 within about 12 minutes. It cannot be reduced further — the prefix hash covers the whole
 `tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
-cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
+cache and cost 12.5x instead of saving 11.5x (at a `0.1x` read rate), which is the mechanism inverted.
 
 Controls, because this is the one place the service holds a caller's credential beyond the life
 of a request:
@@ -319,6 +362,24 @@ turns.
 ```yaml
 cache:
   tail_breakpoint: false
+```
+
+## The size gate of the 1-hour head
+
+`cache.head_ttl_1h` asks for the 1-hour tier on the head breakpoints. It does so only on a large
+request.
+
+- **The gate is in bytes.** `cache.head_ttl_min_bytes` is the smallest request body that gets the
+  1-hour tier. The default is `200000`.
+- **Deprecated key.** `cache.head_ttl_min_tokens` still works. The gate was always the body size
+  divided by 4, not a token count. When `head_ttl_min_bytes` is not set, the proxy uses
+  `head_ttl_min_tokens` x 4 bytes. `50000` tokens is the same gate as `200000` bytes.
+- **Both set.** `head_ttl_min_bytes` wins.
+
+```yaml
+cache:
+  head_ttl_1h: true
+  head_ttl_min_bytes: 200000
 ```
 
 ## Related

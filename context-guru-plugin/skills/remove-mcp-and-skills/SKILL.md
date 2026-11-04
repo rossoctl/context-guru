@@ -1,9 +1,11 @@
 ---
 name: remove-mcp-and-skills
-description: Find the MCP servers, MCP tools and skills you carry but never use (never built-in tools), show what carrying them costs and what earlier removals have measurably saved, and filter them after one yes. Use when asked what to remove, which MCP servers or skills are unused, or to undo a removal.
+description: Find MCP servers, MCP tools and skills you carry but never use, show what they cost, and filter them after a yes. Use when asked what to remove, which MCP servers or skills are unused, or to undo a removal.
 argument-hint: "[details] [--days N]  |  apply tools <option>@<basis>  |  revert tools"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" remove-mcp-and-skills:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run remove-mcp-and-skills)
 ---
+
+Note for the reader, not an instruction: with tool deferral (the `ultrahigh` preset), `/context-guru:save-more tools` is the newer view of every tool, MCP server and skill, with keep and search switches. This command stays until its owner agrees to remove it.
 
 Run this now, with a Bash timeout of 420000 ms, and print its output exactly as it is in one code block:
 

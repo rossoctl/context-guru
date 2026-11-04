@@ -642,6 +642,16 @@ func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
 	if msg, _ := out["error"].(string); !strings.Contains(msg, "aggressiveness") {
 		t.Errorf("the error does not name the field: %q", msg)
 	}
+
+	// A typo in cache_reset is a 400 naming the key, not a silent success.
+	w, out = f.do(t, "PUT", "/api/me",
+		`{"config":{"mode":"sync","cache":{"keepalive":false,"head_ttl_1h":false},"cache_reset":["keepalive_max_ping"]}}`, jar)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown cache_reset name = %d, want 400", w.Code)
+	}
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "keepalive_max_ping") {
+		t.Errorf("the error does not name the key: %q", msg)
+	}
 }
 
 // A plain account cannot set the compaction configuration through the fields either — a

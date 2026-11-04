@@ -385,13 +385,13 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	e := j.e
 	k.mu.Lock()
-	names, stop, usageOK, turnRead := e.toolUseNames, e.stopReason, e.usageOK, e.turnRead
+	names, stop, usageOK, turnRead, terminal := e.toolUseNames, e.stopReason, e.usageOK, e.turnRead, e.terminal
 	k.mu.Unlock()
 	bg, tm := 0, 0
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
 	}
-	waitingFor, tool := waitcause.ClassifyWaitingFor(names, stop, false, usageOK, bg, tm)
+	waitingFor, tool := waitcause.ClassifyWaitingForTerminal(terminal, names, stop, false, usageOK, bg, tm)
 	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 
@@ -414,6 +414,13 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 			substituted = false
 		}
 	}()
+	// No sweep question while the thread waits for its own tool (#858): that span stays warm until the
+	// result comes back, so a cut can never follow. The ordinary ping goes out.
+	if j.e.toolWait() {
+		slog.Debug("context-guru: sweep keep-alive question not offered: the thread waits for its own tool",
+			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread)
+		return false
+	}
 	dispatch, info, reason, ok := offload.SweepPingSubstitute(thread.Key(j.session, j.thread))
 	if !ok {
 		slog.Debug("context-guru: sweep keep-alive question not offered",

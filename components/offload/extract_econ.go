@@ -6,6 +6,7 @@ import (
 
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // The economic gate. extract_llm is the only component that SPENDS money to SAVE money,
@@ -98,8 +99,15 @@ type tokenValue struct {
 // list prices for models this deployment does not bill at. A literal cannot be right for
 // every operator, so the literal is now only what we use when the table said nothing.
 const (
-	agentFreshPerMTok     = 3.00
-	agentCacheReadPerMTok = 0.30 // 0.1x fresh, the standard Anthropic cache-read multiplier
+	agentFreshPerMTok = 3.00
+	// agentCacheReadPerMTok stays at the standard 0.1x on purpose. The literal agent rates are the
+	// Sonnet 4.5/4.6-class list prices ($3 fresh), and 0.1x is right for that class. The lower
+	// Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 tiers apply only where the request's own
+	// model is known: see agentRates and modelinfo.CacheReadFracFor.
+	// A constant, not modelinfo.Price.CacheReadFor: a constant product is exact (0.3), while the
+	// same product at run time is 0.30000000000000004. TestAgentClassRatesMatchPrice pins the
+	// constant to that function for this class, so the two cannot drift.
+	agentCacheReadPerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheReadFrac
 	// agentCacheWritePerMTok is 1.25x fresh, the standard cache-WRITE multiplier, and it is
 	// what a token is worth on a turn whose cache has expired.
 	//
@@ -109,7 +117,7 @@ const (
 	// $0.144 for a warm turn, an 11x difference — because all 56.7M of their tokens were
 	// billed as cache_creation_input_tokens. Removing one of those saves 1.25x the fresh
 	// rate, i.e. 12.5x what removing a token from a warm cached prefix saves.
-	agentCacheWritePerMTok = 3.75
+	agentCacheWritePerMTok = agentFreshPerMTok * modelinfo.AnthropicCacheWrite5mFrac
 )
 
 // agentRates resolves the three billing tiers for this request, preferring the deployment's
@@ -125,13 +133,11 @@ func agentRates(c *components.Ctx) (fresh, read, write float64) {
 		if c.SelfRates.Input > 0 {
 			fresh = c.SelfRates.Input
 		}
-		read, write = c.SelfRates.CacheRead, c.SelfRates.CacheWrite
-		if read <= 0 {
-			read = fresh * 0.1
-		}
-		if write <= 0 {
-			write = fresh * 1.25
-		}
+		// A blank tier follows the model (Price decides it): only Anthropic and GPT-5.6+
+		// charge a creation premium. Other families write at the fresh rate, the same
+		// answer ParseTable and the price feed give.
+		p := modelinfo.Price{Input: fresh, CacheRead: c.SelfRates.CacheRead, CacheWrite: c.SelfRates.CacheWrite}
+		read, write = p.CacheReadFor(c.ModelName), p.CacheWrite5mFor(c.ModelName)
 	}
 	return fresh, read, write
 }

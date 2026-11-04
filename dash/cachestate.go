@@ -44,7 +44,7 @@ type CacheState struct {
 	// Pingable is true when the proxy holds this session's main thread's body and key, so POST
 	// /api/me/cache/ping can work (with keep-alive off and no opt-in it holds nothing and answers 409
 	// "not held"). PingReason says why not, when it is false: "not opted in", "too large", "expired",
-	// "over budget", "unsupported", "pings used", "stopped", "below limits" or "no entry". Both are omitted when the host cannot say, so a client treats
+	// "over budget", "unsupported", "pings used", "stopped", "below limits", "done" or "no entry". Both are omitted when the host cannot say, so a client treats
 	// absence as "unknown".
 	Pingable   *bool  `json:"pingable,omitempty"`
 	PingReason string `json:"ping_reason,omitempty"`
@@ -372,7 +372,7 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 // so the "kept warm" credit is the cold figure the status line already showed.
 func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
 	if ttlS == 3600 {
-		return float64(tokens) * p.CacheRead, float64(tokens) * p.Input * 2.0
+		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
 	}
 	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
 }

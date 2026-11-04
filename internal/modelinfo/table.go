@@ -43,8 +43,11 @@ type tableEntry struct {
 type tableFile struct {
 	// CacheReadFrac/CacheWriteFrac fill in the two cache tiers for entries that do
 	// not state them. Defaults follow the Anthropic-family multiples the rest of
-	// this package already assumes (0.1x a read, 1.25x a write).
-	CacheReadFrac  float64          `yaml:"cache_read_frac"`
+	// this package already assumes (1.25x a write; a read per model, see CacheReadFracFor).
+	//
+	// CacheReadFrac is a pointer: nil (key unset) means "per model", and a value, even 0.1,
+	// is the operator's gateway multiple and wins for every entry.
+	CacheReadFrac  *float64         `yaml:"cache_read_frac"`
 	CacheWriteFrac float64          `yaml:"cache_write_frac"`
 	Models         []tableFileModel `yaml:"models"`
 }
@@ -88,11 +91,14 @@ func ParseTable(b []byte) (*Table, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("model price list: %w", err)
 	}
-	if f.CacheReadFrac == 0 {
-		f.CacheReadFrac = 0.1
+	if f.CacheReadFrac != nil && *f.CacheReadFrac <= 0 {
+		return nil, fmt.Errorf("model price list: cache_read_frac must be above 0")
+	}
+	if f.CacheWriteFrac < 0 {
+		return nil, fmt.Errorf("model price list: cache_write_frac must not be negative")
 	}
 	if f.CacheWriteFrac == 0 {
-		f.CacheWriteFrac = 1.25
+		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
 	t := &Table{}
 	for i, m := range f.Models {
@@ -112,19 +118,19 @@ func ParseTable(b []byte) (*Table, error) {
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
 		}
-		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * f.CacheReadFrac
+		// A blank tier is filled at lookup, when the model is known (Price.CacheReadFor). The
+		// file-level multiples travel with the entry. A cache_read_frac the file leaves unset
+		// stays 0, so the queried model decides.
+		if f.CacheReadFrac != nil {
+			p.ReadFrac = *f.CacheReadFrac
 		}
-		if p.CacheWrite == 0 {
-			// The file-level cache_write_frac is documented in prices.example.yaml as "the
-			// Anthropic-family multiples", so it is applied to the Anthropic family and not
-			// to models whose provider charges no creation premium at all. An entry that
-			// states its own cache_write is honoured above and never reaches this line.
-			frac := f.CacheWriteFrac
-			if !chargesCacheWritePremium(match) {
-				frac = 1.0
-			}
-			p.CacheWrite = p.Input * frac
+		// The file-level cache_write_frac is documented in prices.example.yaml as "the
+		// Anthropic-family multiples", so it is applied to the Anthropic family and not
+		// to models whose provider charges no creation premium at all. The family is that of
+		// the entry's own match, as before.
+		p.WriteFrac = f.CacheWriteFrac
+		if !chargesCacheWritePremium(match) {
+			p.WriteFrac = 1.0
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
 			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
@@ -195,7 +201,10 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	if !ok {
 		return Price{}, false
 	}
-	return e.price, true
+	// The fill uses the QUERIED model, not the match pattern: a family entry such as
+	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
+	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
+	return e.price.Resolved(model), true
 }
 
 // Window returns an operator-supplied context window, for models the public map

@@ -79,7 +79,13 @@ type keeper struct {
 	signalApplied atomic.Int64
 }
 
-func newKeeper(h *Handler) *keeper { return newKeeperWith(h, keepalive.Options{}) }
+func newKeeper(h *Handler) *keeper {
+	o := keepalive.Options{}
+	if h != nil {
+		o.TerminalTools = h.opts.TerminalTools
+	}
+	return newKeeperWith(h, o)
+}
 
 // newKeeperWith lets tests inject the clock and an inline runner. Dispatcher and Spare are always
 // the proxy's own.
@@ -363,7 +369,15 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
 				string(provider), startedAt, body, r.UserAgent(), u)
 		}
-		pol, applied = k.resolvePolicy(tn, session, provider, pol, pdec, pdecOK)
+		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
+		// cause of the response that ended this turn.
+		ignoreWindows := false
+		if pol.WaitPlan && tracked {
+			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
+				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
+			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
+		}
+		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
@@ -383,7 +397,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	recorded = true
@@ -396,19 +410,35 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 // record-time gate, evaluated before the request goes out and without a campaign decision (that one
 // needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
 // the safe direction: nothing extra is kept for it.
-func (k *keeper) canPing(tn *Tenancy, session string, provider bschemas.ModelProvider) bool {
+func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
 	if k == nil || tn == nil || k.h == nil || k.h.rec == nil || keepAliveDisabled() ||
 		provider == bschemas.OpenAI || session == "" {
 		return false
 	}
+	// The wait cause is not known yet, so the windows count, as before #858: for an unknown wait the
+	// pessimistic answer is the safe one. A tool wait outside a window then registers no conversation copy
+	// and still gets its plain ping; it loses only the sweep substitute. A copy is content kept in memory.
 	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
-	return pol.On()
+	if !pol.On() {
+		return false
+	}
+	// A thread with no tool call yet is not pinged (#858), so it keeps no copy either.
+	if pol.WaitPlan && !k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}) {
+		return false
+	}
+	return true
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own
 // policy — the old record's policy block, unchanged.
 func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.ModelProvider,
 	pol CachePolicy, pdec predDecision, pdecOK bool) (CachePolicy, string) {
+	return k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, false)
+}
+
+// resolvePolicyWindows is resolvePolicy with the strategy's time windows optionally ignored (#858).
+func (k *keeper) resolvePolicyWindows(tn *Tenancy, session string, provider bschemas.ModelProvider,
+	pol CachePolicy, pdec predDecision, pdecOK bool, ignoreWindows bool) (CachePolicy, string) {
 	// The manager-controlled strategy layer, resolved once here and generalizing the one
 	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
 	// A matching ACTIVE strategy forces KeepAlive on and replaces Idle/MaxPings/
@@ -416,11 +446,18 @@ func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.Mo
 	// override, which still wins on top and still cannot widen MaxUSDPerPing.
 	applied := ""
 	if provider != bschemas.OpenAI {
-		pol, applied = k.applyStrategy(tn.ID, pol, k.now())
+		account := pol
+		pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), false)
+		// A strategy that matches only because its window was ignored (#858) never displaces an active
+		// campaign: with a campaign and a closed window, the campaign wins, as before #858.
+		if applied == "" && ignoreWindows && !(pdecOK && pdec.active) {
+			pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), true)
+		}
 		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
-		// explicit instruction).
+		// explicit instruction). The campaign owns the count, so the per-wait plan is off for it (#858).
 		if pdecOK && applied == "" && pdec.active {
 			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
+			pol.WaitPlan = false
 		}
 	}
 	// A per-session manual override, if one is armed and unexpired. Everything below reads
@@ -508,4 +545,69 @@ func (h *Handler) KeepAlivePlans(tenantID string, allTenants bool, session strin
 			IdleMS: p.Idle.Milliseconds()}
 	}
 	return out
+}
+
+// DashWaitPolicy is the dashboard's READ hook for an account's EFFECTIVE per-wait ping plan (#868). The
+// calculator replays the plan with it. It follows the request path (resolvePolicyWindows) in the same
+// order, and reports WaitPlan false, the fixed-K model, when that path would turn the plan off:
+//
+//  1. keepalive_wait_plan is false, or the account cannot be read (fail to the old model);
+//  2. a covering manager strategy wins first, found as the request path finds it for a wait that is
+//     not for a person (bestStrategy, windows ignored; respected while a campaign is active). Its Idle decides: 300 s or more (the 1-hour
+//     band) turns the plan off, less keeps the account's own setting. The campaign is then skipped;
+//  3. only when no strategy covers the account, an active campaign (keep-alive on) owns the count and
+//     turns the plan off.
+//
+// While a campaign is active the answer depends on the hour: a strategy whose window is closed falls
+// through to the campaign, so the flag is right at the moment the page is read.
+//
+// Limits, stated because one read hook cannot see a single request:
+//   - A campaign owns the count only on a request that passes its price gate (pdecOK in
+//     predictive.go). An account with no prices never has its count owned, but the hook reports plan off.
+//   - A per-session override turns the plan off for that session only. No account-wide figure shows it.
+//   - The plan flag is one value for the account. A 1-hour strategy whose window is closed leaves a
+//     person's wait on the account plan (the windows apply to that wait), but the hook reports plan off.
+//
+// Wired in cmd/context-guru-proxy beside the keep-alive plans.
+func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
+	return func(id string) keepalive.Policy {
+		off := keepalive.Policy{}
+		tn := h.static.Load()
+		if reg := h.registry(); reg != nil && h.opts.Tenants != nil {
+			t, err := reg.Get(id)
+			if err != nil {
+				return off
+			}
+			if tn, err = h.opts.Tenants.ForTenant(t); err != nil {
+				return off
+			}
+		}
+		if tn == nil {
+			return off
+		}
+		c := tn.Cache
+		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
+			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
+		// With an active campaign the request path does not retry a closed window (resolvePolicyWindows),
+		// so a strategy counts only while its window is open and a closed one falls through to the
+		// campaign. Without one, the window-ignoring lookup stands.
+		campaignOn := false
+		if pc := h.predRT().forTenant(tn.ID); pc != nil && c.KeepAlive {
+			pc.mu.Lock()
+			campaignOn = pc.meta.Mode == campaignModeActive
+			pc.mu.Unlock()
+		}
+		if h.keeper != nil {
+			if best := h.keeper.bestStrategy(tn.ID, h.keeper.now(), !campaignOn); best != nil {
+				if time.Duration(best.IdleSeconds)*time.Second >= 300*time.Second {
+					return off
+				}
+				return pol // a covering strategy decides; the campaign is skipped
+			}
+		}
+		if campaignOn {
+			return off
+		}
+		return pol
+	}
 }

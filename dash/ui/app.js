@@ -968,7 +968,7 @@ const TILE_INFO = {
   },
   'ka-rec-policy': {
     what: 'The idle interval and ping count suggested for this account.',
-    how: 'The shipped default, offered only when your own history can tell its effect apart '
+    how: 'The live policy (240 s, base of 2 pings, with the per-wait plan on unless your account switched it off), offered only when your own history can tell its effect apart '
       + 'from zero: at least 20 addressable cache expiries, at least 200 requests, and a 90% '
       + 'interval that excludes no-change.',
     catch: 'One ping is never suggested. Not because it loses money \u2014 it does not \u2014 '
@@ -6538,8 +6538,8 @@ function loadSettings() {
         + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 240)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' pings. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
-        'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
-        + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
+        'A cache read costs 0.1x base input (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1); re-creating a lapsed prefix costs 1.25x, so one '
+        + 'ping buys back about 11.5 times its own cost at a 0.1x read rate (about 24 times at 0.05x, about 49 times at 0.025x). On this service\u2019s traffic, requests that '
         + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
         + 'to be spent. Every ping is a row on your Requests tab marked cache strategy with its own '
@@ -9520,6 +9520,20 @@ function renderKACalcControls() {
     el('label', { for: 'ka-k' }, 'Max pings (K)'), k, apply));
 }
 
+/** kaRungName names a ladder rung by its model: the live plan, or a fixed count. */
+function kaRungName(r) {
+  const name = r.plan === 'wait_plan' ? 'Live plan, base ' + r.max_pings : 'Fixed ' + r.max_pings;
+  return name + (r.current ? ' (current)' : '');
+}
+
+/** kaRungCoverage says how far a rung reaches. The plan's reach depends on the wait, so it has no single figure. */
+function kaRungCoverage(r) {
+  const pc = kaState.calc && kaState.calc.plan_counts;
+  return r.plan === 'wait_plan'
+    ? (pc ? `by wait: a tool up to ${pc.tool_wait_max}, a person base+${pc.human_extra}` : 'by wait')
+    : r.coverage_seconds.toFixed(0) + 's = ' + r.max_pings + '×' + kaState.x + ' + 300';
+}
+
 /** loadKACalc renders the K ladder. */
 async function loadKACalc() {
   renderKACalcControls();
@@ -9555,7 +9569,7 @@ async function loadKACalc() {
         'the dollar columns are blank. They are not zero.'));
   const tbl = el('table', { class: 'grid', 'data-testid': 'ka-ladder' },
     el('thead', {}, el('tr', {},
-      el('th', {}, 'Max pings (K)'), el('th', {}, 'Cache stays alive'),
+      el('th', {}, 'Policy (K)'), el('th', {}, 'Cache stays alive'),
       el('th', { class: 'num' }, 'Your expiries inside it'),
       el('th', { class: 'num' }, 'Their cost'),
       // The value is convertible_usd / addressable_usd — a share of the DOLLARS, not of the
@@ -9568,9 +9582,9 @@ async function loadKACalc() {
   for (const r of c.rows) {
     // Emphasis by weight, not by a new hue: the current row is the accent, the rest recede.
     tb.appendChild(el('tr', { class: r.current ? 'is-current' : 'muted-row',
-      'data-testid': 'ka-ladder-k' + r.max_pings },
-      el('td', {}, String(r.max_pings) + (r.current ? ' (current)' : '')),
-      el('td', {}, r.coverage_seconds.toFixed(0) + 's = ' + r.max_pings + '×' + kaState.x + ' + 300'),
+      'data-testid': r.plan === 'wait_plan' ? 'ka-ladder-plan' : 'ka-ladder-k' + r.max_pings },
+      el('td', {}, kaRungName(r)),
+      el('td', {}, kaRungCoverage(r)),
       el('td', { class: 'num' }, num(r.convertible_misses)),
       el('td', { class: 'num' }, usd(r.convertible_usd)),
       el('td', { class: 'num' }, pct(r.share_of_addressable_pct, 1)),
@@ -9592,23 +9606,35 @@ async function loadKACalc() {
   const share = el('div');
   host.appendChild(share);
   barRows(share, c.rows.map((r) => ({
-    label: 'K=' + r.max_pings + (r.current ? ' (current)' : ''),
+    label: kaRungName(r),
     value: r.share_of_addressable_pct, max: 100,
     display: pct(r.share_of_addressable_pct, 1) + ' · ' + num(r.pings) + ' pings',
     color: r.current ? 'var(--accent)' : KA_MUTED,
     title: `${r.convertible_misses} of ${c.addressable_misses} expiries reachable`,
   })), {});
   host.appendChild(el('p', { class: 'hint' },
-    'Each row is one cap on pings. Reading across: how many of your expiries it would have caught, ' +
+    'Each row is one policy. Reading across: how many of your expiries it would have caught, ' +
     'what they cost, and what the pings cost. A replay of your past gaps, not a forecast. ' +
+    (c.plan === 'wait_plan'
+      ? 'The first row is the live plan: it picks the count from what each thread waits for ' +
+        (c.plan_counts
+          ? `(up to ${c.plan_counts.tool_wait_max} for a tool wait, the base plus ${c.plan_counts.background_extra} for background work, ` +
+            `the base plus ${c.plan_counts.human_extra} for a person, `
+          : '(') +
+        'none before the thread has called a tool). The fixed rows send the same count for every wait, ' +
+        'for comparison. It shows your account setting after campaigns and manager strategies, not a per-session override. '
+      : 'Your account has the per-wait plan switched off, so every row is a fixed count and the row ' +
+        'with your count is the current one. ') +
     'Catching grows sharply from one ping to two, then flattens while ping cost keeps climbing.'));
   host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
     el('p', {},
-    'PINGS is every ping the shipped policy would have sent over this window, gated as the ' +
+    'PINGS is every ping the policy would have sent over this window, gated as the ' +
     'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
     'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
     'session has ended and sends its full K anyway. It counts only expiries that were ' +
-    'addressable (the provider wrote a prefix that a ping could have refreshed).')));
+    'addressable (the provider wrote a prefix that a ping could have refreshed). The live-plan row ' +
+    'reads the stop reason and wait cause the proxy stored for the request before each idle gap, and ' +
+    'whether the thread had called a tool by then. It uses the same rule the proxy uses.')));
 }
 
 /**
@@ -9659,9 +9685,15 @@ async function loadKARecommend() {
       usd(rec.lo_usd) + ' – ' + usd(rec.hi_usd),
       `90% interval from ${num(rec.n)} expiries in ${num(rec.sessions)} sessions`,
       rec.lo_usd > 0 ? 'good' : 'bad'),
-    tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings',
+    tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings'
+      + (rec.plan === 'wait_plan' ? ' (base)' : ''),
       'on sessions past their first request with a cached prompt over 20k tokens', 'accent'),
   ]));
+  if (rec.plan === 'wait_plan' && rec.fixed_k) {
+    host.appendChild(el('p', { class: 'note', 'data-testid': 'ka-rec-fixed' },
+      `The live plan picks the count from each wait. For comparison, ${rec.max_pings} pings for every wait ` +
+      `would have given ${usd(rec.fixed_k.lo_usd)} – ${usd(rec.fixed_k.hi_usd)} over the same window.`));
+  }
   host.appendChild(el('p', { class: 'note' },
     'The direction is resolvable; the size is not — a window like this one cannot pin it ',
     el('strong', {}, 'closer than about a factor of two'),

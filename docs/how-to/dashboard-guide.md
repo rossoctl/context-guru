@@ -82,7 +82,7 @@ Detailed diagnostics, opened:
 
 **How often your cache ran out.** Compact charts of the expiries: how many per day, what they cost, and how long you had been idle when they happened.
 
-**What would other settings have earned?** A calculator and a recommendation. Change how long to wait before a ping and how many pings to send, and see what your past traffic would have cost.
+**What would other settings have earned?** A calculator and a recommendation. Change how long to wait before a ping and how many pings to send, and see what your past traffic would have cost. The first row of the calculator is the live plan: the proxy picks the ping count from what each thread waits for. The fixed rows send the same count for every wait, for comparison. If your account sets `keepalive_wait_plan: false`, every row is a fixed count.
 
 
 ## Inventory

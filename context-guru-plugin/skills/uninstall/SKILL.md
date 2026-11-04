@@ -1,6 +1,7 @@
 ---
 name: uninstall
-description: Stop routing Claude Code through context-guru — remove the ANTHROPIC_BASE_URL key it added, stop the local proxy, and optionally delete the binary. Use when the user asks to uninstall, remove, disable, turn off, or stop context-guru, or says routing through it is breaking their sessions.
+description: Stop routing Claude Code through context-guru. Removes the ANTHROPIC_BASE_URL key it added, stops the local proxy, and can delete the binary.
+disable-model-invocation: true
 ---
 
 # Uninstall context-guru

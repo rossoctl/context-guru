@@ -2076,12 +2076,21 @@ func (h *Handler) destructiveTarget(w http.ResponseWriter, r *http.Request) (*te
 func (h *Handler) purgeTenantData(tenantID string) (dash.PurgeResult, error) {
 	if h.rec == nil {
 		// No dashboard on this deployment: there is no stored traffic to purge, which is a
-		// complete success rather than a failure.
-		return dash.PurgeResult{}, nil
+		// complete success rather than a failure. Tool deferral may still hold state of its own.
+		ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
+		defer cancel()
+		n, err := h.purgeToolDefer(ctx, tenantID)
+		return dash.PurgeResult{ToolDefer: n}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
 	defer cancel()
-	return h.rec.PurgeTenant(ctx, tenantID)
+	res, err := h.rec.PurgeTenant(ctx, tenantID)
+	n, terr := h.purgeToolDefer(ctx, tenantID)
+	res.ToolDefer += n
+	if err == nil {
+		err = terr
+	}
+	return res, err
 }
 
 // --- A/B variants ----------------------------------------------------------

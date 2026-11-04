@@ -2,6 +2,8 @@
 
 **Question: which MCP servers and skills do I carry and never use, and what does removing them save?**
 
+> With tool deferral (the `ultrahigh` preset), use [`/context-guru:save-more tools`](save-more.md#tools): it shows every tool, MCP server and skill with its state and lets you keep a tool loaded or turn search off. This command stays until its owner agrees to remove it (#485, decision D4).
+
 `/context-guru:remove-mcp-and-skills` lists the MCP servers, MCP tools and skills that were declared on your requests and never used, prices what carrying them cost, and shows what the ones you already removed have **measurably** saved since. Built-in tools (Read, Bash, Edit and the like) are never listed. It asks one question and filters them only on a yes.
 
 ```text

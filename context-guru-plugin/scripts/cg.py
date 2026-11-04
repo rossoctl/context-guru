@@ -9,6 +9,7 @@
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
+                           (`save-more tools`: each tool, MCP server and skill, and tool deferral's keep and search switches)
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
     ping      keep this session's cache warm with one ping right now (POST /api/me/cache/ping)
     cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
@@ -892,13 +893,17 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 # each setting and returns one report per kind (contract: docs/plugin/save-more.md). This side renders it and,
 # after a yes, sends back an option id the report offered. It never composes configuration itself.
 
-KINDS = ("config", "cache", "tools", "settings")
+KINDS = ("config", "cache", "tools", "settings", "deferral")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
+PATH = {"deferral": "/api/save-more/tools"}  # `save-more tools` (#869): tool deferral's per-tool report, and its writes
 ALIAS = {"compaction": "config"}  # an older name, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
 READS = ("save-more", "remove-mcp-and-skills")
-SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "settings": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
-NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills"}
+SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "settings": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills",
+         "deferral": "/context-guru:save-more"}
+NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills", "deferral": "tool deferral"}
+STATE = {"loaded": "loaded", "deferred_cg": "deferred by CG", "deferred_client": "deferred by Claude Code", "removed": "removed"}
+DEFERRAL_ROWS = 12  # rows of `save-more tools` without `details`
 ITEM_KINDS = {"mcp_server": "MCP server", "mcp_tool": "MCP tool", "skill": "skill"}  # never a built-in tool
 ADAPT_DAYS = 30
 MARKS = {"best": "★", "unrecommended": "☆", "current": "▸", "default": "◦"}
@@ -946,7 +951,7 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
         kinds = ["tools"]
     token = rest[0] if rest else None
     flags = (f" --days {o['days']}" if o["days"] else "") + (" --force" if o.get("force") else "")
-    usage = (f'Usage: python3 "{script}" save-more [config|cache|settings] [details] [--custom] [--days N]\n'
+    usage = (f'Usage: python3 "{script}" save-more [config|cache|settings|tools] [details] [--custom] [--days N]\n'
              f'       python3 "{script}" remove-mcp-and-skills [details] [--days N]\n'
              f'       python3 "{script}" apply <{"|".join(KINDS)}> <option>@<basis>\n'
              f'       python3 "{script}" revert <{"|".join(KINDS)}> (settings: revert settings <check-id>)')
@@ -954,6 +959,10 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
             or (verb == "revert" and (not kinds or len(rest) != (kinds == ["settings"]))) or (verb == "read" and rest) \
             or (cmd == "remove-mcp-and-skills" and kinds != ["tools"]):
         return verb, kinds, token, usage
+    # `save-more tools` is tool deferral's view (#869); the removal report stays remove-mcp-and-skills. A change typed
+    # as `save-more tools apply X` is deferral's; `insights tools apply X` (routed here as save-more) is the removal's.
+    if cmd == "save-more" and kinds == ["tools"] and "insights" not in args:
+        kinds = ["deferral"]
     if verb != "read" and cmd != verb:
         exact = f'python3 "{script}" {verb} {kinds[0]}' + (f" {shlex.quote(token)}" if token else "") + flags
         return verb, kinds, token, f"Run this instead (a change is its own command): {exact}"
@@ -1008,10 +1017,14 @@ def with_ticker(fn, label: str):
         sys.stderr.write("\r\x1b[K")
 
 
+def report_path(kind: str) -> str:
+    return PATH.get(kind) or f"/api/adapt/{ROUTE[kind]}"
+
+
 def adapt_report(api: Api, o: dict, kind: str, tick: bool = True) -> tuple[int, dict | None]:
     since, now = window(o, o["days"] or ADAPT_DAYS)
     q = {"since": since, "until": now, **({"custom": 1} if o.get("custom") and kind == "config" else {})}
-    get = lambda: api.send("GET", f"/api/adapt/{ROUTE[kind]}", q, timeout=ADAPT_TIMEOUT)  # noqa: E731
+    get = lambda: api.send("GET", report_path(kind), q, timeout=ADAPT_TIMEOUT)  # noqa: E731
     return with_ticker(get, f"Replaying {o['days'] or ADAPT_DAYS} days of history...") if tick else get()
 
 
@@ -1183,7 +1196,62 @@ def plain_words(kind: str, rep: dict, o: dict) -> list[str]:
     return [a, b]
 
 
+def render_deferral(rep: dict, o: dict, e) -> list[str]:
+    """`save-more tools` (#485 D3): one row per tool, MCP server and skill, with its state, use, cost carried and
+    reason, then the changes it offers, each as a command to run after a yes. No recommendation: deferral decides
+    per tool from the user's own history, so this view is for overriding it."""
+    rows, w = rep.get("rows") or [], rep.get("window") or {}
+    by = {}
+    for r in rows:
+        by[r.get("state")] = by.get(r.get("state"), 0) + 1
+    on = rep.get("search_on")
+    # Missing is not zero: an unpriced row's dollars are unknown, so the total is a floor and says so.
+    priced = [r for r in rows if r.get("carry_priced", True)]
+    unpriced = len(rows) - len(priced)
+    carried = dollars(sum(r.get("carry_usd") or 0 for r in priced))
+    cost = (f"Carrying all of them cost at least {carried} over the last {days_of(w)} days; "
+            f"{unpriced} item{'s' * (unpriced != 1)} had no price." if unpriced
+            else f"Carrying all of them cost {carried} over the last {days_of(w)} days.")
+    lines = [f"Tool search is {'on' if on else 'off'} for your account"
+             + (f": Context Guru defers {by.get('deferred_cg', 0)} of these {len(rows)} items, from your own history." if on
+                else ": every tool is sent in full, unless Claude Code defers it itself."),
+             f"Claude Code defers {by.get('deferred_client', 0)} itself. {cost}"]
+    L = card("Save more: tools", lines, e)
+    shown = rows if o["details"] else rows[:DEFERRAL_ROWS]
+    if shown:
+        kind = {"tool": "tool", "mcp_server": "MCP server", "skill": "skill"}
+        L += ["", f"Your items, most costly first ({len(shown)} of {len(rows)}):" if len(shown) < len(rows) else "Your items, most costly first:"]
+        L += ["  " + r for r in T.cols([["kind", "name", "state", "used", "cost"]]
+                                       + [[kind.get(r.get("kind"), r.get("kind", "")) + (" (kept)" if r.get("kept") else ""),
+                                           T.clip(r.get("name", ""), 36, e), STATE.get(r.get("state"), r.get("state", "")),
+                                           f"{r.get('sessions_used', 0)} of {r.get('sessions_declared', 0)}",
+                                           money(r.get("carry_usd") if r.get("carry_priced", True) else None)] for r in shown], "lllrr")]
+        if o["details"]:
+            L += ["", "Why:"] + [f"  {r.get('name', '')}: {r.get('reason', '')}" for r in shown]
+    if w.get("since"):
+        L += ["", f"  {day(w['since'], o)}..{day(w['until'], o)} {dot(e)} {w.get('sessions', 0):,} sessions, {w.get('requests', 0):,} requests"]
+    if rep.get("truncated"):
+        L.append(f"  ! {rep['truncated']} cheaper items are not listed.")
+    act = []  # never wrapped: these lines are run exactly as printed
+    basis = rep.get("basis_id")
+    if not rep.get("writable") or not basis:
+        L.append(f"  ! Changes are not available here: {rep.get('reason') or 'this proxy cannot edit your configuration.'}")
+    else:
+        sw = next((x for x in rep.get("options") or [] if x.get("action") in ("search_on", "search_off")), None)
+        act.append(f"Keep a tool loaded (never defer it), after a yes: {apply_line('deferral', 'keep:<name>@' + basis, o)}")
+        if sw:
+            act.append(f"Turn tool search {'off' if sw['action'] == 'search_off' else 'on'} for your account, after a yes: "
+                       f"{apply_line('deferral', sw['id'] + '@' + basis, o)}")
+        act.append(f"Undo the last of these changes: {SLASH['deferral']} revert deferral")
+    for x in rep.get("not_yet") or []:
+        L.append(f"  Not available yet: {x.get('label', x.get('action', ''))} (#{x['issue']})." if x.get("issue")
+                 else f"  Not available yet: {x.get('label', x.get('action', ''))}.")
+    return T.fit(L, e) + act
+
+
 def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
+    if kind == "deferral":
+        return render_deferral(rep, o, e)
     title = {"config": "Save more: config", "cache": "Save more: cache", "tools": "Remove MCP servers and skills"}[kind]
     L = card(title, plain_words(kind, rep, o), e)
     L.append(rep.get("summary", ""))
@@ -1285,7 +1353,7 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
         basis = rep.get("basis_id", "")
     since, now = window(o, o["days"] or ADAPT_DAYS)  # the report's window, so the proxy can check the basis on it
     body = {"option": opt, **({"basis": basis} if basis else {}), **({"force": True} if o.get("force") else {})}
-    st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{ROUTE[kind]}/apply", {"since": since, "until": now},
+    st, doc = with_ticker(lambda: api.send("POST", report_path(kind) + "/apply", {"since": since, "until": now},
                                            body, timeout=APPLY_WAIT + 40),
                           "Applying...")
     if st == 202 and isinstance(doc, dict) and doc.get("poll"):  # a long apply (a campaign build): wait for it
@@ -1441,6 +1509,7 @@ PING_REASONS = {
     "too large": "context too large to hold for Ping",
     "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
     "pings used": "the planned keep-alive pings have run out",
+    "done": "this agent has finished, so there is nothing to keep warm",
     "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
     "expired": "cache already cold",
     "no entry": "the server knows nothing about this session yet; send a prompt first",
@@ -1551,7 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mock", action="store_true", help="cache-campaign: use the documented sample response")
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in ("config", "compaction", "tools", "settings"):  # `cg.py config revert`: the read side, which names the change
-        argv = ["save-more", *argv]
+        argv = ["remove-mcp-and-skills" if argv[0] == "tools" else "save-more", *argv]  # `tools` is the removal report's kind
     a = ap.parse_args(argv)
     if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"

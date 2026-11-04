@@ -34,71 +34,18 @@ const DefaultMaxTokens = 4096
 // needs, against what a verdict array over an unbounded candidate list needs.
 const PrefixAskMaxTokens = 16000
 
-// Prompt-cache minimums, MEASURED against the gateway rather than assumed.
-//
-// A provider silently ignores a cache_control breakpoint that sits below its minimum
-// cacheable prefix: no error, no cache entry, cache_creation_input_tokens: 0. The
-// numbers differ per model family, so a single constant would either waste writes on
-// one family or forgo caching on another.
-//
-//	~1.5k prefix, claude-haiku-4-5  => write=0 read=0   (inert)
-//	~4.5k prefix, claude-haiku-4-5  => write=5401 then read=5401
-//	~1.5k prefix, claude-sonnet-5   => write=2653 then read=2653
+// The prompt-cache floor and its unit conversion live in internal/modelinfo (cachefloor.go), shared
+// with apply's prefix split. These names stay as thin aliases so the callers and tests here are unchanged.
 const (
-	minCacheableHaiku = 4096
-	minCacheableSmall = 1024
+	minCacheableHaiku = modelinfo.MinCacheableHaiku
+	minCacheableSmall = modelinfo.MinCacheableSmall
 )
 
-// realTokensPerO200k converts our own token count into the count the provider will bill.
-//
-// THE FLOORS ABOVE ARE IN THE PROVIDER'S TOKENS; internal/tokens counts o200k_base. Comparing
-// the two directly is a unit error, and it was silently costing every haiku call its cache.
-// MEASURED 2026-08-19 against the gateway, same bytes both sides:
-//
-//	preamble+context, claude-haiku-4-5:  3,673 o200k  ->  4,217 billed  (1.148x)
-//	same shape, re-measured 2026-08-20:   6,143 o200k  ->  7,077 billed  (1.152x)
-//	preamble only,    aws/claude-sonnet-5: 1,893 o200k ->  2,956 billed  (1.56x)
-//
-// The 3,682-o200k prefix CACHED (write=4,412 then read=4,412) while the unconverted
-// comparison (3,682 < 4,096) withheld the breakpoint — a cache the provider was willing to
-// grant, declined on arithmetic. 1.20x is kept as the DIVISOR deliberately: it is looser than
-// the 1.148-1.152x actually measured, so the derived floor (4096/1.20 = 3413 o200k) sits below
-// the true one (4096/1.152 = 3555) and the breakpoint is offered slightly early rather than
-// withheld. A too-tight divisor would reintroduce the bug this comment exists to explain.
-// haiku-class is the family
-// carrying the 4,096 floor, so it is the right conversion here; it is also the smaller of
-// the two, so it never claims a cache we have evidence would be refused.
-//
-// Being wrong in the LOOSE direction is nearly free: a breakpoint below the provider's real
-// minimum is ignored, not charged (measured: write=0, read=0, input_tokens identical with and
-// without the mark), and claimCacheWrite's release() records that and retries later. Being
-// wrong in the TIGHT direction forgoes the cache permanently, which is what happened here.
-const realTokensPerO200k = 1.20
+// minCacheableO200k is modelinfo.MinCacheableO200k: the floor in the units tokens.Count returns.
+func minCacheableO200k(model string) int { return modelinfo.MinCacheableO200k(model) }
 
-// minCacheableO200k is minCacheablePrefix expressed in the units tokens.Count actually
-// returns, so like is compared with like.
-func minCacheableO200k(model string) int {
-	return int(float64(minCacheablePrefix(model)) / realTokensPerO200k)
-}
-
-// minCacheablePrefix returns the smallest system prefix worth marking for this model, in the
-// PROVIDER's tokens. Callers holding an o200k count must go through minCacheableO200k.
-//
-// An UNNAMEABLE model gets the haiku figure, not the smaller default: the failure we are
-// avoiding is paying for a cache entry that is never read, so when we cannot tell which
-// family we are talking to, the conservative answer is to demand the larger prefix and
-// place no mark below it.
-func minCacheablePrefix(model string) int {
-	switch modelinfo.Family(model) {
-	case modelinfo.FamilySonnet, modelinfo.FamilyOpus:
-		return minCacheableSmall
-	default:
-		// Fable has no published minimum in this repo, so it keeps the haiku figure it always got.
-		// haiku-class, and every id we cannot place — including a gateway alias that hides
-		// the real model, which is the common case on a LiteLLM-style deployment.
-		return minCacheableHaiku
-	}
-}
+// minCacheablePrefix is modelinfo.MinCacheablePrefix: the floor in the provider's tokens.
+func minCacheablePrefix(model string) int { return modelinfo.MinCacheablePrefix(model) }
 
 // systemBlocks renders ordered system text into Anthropic content blocks, marking the
 // LAST one with a cache_control breakpoint only when the whole prefix clears the model's

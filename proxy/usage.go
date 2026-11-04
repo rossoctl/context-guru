@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -15,6 +16,12 @@ import (
 // provider told us nothing, in which case a caller must report the request as
 // partially accounted rather than pricing it as free.
 type Usage struct {
+	// Searches and SearchLoaded are the server-side tool searches a streamed response ran and the
+	// tools they loaded, read off the sniffer window for tool deferral's ledger (#485).
+	// SearchDropped is how many of those searches have no result (sent with another tool call).
+	Searches      int
+	SearchLoaded  []string
+	SearchDropped int
 	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
 	Live       *LiveFacts
 	FreshInput int64
@@ -56,6 +63,9 @@ type Usage struct {
 	// case this is best-effort, not exhaustive, and the row reads a weaker signal
 	// (background/teammate/human from open state) rather than own_tool, never a guess).
 	ToolUseNames []string
+	// ToolUseIncomplete is true when ToolUseNames may miss the true last call, because the bytes
+	// read were a spliced head+tail sniff window. The terminal-tool rule never applies then (#857).
+	ToolUseIncomplete bool
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -367,6 +377,7 @@ func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, usa
 	}
 	u.StopReason = responseStopReason(sse, body)
 	u.ToolUseNames = responseToolUseNames(sse, body)
+	u.ToolUseIncomplete = spliced
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.
 	if counter, alertable := usageCounters[why]; alertable {
@@ -639,26 +650,12 @@ func responseToolUseNames(sse bool, body []byte) []string {
 // body (or a sniffed window of one — see responseToolUseNames).
 func bufferedToolUseNames(body []byte) []string {
 	var names []string
-	root := gjson.ParseBytes(body)
-	// Anthropic Messages.
-	for _, c := range root.Get("content").Array() {
-		if c.Get("type").String() == "tool_use" {
-			if n := c.Get("name").String(); n != "" {
-				names = append(names, n)
-			}
-		}
-	}
-	// OpenAI chat.
-	for _, tc := range root.Get("choices.0.message.tool_calls").Array() {
-		if n := tc.Get("function.name").String(); n != "" {
-			names = append(names, n)
-		}
-	}
-	// OpenAI Responses.
-	for _, item := range root.Get("output").Array() {
-		if item.Get("type").String() == "function_call" {
-			if n := item.Get("name").String(); n != "" {
-				names = append(names, n)
+	// The body names no dialect, so all three are read; a body matches only one of them. A
+	// Responses custom tool call is not counted, as before.
+	for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
+		for _, c := range schema.OutputCalls(wire, body) {
+			if !c.Custom && c.Name != "" {
+				names = append(names, c.Name)
 			}
 		}
 	}
@@ -729,6 +726,26 @@ func (s *sniffer) bytes() []byte {
 	out = append(out, s.head...)
 	out = append(out, '\n')
 	return append(out, s.tail...)
+}
+
+// disjoint is the retained window with no byte twice. For a response of sniffMax to 2*sniffMax
+// bytes the head and the tail overlap, and bytes() holds the overlap twice: a reader that counts
+// events (tool deferral's search count) would count one there twice. Here the tail is cut past
+// the head, so an overlap gives the exact body; a gap keeps the newline between the halves.
+func (s *sniffer) disjoint() []byte {
+	if !s.on {
+		return nil
+	}
+	if s.total <= len(s.head) {
+		return s.head
+	}
+	start := len(s.head) - (s.total - len(s.tail)) // the tail's first byte the head does not hold
+	if start < 0 {
+		return s.bytes() // a gap: nothing is held twice
+	}
+	out := make([]byte, 0, len(s.head)+len(s.tail)-start)
+	out = append(out, s.head...)
+	return append(out, s.tail[start:]...)
 }
 
 func max64(a, b int64) int64 {

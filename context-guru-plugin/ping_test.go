@@ -234,7 +234,7 @@ func TestPingExplainsAnUnheldCache(t *testing.T) {
 func TestPingReasonWords(t *testing.T) {
 	requireTool(t, "python3")
 	for reason, want := range map[string]string{
-		"below limits": "below its minimum size", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
+		"below limits": "below its minimum size", "done": "agent has finished", "pings used": "pings have run out", "stopped": "stopped keeping this thread warm",
 		"no entry": "knows nothing about this session", "unavailable": "route or credential is failing",
 		"not opted in": "turns on in your next session", "expired": "cache already cold", "too large": "too large to hold",
 		"unsupported": "a route Ping does not support", "over budget": "per-ping limit", "from-the-future": "cannot ping this session right now",

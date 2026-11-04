@@ -52,16 +52,16 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// is off even then — the ttl field reaches the provider, but Bedrock grants the 1h
 	// tier only for the Claude 4.5 family and silently downgrades the models this
 	// service actually runs.
-	headTTL1h, headTTLMinTokens := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
-		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLMinTokens)
+	headTTL1h, headTTLMinBytes := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
+		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLGateBytes())
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
 		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
 		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
 		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx), ThreadOf: r.threadOf,
-		HeadTTL1h:        headTTL1h,
-		HeadTTLMinTokens: headTTLMinTokens,
-		Mode:             mode, Tracker: h.tracker,
+		HeadTTL1h:       headTTL1h,
+		HeadTTLMinBytes: headTTLMinBytes,
+		Mode:            mode, Tracker: h.tracker,
 		// The asker a component may use to put a question to the request's own model over its
 		// cached transcript. nil on a non-Anthropic route or without an incoming client; a
 		// component decides for itself what nil means. See prefixask.go.
@@ -69,7 +69,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		// Whether the keep-alive can ping this thread, so a component that prepares something for a
 		// ping keeps nothing for a thread that will never get one. See keeper.canPing.
 		CanKeepAlive: func(session, thread string) bool {
-			return h.keeper.canPing(r.tn, session, r.provider)
+			return h.keeper.canPing(r.tn, session, thread, r.provider)
 		},
 	})
 	added := time.Since(start)

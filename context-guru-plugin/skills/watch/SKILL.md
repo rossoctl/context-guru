@@ -1,6 +1,7 @@
 ---
 name: watch
 description: A live terminal view of every cache's countdown, what you saved today, and the last 20 requests. One frame here; the live version runs in a second terminal.
+disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tv.py" watch:*)
 ---
 

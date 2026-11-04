@@ -103,6 +103,7 @@ It's an effort ladder — each tier is everything in the one before it, plus mor
 | `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired | yes |
 | `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full | yes |
 | `xhigh` | `high` plus a periodic deep-adjudication sweep over turns whose prompt cache has gone cold — the deepest cut | yes |
+| `ultrahigh` | **Experimental.** `xhigh` plus tool deferral: tools your own history shows you do not use are sent as names only, and the model loads one through search when it needs it. Opt-in. On Claude models it uses the API's tool search; on GPT, GLM and Kimi it uses Context Guru's own search tool. See [Experimental: ultrahigh](#experimental-ultrahigh) | yes |
 
 Run the picker any time to switch tiers—it explains each one before asking which to set:
 
@@ -114,6 +115,15 @@ Claude Code applies the change at the next proxy start; Codex restarts its owned
 selection. Confirm the result with `/context-guru:status` on Claude Code or
 `$context-guru-status` on Codex. Full pipelines:
 [docs/reference/presets.md](docs/reference/presets.md).
+
+### Experimental: ultrahigh
+
+`ultrahigh` is experimental. Use it to try tool deferral, not as a default.
+
+- **Accuracy:** on Sonnet 5.5 it picks the right tool as often as `xhigh`. On Opus 5.5 it is worse on vague tasks: 66 of 80 against 72 of 80 with no deferral, in the last run of the shipped setup (2026-11-03). The model sometimes uses Bash when the right tool is deferred.
+- **Measured before each release:** the result of each run is posted on [#871](https://github.com/rossoctl/context-guru/issues/871). `ultrahigh` stays experimental until 3 releases in a row pass.
+- **Known limits:** on GPT, GLM and Kimi, answers in a session with deferred tools arrive all at once, not word by word, on both Chat Completions and Responses ([#879](https://github.com/rossoctl/context-guru/issues/879) for Chat Completions). The provider's native tool search for newer GPT models is not used yet ([#876](https://github.com/rossoctl/context-guru/issues/876)).
+- **To turn it off:** pick another preset, or set `toolfilter: {defer: off}`. In Claude Code you can also set `ENABLE_TOOL_SEARCH=false` (the plugin's session-start hook sends it to the proxy; the Codex plugin has no such hook).
 
 Everything else — architecture, the full benchmark, every component, the proxy/gateway path,
 config reference — is in **[docs/design.md](docs/design.md)** and
