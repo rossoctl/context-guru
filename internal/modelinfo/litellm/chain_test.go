@@ -259,3 +259,41 @@ func TestLiteLLMBlankCacheReadFollowsTheModelTier(t *testing.T) {
 		}
 	}
 }
+
+// A dated id and a Bedrock or Vertex id name a model the map lists under its bare name. Neither found a
+// price, because the last-resort scan needs a map key that CONTAINS the whole id, and these ids are longer
+// than the key. No price means no saving is booked (context-guru#768 minor). `x` and `x[1m]` already agree.
+func TestLiteLLMPriceFindsDatedAndWrappedIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(priceSample))
+	}))
+	defer srv.Close()
+	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
+	ctx := context.Background()
+	for i := 0; i < 400; i++ {
+		if _, ok := l.Price(ctx, "aws/claude-sonnet-5"); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	want, _ := l.Price(ctx, "aws/claude-sonnet-5")
+	for _, id := range []string{
+		"claude-sonnet-5-20260101",
+		"aws/claude-sonnet-5-20260101",
+		"us.anthropic.claude-sonnet-5-v1:0",
+		"anthropic.claude-sonnet-5-20260101-v2:0",
+		"eu.anthropic.claude-sonnet-5-v1:0[1m]",
+		"claude-sonnet-5@20260101",
+	} {
+		got, ok := l.Price(ctx, id)
+		if !ok || got != want {
+			t.Errorf("Price(%q) = %+v, %v; want %+v", id, got, ok, want)
+		}
+	}
+	// A different model must not be mistaken for it: the date and the wrapper are stripped, nothing else.
+	for _, id := range []string{"claude-sonnet-5-5-20260101", "us.anthropic.totally-absent-xyz-v1:0"} {
+		if p, ok := l.Price(ctx, id); ok && p == want {
+			t.Errorf("Price(%q) resolved to claude-sonnet-5's price", id)
+		}
+	}
+}
