@@ -2,6 +2,7 @@ package dash
 
 import (
 	"context"
+	"math"
 	"sort"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -294,7 +295,9 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 		// component that loses money as a gain (context-guru#768 B6: saved_usd -$0.0302, this field +$0.0113).
 		c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 		if c.SavedUSDFirstRemoval > 0 {
-			c.ReplayMultiple = (c.SavedUSDFirstRemoval + c.SavedUSDReplay) / c.SavedUSDFirstRemoval
+			// The amortized verdict (replay and costs included) over the first-removal credit, as the replay cap
+			// computes it: a component whose costs exceed its credit must not print a gain.
+			c.ReplayMultiple = math.Max(c.SavedUSDDecomposed, 0) / c.SavedUSDFirstRemoval
 		}
 		// Whether this component's `unique` is a DEDUP MEASUREMENT at all.
 		//

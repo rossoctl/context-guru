@@ -1090,6 +1090,10 @@ func TestTheFirstRemovalVerdictIncludesTheCostsAComponentCaused(t *testing.T) {
 	}
 	// 0.0100 first removal - 0.0600 costs, and the component has no LLM spend of its own.
 	nearEq(t, "verdict", c.NetUSDFirstRemoval, -0.0500)
+	// The amortized verdict is -0.0450 too, so the factor between the two is not a gain: it printed 1.5x.
+	if c.ReplayMultiple != 0 {
+		t.Fatalf("replay_multiple = %g for a component whose amortized verdict is %g, want 0", c.ReplayMultiple, c.SavedUSDDecomposed)
+	}
 }
 
 // A request the accountant could not price books no saving: its components carry priced_by='none' and a stored
