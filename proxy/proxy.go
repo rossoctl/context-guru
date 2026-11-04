@@ -539,6 +539,19 @@ func (h *Handler) Mux() *http.ServeMux {
 		path:   "/v1/responses",
 		setKey: bearerKey(h.opts.OpenAIKey),
 	}, pickOpenAI, "responses"))
+	// Codex tries a WebSocket first. This proxy serves Responses over HTTP only, and an unmatched
+	// GET answers 405, which Codex treats as a failure to retry (5 times, ~10 s) before it falls
+	// back. Only 426 Upgrade Required makes it fall back to HTTPS at once (codex-rs core/src/
+	// client.rs), so a WebSocket upgrade gets that. Any other GET keeps the mux's own 405.
+	// Plain http.Error, as the other routes here; no Upgrade header, as there is nothing to offer.
+	m.HandleFunc("GET /openai/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "WebSocket is not served here; use HTTPS POST", http.StatusUpgradeRequired)
+			return
+		}
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	})
 	m.HandleFunc("POST /anthropic/v1/messages", h.chat(bschemas.Anthropic, upstream{
 		base:   h.opts.AnthropicUpstream,
 		path:   "/v1/messages",

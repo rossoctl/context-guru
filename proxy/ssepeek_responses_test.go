@@ -413,3 +413,29 @@ func TestResponsesSearchRetriesOriginalOn400(t *testing.T) {
 		t.Fatalf("the client must get the retried stream untouched: %d %q", resp.StatusCode, raw)
 	}
 }
+
+// Codex opens a WebSocket first. 426 makes it fall back to HTTPS at once; 405 made it retry 5 times.
+func TestResponsesWebSocketUpgradeGets426(t *testing.T) {
+	h := csHandler(t, "ultrahigh", "http://127.0.0.1:1")
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	get := func(upgrade string) *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/openai/v1/responses", nil)
+		if upgrade != "" {
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", upgrade)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	if got := get("websocket").StatusCode; got != http.StatusUpgradeRequired {
+		t.Fatalf("websocket upgrade: %d", got)
+	}
+	if r := get(""); r.StatusCode != http.StatusMethodNotAllowed || r.Header.Get("Allow") != "POST" {
+		t.Fatalf("plain GET: %d allow=%q", r.StatusCode, r.Header.Get("Allow"))
+	}
+}
