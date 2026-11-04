@@ -191,3 +191,41 @@ func TestOpenReadOnlyShimsAnOlderRequestComponentsTable(t *testing.T) {
 		t.Fatalf("missing columns read as %q, %v; want their defaults", by, first)
 	}
 }
+
+// A database written by an older proxy lacks the newest request_components columns. OpenReadOnly shims them
+// with a TEMP VIEW, and a view has no rowid, so ordering a request's components by rowid failed with "no such
+// column: rowid" (context-guru#768 minor). cg-cache-campaign opens databases this way.
+func TestOpenReadOnlyRequestOnAnOlderDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRequest(t, db, "t1", "s1")
+	var id int64
+	if err := db.sql.QueryRow(`SELECT id FROM requests`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`INSERT INTO request_components(request_id, component, kind) VALUES (?, 'a', 'k'), (?, 'b', 'k')`, id, id); err != nil {
+		t.Fatal(err)
+	}
+	// Make it an older file: drop the newest additive column of request_components.
+	if _, err := db.sql.Exec(`ALTER TABLE request_components DROP COLUMN priced_by`); err != nil {
+		t.Fatalf("cannot build the older file: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	e, err := ro.Request(id, false)
+	if err != nil {
+		t.Fatalf("Request on an older database: %v", err)
+	}
+	if len(e.Components) != 2 || e.Components[0].Component != "a" || e.Components[1].Component != "b" {
+		t.Fatalf("components %+v, want a then b in insert order", e.Components)
+	}
+}
