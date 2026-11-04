@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -250,5 +252,57 @@ func TestChatProxyToolCallName(t *testing.T) {
 		if got := chatProxyToolCallName([]byte(tc.ev), ccProxyTools); got != tc.want {
 			t.Errorf("%q: got %q, want %q", tc.ev, got, tc.want)
 		}
+	}
+}
+
+// errAfter is a body that the upstream breaks off after its bytes, with a read error, not an EOF.
+type errAfter struct{ r io.Reader }
+
+func (e errAfter) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		return n, errors.New("connection reset by peer")
+	}
+	return n, err
+}
+
+// One round, no call of ours, and the upstream cuts the answer off: the client gets an error chunk
+// after the bytes it got, as on Anthropic, and not a stream that just stops.
+func TestChatSpliceOneRoundCutGetsAnErrorChunk(t *testing.T) {
+	const errChunk = "data: {\"error\":{\"type\":\"api_error\",\"message\":\"upstream ended the turn without a terminator\"}}\n\n"
+	for _, tc := range []struct {
+		name string
+		body func(string) io.Reader
+		sent string
+	}{
+		// Mid-event: the last chunk has no blank line after it. It still goes to the client.
+		{"mid-event", func(s string) io.Reader { return strings.NewReader(s) }, ccRole("a") + ccText("a", "Hel") + `data: {"id":"a","choi`},
+		// Between events, on a read error that is not an EOF.
+		{"read error", func(s string) io.Reader { return errAfter{strings.NewReader(s)} }, ccRole("a") + ccText("a", "Hel")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, rec := ccSplicer()
+			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			_, withheld, _ := sp.pass(tc.body(tc.sent), expand.ToolName, ccProxyTools...)
+			if withheld != nil {
+				t.Fatalf("withheld = %q", withheld)
+			}
+			sp.terminate(withheld)
+			if got := rec.Body.String(); got != tc.sent+errChunk {
+				t.Fatalf("the client must get its bytes and then an error chunk:\n got  %q\n want %q", got, tc.sent+errChunk)
+			}
+		})
+	}
+}
+
+// One round that ends a complete answer cleanly, with no [DONE] and no finish_reason: some gateways
+// do that. The client gets the upstream's bytes exactly, with nothing added.
+func TestChatSpliceOneRoundCleanCloseStaysExact(t *testing.T) {
+	stream := ccRole("a") + ccText("a", "Hello")
+	sp, rec := ccSplicer()
+	_, withheld, _ := ccPass(sp, stream)
+	sp.terminate(withheld)
+	if got := rec.Body.String(); got != stream {
+		t.Fatalf("the client must get the stream byte for byte:\n got  %q\n want %q", got, stream)
 	}
 }

@@ -129,6 +129,7 @@ type sseSplicer struct {
 	rounds int    // upstream rounds started
 	chatID string // the chunk id the client sees
 	said   bool   // the client holds content or reasoning text
+	cutOff bool   // the last round's read stopped mid-event or on a read error, not on a clean EOF
 }
 
 func newSSESplicer(w http.ResponseWriter) *sseSplicer {
@@ -231,9 +232,11 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 		e, err := readSSEEvent(br, &ev)
 		if len(e) > 0 {
 			sent := false
-			name := proxyToolCallName(e, proxyTools)
+			var name string
 			if sp.chat {
 				name = chatProxyToolCallName(e, proxyTools)
+			} else {
+				name = proxyToolCallName(e, proxyTools)
 			}
 			if name != "" {
 				if !slices.Contains(called, name) {
@@ -261,6 +264,9 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 			}
 		}
 		if err != nil {
+			// A clean EOF comes between events. A partial event or another read error means the
+			// upstream cut the round off, which terminateChat must tell from a clean close.
+			sp.cutOff = len(e) > 0 || err != io.EOF
 			if over {
 				return nil, nil, called
 			}
@@ -569,7 +575,7 @@ func (sp *sseSplicer) rewriteChat(ev []byte) []byte {
 	}
 	p.Get("choices").ForEach(func(ci, ch gjson.Result) bool {
 		d := ch.Get("delta")
-		if d.Get("content").String() != "" || d.Get("reasoning_content").String() != "" {
+		if d.Get("content").String() != "" || d.Get("reasoning_content").String() != "" || d.Get("reasoning").String() != "" {
 			sp.said = true
 		}
 		d.Get("tool_calls").ForEach(func(ti, tc gjson.Result) bool {
@@ -597,8 +603,10 @@ func (sp *sseSplicer) rewriteChat(ev []byte) []byte {
 // chunks (the finish_reason chunk, the usage chunk and [DONE]) and never a chunk that carries
 // the withheld call or text. With no [DONE] anywhere, it ends the stream with an error chunk.
 func (sp *sseSplicer) terminateChat(withheld []byte) {
-	if withheld == nil && sp.rounds <= 1 {
-		return // one round, nothing withheld: the client got the upstream's bytes, exactly
+	if withheld == nil && sp.rounds <= 1 && !sp.cutOff {
+		// One round, nothing withheld, and the upstream closed cleanly: a gateway that ends a
+		// complete answer without [DONE]. The client got the upstream's bytes, exactly.
+		return
 	}
 	br := bufio.NewReader(bytes.NewReader(withheld))
 	var ev bytes.Buffer
@@ -612,7 +620,7 @@ func (sp *sseSplicer) terminateChat(withheld []byte) {
 				gjson.Get(p, "choices").ForEach(func(_, ch gjson.Result) bool {
 					d := ch.Get("delta")
 					closing = !d.Get("tool_calls").Exists() && d.Get("content").String() == "" &&
-						d.Get("reasoning_content").String() == ""
+						d.Get("reasoning_content").String() == "" && d.Get("reasoning").String() == ""
 					return closing
 				})
 				if closing {

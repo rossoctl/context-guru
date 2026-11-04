@@ -1819,7 +1819,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			case expand.ToolName:
 				h.agg.RecordSSEExpandAfterStream()
 			case tooldefer.ClientSearchName:
-				// Counted where it is decided: mixed_searches, or kept for the next request.
+				// Counted where it is decided: mixed_searches, or kept for the next request. Past the
+				// retain bound or after a failed rebuild it is counted nowhere, but the next request
+				// still answers it from the transcript (tooldefer.ApplySearch).
 			default:
 				lg.Warn("cg.sse_splice: proxy tool leak with no counter of its own", "tool", name)
 			}
