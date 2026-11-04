@@ -260,3 +260,62 @@ func TestSavings_AMovingCacheMarkDoesNotRepriceAReplayAtTheWriteRate(t *testing.
 		t.Fatalf("turn 3 priced the replay at %+v, want the read tier (the provider read it)", got.Saved)
 	}
 }
+
+// context-guru#768 B9: the cachesplit credit was the whole cached read. A replay of four Claude Code sessions booked
+// $350.93 of it on $29.96 of cost, although the system snapshot never changed and the true saving was $0. Two
+// faults made that: the hash included the moving cache mark (B1), so the library lost B*, and the library credited a
+// split with no check that the system section changed (accountant#20). Both are fixed. This drives the shape of the
+// replay through the real tracker: a split every turn, an unchanged system block, a mark that moves.
+//
+// It fails only with BOTH faults present (the hash with the mark and the library before #20/#21): either fix alone
+// is enough to keep the split effect out of this scenario. So it guards the combination, not each cause. The causes
+// have their own tests: TestAccBodies_* for the hash, and the accountant cases split/tail-unchanged-* for the library.
+func TestSavings_ASplitOfAnUnchangedSystemBlockBooksNothingWhenTheMarkMoves(t *testing.T) {
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	const sys = "stable instructions. "
+	vol := "gitStatus: clean"
+	clientSys := func() string {
+		return fmt.Sprintf(`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]`, strings.Repeat(sys, 80)+vol)
+	}
+	fwdSys := func() string { // cachesplit puts the stable half first, with the mark, and the volatile tail after
+		return fmt.Sprintf(`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}},{"type":"text","text":%q}]`,
+			strings.Repeat(sys, 80), vol)
+	}
+	turn := func(n int, withMark func(i int) bool, sysJSON string) []byte {
+		var msgs []string
+		for i := 0; i < n; i++ {
+			text := fmt.Sprintf("message %d %s", i, strings.Repeat("x", 300))
+			mark := ""
+			if withMark(i) {
+				mark = `,"cache_control":{"type":"ephemeral"}`
+			}
+			role := "user"
+			if i%2 == 1 {
+				role = "assistant"
+			}
+			msgs = append(msgs, fmt.Sprintf(`{"role":%q,"content":[{"type":"text","text":%q%s}]}`, role, text, mark))
+		}
+		return []byte(`{` + sysJSON + `,"messages":[` + strings.Join(msgs, ",") + `]}`)
+	}
+	split := accountant.Operation{Kind: accountant.KindRewrite, Operator: "context-guru.cachesplit", ChangeID: "cg:cachesplit:b9",
+		At:         accountant.Position{Section: accountant.SectionSystem, Index: 0},
+		SizeBefore: accountant.Size{Bytes: len(clientSys())}, SizeAfter: accountant.Size{Bytes: len(clientSys())}}
+	var prevTokens int64
+	for n := 2; n <= 6; n++ {
+		last := n - 1
+		client := turn(n, func(i int) bool { return i == last }, clientSys()) // the mark is on the newest message
+		fwd := turn(n, func(i int) bool { return i == last }, fwdSys())
+		tokens := int64((len(fwd) + 3) / 4)
+		u := Usage{CacheRead: prevTokens, CacheWrite: tokens - prevTokens}
+		if n == 2 {
+			u = Usage{CacheWrite: tokens}
+		}
+		res := c.do(n, client, fwd, u, split)
+		prevTokens = tokens
+		for _, e := range res.CacheEffects {
+			if e.Kind == accountant.EffectSplit {
+				t.Fatalf("turn %d: a split effect %+v on a system block that did not change", n, e.Saved)
+			}
+		}
+	}
+}
