@@ -68,14 +68,14 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings},
-		manual.dest()...)...); err != nil {
+		append(manual.dest(), &o.DeferNetUSD)...)...); err != nil {
 		return nil, err
 	}
 	o.ManualPings = manual.pings()
 	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
-		o.ManualPings.SavedUSD)
+		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	o.TotalReducedUSD = o.TotalSavedUSD
 	return o, nil
 }
@@ -115,6 +115,7 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			AVG(CASE WHEN ` + agent + ` THEN r.cg_latency_ms END),
 			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN r.cost_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN 1 ELSE 0 END),0),
-			` + manualSelect + `
+			` + manualSelect + `,
+			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.defer_net_usd ELSE 0 END),0)
 		FROM requests r WHERE ` + cond, args
 }

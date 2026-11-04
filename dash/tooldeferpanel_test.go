@@ -5,7 +5,9 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The panel sums deferral's per-request facts per account and per UTC day. A request deferral did
@@ -82,5 +84,123 @@ func TestToolDeferRouteEmpty(t *testing.T) {
 	}
 	if days, ok := got["days"].([]any); !ok || len(days) != 0 {
 		t.Errorf("days = %v, want []", got["days"])
+	}
+}
+
+// Tool deferral's net saving is its own lever on the Savings page (#888): a request row with
+// defer_net_usd > 0 raises the total by exactly that, in every path that computes a total, and shows
+// as its own series. An account that never deferred has no deferral figure and no series.
+func TestDeferNetIsItsOwnLeverInTheTotal(t *testing.T) {
+	plain := func(db *DB) {
+		if err := db.InsertEvents([]*Event{mkEvent(20000*DayMs+1000, "s", "m", 100, 80)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := openTestDB(t)
+	plain(base)
+	with := openTestDB(t)
+	plain(with)
+	d := mkEvent(20000*DayMs+2000, "s", "m", 100, 100)
+	d.DeferTokens, d.DeferGrossUSD, d.DeferNetUSD = 5000, 0.010, 0.004
+	if err := with.InsertEvents([]*Event{d}); err != nil {
+		t.Fatal(err)
+	}
+	// The same row without deferral, to compare against: its own compaction and cost terms.
+	ref := openTestDB(t)
+	plain(ref)
+	if err := ref.InsertEvents([]*Event{mkEvent(20000*DayMs+2000, "s", "m", 100, 100)}); err != nil {
+		t.Fatal(err)
+	}
+	f := Filter{TenantAll: true}
+	for name, read := range map[string]func(*DB) (float64, float64, error){
+		"overview": func(db *DB) (float64, float64, error) {
+			o, err := db.Overview(f)
+			if err != nil {
+				return 0, 0, err
+			}
+			return o.TotalSavedUSD, o.DeferNetUSD, nil
+		},
+		"lean": func(db *DB) (float64, float64, error) {
+			o, err := db.OverviewLean(f, nil, nil)
+			if err != nil {
+				return 0, 0, err
+			}
+			return o.TotalSavedUSD, o.DeferNetUSD, nil
+		},
+		"savings totals": func(db *DB) (float64, float64, error) {
+			s, err := db.SavingsTotals(f)
+			if err != nil {
+				return 0, 0, err
+			}
+			return s.TotalSavedUSD, s.DeferNetUSD, nil
+		},
+	} {
+		want, none, err := read(ref)
+		if err != nil || none != 0 {
+			t.Fatalf("%s: no-deferral account: defer = %g, err %v", name, none, err)
+		}
+		got, def, err := read(with)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(def-0.004) > 1e-12 || math.Abs(got-want-0.004) > 1e-12 {
+			t.Errorf("%s: defer = %g, total moved by %g, want exactly 0.004", name, def, got-want)
+		}
+	}
+
+	// The waterfall holds the lever as its own step, and it adds up to the total.
+	o, err := with.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var step float64
+	var seen bool
+	for _, s := range o.Waterfall {
+		if s.Key == "defer_net" {
+			step, seen = -s.DeltaUSD, true
+		}
+	}
+	if !seen || math.Abs(step-0.004) > 1e-12 {
+		t.Errorf("waterfall defer_net step = %g (seen %v), want 0.004", step, seen)
+	}
+
+	// The daily series: its own field on the day that deferred, absent from the JSON otherwise.
+	b, err := with.Series(f, DayMs)
+	if err != nil || len(b) != 1 || math.Abs(b[0].DeferNetUSD-0.004) > 1e-12 {
+		t.Fatalf("series = %+v, err %v", b, err)
+	}
+	if js, _ := json.Marshal(b[0]); !strings.Contains(string(js), "defer_net_usd") {
+		t.Errorf("deferral day has no defer_net_usd series: %s", js)
+	}
+	rb, err := ref.Series(f, DayMs)
+	if err != nil || len(rb) != 1 {
+		t.Fatalf("ref series = %+v, err %v", rb, err)
+	}
+	if js, _ := json.Marshal(rb[0]); strings.Contains(string(js), "defer_net_usd") {
+		t.Errorf("an account with no deferral has a deferral series: %s", js)
+	}
+}
+
+// The per-thread money view carries deferral's net too, in both x and y; a thread that never
+// deferred reads as before.
+func TestThreadMoneyIncludesDeferNet(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	d := mkEvent(now-60_000, "sd", "m", 100, 100)
+	d.DeferTokens, d.DeferGrossUSD, d.DeferNetUSD = 5000, 0.010, 0.004
+	n := mkEvent(now-60_000, "sn", "m", 100, 100)
+	if err := db.InsertEvents([]*Event{d, n}); err != nil {
+		t.Fatal(err)
+	}
+	money := func(session string) ThreadMoney {
+		_, m, err := db.ThreadsFor(Filter{Session: session}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Main
+	}
+	with, none := money("sd"), money("sn")
+	if math.Abs(with.SavedUSD-none.SavedUSD-0.004) > 1e-12 || math.Abs(with.BaselineUSD-none.BaselineUSD-0.004) > 1e-12 {
+		t.Errorf("thread with deferral %+v, without %+v: want exactly 0.004 more in saved and baseline", with, none)
 	}
 }

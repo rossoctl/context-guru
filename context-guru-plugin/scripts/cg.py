@@ -166,6 +166,7 @@ def levers(st: dict) -> list[tuple[str, float]]:
     rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
             ("Keep-alive pings", -w.get("keepalive_saved", 0.0) - w.get("keepalive_ping", 0.0)),
             ("Tool filtering", -w.get("decl_filter_saved", 0.0)),
+            ("Tool deferral", -w.get("defer_net", 0.0)),
             ("Context Guru's own model spend", -w.get("cg_llm", 0.0))]
     return [(n, v) for n, v in rows if abs(v) >= 0.005]
 

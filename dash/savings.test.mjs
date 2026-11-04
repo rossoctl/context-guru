@@ -75,3 +75,11 @@ test('the cache strategy name is read back from the settings, and only for a nam
   assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 120 }), ''); // hand-tuned: no name
   assert.equal(strategyName(null), '');
 });
+
+test('tool deferral is its own part, and the parts still add up to total_saved_usd', () => {
+  const o = { net_saved_usd: 10, keepalive_net_usd: 2, decl_filter_usd: 0.5, defer_net_usd: 0.75, total_saved_usd: 13.25 };
+  const p = savedParts(o);
+  assert.equal(p.defer, 0.75);
+  assert.ok(Math.abs(p.total - p.serverTotal) < 1e-9, `${p.total} vs ${p.serverTotal}`);
+  assert.equal(savedParts({ net_saved_usd: 5, total_saved_usd: 5 }).defer, 0); // no deferral: zero, not NaN
+});

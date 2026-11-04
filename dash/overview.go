@@ -169,6 +169,10 @@ type Overview struct {
 	// and the provider then read at least the stable half from cache while writing less than
 	// it. Priced against a cache miss. A floor. The accountant library's split effect.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
+	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
+	// TotalSavedUSD and is its own lever. 0 for an account that never deferred.
+	DeferNetUSD float64 `json:"defer_net_usd"`
 	// The three counts behind that figure, so a small number is explicable rather than
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
 	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
@@ -663,7 +667,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.billed_token_factor = 0
 			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
-			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0)
+			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
+		`+deferNetSum+`
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -680,7 +685,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.TokensBeforeBilled, &o.BilledInputRows,
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
-		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows)
+		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
+		&o.DeferNetUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -1094,7 +1100,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// also uses, so the dashboard and /stats can never disagree about what they mean.
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
-		o.ManualPings.SavedUSD)
+		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	// Both totals exist before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves both.
@@ -1361,10 +1367,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"no figure in it and appeared in no total on this page at all, even though 82.7% " +
 				"of a declared catalogue is never invoked and it is the largest lever measured in " +
 				"this project."},
+		{Key: "defer_net", Label: "Tool deferral", DeltaUSD: -o.DeferNetUSD,
+			Description: "Tool definitions the ultrahigh preset left out of the prompt until the model " +
+				"searched for them, NET of the names list and the searches that cost. From the " +
+				"per-request ledger, so it is the same figure as the Tools page. Its own line: the " +
+				"definitions sit in the top-level `tools` array, which the compaction walk never " +
+				"counted, and deferral runs after the declaration filter, so it holds none of the " +
+				"tokens that filter dropped."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
 				"keep-alive's NET — its savings minus what its pings cost — plus the manual pings' " +
-				"net, plus the declarations the removal filter stopped sending. FOUR disjoint token " +
+				"net, plus the declarations the removal filter stopped sending, plus tool deferral's net. FIVE disjoint token " +
 				"sets, all ours, so nothing is counted twice: compaction's removals never reached " +
 				"the provider, the split moved a breakpoint over tokens that did, the " +
 				"keep-alive refreshed entries that already existed, and the filter's declarations " +

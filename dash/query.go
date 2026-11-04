@@ -1422,6 +1422,9 @@ type Bucket struct {
 	Expands            int64   `json:"expands"`
 	ExpandTokens       int64   `json:"expand_tokens"`
 	Misses             int64   `json:"cache_misses"`
+	// DeferNetUSD is tool deferral's net saving in this bucket: its own series, left out of the
+	// JSON when 0 so an account that never deferred has no deferral series.
+	DeferNetUSD float64 `json:"defer_net_usd,omitempty"`
 }
 
 // DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the
@@ -1484,8 +1487,9 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd), SUM(r.cachesplit_saved_usd),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		SUM(r.expands), SUM(r.expand_tokens),
-		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END)
-		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, cond)
+		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END),
+		%s
+		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, deferNetSum, cond)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1498,7 +1502,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		if err := rows.Scan(&b.TS, &b.Requests, &b.TokensBefore, &b.TokensAfter, &b.SavedUnique,
 			&b.AttemptedTokens, &b.FrozenTokens, &b.FreshInput, &b.CacheRead, &b.CacheWrite,
 			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD, &b.CachesplitSavedUSD,
-			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses); err != nil {
+			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses, &b.DeferNetUSD); err != nil {
 			return nil, err
 		}
 		b.CGLatencyMs, b.UpstreamMs = cgAvg.Float64, upAvg.Float64

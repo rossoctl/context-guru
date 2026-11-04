@@ -5,6 +5,7 @@
 //               of the prompt first earned, in the window and on earlier requests)
 //   compaction  net_saved_usd, already after our own model calls
 //   filter      tools and skills left out of the prompt
+//   defer       tool deferral's net saving (ultrahigh); 0 on an account that never deferred
 'use strict';
 
 function savedParts(o) {
@@ -13,10 +14,11 @@ function savedParts(o) {
   const cache = keepalive + reorder;
   const compaction = o.net_saved_usd || 0;
   const filter = o.decl_filter_usd || 0;
+  const defer = o.defer_net_usd || 0;
   // The user's own Ping presses. saved_usd is already net of what the pings cost, and the server adds it to
   // total_saved_usd as its own addend, outside the cache strategy.
   const manual = (o.manual_pings && o.manual_pings.saved_usd) || 0;
-  return { cache, keepalive, reorder, compaction, filter, manual, total: cache + compaction + filter + manual, serverTotal: o.total_saved_usd || 0 };
+  return { cache, keepalive, reorder, compaction, filter, defer, manual, total: cache + compaction + filter + defer + manual, serverTotal: o.total_saved_usd || 0 };
 }
 
 // The headline on the Overview: the parts added up, against what the same traffic would have cost
