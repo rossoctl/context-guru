@@ -92,6 +92,84 @@ SQLite (pure Go, no C toolchain), in WAL mode. Retention is bounded by both **ag
 blow past the limit and a quiet week can't erase itself. `--dashboard-db :memory:`
 runs with no persistence at all.
 
+## Savings source
+
+Every saving the dashboard stores comes from the accountant library
+([rossoctl/accountant](https://github.com/rossoctl/accountant)). It needs `--dashboard`: the
+library's result is attached to the recorded event, so without a recorder nothing runs. The proxy
+itself books no saving: `Event.Price` stores the cost, the provider's own cache saving and the
+accounting fields, and nothing else.
+
+What the library prices:
+
+- **Components.** Each component's saved dollars, net of the cache break it caused, and the baseline
+  cost. The component figures sum to baseline minus cost. Each row also stores the library's split:
+  `saved_first_usd` (saved tokens priced at the write or input tier: content the provider had not
+  cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
+  are `saved_usd` minus both. `priced_by` is `accountant`. On a request the library could not price (a
+  fallback) it is `none`: the row books no saving, and the read views do not value it.
+- **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
+  cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
+  from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
+  row of its own.
+- **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
+  and the library derives the extent the ping read from it. A prefix that another thread of the
+  session kept warm inside the TTL is not credited (`EntryFacts.SharedWarm`, accountant R54).
+- **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
+- **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
+- **A break nobody owns.** A break that a change left behind when it ended is counted on the
+  `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
+
+When the library cannot price an event, the event books **no saving**, and the proxy logs one
+`acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
+`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
+`figure_without_row`, `duplicate_name` or `acted_without_figure`. A saving nothing measured is not
+shown.
+
+Limits:
+
+- A request with no history to classify a cache break against gets `penalty_unknown`. This is the
+  first request of a thread, and a request after a gap longer than the cache lifetime when the
+  provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
+  can be too high if a component broke the cache on that request (accountant design §6.4). The
+  event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
+  in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
+  The totals and charts add such a figure like any other: they do not mark it. A row written before
+  the column existed reads as exact.
+- A thread that continues another by content (a rewind, a fork) is priced as a first request. The
+  proxy passes the parent thread to the library, but the library does not read it, so the new thread
+  does not start from a copy of the parent's cache state (accountant design §4.1).
+- The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
+  exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
+  library does not credit a keep-alive rescue after a gap past the TTL.
+- The proxy measures the operations against the body it forwards, and starts the request record from
+  the body it received. When a repair runs before the pipeline (`repairExpandErrors`,
+  `AnswerStrayCalls`, a forced model), the two differ, the sum check fails (`check_sum`) and the
+  event books no saving. A request with no usage, or a model with no price, books no saving and logs
+  `unpriced`.
+- A change the pipeline made that no operation can describe drops every operation of the request
+  (`ops_dropped`): a message whose only change is a `cache_control` mark, a cache anchor written
+  after a count-changing splice, and a splice that moves the later messages in a request the equal-count
+  writeback handled. Such a request books no saving.
+- A request whose response called `context_guru_expand` (more than one upstream round) books no
+  saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
+- The thread state lives in memory. After a restart, and for a thread dropped by the library's cap
+  of 10,000 threads (the oldest go first), the next request of the thread is a first request again.
+- The figures are estimates. The library converts removed bytes to tokens with the request's own
+  billed-token ratio. A figure that implies more removed tokens than the request had is rejected
+  (`implausible_size`).
+- The cost and the provider's cache saving are not the library's.
+- Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
+  the summarize ledger and the replay cap value those rows with the legacy rule at read time, and
+  sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
+- The savings tracker runs only when a dashboard is on. The pipeline records what each component
+  changed on every request, with or without a dashboard (a scan of the changed messages). That cost
+  is accepted.
+- A request that asks for the one-hour tier and is billed the five-minute tier (a gateway that
+  downgrades it) keeps the one-hour TTL in the facts, because the facts are written before the
+  response. The library can then credit a rescue after a gap of 5 to 60 minutes that the provider
+  did not honour. The keeper uses the billed tier.
+
 ## Tool inventory panel
 
 *How much of what your agent carries in every request does it actually use?*

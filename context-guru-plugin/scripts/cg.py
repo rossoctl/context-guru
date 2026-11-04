@@ -464,6 +464,19 @@ def session_id(api: Api, a_session: str | None) -> tuple[str | None, str]:
 # ---------------------------------------------------------------------------------------------
 # /context-guru:status
 
+def preset_gap_line(api: Api) -> str | None:
+    """`preset: xhigh (ultrahigh after a restart)` when the saved preset differs from the running one
+    (the proxy's /stats `preset`); None when they agree or either is unknown."""
+    try:
+        import settings  # noqa: PLC0415 - lazy: the other commands do not pay for it
+        saved = settings.saved_preset()[0]
+        doc = api.get("/stats", timeout=3)
+    except Exception:  # noqa: BLE001 - a missing line is better than a failed home screen
+        return None
+    running = doc.get("preset") if isinstance(doc, dict) else None
+    return settings.preset_gap_note(saved, running if isinstance(running, str) else None) or None
+
+
 def cmd_home(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
     since, now = window(o, d)
@@ -474,6 +487,9 @@ def cmd_home(api: Api, o: dict) -> list[str]:
     sp, (tools, last) = spend_doc(api, o, d), tools_doc(api, o, d)
     recs = C.recommendations(sp, tools, d) if sp else []
     L = [f"Saved {dollars(saved)} in {d} days ({share(saved, st.get('baseline_cost_usd') or bill)} of what the same work would have cost)."]
+    gap = preset_gap_line(api)
+    if gap:
+        L.append(gap + ". Run /context-guru:preset-picker to restart the proxy now, or start a new session.")
     t0 = window(o, 1)[0]
     today, yest = stats(api, t0, now), stats(api, t0 - DAY_MS, t0)
     spend_d, saved_d = daily(api, since, now, "cost_usd"), daily(api, since, now, "saved_usd")

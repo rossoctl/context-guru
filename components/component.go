@@ -872,6 +872,23 @@ func (c *Ctx) Stats() FilterStatsSink {
 	return c.FilterStats
 }
 
+// Change is one message a component rewrote, in bytes. The pipeline fills it, so no component
+// has to. Hash is of the text BEFORE the run: the same content re-sent next turn gets the same
+// hash, which is what lets the savings code recognise a replay (accountant ChangeID).
+type Change struct {
+	Idx                     int // index in req.Input; for a splice, where the splice starts
+	BytesBefore, BytesAfter int
+	Hash                    string
+	// Splice is set, on the one Change of a count-changing run, to the contiguous range of
+	// messages the run replaced. BytesBefore/After are then the bytes of the removed and the
+	// inserted messages.
+	Splice *Splice
+}
+
+// Splice says a run replaced Removed messages of its input, starting at At, with Inserted
+// messages. At is a req.Input index (the same before and after the range).
+type Splice struct{ At, Removed, Inserted int }
+
 // Report is the per-component result, modelled after lean-ctx's ToolOutput
 // token accounting and headroom's record_pipeline_run inputs. The pipeline
 // fills TokensBefore/After/DurationMs; the component fills CacheKey and may set
@@ -899,6 +916,12 @@ type Report struct {
 	// pipeline. The writeback layer uses them to attribute a discarded change back to
 	// the component that made it (see Pipeline.RecordDiscards).
 	ChangedIdx []int
+	// Changes is ChangedIdx with sizes and a content hash. When CountChanged it holds exactly one
+	// Change, with Splice set, describing the replaced range.
+	Changes []Change
+	// CountChanged says the run added or removed messages (a summary, a drop). ChangedIdx is
+	// empty then, because indices before and after do not line up; Changes carries the splice.
+	CountChanged bool
 	// Discarded counts changes this component made that the WRITEBACK layer then threw
 	// away (bifrost could not round-trip the message, so splicing would have dropped
 	// provider fields). A report carrying Discarded > 0 is a follow-up attribution, not
@@ -1207,6 +1230,11 @@ type KeepAliveReport struct {
 	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the
 	// summary's call is (#458). Part of CostUSD, not added to it. 0 for every other ping.
 	SweepAnswerUSD float64
+	// Window is the start of the idle gap this ping served: the start of the last upstream
+	// request the entry was kept warm after (kaEntry.startedAt as it stood before this ping
+	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
+	// as belonging to a window.
+	Window time.Time
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

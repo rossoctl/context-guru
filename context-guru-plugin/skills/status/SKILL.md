@@ -120,6 +120,10 @@ These caveats are not hedging; each one is a way a confident reading would be wr
   cold — measured, 1,105 of 1,127 session starts.
 ### Is a configuration change still pending?
 
+The home screen (`cg.py home`) prints `preset: <running> (<saved> after a restart)` when the preset in
+the settings file differs from the one the proxy runs (the `preset` key of `/stats`). Pass it on. The
+fix is `/context-guru:preset-picker`, which restarts the proxy after one yes.
+
 `start-proxy.sh` records what the running proxy was started with, in
 `$CONTEXT_GURU_STATE/proxy-<port>.fingerprint`. Compare it against what the options ask for now:
 

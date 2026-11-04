@@ -706,6 +706,10 @@ type Snapshot struct {
 	// components", `null` is "no single pipeline describes this endpoint". Caught in review.
 	Pipeline    []string `json:"pipeline"`
 	PipelineLen int      `json:"pipeline_len"`
+	// Preset is the preset this proxy was started with ("" when none is named, or in hosted mode
+	// where no single preset describes the endpoint). The plugin compares it with the preset the
+	// user saved, to say that a saved change waits for a restart. Always emitted, like Pipeline.
+	Preset string `json:"preset"`
 	// TopPassthrough names components that ran but never saved a token — dead
 	// weight in the pipeline, candidates to drop from the config.
 	TopPassthrough []string `json:"top_passthrough"`

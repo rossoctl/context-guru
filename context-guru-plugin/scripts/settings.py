@@ -4143,6 +4143,49 @@ PRESETS: dict[str, str] = {
 DEFAULT_PRESET = "off"
 
 
+def saved_preset(plugin: str = "context-guru@context-guru") -> tuple[str, str]:
+    """(preset, file) as saved in the first settings file that names one; ("", "") when none does."""
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and "preset" in opts:
+            return str(opts["preset"]), path
+    return "", ""
+
+
+def running_preset(port: str) -> str | None:
+    """The preset the proxy on `port` runs, from its /stats. None when nothing answers; "" when it
+    answers without a `preset` key (a proxy from before that field existed)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as resp:
+            doc = json.loads(resp.read())
+    except Exception:  # noqa: BLE001 - no proxy, or an unreadable answer: unknown, not an error
+        return None
+    got = doc.get("preset") if isinstance(doc, dict) else ""
+    return got if isinstance(got, str) else ""
+
+
+def preset_gap_note(saved: str, running: str | None) -> str:
+    """`preset: xhigh (ultrahigh after a restart)` when the saved preset differs from the running
+    one, else "". Nothing when the running preset is unknown: a guess would show a false gap."""
+    if not saved or not running or saved == running:
+        return ""
+    return f"preset: {running} ({saved} after a restart)"
+
+
+def _gap_facts(saved: str) -> dict:
+    port, _src = resolve_routed_port()
+    running = running_preset(port) if port else None
+    facts: dict = {"running": running if running is not None else "no_proxy"}
+    note = preset_gap_note(saved, running)
+    if note:
+        facts["gap"] = note
+    return facts
+
+
 def cmd_preset(args: argparse.Namespace) -> int:
     if args.op == "list":
         emit(result="ok", default=DEFAULT_PRESET, names=",".join(PRESETS))
@@ -4151,17 +4194,16 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 0
 
     if args.op == "show":
-        for path in _option_file_candidates(args.plugin):
-            if not os.path.exists(path):
-                continue
-            data, _ = load(path)
-            opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options") or {})
-            if isinstance(opts, dict) and "preset" in opts:
-                emit(result="ok", preset=opts["preset"], file=path)
-                return 0
-        emit(result="ok", preset=DEFAULT_PRESET, file="(none)",
+        saved, path = saved_preset(args.plugin)
+        if path:
+            emit(result="ok", preset=saved, file=path, **_gap_facts(saved))
+            return 0
+        emit(result="ok", preset=DEFAULT_PRESET, file="(none)", **_gap_facts(DEFAULT_PRESET),
              note="no preset configured; the plugin default applies")
         return 0
+
+    if args.op == "restart":
+        return _preset_restart(args)
 
     # op == "set"
     name = args.name
@@ -4209,17 +4251,82 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 3
 
     if options.get("preset") == name:
-        emit(result="unchanged", preset=name, file=target, **_ask_defer_probe(name))
+        facts = _gap_facts(name)
+        # The probe goes only to a proxy that runs the preset already.
+        emit(result="unchanged", preset=name, file=target, **facts,
+             **(_ask_defer_probe(name) if facts["running"] == name else {}))
         return 0
 
     if existed:
         backup(target)
     options["preset"] = name
     save(target, data)
-    emit(result="set", preset=name, file=target, **_ask_defer_probe(name),
-         note="takes effect the next time the proxy starts, not this session — stop and restart "
-              "it, or start a new session, to pick it up")
+    facts = _gap_facts(name)
+    if facts["running"] == name:
+        emit(result="set", preset=name, file=target, **facts, **_ask_defer_probe(name))
+    elif facts["running"] == "no_proxy":
+        emit(result="set", preset=name, file=target, **facts, restart_needed="false",
+             note="no proxy answers on this port; the next proxy start runs this preset")
+    else:
+        # The probe waits: the running proxy would take it and do nothing with it (#887).
+        emit(result="set", preset=name, file=target, **facts, restart_needed="true",
+             note="saved, but the running proxy does not run it yet. A restart applies it, and every "
+                  "open session on this port then pays one cache rewrite. Ask the user. On yes run "
+                  f"`preset restart --name {name}`. On no, the old preset runs until the next session start.")
     return 0
+
+
+def _preset_restart(args: argparse.Namespace) -> int:
+    """Restart the proxy on this directory's port with preset `--name`, through start-proxy.sh.
+
+    There is ONE restart path: start-proxy.sh runs `strategy sync`, compares the fingerprint, stops
+    the proxy by its pidfile and starts a new one. This only hands it the values a Bash call does not
+    carry (`CLAUDE_PLUGIN_OPTION_*` reaches hooks only), then reads /stats to confirm. Call it only
+    after the user said yes: every open session on the port pays one cache rewrite.
+    """
+    name = args.name
+    if name not in PRESETS:
+        emit(result="error", reason="unknown_preset", requested=name, known=",".join(PRESETS))
+        return 2
+    port, why = resolve_routed_port(plugin=args.plugin)
+    if not port:
+        emit(result="error", reason="not_routed", why=why)
+        return 3
+    # --unrouted: the port was resolved just above, so start-proxy.sh's own routing gate (which reads
+    # ANTHROPIC_BASE_URL, absent from some Bash calls) has nothing left to check.
+    cmd = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "start-proxy.sh"),
+           "--unrouted", "--no-update-check", "--port", port, "--preset", name]
+    for flag, key in (("--upstream", "upstream"), ("--idle-exit", "idle_exit")):
+        value = _configured_option(args.plugin, key)
+        if value:
+            cmd += [flag, value]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        emit(result="error", reason="start_failed", detail=str(exc))
+        return 4
+    for line in out.splitlines():
+        if line.strip():
+            emit(starter=line.strip())
+    running = running_preset(port)
+    if running == name:
+        emit(result="restarted", preset=name, port=port, running=running, **_ask_defer_probe(name))
+        return 0
+    emit(result="not_applied", preset=name, port=port, running=running if running is not None else "no_proxy",
+         note="the proxy does not run the new preset yet; the lines above say why. The saved preset "
+              "applies at the next session start.")
+    return 5
+
+
+def _configured_option(plugin: str, key: str) -> str:
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and opts:
+            return str(opts.get(key) or "")
+    return ""
 
 
 def _ask_defer_probe(preset: str) -> dict:
@@ -4539,10 +4646,10 @@ def main() -> int:
                     help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
 
     pr = sub.add_parser("preset")
-    pr.add_argument("op", choices=("list", "show", "set"))
+    pr.add_argument("op", choices=("list", "show", "set", "restart"))
     pr.add_argument("--plugin", default="context-guru@context-guru")
     pr.add_argument("--name", default="",
-                    help="preset name for `set`; one of " + ", ".join(PRESETS))
+                    help="preset name for `set` and `restart`; one of " + ", ".join(PRESETS))
     pr.add_argument("--user-scope", action="store_true",
                     help="only used when no options file exists yet: write the machine-wide "
                          "settings file (~/.claude/settings.json) instead of the project-local "

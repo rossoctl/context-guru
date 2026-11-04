@@ -3696,8 +3696,12 @@ async function openRequest(id, fromURL) {
       // Directly beneath the cost, because the cost on its own is the figure that makes
       // readers conclude the product is worthless: baseline − actual − our own spend is
       // what this one turn was actually worth.
-      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'),
-        priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
+      // price_estimated: the accountant could not rule out a cache break (no history for this
+      // thread yet), so the gross saving is right and the net may be too high. Marked "≈", the
+      // same way this page marks every other estimate.
+      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'
+          + (e.price_estimated ? ' An estimate: there was no history to tell whether a change broke the cache, so the net may be too high.' : '')),
+        priced ? (e.price_estimated ? '≈ ' : '') + usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.

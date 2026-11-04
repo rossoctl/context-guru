@@ -672,6 +672,25 @@ def _update_available_segment() -> str | None:
     return f"{GREEN}▲ update {latest}{RESET}"
 
 
+def _preset_segment(saved: str, running: object) -> str | None:
+    """`preset: xhigh (ultrahigh after a restart)`, only when the saved preset differs from the one
+    the proxy runs (its /stats `preset`). Nothing when either is unknown: a guess would show a false
+    gap, and an older proxy has no `preset` key."""
+    if not saved or not isinstance(running, str) or not running or running == saved:
+        return None
+    return f"{DIM}preset:{RESET} {running} {YELLOW}({saved} after a restart){RESET}"
+
+
+def _saved_preset() -> str:
+    """The preset saved in the settings files, "" when none or unreadable. Never raises."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import settings  # noqa: PLC0415 - as in _our_port
+        return settings.saved_preset()[0]
+    except Exception:  # noqa: BLE001 - a status line must never raise
+        return ""
+
+
 def _keepalive_segment(stats: dict, money: bool = True) -> str | None:
     """This session's keep-alive pings: how many the proxy sent and what they cost (`keep-alive 3 pings
     · $0.04`, detailed layout only, in plain words). Nothing until the first ping. Whether a ping is still planned, and how long that holds
@@ -699,10 +718,10 @@ LAYOUTS = {
 RETIRED_LAYOUTS = ("spark", "strip", "heat", "fill", "watch")
 # next, agents and tip are opt-in (--show=next|agents|tip): the mod owns the next-request price, the sub-agent
 # caches and the weekly tip. ka is the keep-alive count in plain words (detailed, or --show=ka).
-ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka", "agents", "next", "tip"}
+ELEMENTS = {e for els in LAYOUTS.values() for e in els} | {"ka", "agents", "next", "tip", "preset"}
 # Dropped/shrunk first to last when a line is wider than the terminal: spend and latency (detailed), the
 # subagents phrase, the `session` label, the context bar; the clock shortens last.
-DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("next", 1), ("next", None), ("agents", 1), ("agents", 2),
+DEGRADE = (("tip", 1), ("tip", None), ("tools", None), ("preset", None), ("next", 1), ("next", None), ("agents", 1), ("agents", 2),
            ("latency", None), ("ka", None), ("spend", None), ("update", None),
            ("save", 1), ("save", 2), ("ctx", 1), ("save", 3), ("cache", 1), ("agents", None), ("ctx", None),
            ("save", None))
@@ -721,6 +740,7 @@ CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4: at least 10 s
 CACHESTATE_REFRESH_WINDOW_SECONDS = 5.0
 DAY_TTL_SECONDS = 60.0
 WINDOW_TTL_SECONDS = 30.0
+PRESET_TTL_SECONDS = 30.0  # the running preset changes only at a restart
 CACHE_BAR_CELLS = 6
 AGENT_ROWS = 5  # named sub-agents shown before `+N more`
 ACTIVE_SECONDS = 10  # a sub-agent whose last request ended this recently is marked `active`
@@ -728,7 +748,7 @@ SERIES_TTL_SECONDS = 120.0  # day and hour totals move slowly; a stale one is fi
 REQUESTS_TTL_SECONDS = 4.0
 STRIP_REQUESTS = 20
 # Which line each element sits on in a two-line layout. `minimal` ignores this: it is one line.
-ROW = {"update": 0, "save": 0, "spend": 0, "cache": 1, "next": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "tip": 2}
+ROW = {"update": 0, "save": 0, "spend": 0, "cache": 1, "next": 1, "agents": 1, "ctx": 1, "ka": 1, "latency": 1, "tools": 1, "tip": 2, "preset": 1}
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -758,7 +778,7 @@ def _config(argv: list[str]) -> tuple[str, set[str], int]:
                 opt[k] = v
     chosen = _saved_layout()  # a layout picked with --set-layout outranks the installed command's flag
     layout = chosen or (opt.get("layout") if opt.get("layout") in LAYOUTS else "balanced")  # a retired flag falls back silently; a retired remembered name is ignored (see _saved_layout)
-    on = set(LAYOUTS[layout])
+    on = set(LAYOUTS[layout]) | {"preset"}  # a saved preset the proxy does not run yet shows in every layout
     on |= {e for e in opt.get("show", "").split(",") if e in ELEMENTS}
     on -= set(opt.get("hide", "").split(","))
     if "--cache" in argv:
@@ -1549,7 +1569,8 @@ def _day_start_ms(days_ago: int = 0) -> int:
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
 
 
-def _gather(port: str, session_id: str | None, on: set[str], win_start: int | None = None) -> dict:
+def _gather(port: str, session_id: str | None, on: set[str], win_start: int | None = None,
+            saved_preset: str = "") -> dict:
     """Run the (at most three) proxy reads in parallel under one shared deadline, so the worst
     case is one HTTP_TIMEOUT_SECONDS, not three. Each read is disk-cached; a render that finds all
     of them fresh makes no network call at all."""
@@ -1559,6 +1580,8 @@ def _gather(port: str, session_id: str | None, on: set[str], win_start: int | No
         jobs["cs"] = lambda: _fetch_json(
             port, "/api/cachestate?session=" + _quote(session_id),
             "cs-" + session_id, CACHESTATE_TTL_SECONDS, CACHESTATE_REFRESH_WINDOW_SECONDS, max_age=None)
+    if saved_preset and "preset" in on:  # the running preset: only the proxy knows it (/stats `preset`)
+        jobs["preset"] = lambda: _fetch_json(port, "/stats", "preset", PRESET_TTL_SECONDS)
     if win_start is not None and "save" in on:  # subscription: totals since this 5-hour window began
         jobs["win"] = lambda: _bg_json(
             port, f"/api/stats?lean=1&since={win_start}", f"win-{win_start // 1000}", WINDOW_TTL_SECONDS)
@@ -1590,7 +1613,8 @@ def main() -> None:
     layout, on, width = _config(sys.argv[1:])
 
     sub = _subscription(payload)
-    got = _gather(port, session_id, on, _window_start_ms(sub))
+    saved_preset = _saved_preset() if "preset" in on else ""
+    got = _gather(port, session_id, on, _window_start_ms(sub), saved_preset)
     stats, status = got.get("stats") or _stale_stats(port, session_id)
     update_seg = _update_available_segment()  # local file only - independent of the proxy
     if status in (STATS_HUNG, STATS_TIMEOUT) and got.get("cs", (None,))[0] is not None:
@@ -1627,6 +1651,7 @@ def main() -> None:
         "agents": lambda lv: _agents_segment(agent_rows, max(lv, 1) if sub and lv is not None else lv),  # no per-agent $ on a subscription
         "spend": lambda lv: _spend_segment(payload, lv) if lv == 0 and not sub else None,
         "ctx": lambda lv: _ctx_segment(*ctx, lv) if ctx else None,
+        "preset": lambda lv: _preset_segment(saved_preset, (got.get("preset", (None, 0.0))[0] or {}).get("preset")) if lv == 0 else None,
         "ka": lambda lv: (_keepalive_segment(stats, not sub) if stats and lv == 0 else None),
         "latency": lambda lv: _latency_segment(stats) if lv == 0 else None,
         "tools": lambda lv: _recommend_segment(payload) if lv == 0 else None,
@@ -1634,7 +1659,7 @@ def main() -> None:
     }
     if sub:  # a subscription pays in limit, not dollars: the window view replaces the money view
         shown["save"] = lambda lv: _window_segment(sub, win, lv, layout == "detailed")
-    order = [e for e in ("update", "save", "spend", "cache", "next", "agents", "ctx", "ka", "latency", "tools", "tip") if e in on]
+    order = [e for e in ("update", "save", "spend", "cache", "next", "agents", "ctx", "preset", "ka", "latency", "tools", "tip") if e in on]
     level: dict[str, int | None] = {e: 0 for e in order}
     tips = {lv: _tip_segment(lv) for lv in (0, 1)} if "tip" in on and not _tips_off() else {}
     if layout == "minimal":

@@ -6386,6 +6386,10 @@ print(ns["PORT_SCAN_START"])
 func TestPresetUltrahighAsksForAProbe(t *testing.T) {
 	asks := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stats" { // the proxy runs the preset being picked: the probe goes to it
+			w.Write([]byte(`{"preset":"ultrahigh"}`)) //nolint:errcheck
+			return
+		}
 		asks <- r.Method + " " + r.URL.Path + " " + r.Header.Get("Content-Type")
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -6411,6 +6415,7 @@ func TestPresetUltrahighAsksForAProbe(t *testing.T) {
 		}
 		return string(out)
 	}
+	// (the stub's /stats says ultrahigh, so `high` sees a gap; it still must send no probe)
 	if out := run("high"); strings.Contains(out, "probe=") {
 		t.Fatalf("high asked for a probe:\n%s", out)
 	}

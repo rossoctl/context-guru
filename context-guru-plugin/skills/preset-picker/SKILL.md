@@ -61,15 +61,39 @@ way. Only a project with no routing at all falls back to project-local, since th
 to inherit. Pass `--user-scope` to deliberately diverge from that — a preset the user wants on
 every project even though routing itself is project-scoped.
 
-For `ultrahigh`, the same command also asks the running proxy to start the provider check that
-tool deferral needs, and prints `probe=asked` (or why not: `not_routed`, `unavailable`). The check
-runs at your next request, in the background. The first session after the restart is not deferred.
+`preset show` and `preset set` also print `running=` (the preset the proxy runs now, from its
+`/stats`; `no_proxy` when nothing answers). `gap=` appears when the saved and the running preset
+differ.
 
-## 4. A restart is required
+## 4. A restart applies it, after one yes
 
-Like a cache-strategy change, this takes effect at the **next proxy start**, not this session.
-Say so plainly rather than implying it applies immediately — `/context-guru:status` after a
-restart is the way to confirm it stuck.
+The running proxy keeps its old preset until it restarts. When `preset set` prints
+`restart_needed=true`, tell the user in plain words:
+
+- The new preset is saved.
+- A restart applies it now.
+- **A restart costs one cache rewrite in every open session on this port.**
+- If they say no, the old preset runs until the next session start.
+
+Then ask for a yes. Do not restart without it. On yes:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" preset restart --name <name>
+```
+
+It restarts the proxy through `start-proxy.sh`, the same path a session start uses (`strategy sync`,
+then a fingerprint compare, then a stop by pidfile and a start). It never kills by pattern, and it
+leaves a proxy that another project owns alone. It then reads `/stats` to confirm. Report
+`result=restarted` (the new preset runs) or `result=not_applied` with the `starter=` lines that say why.
+
+For `ultrahigh`, `preset restart` then asks the RESTARTED proxy to start the provider check that tool
+deferral needs, and prints `probe=asked` (or why not: `not_routed`, `unavailable`). The check runs at
+your next request, in the background. The first session on each model after the restart is not
+deferred. `preset set` sends no probe while the old proxy runs: that proxy would take it and do
+nothing with it.
+
+On no, say the old preset runs until the next session start. `/context-guru:status` and the status line
+show `preset: <running> (<saved> after a restart)` until then.
 
 ## Do not
 
