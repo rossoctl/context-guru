@@ -78,12 +78,15 @@ func (g *Gate) NoteToolSearch(tenant, session, raw string, rs store.Store, seen 
 	putCapped(g.pending, tenant, session, g.now(), maxPerTenant, maxTenants)
 }
 
-// putCapped sets m[tenant][key] to at. A tenant at perTenant entries loses its oldest one first. A
-// new tenant is refused when m already holds maxTenants tenants. It reports whether it stored.
-func putCapped(m map[string]map[string]time.Time, tenant, key string, at time.Time, perTenant, maxTenants int) bool {
+// putCapped sets m[tenant][key] to now. A tenant at perTenant entries loses its oldest one first
+// (a key that is already there is only refreshed). A new tenant, when m holds maxTenants tenants,
+// first takes the slot of one tenant whose entries all passed gateTTL, and is refused if there is
+// none. TakePending frees a slot when a tenant's last flag is taken; a turn-off has no such taker,
+// so expiry frees it. It reports whether it stored.
+func putCapped(m map[string]map[string]time.Time, tenant, key string, now time.Time, perTenant, maxTenants int) bool {
 	t := m[tenant]
 	if t == nil {
-		if len(m) >= maxTenants {
+		if len(m) >= maxTenants && !dropExpiredTenant(m, now) {
 			return false
 		}
 		t = map[string]time.Time{}
@@ -92,8 +95,27 @@ func putCapped(m map[string]map[string]time.Time, tenant, key string, at time.Ti
 	if _, ok := t[key]; !ok && len(t) >= perTenant {
 		pruneOldest(t)
 	}
-	t[key] = at
+	t[key] = now
 	return true
+}
+
+// dropExpiredTenant deletes one tenant of m whose entries all passed gateTTL, and reports whether
+// it found one. It scans only when m is full.
+func dropExpiredTenant(m map[string]map[string]time.Time, now time.Time) bool {
+	for tenant, t := range m {
+		live := false
+		for _, at := range t {
+			if now.Sub(at) < gateTTL {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(m, tenant)
+			return true
+		}
+	}
+	return false
 }
 
 // TakePending reports whether tenant's session has a pending opt-out, and moves it into rs.
@@ -149,16 +171,17 @@ func (g *Gate) Broken(tenant, model string) bool {
 	return ok && g.now().Sub(at) < gateTTL
 }
 
-// Break turns deferral off for this tenant and model, and counts it.
+// Break turns deferral off for this tenant and model, and counts it (TurnedOff only when it stored).
 func (g *Gate) Break(tenant, model string) {
 	if g == nil {
 		return
 	}
 	g.Retries.Add(1)
-	g.TurnedOff.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	putCapped(g.broken, tenant, model, g.now(), maxPerTenant, maxTenants)
+	if putCapped(g.broken, tenant, model, g.now(), maxPerTenant, maxTenants) {
+		g.TurnedOff.Add(1)
+	}
 }
 
 // pruneOldest deletes the oldest entry of m.

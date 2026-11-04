@@ -438,6 +438,48 @@ func TestGateBreakEvictsOldestPerTenant(t *testing.T) {
 	}
 }
 
+func TestGateBreakRefreshKeepsTheOthers(t *testing.T) {
+	g := NewGate()
+	now := time.Unix(0, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < maxPerTenant; i++ {
+		now = now.Add(time.Second)
+		g.Break("t", "m"+itoa(i))
+	}
+	now = now.Add(time.Second)
+	g.Break("t", "m5")
+	g.mu.Lock()
+	n := len(g.broken["t"])
+	g.mu.Unlock()
+	if n != maxPerTenant || !g.Broken("t", "m0") || !g.Broken("t", "m5") {
+		t.Fatalf("a refresh at the cap evicted an entry: %d left", n)
+	}
+	if g.TurnedOff.Load() != int64(maxPerTenant+1) {
+		t.Fatalf("TurnedOff = %d", g.TurnedOff.Load())
+	}
+}
+
+func TestGateExpiredTenantsFreeTheirSlots(t *testing.T) {
+	g := NewGate()
+	now := time.Unix(0, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < maxTenants; i++ {
+		g.Break("t"+itoa(i), "m")
+	}
+	g.Break("early", "m") // every slot holds a live entry: refused
+	if g.Broken("early", "m") || g.TurnedOff.Load() != int64(maxTenants) {
+		t.Fatal("a full map of live entries took a new tenant")
+	}
+	now = now.Add(gateTTL + time.Second)
+	g.Break("late", "m")
+	g.mu.Lock()
+	n := len(g.broken)
+	g.mu.Unlock()
+	if !g.Broken("late", "m") || n != maxTenants {
+		t.Fatalf("expired tenants did not free a slot: stored=%v, %d tenants", g.Broken("late", "m"), n)
+	}
+}
+
 // ── Apply: the thread-fixed set ──────────────────────────────────────────
 
 // env is a deferral Env over a memory-only session store and tool deferral's own file, which holds
