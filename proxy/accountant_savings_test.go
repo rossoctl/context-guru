@@ -44,7 +44,7 @@ func countChange(res accountant.Result, id string) (n int, saved int) {
 	for _, o := range res.Ops {
 		if o.ChangeID == id {
 			n++
-			saved += o.Saved.Input + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
+			saved += o.Saved.Input + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h + o.Saved.CacheRead
 		}
 	}
 	return
@@ -57,7 +57,7 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	m0, _ := msg("user", "first")
 	m2, _ := msg("assistant", "answer")
 	client, fwd := body(m0, big, m2), body(m0, small, m2)
-	usage := Usage{FreshInput: 100, CacheRead: 1000}
+	usage := Usage{FreshInput: 10, CacheRead: 100}
 	const id = "cg:mask:a1"
 
 	// (a) first request: reported and priced.
@@ -103,7 +103,7 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
 	m2, _ := msg("assistant", "answer")
-	usage := Usage{FreshInput: 100, CacheRead: 1000}
+	usage := Usage{FreshInput: 10, CacheRead: 100}
 	const id = "cg:mask:a1"
 
 	c.do(1, body(m0, big, m2), body(m0, small, m2), usage, rewriteOp(id, 1, nBig, nSmall))
@@ -182,7 +182,7 @@ func TestSavings_ChangedChangeIDDoubleCountIsGated(t *testing.T) {
 	small, nSmall := msg("user", "[masked]")
 	m0, _ := msg("user", "first")
 	m2, _ := msg("assistant", "answer")
-	usage := Usage{FreshInput: 100, CacheRead: 1000}
+	usage := Usage{FreshInput: 10, CacheRead: 100}
 	r1 := c.do(1, body(m0, big, m2), body(m0, small, m2), usage, rewriteOp("cg:mask:1:h1", 1, nBig, nSmall))
 	if len(r1.Checks) != 0 {
 		t.Fatalf("first request checks = %+v", r1.Checks)
@@ -240,12 +240,12 @@ func TestSavings_AMovingCacheMarkDoesNotRepriceAReplayAtTheWriteRate(t *testing.
 	op := rewriteOp(id, 1, nBig, nSmall)
 
 	// turn 1: the mark is on message 2. Nothing cached before it.
-	c.do(1, body(m0, big, withMark("a")), body(m0, small, withMark("a")), Usage{CacheWrite: 3000}, op)
+	c.do(1, body(m0, big, withMark("a")), body(m0, small, withMark("a")), Usage{CacheWrite: 100}, op)
 	// turn 2 and 3: the mark moves to the newest message. The text of the earlier ones did not change.
 	c.do(2, body(m0, big, plain("a"), withMark("b")), body(m0, small, plain("a"), withMark("b")),
-		Usage{CacheRead: 3000, CacheWrite: 100}, op)
+		Usage{CacheRead: 100, CacheWrite: 10}, op)
 	res := c.do(3, body(m0, big, plain("a"), plain("b"), withMark("c")), body(m0, small, plain("a"), plain("b"), withMark("c")),
-		Usage{CacheRead: 3100, CacheWrite: 100}, op)
+		Usage{CacheRead: 110, CacheWrite: 10}, op)
 
 	var got *accountant.PricedOp
 	for i := range res.Ops {
@@ -258,6 +258,13 @@ func TestSavings_AMovingCacheMarkDoesNotRepriceAReplayAtTheWriteRate(t *testing.
 	}
 	if got.Saved.CacheWrite5m != 0 || got.Saved.Input != 0 || got.Saved.CacheRead == 0 {
 		t.Fatalf("turn 3 priced the replay at %+v, want the read tier (the provider read it)", got.Saved)
+	}
+	// The mark moved; the text did not. A hash that includes the mark reads that as an edit and the
+	// library reports a cache break that never happened.
+	for _, e := range res.CacheEffects {
+		if e.Kind == accountant.EffectBreak {
+			t.Fatalf("turn 3 reports a cache break %+v: the moving mark was read as an edit", e)
+		}
 	}
 }
 

@@ -179,7 +179,7 @@ func TestHeadTTLRelabelBooksThePremium(t *testing.T) {
 	st := newSavingsTracker()
 	req := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, client)
 	st.end(req, accountant.Thread{ID: "main"}, fwd, ops, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
-	res := st.compute(req, Usage{CacheWrite: 2000, CacheWrite1h: 2000})
+	res := st.compute(req, Usage{CacheWrite: 100, CacheWrite1h: 100})
 	for _, e := range res.CacheEffects {
 		if e.Kind == accountant.EffectTTLPremium {
 			return
@@ -217,7 +217,7 @@ func assertPremiumBooked(t *testing.T, client, fwd []byte, ops []accountant.Oper
 	st := newSavingsTracker()
 	req := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, client)
 	st.end(req, accountant.Thread{ID: "main"}, fwd, ops, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
-	res := st.compute(req, Usage{CacheWrite: 2000, CacheWrite1h: 2000})
+	res := st.compute(req, Usage{CacheWrite: 100, CacheWrite1h: 100})
 	if len(res.Checks) != 0 {
 		t.Errorf("checks failed: %+v", res.Checks)
 	}

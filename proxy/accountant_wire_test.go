@@ -158,8 +158,10 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 //	usage        = 20 input + 50 cache write = 70 tokens
 //	ratio        = 70 tokens / fwdBytes                      (the library's bytes-to-tokens ratio)
 //	saved tokens = floor(before*70/fwdBytes) - floor(after*70/fwdBytes), in the Input tier: the
-//	               removed span was never cached (no previous request cached it)
-//	SavedUSD     = saved tokens * 2e-6                       (fixedPricer Input rate)
+//	               removed span was never cached (no previous request cached it). The request has no
+//	               cache_control mark, so the provider caches nothing the client asked for and the
+//	               library prices the removed span at the read tier (accountant#24)
+//	SavedUSD     = saved tokens * 2e-7                       (fixedPricer CacheRead rate)
 //
 // The op sizes are wire bytes, so the derivation is exact up to the two floors (1 token).
 // It runs through the real proxy path, and the Result must carry no failed check: before the op
@@ -185,7 +187,7 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 		return n
 	}
 	client, fb := msgBytes(anthropicRequest("aws/claude-sonnet-5")), msgBytes(fwd)
-	want := float64((client-fb)*70/fb) * 2e-6
+	want := float64((client-fb)*70/fb) * 2e-7
 	got := extractRow(t, e).SavedUSD
 	if math.Abs(got-want) > 2*2e-6 {
 		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d message bytes)", got, want, client, fb)
@@ -193,10 +195,11 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 	t.Logf("library %v hand %v", got, want)
 }
 
-// The old fixture: 10,512 prompt tokens for a few-hundred-byte forwarded body. The library's
-// token figure then exceeds the request's size, so PriceMode must book no saving, and for that
-// reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
-// unpriced, so the plausibility bound is what fired, not some earlier gate.
+// Usage far from the body's size: 10,512 prompt tokens for a few-hundred-byte forwarded body, 21
+// tokens per byte. The library refuses it with the ratio_range check before it prices anything
+// (accountant#28), so PriceMode books no saving and the event keeps the legacy figures. The reason
+// is "unpriced": the Result is built, its checks name why. FallbackImplausibleSize is the second
+// line of defence for a Result that passes every check (dash/accountant_switch_test.go).
 func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 	cfs, _ := accRunUsage(t, 12, 9000, 1500)
 	if got := extractRow(t, cfs[0]).SavedUSD; got != 0 || cfs[0].BaselineCostUSD != cfs[0].CostUSD {
@@ -204,20 +207,18 @@ func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 			got, cfs[0].BaselineCostUSD, cfs[0].CostUSD)
 	}
 	r, ok := cfs[0].AccountantResult()
-	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {
-		t.Fatalf("Result %v: unpriced %+v checks %+v, want a clean Result", ok, r.Unpriced, r.Checks)
+	if !ok {
+		t.Fatal("the Result was not attached")
 	}
-	saved := 0
-	for _, o := range r.Ops {
-		if !o.DryRun && o.Call == nil {
-			saved += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
-		}
+	found := false
+	for _, c := range r.Checks {
+		found = found || c.Check == "ratio_range"
 	}
-	if saved <= cfs[0].TokensBefore {
-		t.Fatalf("counted Saved %d <= TokensBefore %d: the bound would not fire", saved, cfs[0].TokensBefore)
+	if !found {
+		t.Fatalf("checks %+v, want a failed ratio_range", r.Checks)
 	}
-	if fb := cfs[0].AccountantFallback(); fb != dash.FallbackImplausibleSize {
-		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackImplausibleSize)
+	if fb := cfs[0].AccountantFallback(); fb != dash.FallbackUnpriced {
+		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackUnpriced)
 	}
 }
 
