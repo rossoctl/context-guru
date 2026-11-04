@@ -408,18 +408,75 @@ func TestDeferralCause(t *testing.T) {
 	}
 }
 
-func TestGateBreakEvictsOldest(t *testing.T) {
+func TestGateBreakEvictsOldestPerTenant(t *testing.T) {
 	g := NewGate()
 	now := time.Unix(0, 0)
 	g.now = func() time.Time { return now }
-	for i := 0; i < maxGate; i++ {
+	now = now.Add(time.Second)
+	g.Break("quiet", "q")
+	for i := 0; i < maxPerTenant; i++ {
+		now = now.Add(time.Second)
+		g.Break("noisy", "m"+itoa(i))
+	}
+	now = now.Add(time.Second)
+	g.Break("noisy", "new")
+	if g.Broken("noisy", "m0") || !g.Broken("noisy", "m1") || !g.Broken("noisy", "new") {
+		t.Fatal("Break did not evict the tenant's oldest entry")
+	}
+	if !g.Broken("quiet", "q") {
+		t.Fatal("another tenant's 400s pushed this tenant's turn-off out")
+	}
+	g.mu.Lock()
+	n := len(g.broken["noisy"])
+	g.mu.Unlock()
+	if n > maxPerTenant {
+		t.Fatalf("%d turn-offs for one tenant", n)
+	}
+	g.DropTenant("noisy")
+	if g.Broken("noisy", "new") || !g.Broken("quiet", "q") {
+		t.Fatal("DropTenant did not drop exactly the tenant's turn-offs")
+	}
+}
+
+func TestGateBreakRefreshKeepsTheOthers(t *testing.T) {
+	g := NewGate()
+	now := time.Unix(0, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < maxPerTenant; i++ {
 		now = now.Add(time.Second)
 		g.Break("t", "m"+itoa(i))
 	}
 	now = now.Add(time.Second)
-	g.Break("t", "new")
-	if g.Broken("t", "m0") || !g.Broken("t", "m1") || !g.Broken("t", "new") {
-		t.Fatal("Break did not evict the oldest entry")
+	g.Break("t", "m5")
+	g.mu.Lock()
+	n := len(g.broken["t"])
+	g.mu.Unlock()
+	if n != maxPerTenant || !g.Broken("t", "m0") || !g.Broken("t", "m5") {
+		t.Fatalf("a refresh at the cap evicted an entry: %d left", n)
+	}
+	if g.TurnedOff.Load() != int64(maxPerTenant+1) {
+		t.Fatalf("TurnedOff = %d", g.TurnedOff.Load())
+	}
+}
+
+func TestGateExpiredTenantsFreeTheirSlots(t *testing.T) {
+	g := NewGate()
+	now := time.Unix(0, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < maxTenants; i++ {
+		g.Break("t"+itoa(i), "m")
+	}
+	g.Break("early", "m") // every slot holds a live entry: refused
+	if g.Broken("early", "m") || g.TurnedOff.Load() != int64(maxTenants) {
+		t.Fatal("a full map of live entries took a new tenant")
+	}
+	now = now.Add(gateTTL + time.Second)
+	g.Break("late", "m")
+	g.mu.Lock()
+	n := len(g.broken)
+	g.mu.Unlock()
+	if !g.Broken("late", "m") || n != maxTenants {
+		t.Fatalf("expired tenants did not free a slot: stored=%v, %d tenants", g.Broken("late", "m"), n)
 	}
 }
 
@@ -623,11 +680,11 @@ func TestApplyOptOutAfterFirstRequestKeepsTheThread(t *testing.T) {
 // first request; one tenant's flags cannot push out another's.
 func TestGatePendingOptOutIsPerTenant(t *testing.T) {
 	g := NewGate()
-	for i := 0; i < maxPendingPerTenant+10; i++ {
+	for i := 0; i < maxPerTenant+10; i++ {
 		g.NoteToolSearch("noisy", "s"+itoa(i), "false", nil, false)
 	}
 	g.NoteToolSearch("quiet", "q", "false", nil, false)
-	for i := 0; i < maxPendingPerTenant+10; i++ {
+	for i := 0; i < maxPerTenant+10; i++ {
 		g.NoteToolSearch("noisy", "x"+itoa(i), "false", nil, false)
 	}
 	st := e2Durable(t)
@@ -643,7 +700,7 @@ func TestGatePendingOptOutIsPerTenant(t *testing.T) {
 	g.mu.Lock()
 	n := len(g.pending["noisy"])
 	g.mu.Unlock()
-	if n > maxPendingPerTenant {
+	if n > maxPerTenant {
 		t.Fatalf("%d pending for one tenant", n)
 	}
 }
