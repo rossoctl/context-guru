@@ -20,8 +20,9 @@ type Gate struct {
 	// flag into the record store (TakePending). Capped per tenant, so one tenant cannot push out
 	// another's.
 	pending map[string]map[string]time.Time
-	// broken holds tenant+model pairs a 400/422 turned off.
-	broken map[[2]string]time.Time
+	// broken holds, per tenant, the models a 400/422 turned off. Same shape and same bounds as
+	// pending (putCapped), so one tenant's 400s cannot push out another's turn-offs.
+	broken map[string]map[string]time.Time
 	now    func() time.Time
 
 	// Counters, for /stats.
@@ -40,18 +41,22 @@ type Gate struct {
 // fresh probe, and a flag whose session never sends a request is dropped.
 const gateTTL = 24 * time.Hour
 
-// maxGate bounds the turn-off map; past it the oldest entry goes.
-const maxGate = 20000
-
 // maxPendingPerTenant and maxPendingTenants bound the pending opt-outs.
 const (
 	maxPendingPerTenant = 64
 	maxPendingTenants   = 10000
 )
 
+// maxBrokenPerTenant and maxBrokenTenants bound the turn-off map. A turn-off lost to a full map
+// only costs one more 400 and retry.
+const (
+	maxBrokenPerTenant = 256
+	maxBrokenTenants   = 10000
+)
+
 // NewGate returns an empty Gate.
 func NewGate() *Gate {
-	return &Gate{pending: map[string]map[string]time.Time{}, broken: map[[2]string]time.Time{}, now: time.Now}
+	return &Gate{pending: map[string]map[string]time.Time{}, broken: map[string]map[string]time.Time{}, now: time.Now}
 }
 
 // NoteToolSearch records the raw ENABLE_TOOL_SEARCH value a session's hook sent (SearchOffValue).
@@ -75,18 +80,26 @@ func (g *Gate) NoteToolSearch(tenant, session, raw string, rs store.Store, seen 
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	t := g.pending[tenant]
+	// Full: the flag is lost, and the session is deferred as without it.
+	putCapped(g.pending, tenant, session, g.now(), maxPendingPerTenant, maxPendingTenants)
+}
+
+// putCapped sets m[tenant][key] to at. A tenant at perTenant entries loses its oldest one first. A
+// new tenant is refused when m already holds maxTenants tenants. It reports whether it stored.
+func putCapped(m map[string]map[string]time.Time, tenant, key string, at time.Time, perTenant, maxTenants int) bool {
+	t := m[tenant]
 	if t == nil {
-		if len(g.pending) >= maxPendingTenants {
-			return // full: the flag is lost, and the session is deferred as without it
+		if len(m) >= maxTenants {
+			return false
 		}
 		t = map[string]time.Time{}
-		g.pending[tenant] = t
+		m[tenant] = t
 	}
-	if len(t) >= maxPendingPerTenant {
+	if _, ok := t[key]; !ok && len(t) >= perTenant {
 		pruneOldest(t)
 	}
-	t[session] = g.now()
+	t[key] = at
+	return true
 }
 
 // TakePending reports whether tenant's session has a pending opt-out, and moves it into rs.
@@ -118,11 +131,7 @@ func (g *Gate) DropTenant(tenant string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.pending, tenant)
-	for k := range g.broken {
-		if k[0] == tenant {
-			delete(g.broken, k)
-		}
-	}
+	delete(g.broken, tenant)
 }
 
 // SearchOffValue reports whether a raw ENABLE_TOOL_SEARCH value turns tool search off on purpose:
@@ -142,7 +151,7 @@ func (g *Gate) Broken(tenant, model string) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	at, ok := g.broken[[2]string{tenant, model}]
+	at, ok := g.broken[tenant][model]
 	return ok && g.now().Sub(at) < gateTTL
 }
 
@@ -155,10 +164,7 @@ func (g *Gate) Break(tenant, model string) {
 	g.TurnedOff.Add(1)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.broken) >= maxGate {
-		pruneOldest(g.broken)
-	}
-	g.broken[[2]string{tenant, model}] = g.now()
+	putCapped(g.broken, tenant, model, g.now(), maxBrokenPerTenant, maxBrokenTenants)
 }
 
 // pruneOldest deletes the oldest entry of m.

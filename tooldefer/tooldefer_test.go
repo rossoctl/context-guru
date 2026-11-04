@@ -408,18 +408,33 @@ func TestDeferralCause(t *testing.T) {
 	}
 }
 
-func TestGateBreakEvictsOldest(t *testing.T) {
+func TestGateBreakEvictsOldestPerTenant(t *testing.T) {
 	g := NewGate()
 	now := time.Unix(0, 0)
 	g.now = func() time.Time { return now }
-	for i := 0; i < maxGate; i++ {
+	now = now.Add(time.Second)
+	g.Break("quiet", "q")
+	for i := 0; i < maxBrokenPerTenant; i++ {
 		now = now.Add(time.Second)
-		g.Break("t", "m"+itoa(i))
+		g.Break("noisy", "m"+itoa(i))
 	}
 	now = now.Add(time.Second)
-	g.Break("t", "new")
-	if g.Broken("t", "m0") || !g.Broken("t", "m1") || !g.Broken("t", "new") {
-		t.Fatal("Break did not evict the oldest entry")
+	g.Break("noisy", "new")
+	if g.Broken("noisy", "m0") || !g.Broken("noisy", "m1") || !g.Broken("noisy", "new") {
+		t.Fatal("Break did not evict the tenant's oldest entry")
+	}
+	if !g.Broken("quiet", "q") {
+		t.Fatal("another tenant's 400s pushed this tenant's turn-off out")
+	}
+	g.mu.Lock()
+	n := len(g.broken["noisy"])
+	g.mu.Unlock()
+	if n > maxBrokenPerTenant {
+		t.Fatalf("%d turn-offs for one tenant", n)
+	}
+	g.DropTenant("noisy")
+	if g.Broken("noisy", "new") || !g.Broken("quiet", "q") {
+		t.Fatal("DropTenant did not drop exactly the tenant's turn-offs")
 	}
 }
 
