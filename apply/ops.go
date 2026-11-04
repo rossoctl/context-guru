@@ -244,6 +244,17 @@ func wireSizes(ops []accountant.Operation, inLen, outLen func(i int) (int, bool)
 	return net == inTotal-outTotal
 }
 
+// shiftingSplice is true when an operation is a splice that inserts a different number of messages
+// than it removed: every message after it moves to a new wire index.
+func shiftingSplice(ops []accountant.Operation) bool {
+	for _, o := range ops {
+		if o.MessageSplice != nil && o.MessageSplice.Removed != o.MessageSplice.Inserted {
+			return true
+		}
+	}
+	return false
+}
+
 // chain gives the operations ks, all on one wire message of b bytes before and a bytes after,
 // contiguous wire sizes from b to a, splitting b - a in proportion to their text deltas. With no
 // text delta at all, the whole wire delta goes to the last operation.

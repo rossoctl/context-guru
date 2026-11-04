@@ -140,6 +140,15 @@ Limits:
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
   library does not credit a keep-alive rescue after a gap past the TTL.
+- The proxy measures the operations against the body it forwards, and starts the request record from
+  the body it received. When a repair runs before the pipeline (`repairExpandErrors`,
+  `AnswerStrayCalls`, a forced model), the two differ, the sum check fails (`check_sum`) and the
+  event books no saving. A request with no usage, or a model with no price, books no saving and logs
+  `unpriced`.
+- A change the pipeline made that no operation can describe drops every operation of the request
+  (`ops_dropped`): a message whose only change is a `cache_control` mark, a cache anchor written
+  after a count-changing splice, and a splice that moves the later messages in a request the equal-count
+  writeback handled. Such a request books no saving.
 - A request whose response called `context_guru_expand` (more than one upstream round) books no
   saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
 - The thread state lives in memory. After a restart, and for a thread dropped by the library's cap

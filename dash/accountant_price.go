@@ -131,7 +131,7 @@ const (
 	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
 	FallbackOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
 	FallbackObserve            = "observe"              // the run was observe mode
-	FallbackUnpriced           = "unpriced"             // an operation or effect is unpriced
+	FallbackUnpriced           = "unpriced"             // no usage or no price for the model, or an operation or effect is unpriced
 	FallbackCheckSum           = "check_sum"            // the library's sum check failed
 	FallbackCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
 	FallbackCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
@@ -198,6 +198,7 @@ func (e *Event) AccountantEstimated() bool { return e.accEstimated }
 
 // AccountantFallback is the reason PriceMode booked no saving, or "" when the override
 // applied. It is "" too on an event priced with Price alone, which never tries the override.
+// An event with no usage or no price books no saving too, and its reason is FallbackUnpriced.
 func (e *Event) AccountantFallback() string { return e.accFallback }
 
 // PriceMode is Price, then an override of each component's SavedUSD, of BaselineCostUSD, of
@@ -213,6 +214,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.accEstimated = "", false
 	if !e.priceCost(p, accountingComplete) {
+		e.accFallback = FallbackUnpriced
 		return
 	}
 	e.accFallback = e.accOverride(p)

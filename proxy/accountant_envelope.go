@@ -210,6 +210,11 @@ func systemOps(cl, fw []string) []accountant.Operation {
 // withHeadTTL is client with its cache mark relabelled to 1h, when forwarded carries a 1h mark and the
 // client's did not: the bytes upgradeHeadTTL leaves a block before anything else rewrites it. It is
 // client itself when there is no relabel to explain.
+//
+// It relies on upgradeHeadTTL (apply/headttl.go) only ever relabelling a mark the client already
+// sent. If that function learns to ADD a mark where the client had none, headTTLRelabelled is false
+// for it, the relabel is absorbed into the split or the rewrite again, and the library never books
+// the 1h premium. Change both together.
 func withHeadTTL(client, forwarded string) string {
 	if !headTTLRelabelled(client, forwarded) {
 		return client

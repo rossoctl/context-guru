@@ -1017,7 +1017,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				outTotal += len(e) - len(msgs[i].Raw)
 			}
 		}
-		if !wireSizes(tr.Ops, rawLen(msgs), outLen, inTotal, outTotal) {
+		// outLen is keyed by the INPUT index, and wireSizes asks it for the OUTPUT index. They differ
+		// when a splice inserts a different count than it removed, which this equal-count writeback
+		// can carry when two count-changing components cancel out. Sizes taken from the wrong
+		// message would be published with no check able to catch them, so give up here.
+		if shiftingSplice(tr.Ops) || !wireSizes(tr.Ops, rawLen(msgs), outLen, inTotal, outTotal) {
 			giveUp()
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // switchEvent is a priced-looking event with a mask component that acted and a library Result
@@ -283,4 +284,22 @@ func TestAFallbackRowIsNotEstimatedAtReadTime(t *testing.T) {
 		return
 	}
 	t.Fatal("no mask row")
+}
+
+// An event with no usage or no price books no saving, and says why: an empty reason would read as
+// "the override applied".
+func TestPriceMode_AnUnpricedEventSaysWhyItBooksNoSaving(t *testing.T) {
+	for name, tc := range map[string]struct {
+		price    modelinfo.Price
+		complete bool
+	}{
+		"no usage": {accTestPrice, false},
+		"no price": {modelinfo.Price{}, true},
+	} {
+		e := switchEvent()
+		e.PriceMode(tc.price, tc.complete)
+		if fb := e.AccountantFallback(); fb != FallbackUnpriced {
+			t.Errorf("%s: fallback = %q, want %q", name, fb, FallbackUnpriced)
+		}
+	}
 }

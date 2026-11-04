@@ -172,3 +172,26 @@ func TestOpsFromRun_SpliceBeforeAWireHoleIsKept(t *testing.T) {
 		t.Fatalf("ops = %+v dropped = %d, want dropped", ops, dropped)
 	}
 }
+
+// shiftingSplice is what keeps the equal-count writeback from sizing a message with the wrong
+// index: it is true only for a splice that inserts a different count than it removed.
+func TestShiftingSplice(t *testing.T) {
+	sp := func(removed, inserted int) accountant.Operation {
+		return accountant.Operation{MessageSplice: &accountant.MessageSplice{At: 1, Removed: removed, Inserted: inserted}}
+	}
+	for _, tc := range []struct {
+		name string
+		ops  []accountant.Operation
+		want bool
+	}{
+		{"no operations", nil, false},
+		{"a rewrite", []accountant.Operation{{}}, false},
+		{"a splice that keeps the count", []accountant.Operation{sp(2, 2)}, false},
+		{"a splice that removes more", []accountant.Operation{{}, sp(3, 1)}, true},
+		{"a splice that inserts more", []accountant.Operation{sp(1, 2)}, true},
+	} {
+		if got := shiftingSplice(tc.ops); got != tc.want {
+			t.Errorf("%s: shiftingSplice = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
