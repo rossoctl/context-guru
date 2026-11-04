@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -83,8 +85,10 @@ import (
 //     realistic shape is thinking interleaved after a tool call.
 //   - Chat Completions streams are spliced only when the request declares our own tool search
 //     (#825, #879): there the dialect differs only in how a call is detected and renumbered
-//     (see chatProxyToolCallName and rewriteChat). Other non-Anthropic streams, and Responses
-//     streams, are not spliced.
+//     (see chatProxyToolCallName and rewriteChat). Responses streams are spliced only when the
+//     request declares it too AND is stateless (#884, statelessResponses): the client then
+//     never chains on a response id, so round 1's id can stand for the whole stream. Other
+//     non-Anthropic streams are not spliced.
 //   - The forwarded bytes are retained until the round ends, because Continuation needs the
 //     whole assistant turn — bounded by sseRetainMaxBytes. Measured on a 2.25 MB round, the
 //     largest a 128K-output model typically produces: the RETAINED bytes are what the old
@@ -130,6 +134,18 @@ type sseSplicer struct {
 	chatID string // the chunk id the client sees
 	said   bool   // the client holds content or reasoning text
 	cutOff bool   // the last round's read stopped mid-event or on a read error, not on a clean EOF
+
+	// OpenAI Responses (#884). A call's name arrives on response.output_item.added, blocks counts
+	// the output items the client holds, and the stream ends with ONE response.completed that
+	// lists every item the client saw. The splice is only used for a stateless request
+	// (store:false, no previous_response_id), so the client never chains on an id: it gets
+	// round 1's id on the whole stream.
+	resp      bool
+	respID    string           // the response id the client sees (round 1's)
+	items     map[int]string   // output_item.done items sent to the client, by client index
+	prevItems []string         // the items the client held when the current round began
+	evCount   int              // events written to the client, to number a later round's events
+	usage     map[string]int64 // input, output and total tokens summed over the rounds
 }
 
 func newSSESplicer(w http.ResponseWriter) *sseSplicer {
@@ -141,6 +157,15 @@ func newSSESplicer(w http.ResponseWriter) *sseSplicer {
 func newChatSSESplicer(w http.ResponseWriter) *sseSplicer {
 	sp := newSSESplicer(w)
 	sp.chat = true
+	return sp
+}
+
+// newResponsesSSESplicer is the splicer for an OpenAI Responses stream.
+func newResponsesSSESplicer(w http.ResponseWriter) *sseSplicer {
+	sp := newSSESplicer(w)
+	sp.resp = true
+	sp.items = map[int]string{}
+	sp.usage = map[string]int64{}
 	return sp
 }
 
@@ -161,6 +186,9 @@ func (sp *sseSplicer) round(resp *http.Response) {
 	sp.base = sp.blocks
 	sp.remap = nil
 	sp.rounds++
+	if sp.resp {
+		sp.prevItems = sp.heldItems()
+	}
 	if sp.headers {
 		return
 	}
@@ -233,7 +261,12 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 		if len(e) > 0 {
 			sent := false
 			var name string
-			if sp.chat {
+			if sp.resp {
+				name = responsesProxyToolCallName(e, proxyTools)
+				if bytes.Contains(e, []byte("response.completed")) {
+					sp.addUsage(e)
+				}
+			} else if sp.chat {
 				name = chatProxyToolCallName(e, proxyTools)
 			} else {
 				name = proxyToolCallName(e, proxyTools)
@@ -301,6 +334,7 @@ func (sp *sseSplicer) forward(ev []byte) {
 	if !ok {
 		return
 	}
+	sp.evCount++
 	if sp.first.IsZero() {
 		sp.first = time.Now()
 	}
@@ -314,6 +348,9 @@ func (sp *sseSplicer) forward(ev []byte) {
 // already has. With no offset to apply it returns the event untouched — byte-for-byte,
 // which is what keeps a response that never calls expand an exact pass-through.
 func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
+	if sp.resp {
+		return sp.rewriteResponses(ev)
+	}
 	if sp.chat {
 		return sp.rewriteChat(ev), true
 	}
@@ -471,6 +508,10 @@ func (sp *sseSplicer) terminate(withheld []byte) {
 	}
 	if sp.chat {
 		sp.terminateChat(withheld)
+		return
+	}
+	if sp.resp {
+		sp.terminateResponses(withheld)
 		return
 	}
 	// Only the CLOSING events, never the content: the withheld bytes begin with the expand
@@ -637,4 +678,148 @@ func (sp *sseSplicer) terminateChat(withheld []byte) {
 			return
 		}
 	}
+}
+
+// responsesProxyToolCallName is proxyToolCallName for a Responses event: the injected tool a
+// function_call item STARTS as, or "". The name is on response.output_item.added, so the cut
+// lands on the event that opens the call.
+func responsesProxyToolCallName(ev []byte, proxyTools []string) string {
+	if !bytes.Contains(ev, []byte("output_item.added")) {
+		return "" // cheap reject: text deltas skip the parse
+	}
+	p := gjson.Parse(sseEventPayload(ev))
+	if p.Get("type").String() != "response.output_item.added" || p.Get("item.type").String() != "function_call" {
+		return ""
+	}
+	name := p.Get("item.name").String()
+	for _, t := range proxyTools {
+		if t != "" && name == t {
+			return t
+		}
+	}
+	return ""
+}
+
+// heldItems lists the output items the client holds, in order.
+func (sp *sseSplicer) heldItems() []string {
+	idx := make([]int, 0, len(sp.items))
+	for i := range sp.items {
+		idx = append(idx, i)
+	}
+	slices.Sort(idx)
+	out := make([]string, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, sp.items[i])
+	}
+	return out
+}
+
+// addUsage adds a response.completed event's token counts to the running sum, so the merged
+// terminal event reports every round.
+func (sp *sseSplicer) addUsage(ev []byte) {
+	p := gjson.Parse(sseEventPayload(ev))
+	if p.Get("type").String() != "response.completed" {
+		return
+	}
+	for _, k := range []string{"input_tokens", "output_tokens", "total_tokens"} {
+		sp.usage[k] += p.Get("response.usage." + k).Int()
+	}
+}
+
+// rewriteResponses is rewrite for a Responses event. Round 1's events go as they came,
+// byte-for-byte; the splicer only notes the id, the items and the end. A later round loses its
+// response.created / in_progress, takes round 1's id, has output_index moved past the items the
+// client holds and sequence_number continued, and its response.completed is replaced by one that
+// lists every item the client saw. An event it cannot parse goes as it came.
+func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
+	later := sp.rounds > 1
+	if !later && !bytes.Contains(ev, []byte("response.created")) && !bytes.Contains(ev, []byte("output_item.")) &&
+		!bytes.Contains(ev, []byte("response.completed")) && !bytes.Contains(ev, []byte("response.failed")) &&
+		!bytes.Contains(ev, []byte("response.incomplete")) {
+		return ev, true // the common delta: nothing to note, nothing to change
+	}
+	payload := sseEventPayload(ev)
+	if payload == "" || !gjson.Valid(payload) {
+		return ev, true
+	}
+	p := gjson.Parse(payload)
+	typ := p.Get("type").String()
+	if later && (typ == "response.created" || typ == "response.in_progress" || typ == "response.queued") {
+		return nil, false
+	}
+	np := payload
+	set := func(path string, v any) {
+		if out, err := sjson.Set(np, path, v); err == nil {
+			np = out
+		}
+	}
+	switch typ {
+	case "response.created":
+		sp.msgStart = true
+		if sp.respID == "" {
+			sp.respID = p.Get("response.id").String()
+		}
+	case "response.completed", "response.failed", "response.incomplete":
+		sp.ended = true
+	}
+	if later {
+		if p.Get("sequence_number").Exists() {
+			set("sequence_number", sp.evCount)
+		}
+		if oi := p.Get("output_index"); oi.Exists() {
+			set("output_index", int(oi.Int())+sp.base)
+		}
+		if p.Get("response.id").Exists() && sp.respID != "" {
+			set("response.id", sp.respID)
+		}
+	}
+	idx := int(p.Get("output_index").Int()) + sp.base
+	switch typ {
+	case "response.output_item.added":
+		if idx >= sp.blocks {
+			sp.blocks = idx + 1
+		}
+	case "response.output_item.done":
+		if idx >= sp.blocks {
+			sp.blocks = idx + 1
+		}
+		if it := p.Get("item"); it.Exists() {
+			sp.items[idx] = it.Raw
+		}
+	case "response.completed":
+		if later {
+			// ONE terminal event: the items the client holds from the earlier rounds, then
+			// this round's own, and the tokens of every round.
+			out := append([]string{}, sp.prevItems...)
+			p.Get("response.output").ForEach(func(_, it gjson.Result) bool {
+				out = append(out, it.Raw)
+				return true
+			})
+			if o, err := sjson.SetRaw(np, "response.output", "["+strings.Join(out, ",")+"]"); err == nil {
+				np = o
+			}
+			if p.Get("response.usage").IsObject() {
+				for k, v := range sp.usage {
+					set("response.usage."+k, v)
+				}
+			}
+		}
+	}
+	if np == payload {
+		return ev, true
+	}
+	return bytes.Replace(ev, []byte(payload), []byte(np), 1), true
+}
+
+// terminateResponses is terminate for Responses. The withheld round holds the call and the
+// terminal event, and the terminal event lists the call, so none of it is forwarded: a turn
+// that ends without a terminator of its own gets a response.failed, as an Anthropic one gets an
+// error event. sp.ended is checked by terminate, so this runs only when none went out.
+func (sp *sseSplicer) terminateResponses(withheld []byte) {
+	// A Responses stream always ends with a terminal event, so a missing one is a failed turn
+	// even when the upstream closed cleanly.
+	sp.forward([]byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" +
+		"{\"id\":" + strconv.Quote(sp.respID) + ",\"object\":\"response\",\"status\":\"failed\"," +
+		"\"error\":{\"code\":\"server_error\",\"message\":\"upstream ended the turn without a terminator\"}}}\n\n"))
+	sp.ended = true
 }
