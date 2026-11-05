@@ -418,9 +418,15 @@ type Overview struct {
 	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
 	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
 	// EstimatedRequests counts the requests whose saving the accountant library priced without knowing whether
-	// a component broke the cache (requests.price_estimated): the first request of a thread, and the first one
-	// after a restart that lost the state. Their net can be too high. Overview.Requests is the denominator.
+	// a component broke the cache AND that the proxy held out of the books (requests.estimate_held): the first
+	// request of a thread, and the first one after a restart that lost the state. It does not count a row
+	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
 	EstimatedRequests int64 `json:"estimated_requests"`
+	// EstimatedSavedUSD is what those requests would have saved, held OUT of every total (#915):
+	// NetSavedUSD, TotalSavedUSD, the components and the keep-alive tab never include it. It is
+	// what the library priced without knowing whether the cache was already warm, and that can be
+	// about 2x too high. Shown beside the totals, never added to them.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -673,7 +679,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
 			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
 		`+deferNetSum+`,
-		COALESCE(SUM(r.price_estimated),0)
+		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -691,7 +697,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
 		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
-		&o.DeferNetUSD, &o.EstimatedRequests)
+		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD)
 	if err != nil {
 		return nil, err
 	}

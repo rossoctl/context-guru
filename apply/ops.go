@@ -1,7 +1,10 @@
 package apply
 
 import (
+	"hash/fnv"
 	"strconv"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
@@ -277,4 +280,26 @@ func chain(ops []accountant.Operation, ks []int, b, a int) {
 		ops[k].SizeBefore, ops[k].SizeAfter = accountant.Size{Bytes: cur}, accountant.Size{Bytes: next}
 		cur = next
 	}
+}
+
+// tailOp is the operation for the tail mark (markTail): a rewrite of the last message, from its wire
+// bytes before the mark to its wire bytes after. It is the last operation of the request, so a
+// pipeline operation on the same message ends where this one starts. The ChangeID comes from the
+// message as it was before the mark, so the same message gets the same ChangeID on every request.
+func tailOp(before, after []byte) (accountant.Operation, bool) {
+	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	if len(b) == 0 || len(b) != len(a) {
+		return accountant.Operation{}, false
+	}
+	last := len(b) - 1
+	h := fnv.New64a()
+	h.Write([]byte(b[last].Raw))
+	return accountant.Operation{
+		Kind:       accountant.KindRewrite,
+		Operator:   "context-guru.tailbreakpoint",
+		At:         accountant.Position{Section: accountant.SectionMessages, Index: last},
+		SizeBefore: accountant.Size{Bytes: len(b[last].Raw)},
+		SizeAfter:  accountant.Size{Bytes: len(a[last].Raw)},
+		ChangeID:   "cg:tailbreakpoint:" + strconv.FormatUint(h.Sum64(), 16),
+	}, true
 }

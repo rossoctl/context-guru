@@ -236,9 +236,24 @@ func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
 	if fb := e.AccountantFallback(); fb != "" || !e.AccountantEstimated() {
 		t.Fatalf("fallback %q estimated %v, want the override applied as an estimate", fb, e.AccountantEstimated())
 	}
+	// Issue #915: the estimate is held apart. The books get no saving from it.
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("an estimated request booked a baseline delta of %v, want 0", e.BaselineCostUSD-e.CostUSD)
+	}
+	for _, c := range e.Components {
+		if c.SavedUSD != 0 || c.SavedFirstUSD != 0 || c.SavedReplayUSD != 0 {
+			t.Errorf("component %s booked %v from an estimated request, want 0", c.Component, c.SavedUSD)
+		}
+	}
+	if want := 1000 * 0.3e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("EstimatedSavedUSD = %v, want the held figure %v", e.EstimatedSavedUSD, want)
+	}
+	if !e.EstimateHeld {
+		t.Error("EstimateHeld = false on a held request")
+	}
 	e.Price(accTestPrice, true)
-	if e.AccountantEstimated() {
-		t.Fatal("Price left the estimate flag set")
+	if e.AccountantEstimated() || e.EstimatedSavedUSD != 0 || e.EstimateHeld {
+		t.Fatal("Price left the estimate state set")
 	}
 }
 
@@ -331,10 +346,73 @@ func TestPriceEstimatedIsStoredAndReadBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := map[string]bool{}
+	held := map[string]float64{}
 	for _, e := range page.Requests {
 		got[e.SessionID] = e.PriceEstimated
+		held[e.SessionID] = e.EstimatedSavedUSD
+	}
+	if !accNear(held["est"], est.EstimatedSavedUSD) || est.EstimatedSavedUSD == 0 || held["exact"] != 0 {
+		t.Fatalf("stored estimated_saved_usd = %v, want %v on est and 0 on exact", held, est.EstimatedSavedUSD)
 	}
 	if len(got) != 2 || !got["est"] || got["exact"] {
 		t.Fatalf("stored price_estimated = %v, want est true and exact false", got)
+	}
+}
+
+// The marker the keep-alive gate trusts (context-guru#912): set when the override applied, clear on a
+// fallback, and stored with the request.
+func TestAccountantPricedIsSetOnOverrideAndStored(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ok, fell := switchEvent(), switchEvent()
+	ok.TS, ok.SessionID, fell.TS, fell.SessionID = 1, "ok", 2, "fell"
+	fell.accRes = nil // no_result: the override cannot apply
+	ok.PriceMode(accTestPrice, true)
+	fell.PriceMode(accTestPrice, true)
+	if !ok.AccountantPriced || fell.AccountantPriced {
+		t.Fatalf("AccountantPriced = %v on the overridden event and %v on the fallback (%q)",
+			ok.AccountantPriced, fell.AccountantPriced, fell.AccountantFallback())
+	}
+	if err := db.insertBatch([]*Event{ok, fell}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := db.Requests(Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range page.Requests {
+		got[e.SessionID] = e.AccountantPriced
+	}
+	if len(got) != 2 || !got["ok"] || got["fell"] {
+		t.Fatalf("stored acc_priced = %v, want ok true and fell false", got)
+	}
+}
+
+// Removed tool declarations are not message text. TokensBefore counts messages only, so a small
+// conversation that drops a large tool list must not trip the plausibility bound (#907).
+func TestPriceMode_ToolSectionTokensAreNotBoundedByMessageTokens(t *testing.T) {
+	e := switchEvent()
+	e.TokensBefore = 121
+	e.accRes.Ops = []accountant.PricedOp{{Operator: "context-guru.toolfilter", ChangeID: "cg:toolfilter:x",
+		Saved: accountant.TierTokens{CacheRead: 2188}}}
+	e.Components = []CompRow{{Component: "idle"}}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	if got := e.BaselineCostUSD - e.CostUSD; !accNear(got, 2188*0.3e-6) {
+		t.Fatalf("delta = %v, want the declarations' saving", got)
+	}
+	// The bound still holds for messages: the same size on a message operation falls back.
+	m := switchEvent()
+	m.TokensBefore = 121
+	m.accRes.Ops[0].Saved = accountant.TierTokens{CacheRead: 2188}
+	m.PriceMode(accTestPrice, true)
+	if fb := m.AccountantFallback(); fb != FallbackImplausibleSize {
+		t.Fatalf("message operation: fallback %q, want %q", fb, FallbackImplausibleSize)
 	}
 }

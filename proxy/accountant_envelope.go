@@ -281,3 +281,40 @@ func hashOf(s string) string {
 }
 
 func accHex(v uint64) string { return strconv.FormatUint(v, 16) }
+
+// messageOps explains a change to the messages array that an edit AFTER the pipeline made, and that
+// no component reported: tool deferral puts its names list at messages[1], either appended to a system
+// message already there or as a new one (tooldefer placeList). before is the body the edit read and
+// after the one it produced. A new message is a splice that inserts one; an appended list is a rewrite
+// in place of that message. When the two arrays are the same length, it returns one rewrite op per changed
+// message. Any other change (a different length by more than one, or a non-insertion) returns nil, and the sum check says so. The operator is
+// the edit's own, so its row and its ChangeID do not collide with a pipeline component's.
+func messageOps(operator string, before, after []byte) []accountant.Operation {
+	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	switch {
+	case len(a) == len(b)+1:
+		i := 0
+		for i < len(b) && b[i].Raw == a[i].Raw {
+			i++
+		}
+		for j := i; j < len(b); j++ {
+			if b[j].Raw != a[j+1].Raw {
+				return nil // not a single insertion
+			}
+		}
+		op := envelopeOp(operator, accountant.Position{Section: accountant.SectionMessages, Index: i},
+			0, len(a[i].Raw), "msg-inserted:"+strconv.Itoa(i))
+		op.MessageSplice = &accountant.MessageSplice{At: i, Removed: 0, Inserted: 1}
+		return []accountant.Operation{op}
+	case len(a) == len(b):
+		var ops []accountant.Operation
+		for i := range b {
+			if b[i].Raw != a[i].Raw {
+				ops = append(ops, envelopeOp(operator, accountant.Position{Section: accountant.SectionMessages, Index: i},
+					len(b[i].Raw), len(a[i].Raw), "msg-rewritten:"+strconv.Itoa(i)+":"+hashOf(b[i].Raw)))
+			}
+		}
+		return ops
+	}
+	return nil
+}

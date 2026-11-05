@@ -191,6 +191,7 @@ const EndedChangeComponent = "ended_change"
 var envelopeComponents = map[string]bool{
 	"expand": true, "adjudicate": true, "headttl": true,
 	"toolschema": true, "toolfilter": true, "cachesplit": true,
+	"tailbreakpoint": true, "tooldefer": true,
 }
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
@@ -214,7 +215,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated = "", false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimateHeld = "", false, false, 0, false
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		return
@@ -331,10 +332,36 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		c.SavedFirstUSD, c.SavedReplayUSD = fig.ByComponentFirst[c.Component], fig.ByComponentReplay[c.Component]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	if estimated {
+		// The library could not rule out a break: it had no history for the thread, so it priced
+		// each removal as a write the provider would have made. When the cache was in fact warm
+		// (a restart that lost the state file, or a session begun before the proxy) the figure is
+		// about 2x too high, and the proxy cannot say by how much: the size of the unseen warm
+		// prefix is the thing the missing history held. A figure nothing measured is not booked
+		// (issue #915). The request books no break-affected saving, and the figure is kept in
+		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
+		// keep-alive tab and the API still agree.
+		//
+		// What is held out: fig.DeltaUSD, which is every component's figure, the head-TTL premium and
+		// rescue legs (the headttl row), the ended-change break, and the filter's part. The figure can
+		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
+		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
+		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
+		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
+		// do not depend on a break. The filter's dollars are owned by the measured credit
+		// (declFilterInBaseline is false for a held row), not by this figure.
+		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimateHeld = true
+		e.BaselineCostUSD = e.CostUSD
+		for i := range e.Components {
+			e.Components[i].SavedUSD, e.Components[i].SavedFirstUSD, e.Components[i].SavedReplayUSD = 0, 0, 0
+		}
+	}
 	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
 	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
 	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
 	e.PriceEstimated = estimated
+	e.AccountantPriced = true
 	return ""
 }
 
@@ -347,12 +374,24 @@ func inAdded(rows []CompRow, name string) bool {
 	return false
 }
 
+// toolSectionOperators are the operators whose operations act on the tools section, not on messages:
+// the declaration filter and the schema rewrite (proxy/accountant_envelope.go reports them from a body
+// diff), and the two declarations the proxy injects. Their tokens are not in TokensBefore, which counts
+// message text only.
+var toolSectionOperators = map[string]bool{
+	"context-guru.toolfilter": true, "context-guru.toolschema": true,
+	"context-guru.expand": true, "context-guru.adjudicate": true,
+}
+
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
-// AccountantFigure.ByComponent: not DryRun, not a spend.
+// AccountantFigure.ByComponent: not DryRun, not a spend, and not an operation on the tools section.
+// TokensBefore is the size of the messages. A tool declaration is not in it, so 2,188 removed
+// declaration tokens would look larger than a 121-token conversation and drop the whole result (#907).
+// The bound stays for every operation on messages.
 func (e *Event) countedSavedTokens() int {
 	n := 0
 	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
+		if o.DryRun || o.Call != nil || toolSectionOperators[o.Operator] {
 			continue
 		}
 		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h

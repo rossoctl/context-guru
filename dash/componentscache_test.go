@@ -101,3 +101,19 @@ func TestComponentsCached(t *testing.T) {
 		t.Errorf("past dashCacheStale: got %d component rows, want 3 (recomputed)", len(rows))
 	}
 }
+
+// A narrower window must not share a key with a wider one (issue #916). The key used to round
+// since/until down to 30 s, so since=T+1s and since=T hit one cached body.
+func TestCacheKeyKeepsSinceAndUntilExact(t *testing.T) {
+	p := Principal{Manager: true}
+	k := func(u string) string { return cacheKey(p, httptest.NewRequest(http.MethodGet, u, nil)) }
+	if k("/api/stats?since=1700000001000") == k("/api/stats?since=1700000000000") {
+		t.Error("since 1 s apart gives one key; a narrower window would get the wider window's totals")
+	}
+	if k("/api/stats?since=1&until=1700000001000") == k("/api/stats?since=1&until=1700000000000") {
+		t.Error("until 1 s apart gives one key")
+	}
+	if k("/api/stats?since=5") != k("/api/stats?since=5") {
+		t.Error("the same query must give the same key")
+	}
+}

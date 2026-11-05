@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
@@ -101,15 +102,30 @@ func pingStart(r components.KeepAliveReport) time.Time {
 // is already booked on its own row as ManualSavedUSD, from the user's estimate. Storing the facts too
 // would let the next real request credit the same write again as a library rescue, and the total would
 // count it twice (context-guru#768 B3: $0.0200 booked, about $0.0096 true).
-func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result, bool) {
+//
+// A panic in the library is recovered and logged, and the ping is reported as not converted. The keeper
+// runs this in its own goroutine, so an unrecovered panic would end the process (issue #918).
+func PingSavings(r components.KeepAliveReport, st *PingStore) (res accountant.Result, ok bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: ping pricing panicked; the ping is recorded with no saving", "panic", p)
+			res, ok = accountant.Result{}, false
+		}
+	}()
 	if r.Window.IsZero() || r.Status < 200 || r.Status > 299 ||
 		r.FreshInput+r.CacheRead+r.CacheWrite+r.CacheWrite1h+r.Output == 0 {
 		return accountant.Result{}, false
 	}
-	ops, facts := accountant.PingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
-	res := accountant.ComputeStandalone(ops)
+	ops, facts := pingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
+	res = accountantStandalone(ops)
 	if !r.Manual {
 		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
 	}
 	return res, true
 }
+
+// pingOps and accountantStandalone are the two library calls PingSavings makes. Tests replace them to make them panic.
+var (
+	pingOps              = accountant.PingOps
+	accountantStandalone = accountant.ComputeStandalone
+)

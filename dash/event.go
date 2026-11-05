@@ -444,7 +444,26 @@ type Event struct {
 	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
 	// high. It is stored, so the dashboard marks such a figure after a restart. False on an exact
 	// figure, on an event that books no saving, and on a row from before the column existed.
-	PriceEstimated     bool   `json:"price_estimated,omitempty"`
+	PriceEstimated bool `json:"price_estimated,omitempty"`
+	// AccountantPriced is true when the accountant override applied to this request, so its
+	// keepalive_saved_usd is the library's own rescue decision. Stored (requests.acc_priced), so the
+	// keep-alive reachability gate trusts that decision with no component row and no ping probe. False
+	// on a request the library did not price and on every row from before the column existed, which
+	// keep the SQL gate (context-guru#912, #919).
+	AccountantPriced bool `json:"acc_priced,omitempty"`
+	// EstimatedSavedUSD is the saving the library priced on an estimated request, held apart from
+	// the books (issue #915). With no history the library prices every removal as if the provider
+	// would have written it, so after a restart that lost the state, or on a session that began on a
+	// cache the proxy never saw, the figure can be about 2x too high. Such a request books
+	// BaselineCostUSD == CostUSD and every component SavedUSD 0, so every total, the components table
+	// and the keep-alive tab agree without a filter. This field keeps the figure that was not booked.
+	// 0 on an exact request and on a row from before the column existed.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd,omitempty"`
+	// EstimateHeld is true when the hold-out above applied to this row: the request is estimated AND its
+	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
+	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
+	// figure, and it reads here as false (the column defaults to 0, as acc_priced does). Stored.
+	EstimateHeld       bool   `json:"estimate_held,omitempty"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
@@ -783,6 +802,27 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.UncompressedReason = uncompressedReason(e, tr)
 }
 
+// DropUnbilledSavings removes the token saving from a request the provider rejected (issue #914).
+// The provider billed none of its tokens, so cost and baseline are 0, and a token saving booked
+// beside them would disagree with the dollar saving. It sets TokensAfter to TokensBefore, zeroes
+// SavedUnique, and zeroes SavedGross and SavedUnique on every component row. A row keeps Mutated
+// (the proxy did rewrite the body) but is no longer Acted. A status of 0 is a request that never
+// reached a provider (/compact, an upstream that did not answer), and a 2xx was billed, so
+// neither is touched. AttemptedTokens goes to 0 too: Overview divides the gross saving by it over
+// the rows that have it, and a rejected row must leave both sides. FrozenTokens describes the
+// cache freeze, not a saving, and stays.
+func (e *Event) DropUnbilledSavings() {
+	if e.Status == 0 || (e.Status >= 200 && e.Status < 300) {
+		return
+	}
+	e.TokensAfter = e.TokensBefore
+	e.SavedUnique, e.AttemptedTokens = 0, 0
+	for i := range e.Components {
+		c := &e.Components[i]
+		c.SavedGross, c.SavedUnique, c.Acted = 0, 0, false
+	}
+}
+
 // uncompressedReason answers "why didn't you compact this?" from what the trace
 // shows. Empty means we did compact.
 func uncompressedReason(e *Event, tr apply.Trace) string {
@@ -829,7 +869,8 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked partial/missing: a cost we
 // cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated = "", false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
+	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
 	e.priceCost(p, accountingComplete)
 }
 

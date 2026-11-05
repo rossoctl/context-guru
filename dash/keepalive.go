@@ -218,7 +218,14 @@ func kaSavedGate(alias, pingFloor string) string {
 	// is a second EXISTS inside the same AND, and it runs only for a row the strict probe refused.
 	libraryPriced := `EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = ` + alias + `id AND c.priced_by = '` +
 		PricedByAccountant + `')`
-	return `(CASE WHEN ` + col + ` > 0 AND (` + probe(`kp.cache_read > 0`) + ` OR (` + libraryPriced + ` AND ` +
+	// A request the accountant override priced (acc_priced = 1) carries the library's own rescue decision
+	// in keepalive_saved_usd. It is trusted as stored: the gap, the last ping and the extent were judged by
+	// the library, with the billed usage, and the SQL model below cannot see them. This also holds when the
+	// request has no component row, as in a keep-alive-only setup (context-guru#912, #919). The test is a
+	// plain column read, so the probe never runs for such a row. It stays AFTER col > 0: the credited-row
+	// guard is first (see above). A row with acc_priced = 0 (legacy, or one the library did not price) keeps
+	// the SQL model, with its component-row clause.
+	return `(CASE WHEN ` + col + ` > 0 AND (` + alias + `acc_priced = 1 OR ` + probe(`kp.cache_read > 0`) + ` OR (` + libraryPriced + ` AND ` +
 		probe(`kp.cache_write > 0`) + `)) THEN ` + col + ` ELSE 0 END)`
 }
 
