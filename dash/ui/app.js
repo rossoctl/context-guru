@@ -1783,7 +1783,7 @@ function renderSavedLedger(o, ka, partial) {
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
   const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
-    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') }),
+    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + ' · estimate' }),
       el('strong', { text: usd(parts.manual) })),
     parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
   // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside
@@ -1815,7 +1815,7 @@ function renderSavedLedger(o, ka, partial) {
     ],
     infoButton('cache', 'Cache', [
       'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
-      'Manual pings: the same, when you press Ping.',
+      'Manual pings: the same, when you press Ping. This figure is an estimate. It is the write the ping avoided, taken from the cache lifetime and the size of the prefix. No request read it back. The other figures in this total are measured.',
       'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
     ])));
 

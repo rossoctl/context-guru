@@ -378,3 +378,53 @@ func TestSavings_ASpliceOverAMarkedMessageKeepsTheSumCheck(t *testing.T) {
 		t.Errorf("check %s failed: %+v", ch.Check, ch)
 	}
 }
+
+// context-guru#909: the live path booked no split credit. A short conversation (a few hundred tokens of messages
+// beside a 4,300-token system block) makes the stable half the provider reads fall within the library's read
+// tolerance of the whole previous entry. The library then took the read as proof that nothing broke, put B* past the
+// changed system block, and dropped the split effect. The earlier tests used long messages, so they missed it.
+// The fix is in accountant (fix/split-short-turn); this test pins the host side: the envelope the proxy reports
+// for a split, the facts it passes, and the effect the library books for a tail that moves every turn.
+func TestSavings_ASplitBooksItsEffectOnAShortConversationWhenTheTailMoves(t *testing.T) {
+	c := accRun{newSavingsTracker(), accountant.Thread{ID: "main"}}
+	stable := strings.Repeat("Follow the rules carefully and be concise. ", 400)
+	turn := func(n int, sys string) []byte {
+		var msgs []string
+		for i := 0; i < n; i++ {
+			role := "user"
+			if i%2 == 1 {
+				role = "assistant"
+			}
+			mark := ""
+			if i == n-1 {
+				mark = `,"cache_control":{"type":"ephemeral"}`
+			}
+			msgs = append(msgs, fmt.Sprintf(`{"role":%q,"content":[{"type":"text","text":%q%s}]}`, role, fmt.Sprintf("message %d %s", i, strings.Repeat("w ", 20)), mark))
+		}
+		return []byte(`{` + sys + `,"messages":[` + strings.Join(msgs, ",") + `]}`)
+	}
+	for n := 1; n <= 4; n++ {
+		vol := fmt.Sprintf("\nCurrent branch: main\nRecent commits:\n%08d fix thing\n", n)
+		client := turn(2*n-1, fmt.Sprintf(`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}}]`, stable+vol))
+		fwd := turn(2*n-1, fmt.Sprintf(`"system":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}},{"type":"text","text":%q}]`, stable, vol))
+		total, half := (len(fwd)+3)/4, len(stable)/4
+		u := Usage{CacheRead: int64(half), CacheWrite: int64(total - half)}
+		if n == 1 {
+			u = Usage{CacheWrite: int64(total)}
+		}
+		ops := envelopeOps(client, fwd)
+		res := c.do(n, client, fwd, u, ops...)
+		got := 0
+		for _, e := range res.CacheEffects {
+			if e.Kind == accountant.EffectSplit {
+				got += e.Saved.CacheWrite5m
+			}
+		}
+		if n == 1 && got != 0 {
+			t.Fatalf("turn 1 has no previous request, yet a split effect of %d tokens", got)
+		}
+		if n > 1 && got != half {
+			t.Fatalf("turn %d: split effect %d tokens, want the stable half %d (checks %v)", n, got, half, res.Checks)
+		}
+	}
+}

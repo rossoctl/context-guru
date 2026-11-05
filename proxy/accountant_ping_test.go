@@ -393,3 +393,66 @@ func TestPingSavingsRecoversFromALibraryPanic(t *testing.T) {
 		t.Error("after the panics a normal ping was not priced")
 	}
 }
+
+// context-guru#913: a manual ping stores no facts. The next real request then has no LastPing, and the gap
+// from the request before the ping is longer than the TTL. The issue feared a cold phase, with the request priced
+// at the write tier although the usage shows a cache read. The library takes a billed read as proof that the
+// entry was alive (design §5.2, R45), so the request is hot. The arithmetic: request at t0 writes 100,000
+// tokens, a manual ping at t0+4m reads them, a request at t0+8m reads them again. The gap of 8 minutes is past
+// the 5 minute TTL, and the read of 100,000 tokens covers the whole extent of the first request.
+//
+// The control is the same sequence with an automatic ping. It books a rescue; the manual one books none, since
+// its avoided write is already on its own row as ManualSavedUSD (an estimate by the user's ask). The two phases
+// must agree, and the manual run must carry no unpriced entry and no check failure.
+func TestTheRequestAfterAManualPingIsHotNotCold(t *testing.T) {
+	const prefix = 100_000
+	run := func(manual bool) accountant.Result {
+		st, pings := newSavingsTracker(), NewPingStore()
+		t0 := time.Unix(1_700_000_000, 0)
+		body := func(n int) []byte {
+			// 4 bytes a token: the first message is the 100,000-token prefix.
+			msgs := `[{"role":"user","content":"` + strings.Repeat("x", prefix*4) + `","cache_control":{"type":"ephemeral"}}`
+			for i := 1; i < n; i++ {
+				msgs += `,{"role":"assistant","content":"ok"},{"role":"user","content":"more","cache_control":{"type":"ephemeral"}}`
+			}
+			return []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":` + msgs + `]}`)
+		}
+		turn := func(at time.Time, b []byte, u Usage) accountant.Result {
+			req := st.begin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "m", At: at}, b)
+			th := accountant.Thread{ID: "main"}
+			st.end(req, th, b, nil, entryFacts(bschemas.Anthropic, "m", b, pings, "s", th))
+			return st.compute(req, u)
+		}
+		turn(t0, body(1), Usage{CacheWrite: prefix})
+		r := okReport()
+		r.Session, r.Thread, r.TS, r.Window, r.Manual = "s", "", t0.Add(4*time.Minute).UnixMilli(), t0, manual
+		r.FreshInput, r.CacheRead, r.CacheWrite, r.CacheWrite1h, r.Output = 0, prefix, 0, 0, 1
+		if _, ok := PingSavings(r, pings); !ok {
+			t.Fatal("the ping was not converted")
+		}
+		return turn(t0.Add(8*time.Minute), body(2), Usage{CacheRead: prefix, CacheWrite: 20})
+	}
+	auto, manual := run(false), run(true)
+	for name, res := range map[string]accountant.Result{"automatic": auto, "manual": manual} {
+		if res.Phase != accountant.PhaseHot {
+			t.Errorf("%s ping: the next request is %q, want hot", name, res.Phase)
+		}
+		if len(res.Unpriced) != 0 || len(res.Checks) != 0 {
+			t.Errorf("%s ping: unpriced %v checks %v", name, res.Unpriced, res.Checks)
+		}
+	}
+	rescue := func(res accountant.Result) (n int) {
+		for _, e := range res.CacheEffects {
+			if e.Kind == accountant.EffectRescue {
+				n += e.Saved.CacheWrite5m
+			}
+		}
+		return n
+	}
+	if rescue(auto) == 0 {
+		t.Error("the automatic ping booked no rescue: the control is broken")
+	}
+	if n := rescue(manual); n != 0 {
+		t.Errorf("the manual ping's write is booked a second time as a rescue of %d tokens", n)
+	}
+}
