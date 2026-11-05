@@ -371,3 +371,28 @@ func TestAccountantPricedIsSetOnOverrideAndStored(t *testing.T) {
 		t.Fatalf("stored acc_priced = %v, want ok true and fell false", got)
 	}
 }
+
+// Removed tool declarations are not message text. TokensBefore counts messages only, so a small
+// conversation that drops a large tool list must not trip the plausibility bound (#907).
+func TestPriceMode_ToolSectionTokensAreNotBoundedByMessageTokens(t *testing.T) {
+	e := switchEvent()
+	e.TokensBefore = 121
+	e.accRes.Ops = []accountant.PricedOp{{Operator: "context-guru.toolfilter", ChangeID: "cg:toolfilter:x",
+		Saved: accountant.TierTokens{CacheRead: 2188}}}
+	e.Components = []CompRow{{Component: "idle"}}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	if got := e.BaselineCostUSD - e.CostUSD; !accNear(got, 2188*0.3e-6) {
+		t.Fatalf("delta = %v, want the declarations' saving", got)
+	}
+	// The bound still holds for messages: the same size on a message operation falls back.
+	m := switchEvent()
+	m.TokensBefore = 121
+	m.accRes.Ops[0].Saved = accountant.TierTokens{CacheRead: 2188}
+	m.PriceMode(accTestPrice, true)
+	if fb := m.AccountantFallback(); fb != FallbackImplausibleSize {
+		t.Fatalf("message operation: fallback %q, want %q", fb, FallbackImplausibleSize)
+	}
+}

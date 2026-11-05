@@ -411,6 +411,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				return
 			}
 			if out, ok := markTail(res.Body); ok {
+				// The mark makes the last message longer (a string content becomes one block, and
+				// the block carries the mark). No pipeline component reports that, so the sum check
+				// would fail on the messages section. Report it here, as the last operation.
+				if op, ok := tailOp(res.Body, out); ok && res.Trace.OpsDropped == 0 {
+					res.Trace.Ops = append(res.Trace.Ops, op)
+				}
 				res.Body, res.Changed = out, true
 			}
 		}()
