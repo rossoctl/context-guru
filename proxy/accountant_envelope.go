@@ -286,7 +286,8 @@ func accHex(v uint64) string { return strconv.FormatUint(v, 16) }
 // no component reported: tool deferral puts its names list at messages[1], either appended to a system
 // message already there or as a new one (tooldefer placeList). before is the body the edit read and
 // after the one it produced. A new message is a splice that inserts one; an appended list is a rewrite
-// in place of that message. Any other change returns nil, and the sum check says so. The operator is
+// in place of that message. When the two arrays are the same length, it returns one rewrite op per changed
+// message. Any other change (a different length by more than one, or a non-insertion) returns nil, and the sum check says so. The operator is
 // the edit's own, so its row and its ChangeID do not collide with a pipeline component's.
 func messageOps(operator string, before, after []byte) []accountant.Operation {
 	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
