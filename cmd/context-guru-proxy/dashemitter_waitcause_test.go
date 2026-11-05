@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"path/filepath"
 	"testing"
 	"time"
@@ -116,4 +118,20 @@ func waitForRow(t *testing.T, rec *dash.Recorder) (*dash.Page, error) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// A panic while a ping row is built must not end the process: the keeper calls KeepAlivePing from its own goroutine
+// (issue #918). A nil Pricer inside the interface value panics in Price.
+type panicPricer struct{ modelinfo.Pricer }
+
+func (panicPricer) Price(context.Context, string) (modelinfo.Price, bool) { panic("price lookup") }
+
+func TestDashEmitterKeepAlivePingSurvivesAPanic(t *testing.T) {
+	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "dash.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	em := &dashEmitter{rec: rec, prices: panicPricer{}}
+	em.KeepAlivePing(components.KeepAliveReport{Tenant: "t1", Session: "s1", Model: "m", Status: 200, CacheRead: 10, TS: time.Now().UnixMilli()})
 }
