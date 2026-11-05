@@ -1,7 +1,13 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,5 +82,58 @@ func TestFinishBooksNoSavedTokensOnARejectedRequest(t *testing.T) {
 					c.SavedGross, c.SavedUnique, c.Acted, tc.wantSaved, tc.wantUnique, tc.wantActed)
 			}
 		})
+	}
+}
+
+// Review 927 round 1, finding 3. A rejected request whose error body still carries a usage object
+// must book no dollars beside its zero tokens. The 200 control shows the same two requests do book a
+// saving, so the zero on the 429 and the 400 comes from the status and not from the fixture.
+func TestFinishBooksNoDollarsOnARejectedRequestThatReportedUsage(t *testing.T) {
+	decl := func(name string, n int) map[string]any {
+		return map[string]any{"name": name, "description": strings.Repeat("Does a thing. ", n),
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}}}
+	}
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"tools":    []any{decl("bash", 3), decl("big_one", 400), decl("big_two", 400)},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+	run := func(status int) dash.Event {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			n := len(body) / 4
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],`+
+				`"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":34,`+
+				`"cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, n*8/10, n-n*8/10-12)
+		}))
+		defer up.Close()
+		h, rec, tap := accHandlerYAML(t, up.URL,
+			"pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    remove: [big_one, big_two]\n")
+		accPostBody(t, h, "sess-rej", b)
+		accPostBody(t, h, "sess-rej", b)
+		waitForRows(t, rec, 2)
+		return tap.all()[1]
+	}
+	ctl := run(200)
+	if ctl.BaselineCostUSD <= ctl.CostUSD {
+		t.Fatalf("control (200) booked no saving: baseline %v cost %v", ctl.BaselineCostUSD, ctl.CostUSD)
+	}
+	for _, status := range []int{429, 400} {
+		e := run(status)
+		if e.Status != status {
+			t.Fatalf("status = %d, want %d", e.Status, status)
+		}
+		if e.Saved() != 0 || e.SavedUnique != 0 || e.BaselineCostUSD != e.CostUSD {
+			t.Errorf("status %d: saved tokens %d, unique %d, baseline-cost delta %v, want all 0",
+				status, e.Saved(), e.SavedUnique, e.BaselineCostUSD-e.CostUSD)
+		}
+		for _, c := range e.Components {
+			if c.SavedUSD != 0 || c.SavedGross != 0 {
+				t.Errorf("status %d: component %s saved %d tokens / $%v, want 0", status, c.Component, c.SavedGross, c.SavedUSD)
+			}
+		}
+		if e.AccountantFallback() != "no_result" {
+			t.Errorf("status %d: fallback %q, want no_result", status, e.AccountantFallback())
+		}
 	}
 }

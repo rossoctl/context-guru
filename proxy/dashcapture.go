@@ -732,7 +732,15 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	defer c.savings.drop(c.accReq)
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
-		if c.rounds <= 1 {
+		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
+		// dollars. The response body of a 4xx or 5xx can still carry a usage object, but the provider
+		// billed none of the request, so the library must not price a saving on it. DropUnbilledSavings
+		// zeroed the tokens above; skipping the compute leaves the event with no Result, so PriceMode
+		// books no dollars either (acc_fallback no_result, reason rejected_status). PingSavings refuses
+		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
+		if c.rejected() {
+			c.accNoResult = "rejected_status"
+		} else if c.rounds <= 1 {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
@@ -867,16 +875,22 @@ func (c *capture) accDrop() {
 
 // noResultWhy names the branch that left an event with no accountant Result, for the acc_fallback line. The reason
 // no_result covers four unrelated things, and the log line used to say only that.
+// rejected is true when the provider answered with a status that is not 2xx. Status 0 means no upstream
+// answered (such as /compact), and is not a rejection.
+func (c *capture) rejected() bool {
+	return c.status != 0 && (c.status < 200 || c.status > 299)
+}
+
 func (c *capture) noResultWhy(usageOK bool) string {
 	switch {
 	case c.accReq == nil:
 		return "no_record" // no session, or the pipeline did not run: accBegin never opened a record
 	case !usageOK:
 		return "no_usage"
-	case c.rounds > 1:
-		return "upstream_rounds=" + strconv.Itoa(c.rounds)
 	case c.accNoResult != "":
 		return c.accNoResult
+	case c.rounds > 1:
+		return "upstream_rounds=" + strconv.Itoa(c.rounds)
 	}
 	return ""
 }
