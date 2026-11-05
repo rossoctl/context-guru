@@ -140,3 +140,22 @@ func TestAccBodies_ARealEditStillChangesTheHash(t *testing.T) {
 		t.Fatal("an edited text kept the same hash")
 	}
 }
+
+// A cache mark inside a tool_result block's own content array must not move the hash (issue #917).
+func TestNestedCacheMarkDoesNotMoveTheHash(t *testing.T) {
+	with := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}]}]}`
+	without := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":[{"type":"text","text":"a"}]}]}]}`
+	a, b := accBodies([]byte(with)), accBodies([]byte(without))
+	if len(a.Pos) != 1 || len(b.Pos) != 1 {
+		t.Fatalf("positions %d and %d, want 1 and 1", len(a.Pos), len(b.Pos))
+	}
+	if a.Pos[0].Hash != b.Pos[0].Hash {
+		t.Error("a nested cache_control moved the hash")
+	}
+	// A cache_control text inside a string is data, and still counts.
+	s1 := `{"messages":[{"role":"user","content":"say cache_control now"}]}`
+	s2 := `{"messages":[{"role":"user","content":"say  now"}]}`
+	if accBodies([]byte(s1)).Pos[0].Hash == accBodies([]byte(s2)).Pos[0].Hash {
+		t.Error("text mentioning cache_control was stripped")
+	}
+}
