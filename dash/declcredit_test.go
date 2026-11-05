@@ -454,3 +454,34 @@ func TestOverlapFiresForASkillInTheConfigForm(t *testing.T) {
 			bare.SelfOverlap)
 	}
 }
+
+// The accountant library prices each toolfilter removal, so on a request it priced the removal is already
+// in baseline_cost_usd and in the net saving. The measured credit must not add it a second time
+// (context-guru#768 B2: one 1000-token removal gave a row of $0.0001 and a total of $0.0002). A request it
+// could not price, and one written before the switch, have nothing in the baseline: they keep the credit.
+func TestDeclCreditSkipsRequestsTheAccountantPriced(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(i int, pricedBy string) *Event {
+		e := mkEvent(day(0)+int64(i), "s1", "claude", 100, 90)
+		e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 1000
+		e.Components = append(e.Components, CompRow{Component: "toolfilter", Kind: KindEnvelope, Acted: true,
+			Mutated: true, PricedBy: pricedBy})
+		return e
+	}
+	// 1: the library priced it. 2: it could not (no saving booked). 3: a row from before the switch.
+	if err := db.insertBatch([]*Event{mk(1, PricedByAccountant), mk(2, PricedByNone), mk(3, "")}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FilterRequests != 2 || c.FilterReads != 2000 {
+		t.Fatalf("filter half = %d requests / %d reads, want 2 / 2000 (the priced request is already in the baseline)",
+			c.FilterRequests, c.FilterReads)
+	}
+	// 2,000 cache-read tokens at flatPrice's $0.1/MTok.
+	if math.Abs(c.FilterUSD-0.0002) > 1e-9 {
+		t.Errorf("filter USD = %g, want 0.0002", c.FilterUSD)
+	}
+}

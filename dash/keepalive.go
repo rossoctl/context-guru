@@ -99,7 +99,7 @@ func kaSavedSince(alias string, since int64) string {
 // not make, applied on read. pingFloor is one extra predicate on the ping row (kp), "" for
 // none — see kaSavedSince for the only caller that needs one.
 //
-// The credit written at capture time asks four questions (Event.keepaliveSavedUSD) and not one
+// The credit the legacy rule wrote at capture time asked four questions and not one
 // of them is an upper bound on the idle gap: it requires that the gap EXCEEDED the provider's
 // lifetime — the floor — and then credits the row whatever the gap was, on the strength of
 // keepalive_pings alone. That column is the whole of the write path's evidence, and on real rows
@@ -187,10 +187,10 @@ func kaSavedGate(alias, pingFloor string) string {
 	//
 	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
 	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
-	// never credits one (keepaliveSavedUSD gates on GPT56OrLater). The provider-only CASE sees
+	// never credited one (the legacy rule gated on GPT56OrLater). The provider-only CASE sees
 	// only rows that already passed the model gate.
 	//
-	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
+	// This is a reachability ceiling for rows ALREADY credited at write time,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
 	// window for a successful ping. Duplicating Go's routed-model parser here
@@ -198,14 +198,28 @@ func kaSavedGate(alias, pingFloor string) string {
 	// The `> 0` FIRST is not style: it short-circuits the probe to the credited rows. Measured on
 	// a 2.1 GB database, a full-table SUM is 314 ms this way and 61.9 SECONDS with the EXISTS
 	// first, for the identical answer. Do not reorder.
-	return `(CASE WHEN ` + col + ` > 0 AND EXISTS (
+	probe := func(touched string) string {
+		return `EXISTS (
 			SELECT 1 FROM requests kp
-			WHERE kp.keepalive = 1 AND kp.cache_read > 0
+			WHERE kp.keepalive = 1 AND ` + touched + `
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
 			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
-		alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)
-		THEN ` + col + ` ELSE 0 END)`
+			alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)`
+	}
+	// A row the accountant library priced carries a credit the library gave from usage: it credits a rescue
+	// when the ping RE-CREATED an expired entry and the next request read what the ping wrote (accountant
+	// case keepalive/ping-miss-restarts-clock/5m). So for such a row a ping that wrote reached the entry as
+	// well as one that read it, and the test is cache_read > 0 OR cache_write > 0. The strict test above
+	// stays for every other row: the legacy write path credited a row on keepalive_pings alone, and a ping
+	// that only re-created the entry earned it a credit it did not deserve (context-guru#768 B4).
+	//
+	// The order is still load-bearing: col > 0 first, so a probe runs once per CREDITED row. The library test
+	// is a second EXISTS inside the same AND, and it runs only for a row the strict probe refused.
+	libraryPriced := `EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = ` + alias + `id AND c.priced_by = '` +
+		PricedByAccountant + `')`
+	return `(CASE WHEN ` + col + ` > 0 AND (` + probe(`kp.cache_read > 0`) + ` OR (` + libraryPriced + ` AND ` +
+		probe(`kp.cache_write > 0`) + `)) THEN ` + col + ` ELSE 0 END)`
 }
 
 // KeepAliveCoverage is the "is this figure a measurement or an absence?" statement that
@@ -231,7 +245,7 @@ type KeepAliveLedger struct {
 	PingUSD       float64 `json:"ping_usd"`
 	MissesAvoided int64   `json:"misses_avoided"`
 	// SavedUSD is a CEILING, and every tile that shows it says so. The credit itself is exact
-	// arithmetic — see Event.keepaliveSavedUSD — but the provider's cache is keyed on CONTENT,
+	// arithmetic (the accountant library's rescue) — but the provider's cache is keyed on CONTENT,
 	// so another session sending a byte-identical prefix would have refreshed the same entry
 	// for nothing. That confound cannot be measured from our side; it can only be declared.
 	SavedUSD float64 `json:"saved_usd"`

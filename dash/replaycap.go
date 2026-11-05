@@ -135,6 +135,10 @@ type compCredit struct {
 	Unique    int64
 	USD       float64
 	FirstUSD  float64
+	// Accountant marks a credit the accountant library priced: storedFirst is its first-removal
+	// part as stored, and no read-time formula splits it again (firstShare).
+	Accountant  bool
+	storedFirst float64
 }
 
 // capRow is one request as the cap walk needs it.
@@ -274,7 +278,10 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 			if assumed {
 				l.WindowAssumedUSD += c.USD
 			}
-			if state == capOpen {
+			// The cap closes the credit of a replay. It never erases a cost: a break or a TTL premium is money that
+			// was spent whether or not the cap is open. A negative row counts, so DeltaUSD cannot raise the net
+			// (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+			if state == capOpen || c.USD < 0 {
 				l.CountedUSD += c.USD
 				l.FirstRemovalUSD += c.FirstUSD
 				l.ReplayUSD += c.USD - c.FirstUSD
@@ -300,7 +307,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.agent_compaction, r.tokens_before,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
-		c.component, c.saved_gross, c.saved_unique, c.saved_usd
+		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
 	FROM requests r
 	LEFT JOIN request_components c ON c.request_id = r.id AND %c
 
@@ -380,6 +387,10 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			}
 			for j := range r.Credits {
 				c := &r.Credits[j]
+				if c.Accountant {
+					c.FirstUSD = c.storedFirst
+					continue
+				}
 				c.FirstUSD = c.USD * firstShare(&ev, pr, priced, c.Component, c.Gross, c.Unique)
 			}
 		}
@@ -392,10 +403,11 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		var bypassed, agentComp int
 		var comp sql.NullString
 		var gross, unique sql.NullInt64
-		var usd sql.NullFloat64
+		var usd, first sql.NullFloat64
+		var acc sql.NullBool
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
 			&r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
-			&comp, &gross, &unique, &usd); err != nil {
+			&comp, &gross, &unique, &usd, &first, &acc); err != nil {
 			return nil, err
 		}
 		if id != lastID {
@@ -422,7 +434,8 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			continue
 		}
 		cur := &buf[len(buf)-1]
-		c := compCredit{Component: comp.String, Gross: gross.Int64, Unique: unique.Int64, USD: usd.Float64}
+		c := compCredit{Component: comp.String, Gross: gross.Int64, Unique: unique.Int64, USD: usd.Float64,
+			Accountant: acc.Bool, storedFirst: first.Float64}
 		dup := false
 		for i := range cur.Credits { // request_components has no UNIQUE: keep the larger of duplicates
 			if cur.Credits[i].Component == c.Component {
@@ -477,12 +490,13 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 	pastReplay := cl.PastCapUSD - cl.PastCapFirstUSD
 	c.SavedUSDFirstRemoval = math.Max(c.SavedUSDFirstRemoval-cl.PastCapFirstUSD, 0)
 	c.SavedUSDReplay = math.Max(c.SavedUSDReplay-pastReplay, 0)
-	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
+	// The costs term (SavedUSDCosts) stays: the cap removes credit, never a cost (see walkCapConversation).
+	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
 	c.SavedUSDDecomposedStored = math.Max(c.SavedUSDDecomposedStored+delta, 0)
-	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
+	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 	c.ReplayMultiple = 0
 	if c.SavedUSDFirstRemoval > 0 {
-		c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
+		c.ReplayMultiple = math.Max(c.SavedUSDDecomposed, 0) / c.SavedUSDFirstRemoval
 	}
 	c.ReplayCreditPastCapUSD = cl.PastCapUSD
 }

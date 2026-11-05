@@ -189,6 +189,15 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	return out, nil
 }
 
+// declFilterNotPriced keeps the requests whose declaration filtering is not already in the booked baseline.
+// The proxy reports each toolfilter removal to the accountant library, so on a request the library priced
+// (a toolfilter row with priced_by='accountant') the removal is in baseline_cost_usd and in the net saving.
+// Adding the measured credit on top of it counts the same tokens twice (context-guru#768 B2). A request the
+// library could not price (priced_by='none') or one written before the switch has nothing in the baseline, so
+// the measured credit stays the only place its filter saving appears.
+const declFilterNotPriced = `AND NOT EXISTS (SELECT 1 FROM request_components c
+		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = 'accountant')`
+
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
 // #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
 // Bounded by `cond` directly: a session's own index for session scope, the ts range for a
@@ -197,7 +206,7 @@ func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
 		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
-		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
+		WHERE ` + where + ` AND r.filtered_decl_tokens > 0 ` + declFilterNotPriced, args
 }
 
 // accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one
@@ -253,7 +262,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
 		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
-		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
+		WHERE `+cond+` AND r.filtered_decl_tokens > 0 `+declFilterNotPriced, args...)
 	if err != nil {
 		return nil, err
 	}

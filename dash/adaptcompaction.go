@@ -850,29 +850,46 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	// tokenizer correction carry no BilledDeltaFactor, so that column is on a different ruler
 	// from one deployment to the next. MAX per (request, component): request_components has
 	// no unique key and older rows carry duplicates.
+	//
+	// A row the accountant library priced (priced_by) carries the figure it booked, in dollars, on one
+	// ruler; that figure is the observation, and is not re-priced. A fallback row ('none') booked
+	// nothing. Only a row from before the switch (priced_by '') is re-priced from its tokens.
 	orow, err := d.sql.QueryContext(ctx, `SELECT rc.request_id, rc.component, MAX(rc.saved_gross),
-		MAX(rc.saved_unique) FROM request_components rc JOIN requests r ON r.id = rc.request_id
-		WHERE `+cond+` AND rc.saved_gross > 0 GROUP BY rc.request_id, rc.component`, args...)
+		MAX(rc.saved_unique), MAX(rc.saved_usd), MAX(rc.priced_by)
+		FROM request_components rc JOIN requests r ON r.id = rc.request_id
+		WHERE `+cond+` AND (rc.saved_gross > 0 OR rc.priced_by = 'accountant') GROUP BY rc.request_id, rc.component`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer orow.Close()
 	for orow.Next() {
 		var id, gross, unique int64
-		var comp string
-		if err := orow.Scan(&id, &comp, &gross, &unique); err != nil {
+		var comp, pricedBy string
+		var storedUSD float64
+		if err := orow.Scan(&id, &comp, &gross, &unique, &storedUSD, &pricedBy); err != nil {
 			return nil, err
 		}
-		// Savings to date: every priced request in the window, whether or not its content is stored.
-		if ar := all[id]; ar != nil {
+		if pricedBy == PricedByNone {
+			continue // the library could not price this request: it booked no saving
+		}
+		// observedUSD is what the row booked, in dollars: the stored figure for a row the library
+		// priced, else its tokens re-priced at the replay's rates.
+		observedUSD := func(rq *adaptReq) float64 {
+			if pricedBy == PricedByAccountant {
+				return storedUSD
+			}
 			u := unique
 			if u < 0 {
 				u = 0
 			} else if u > gross {
-				u = gross
+				u = gross // shared content keys can over-attribute, as in Event.Price
 			}
-			tail, repeat, _ := adaptRates(ar)
-			v := (float64(u)*tail + float64(gross-u)*repeat) * ar.factor
+			tail, repeat, _ := adaptRates(rq)
+			return (float64(u)*tail + float64(gross-u)*repeat) * rq.factor
+		}
+		// Savings to date: every priced request in the window, whether or not its content is stored.
+		if ar := all[id]; ar != nil {
+			v := observedUSD(ar)
 			cov.ObservedUSD += v
 			if cov.ObservedByComponent == nil {
 				cov.ObservedByComponent = map[string]float64{}
@@ -883,13 +900,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 			if r.observed == nil {
 				r.observed = map[string]float64{}
 			}
-			if unique < 0 {
-				unique = 0
-			} else if unique > gross {
-				unique = gross // shared content keys can over-attribute, as in Event.Price
-			}
-			tail, repeat, _ := adaptRates(r)
-			r.observed[comp] += (float64(unique)*tail + float64(gross-unique)*repeat) * r.factor
+			r.observed[comp] += observedUSD(r)
 		}
 	}
 	if err := orow.Err(); err != nil {

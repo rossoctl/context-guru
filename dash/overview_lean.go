@@ -67,7 +67,8 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(append([]any{
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings},
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings,
+		&o.EstimatedRequests},
 		append(manual.dest(), &o.DeferNetUSD)...)...); err != nil {
 		return nil, err
 	}
@@ -115,6 +116,7 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			AVG(CASE WHEN ` + agent + ` THEN r.cg_latency_ms END),
 			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN r.cost_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.price_estimated ELSE 0 END),0),
 			` + manualSelect + `,
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.defer_net_usd ELSE 0 END),0)
 		FROM requests r WHERE ` + cond, args
