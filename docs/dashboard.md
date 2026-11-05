@@ -123,8 +123,16 @@ What the library prices:
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
 `check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name` or `acted_without_figure`. A saving nothing measured is not
-shown.
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+measured is not shown.
+
+For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
+`upstream_rounds=N` (an expand loop) or `compute_panicked`.
+
+`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
+`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
+Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
+keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
 
 Limits:
 
@@ -134,11 +142,27 @@ Limits:
   can be too high if a component broke the cache on that request (accountant design §6.4). The
   event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
   in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
-  The totals and charts add such a figure like any other: they do not mark it. A row written before
+  Overview counts them (`estimated_requests`, on the full and the lean path) and the Preset card says how many of
+  the window's requests they are. The totals and charts add such a figure like any other: they do not mark it. A row written before
   the column existed reads as exact.
+- The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
+  every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
+  changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.
+  A file older than one hour is ignored (no cache entry lives longer), and so is a missing or unreadable
+  one: the proxy then starts empty, as before. A crash (kill -9) loses up to one minute of state. A
+  request that follows a lost state is priced as a first request and carries the estimate flag. The
+  library also drops the least recently used threads past its own bound; that is not saved or restored.
+  Two proxies must not share one dashboard database: they would write the same state file and the last writer wins.
 - A thread that continues another by content (a rewind, a fork) is priced as a first request. The
   proxy passes the parent thread to the library, but the library does not read it, so the new thread
   does not start from a copy of the parent's cache state (accountant design §4.1).
+- Every request is priced at the model's base rates. A model whose provider charges more above a prompt size
+  (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields) is under-priced on those requests: its
+  cost and its saving both use the base rate, so their ratio looks right and the dollars are low. Among Claude
+  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) on every listing, and Sonnet 4 and 4.5 carry a
+  200k tier (2x) on their Bedrock, Vertex and Azure listings but not on the Anthropic API ids; Sonnet 5, Opus and
+  Fable carry none. Models of other families carry tiers too.
+  `MODEL_PRICES` sets one flat rate for a model, so it does not fix a tiered price.
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
   library does not credit a keep-alive rescue after a gap past the TTL.

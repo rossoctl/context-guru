@@ -417,6 +417,10 @@ type Overview struct {
 	PreCorrectionSavingRows int64   `json:"pre_correction_saving_rows"`
 	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
 	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
+	// EstimatedRequests counts the requests whose saving the accountant library priced without knowing whether
+	// a component broke the cache (requests.price_estimated): the first request of a thread, and the first one
+	// after a restart that lost the state. Their net can be too high. Overview.Requests is the denominator.
+	EstimatedRequests int64 `json:"estimated_requests"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -668,7 +672,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
 			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
-		`+deferNetSum+`
+		`+deferNetSum+`,
+		COALESCE(SUM(r.price_estimated),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -686,7 +691,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
 		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
-		&o.DeferNetUSD)
+		&o.DeferNetUSD, &o.EstimatedRequests)
 	if err != nil {
 		return nil, err
 	}

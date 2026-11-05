@@ -300,3 +300,38 @@ func TestFinishSpendsThePingFactsOnlyWhenItPrices(t *testing.T) {
 		t.Error("a priced request left the ping facts for the next one")
 	}
 }
+
+// A manual ping is priced, but its facts are not stored: its avoided write is already on its row as
+// ManualSavedUSD, and a stored fact would let the next real request credit the same write again as a
+// rescue (context-guru#768 B3).
+func TestPingSavingsDoesNotStoreFactsForAManualPing(t *testing.T) {
+	st := NewPingStore()
+	r := okReport()
+	r.Manual = true
+	res, ok := PingSavings(r, st)
+	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
+		t.Fatalf("a manual ping must still be priced: ok=%v res=%+v", ok, res)
+	}
+	if f, ok := st.take(accPingKey("s", "main")); ok {
+		t.Fatalf("a manual ping stored facts %+v: the next request would credit its write twice", f)
+	}
+	// The automatic ping next to it still stores them.
+	if _, ok := PingSavings(okReport(), st); !ok {
+		t.Fatal("an automatic ping was not converted")
+	}
+	if _, ok := st.take(accPingKey("s", "main")); !ok {
+		t.Fatal("an automatic ping stored no facts")
+	}
+}
+
+// The report's TS is the completion time. The library's entry gap runs from the START of the ping, so the mapped
+// At must be TS minus the ping's duration (context-guru#768 minor).
+func TestPingAtIsTheStartOfThePing(t *testing.T) {
+	r := components.KeepAliveReport{TS: 1_700_000_100_000, DurationMs: 90_000}
+	if got, want := pingFromReport(r).At, time.UnixMilli(1_700_000_010_000); !got.Equal(want) {
+		t.Fatalf("At = %v, want %v (completion minus 90 s)", got, want)
+	}
+	if got := pingFromReport(components.KeepAliveReport{TS: 1_700_000_100_000}).At; !got.Equal(time.UnixMilli(1_700_000_100_000)) {
+		t.Fatalf("a ping with no duration: At = %v, want TS", got)
+	}
+}

@@ -42,6 +42,12 @@ func accHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *accTap) {
 // accHandlerYAML is accHandler with the config document spelled out.
 func accHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *accTap) {
 	t.Helper()
+	return accHandlerOpts(t, up, yaml, nil)
+}
+
+// accHandlerOpts is accHandlerYAML with a hook that edits the handler options before New.
+func accHandlerOpts(t *testing.T, up, yaml string, edit func(*Options)) (*Handler, *dash.Recorder, *accTap) {
+	t.Helper()
 	cfg, err := config.LoadBytes([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
@@ -58,10 +64,14 @@ func accHandlerYAML(t *testing.T, up, yaml string) (*Handler, *dash.Recorder, *a
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+	opts := Options{
 		AnthropicUpstream: up, OpenAIUpstream: up, Preset: cfg.Preset,
 		Dashboard: rec, Prices: fixedPricer{},
-	})
+	}
+	if edit != nil {
+		edit(&opts)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, opts)
 	t.Cleanup(h.Close)
 	return h, rec, tap
 }
@@ -158,8 +168,10 @@ func extractRow(t *testing.T, e dash.Event) dash.CompRow {
 //	usage        = 20 input + 50 cache write = 70 tokens
 //	ratio        = 70 tokens / fwdBytes                      (the library's bytes-to-tokens ratio)
 //	saved tokens = floor(before*70/fwdBytes) - floor(after*70/fwdBytes), in the Input tier: the
-//	               removed span was never cached (no previous request cached it)
-//	SavedUSD     = saved tokens * 2e-6                       (fixedPricer Input rate)
+//	               removed span was never cached (no previous request cached it). The request has no
+//	               cache_control mark, so the provider caches nothing the client asked for and the
+//	               library prices the removed span at the read tier (accountant#24)
+//	SavedUSD     = saved tokens * 2e-7                       (fixedPricer CacheRead rate)
 //
 // The op sizes are wire bytes, so the derivation is exact up to the two floors (1 token).
 // It runs through the real proxy path, and the Result must carry no failed check: before the op
@@ -185,7 +197,7 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 		return n
 	}
 	client, fb := msgBytes(anthropicRequest("aws/claude-sonnet-5")), msgBytes(fwd)
-	want := float64((client-fb)*70/fb) * 2e-6
+	want := float64((client-fb)*70/fb) * 2e-7
 	got := extractRow(t, e).SavedUSD
 	if math.Abs(got-want) > 2*2e-6 {
 		t.Fatalf("extract SavedUSD = %v, hand-derived %v (client %d forwarded %d message bytes)", got, want, client, fb)
@@ -193,10 +205,11 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 	t.Logf("library %v hand %v", got, want)
 }
 
-// The old fixture: 10,512 prompt tokens for a few-hundred-byte forwarded body. The library's
-// token figure then exceeds the request's size, so PriceMode must book no saving, and for that
-// reason: the Result has counted operations whose Saved tokens exceed TokensBefore and nothing
-// unpriced, so the plausibility bound is what fired, not some earlier gate.
+// Usage far from the body's size: 10,512 prompt tokens for a few-hundred-byte forwarded body, 21
+// tokens per byte. The library refuses it with the ratio_range check before it prices anything
+// (accountant#28), so PriceMode books no saving and the event keeps the legacy figures. The reason
+// is "unpriced": the Result is built, its checks name why. FallbackImplausibleSize is the second
+// line of defence for a Result that passes every check (dash/accountant_switch_test.go).
 func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 	cfs, _ := accRunUsage(t, 12, 9000, 1500)
 	if got := extractRow(t, cfs[0]).SavedUSD; got != 0 || cfs[0].BaselineCostUSD != cfs[0].CostUSD {
@@ -204,20 +217,18 @@ func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 			got, cfs[0].BaselineCostUSD, cfs[0].CostUSD)
 	}
 	r, ok := cfs[0].AccountantResult()
-	if !ok || len(r.Unpriced) != 0 || len(r.Checks) != 0 {
-		t.Fatalf("Result %v: unpriced %+v checks %+v, want a clean Result", ok, r.Unpriced, r.Checks)
+	if !ok {
+		t.Fatal("the Result was not attached")
 	}
-	saved := 0
-	for _, o := range r.Ops {
-		if !o.DryRun && o.Call == nil {
-			saved += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
-		}
+	found := false
+	for _, c := range r.Checks {
+		found = found || c.Check == "ratio_range"
 	}
-	if saved <= cfs[0].TokensBefore {
-		t.Fatalf("counted Saved %d <= TokensBefore %d: the bound would not fire", saved, cfs[0].TokensBefore)
+	if !found {
+		t.Fatalf("checks %+v, want a failed ratio_range", r.Checks)
 	}
-	if fb := cfs[0].AccountantFallback(); fb != dash.FallbackImplausibleSize {
-		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackImplausibleSize)
+	if fb := cfs[0].AccountantFallback(); fb != dash.FallbackUnpriced {
+		t.Fatalf("fallback reason %q, want %q", fb, dash.FallbackUnpriced)
 	}
 }
 
@@ -234,5 +245,51 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 	hd, _, _ := accHandler(t, up.URL)
 	if hd.savings == nil {
 		t.Error("a handler with a dashboard must build the tracker")
+	}
+}
+
+// The OpenAI Responses API keeps its conversation in `input`. accBodies hashes `messages` and apply reports no
+// operations on that wire, so the accountant prices nothing there: the library's conservation check failed and
+// every component read priced_by=none with a bare no_result or acted_without_figure. A request on it is now
+// marked, and says why it has no saving (context-guru#768 B7). Chat Completions is unaffected.
+func TestResponsesWireBooksNoSavingAndSaysWhy(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_1","object":"response","status":"completed",
+		  "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+		  "usage":{"input_tokens":2000,"output_tokens":20,"input_tokens_details":{"cached_tokens":1500}}}`)
+	}))
+	defer up.Close()
+	h, rec, tap := accHandler(t, up.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	big := strings.Repeat("line of tool output\n", 400)
+	for i := 0; i < 2; i++ {
+		body := fmt.Sprintf(`{"model":"gpt-5.5","instructions":"agent","input":[`+
+			`{"role":"user","content":"run it"},`+
+			`{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},`+
+			`{"type":"function_call_output","call_id":"c1","output":%q}]}`, big)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/openai/v1/responses", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-test")
+		req.Header.Set("x-context-guru-session", "sess-resp")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	waitForRows(t, rec, 2)
+	for i, e := range tap.all() {
+		if fb := e.AccountantFallback(); fb != dash.FallbackUnsupportedWire {
+			t.Errorf("request %d: fallback %q, want %q", i+1, fb, dash.FallbackUnsupportedWire)
+		}
+		if _, ok := e.AccountantResult(); ok {
+			t.Errorf("request %d: a Responses request got a library Result", i+1)
+		}
+		if saved := e.BaselineCostUSD - e.CostUSD; saved > 1e-12 {
+			t.Errorf("request %d: booked a saving of %g on a wire the accountant does not read", i+1, saved)
+		}
 	}
 }

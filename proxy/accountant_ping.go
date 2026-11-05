@@ -81,14 +81,26 @@ func pingFromReport(r components.KeepAliveReport) accountant.Ping {
 		Session: r.Session, ThreadID: r.Thread, Model: r.Model, Host: r.Route,
 		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
 			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)}, Output: int(r.Output)},
-		At: time.UnixMilli(r.TS), Window: r.Window,
+		At: pingStart(r), Window: r.Window,
 	}
+}
+
+// pingStart is when the ping began. The report's TS is when it was recorded, after the response, and the library
+// measures the entry gap from the START of a request or ping, as the provider measures the TTL (accountant design
+// §5.2; PingFacts.At is "when the ping started"). A ping that streams for minutes would otherwise shorten the gap.
+func pingStart(r components.KeepAliveReport) time.Time {
+	return time.UnixMilli(r.TS).Add(-time.Duration(r.DurationMs * float64(time.Millisecond)))
 }
 
 // PingSavings prices one keep-alive ping as a spend operation and stores its facts in st for the
 // thread's next real request. ok is false, and nothing is stored, for a ping that is not
 // converted: no Window (its ChangeID would be shared by every such ping), a status outside
 // 200-299, or no usage (it billed nothing). Manual and sweep-substitute pings are converted.
+//
+// A MANUAL ping is priced, so its cost is on its row, but its facts are not stored. The write it avoided
+// is already booked on its own row as ManualSavedUSD, from the user's estimate. Storing the facts too
+// would let the next real request credit the same write again as a library rescue, and the total would
+// count it twice (context-guru#768 B3: $0.0200 booked, about $0.0096 true).
 func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result, bool) {
 	if r.Window.IsZero() || r.Status < 200 || r.Status > 299 ||
 		r.FreshInput+r.CacheRead+r.CacheWrite+r.CacheWrite1h+r.Output == 0 {
@@ -96,6 +108,8 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (accountant.Result
 	}
 	ops, facts := accountant.PingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
 	res := accountant.ComputeStandalone(ops)
-	st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
+	if !r.Manual {
+		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
+	}
 	return res, true
 }

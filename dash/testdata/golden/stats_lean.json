@@ -84,6 +84,7 @@
    "percent": 2.3845059148893064
   }
  ],
+ "estimated_requests": 0,
  "estimator_divergence": 1.001123848055743,
  "estimator_divergence_compacted": 1.0011973896904747,
  "estimator_divergence_compacted_rows": 197,

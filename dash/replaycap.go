@@ -278,7 +278,10 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 			if assumed {
 				l.WindowAssumedUSD += c.USD
 			}
-			if state == capOpen {
+			// The cap closes the credit of a replay. It never erases a cost: a break or a TTL premium is money that
+			// was spent whether or not the cap is open. A negative row counts, so DeltaUSD cannot raise the net
+			// (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+			if state == capOpen || c.USD < 0 {
 				l.CountedUSD += c.USD
 				l.FirstRemovalUSD += c.FirstUSD
 				l.ReplayUSD += c.USD - c.FirstUSD
@@ -487,12 +490,13 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 	pastReplay := cl.PastCapUSD - cl.PastCapFirstUSD
 	c.SavedUSDFirstRemoval = math.Max(c.SavedUSDFirstRemoval-cl.PastCapFirstUSD, 0)
 	c.SavedUSDReplay = math.Max(c.SavedUSDReplay-pastReplay, 0)
-	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
+	// The costs term (SavedUSDCosts) stays: the cap removes credit, never a cost (see walkCapConversation).
+	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
 	c.SavedUSDDecomposedStored = math.Max(c.SavedUSDDecomposedStored+delta, 0)
-	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
+	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 	c.ReplayMultiple = 0
 	if c.SavedUSDFirstRemoval > 0 {
-		c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
+		c.ReplayMultiple = math.Max(c.SavedUSDDecomposed, 0) / c.SavedUSDFirstRemoval
 	}
 	c.ReplayCreditPastCapUSD = cl.PastCapUSD
 }

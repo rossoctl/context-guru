@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -259,6 +260,13 @@ func (l *LiteLLM) Price(ctx context.Context, model string) (modelinfo.Price, boo
 	if p, ok := l.priceBy[tail]; ok {
 		return p, true
 	}
+	// A dated id (claude-sonnet-5-20260101) or a Bedrock/Vertex one (us.anthropic.claude-sonnet-5-v1:0) names a
+	// model the map lists under its bare name. Strip the decoration and look the exact name up again.
+	if bare := undecorate(tail); bare != tail {
+		if p, ok := l.priceBy[bare]; ok {
+			return p, true
+		}
+	}
 	// Last resort: a key that CONTAINS the bare id (claude-sonnet-5 vs
 	// anthropic.claude-sonnet-5). The SHORTEST such key wins, because the exact
 	// matches are already handled above, so the remaining candidates differ from the
@@ -315,4 +323,27 @@ func (l *LiteLLM) Window(ctx context.Context, model string) (int, bool) {
 		}
 	}
 	return best, found
+}
+
+var (
+	// decoDate is a trailing release date: -20260101 or @20260101.
+	decoDate = regexp.MustCompile(`[-@]\d{8}$`)
+	// decoBedrock is Bedrock's version suffix: -v1:0, -v2.
+	decoBedrock = regexp.MustCompile(`-v\d+(:\d+)?$`)
+	// decoVendor is the dotted vendor prefix of a Bedrock or Vertex id: us.anthropic., eu.anthropic., anthropic.
+	decoVendor = regexp.MustCompile(`^(?:(?:us|eu|apac|au|jp|us-gov|global)\.)?(?:anthropic|amazon|meta|mistral|cohere)\.`)
+)
+
+// undecorate removes a dated or Bedrock-wrapped id's decoration: the vendor prefix, the version suffix and the
+// release date. The result is looked up as an exact key, so a different model (claude-sonnet-5-5 against
+// claude-sonnet-5) is never reached by it.
+//
+// The version suffix (-v1:0) is stripped only from an id that carried a vendor prefix: that is Bedrock's form. A
+// plain id such as claude-x-v2 may be a model of its own, and would take the price of claude-x.
+func undecorate(id string) string {
+	bare := decoVendor.ReplaceAllString(id, "")
+	if bare != id {
+		bare = decoBedrock.ReplaceAllString(bare, "")
+	}
+	return decoDate.ReplaceAllString(bare, "")
 }

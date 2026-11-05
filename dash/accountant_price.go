@@ -140,6 +140,7 @@ const (
 	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
 	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
 	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
+	FallbackUnsupportedWire    = "unsupported_wire"     // the request is on a wire the accountant does not read yet (OpenAI Responses)
 )
 
 // gatedChecks maps each library check (accountant internal/engine/compute.go checks() and conservation()) that
@@ -229,6 +230,8 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 // accOverride applies the accountant override, or returns the reason it cannot and changes nothing.
 func (e *Event) accOverride(p modelinfo.Price) string {
 	switch {
+	case e.accUnsupportedWire:
+		return FallbackUnsupportedWire // before no_result: say the real reason, not that nothing was attached
 	case e.accRes == nil:
 		return FallbackNoResult
 	case e.accOpsDropped != 0:

@@ -143,6 +143,9 @@ type Options struct {
 	// request is captured off the hot path into a durable store and the dashboard UI
 	// + API are mounted. nil = the proxy behaves exactly as before.
 	Dashboard *dash.Recorder
+	// AccountantState, when set with Dashboard, is the file the savings tracker's thread state is saved to
+	// (every minute and at Close) and restored from at New. Empty = the state starts empty at every start.
+	AccountantState string
 	// Record, when non-nil, records one OTLP span per proxied turn: exported to a collector
 	// (--record-otlp), written as OTLP JSON one file per session (--record), or both. nil = no
 	// recording, and every touchpoint is nil-guarded, so the default path costs one nil check
@@ -349,6 +352,10 @@ type Handler struct {
 	// for every send still in flight before its mail sink goes away (see waitMailForTest).
 	mailWG sync.WaitGroup
 
+	// stateStop and stateDone run the periodic save of the savings tracker's state (Options.AccountantState).
+	stateStop, stateDone chan struct{}
+	stateOnce            sync.Once
+
 	// lastSessionMu guards lastSession.
 	lastSessionMu sync.Mutex
 	// lastSession is the session id of the most recent REAL (non-ping) request this
@@ -422,6 +429,11 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The tracker needs a dashboard: the Result is attached to the recorded event.
 	if opts.Dashboard != nil {
 		h.savings = newSavingsTracker()
+		if opts.AccountantState != "" {
+			h.savings.restore(opts.AccountantState, time.Now())
+			h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
+			go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
+		}
 	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or
 	// a keep-alive ping that read the cache — and not by this process's start (#766). The
@@ -519,6 +531,10 @@ func (h *Handler) onRegistryChange(kind string) {
 // sync-mode handler and safe to call twice.
 func (h *Handler) Close() {
 	h.pool.Stop()
+	if h.stateStop != nil {
+		h.stateOnce.Do(func() { close(h.stateStop) })
+		<-h.stateDone // saves the state once more
+	}
 	// The keeper holds request bodies and, on a caller-pays upstream, callers' provider
 	// credentials. Stopping it drops both, which is why this is not optional on a host that
 	// builds and discards handlers.
@@ -1436,7 +1452,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the client body, so opening the record late loses nothing. `orig` is what the agent
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
-			if cp != nil && cp.savings != nil && tr.Session != "" {
+			//
+			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
+			// `messages`, and apply reports no operations there. The record would price nothing and fail the
+			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
+				cp.accUnsupportedWire = true
+			} else if cp != nil && cp.savings != nil && tr.Session != "" {
 				cp.accBegin(accountant.RequestMeta{
 					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
 					Session:   tr.Session,

@@ -1154,6 +1154,10 @@ type compGroupKey struct {
 	// acc is a group of rows the accountant library priced (priced_by): their dollar split is
 	// stored (firstUSD, replayUSD), and no read-time formula re-prices them.
 	acc bool
+	// fallback is a group of rows of a request the accountant path handled and could not price
+	// (priced_by 'none'). They are also acc: no read-time formula values them. They book no saving, and the
+	// reader must be told that, because a stored 0 here is not a measured 0 (context-guru#768 B8).
+	fallback bool
 }
 
 // compGroup is one cell of that pass. uClamp and rClamp are the decomposition's unique and replay
@@ -1204,14 +1208,14 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
-		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '',
+		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '', c.priced_by = 'none',
 		MAX(c.kind), COUNT(*), SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
 		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END),
 		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END),
 		SUM(c.saved_first_usd), SUM(c.saved_replay_usd)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7`,
+		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`,
 			append(append([]any(nil), args...), bounds...)...)
 		if err != nil {
 			return err
@@ -1221,7 +1225,7 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 			var k compGroupKey
 			var g compGroup
 			var usd sql.NullFloat64
-			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc,
+			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc, &k.fallback,
 				&g.kind, &g.runs, &g.acted, &g.mutated, &g.reverted, &g.skipped, &g.gross, &g.unique,
 				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff, &g.firstUSD, &g.replayUSD); err != nil {
 				return err

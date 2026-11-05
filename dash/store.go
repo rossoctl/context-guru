@@ -374,7 +374,7 @@ func init() {
 				}
 			}
 			if extra != "" && len(have) > 0 {
-				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT *`+extra+` FROM main.`+table, nil); err != nil {
+				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT rowid AS rowid, *`+extra+` FROM main.`+table, nil); err != nil {
 					return err
 				}
 			}
