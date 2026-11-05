@@ -115,6 +115,15 @@ What the library prices:
 - **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
   and the library derives the extent the ping read from it. A prefix that another thread of the
   session kept warm inside the TTL is not credited (`EntryFacts.SharedWarm`, accountant R54).
+  When the override applies, the request stores `requests.acc_priced = 1` (sent as `acc_priced`). The
+  keep-alive views trust the stored `keepalive_saved_usd` of such a request as the library's own
+  decision, with no ping probe and with no component row needed, so a keep-alive-only setup keeps its
+  rescue. A row with `acc_priced = 0` (older rows, and requests the library could not price) keeps the
+  read-side reachability test. The entry TTL given to the library follows the billed tier: if the
+  request asked for 1h and the response billed 5m, the library judges the next gap against 5 minutes.
+- **Tool-filter credit.** A request whose `toolfilter` row is `priced_by = accountant` adds no dollars
+  to the measured filter credit (the net saving has them). It still counts in the request count, the
+  tokens not sent and the first date, so the Realized block and the item list stay.
 - **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
 - **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
 - **A break nobody owns.** A break that a change left behind when it ended is counted on the

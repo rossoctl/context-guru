@@ -731,6 +731,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
 		if c.rounds <= 1 {
+			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
 			} else {

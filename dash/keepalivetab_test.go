@@ -1333,3 +1333,72 @@ func TestTheGateKeepsTheRescueOfAPingThatWroteTheEntry(t *testing.T) {
 		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
 	}
 }
+
+// A keep-alive-only setup stores no component rows, so the rescue the library credited has nothing for the
+// gate to find and was zeroed by the strict probe: the original B4 symptom, left in the case the keep-alive
+// is mostly used for (context-guru#912). The request itself must say the library priced it.
+func TestTheGateKeepsTheRescueOfALibraryPricedRequestWithNoComponentRows(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = nil
+	rescued.AccountantPriced = true
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	got := kaSession(t, fx, "s1")
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
+
+// The library's decision is trusted for a library-priced request even when the SQL model finds no ping that
+// reached the entry, and a row without the marker keeps the SQL gate (context-guru#919).
+func TestTheGateTrustsTheLibraryForPricedRowsAndKeepsSQLForLegacyRows(t *testing.T) {
+	priced := kaCredit(1_100_000, "lib", 0.01)
+	priced.AccountantPriced = true
+	legacy := kaCredit(1_100_000, "old", 0.01)
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "lib", 0.10), kaPing(1_050_000, "lib", 0.001, 0, 0), priced, // the ping read and wrote nothing
+		kaAgent(1_000_000, "old", 0.10), kaPing(1_050_000, "old", 0.001, 0, 0), legacy,
+	)
+	if got := kaSession(t, fx, "lib"); math.Abs(got.KeepAliveSavedUSD-0.01) > 1e-9 {
+		t.Errorf("library-priced saved = %.6f, want 0.01: the stored decision is trusted", got.KeepAliveSavedUSD)
+	}
+	if got := kaSession(t, fx, "old"); got.KeepAliveSavedUSD != 0 {
+		t.Errorf("legacy saved = %.6f, want 0: the SQL gate still judges a row with no marker", got.KeepAliveSavedUSD)
+	}
+}
+
+// The credited-row guard must come before every probe (a 197x slowdown, see
+// kaSavedGate), so the marker test sits inside the same AND after `col > 0`.
+func TestKaSavedGateKeepsTheCreditGuardFirst(t *testing.T) {
+	g := kaSaved("r.")
+	if !strings.HasPrefix(g, "(CASE WHEN r.keepalive_saved_usd > 0 AND (r.acc_priced = 1 OR ") {
+		t.Fatalf("the guard order changed: %.120s", g)
+	}
+	db := openTestDB(t)
+	// The probe must still seek the ping by its session index, and the marker must be a plain column read.
+	plan := explainPlan(t, db, "SELECT SUM("+g+") FROM requests r WHERE r.ts >= ?", []any{0})
+	if !strings.Contains(strings.Join(plan, "\n"), "idx_requests_tenant_session") {
+		t.Errorf("the ping probe no longer seeks idx_requests_tenant_session:\n%v", plan)
+	}
+}
+
+func kaSession(t *testing.T, fx *kaFixture, id string) *SessionRow {
+	t.Helper()
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.SessionID == id {
+			return r
+		}
+	}
+	t.Fatalf("session %s is missing from the list", id)
+	return nil
+}

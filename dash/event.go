@@ -444,7 +444,13 @@ type Event struct {
 	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
 	// high. It is stored, so the dashboard marks such a figure after a restart. False on an exact
 	// figure, on an event that books no saving, and on a row from before the column existed.
-	PriceEstimated     bool   `json:"price_estimated,omitempty"`
+	PriceEstimated bool `json:"price_estimated,omitempty"`
+	// AccountantPriced is true when the accountant override applied to this request, so its
+	// keepalive_saved_usd is the library's own rescue decision. Stored (requests.acc_priced), so the
+	// keep-alive reachability gate trusts that decision with no component row and no ping probe. False
+	// on a request the library did not price and on every row from before the column existed, which
+	// keep the SQL gate (context-guru#912, #919).
+	AccountantPriced   bool   `json:"acc_priced,omitempty"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
@@ -829,7 +835,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // accountingComplete=false leaves every cost at zero and the row is marked partial/missing: a cost we
 // cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated = "", false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
 	e.priceCost(p, accountingComplete)
 }
 

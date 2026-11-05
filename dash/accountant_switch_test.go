@@ -338,3 +338,36 @@ func TestPriceEstimatedIsStoredAndReadBack(t *testing.T) {
 		t.Fatalf("stored price_estimated = %v, want est true and exact false", got)
 	}
 }
+
+// The marker the keep-alive gate trusts (context-guru#912): set when the override applied, clear on a
+// fallback, and stored with the request.
+func TestAccountantPricedIsSetOnOverrideAndStored(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ok, fell := switchEvent(), switchEvent()
+	ok.TS, ok.SessionID, fell.TS, fell.SessionID = 1, "ok", 2, "fell"
+	fell.accRes = nil // no_result: the override cannot apply
+	ok.PriceMode(accTestPrice, true)
+	fell.PriceMode(accTestPrice, true)
+	if !ok.AccountantPriced || fell.AccountantPriced {
+		t.Fatalf("AccountantPriced = %v on the overridden event and %v on the fallback (%q)",
+			ok.AccountantPriced, fell.AccountantPriced, fell.AccountantFallback())
+	}
+	if err := db.insertBatch([]*Event{ok, fell}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := db.Requests(Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range page.Requests {
+		got[e.SessionID] = e.AccountantPriced
+	}
+	if len(got) != 2 || !got["ok"] || got["fell"] {
+		t.Fatalf("stored acc_priced = %v, want ok true and fell false", got)
+	}
+}

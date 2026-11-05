@@ -335,3 +335,38 @@ func TestPingAtIsTheStartOfThePing(t *testing.T) {
 		t.Fatalf("a ping with no duration: At = %v, want TS", got)
 	}
 }
+
+// A gateway that asks for 1h and bills 5m must not make a 20-minute gap look hot (context-guru#919).
+// The entry TTL is lowered to the billed tier after the usage arrives, before the library prices the
+// request. A request billed 1h, or one that wrote nothing, keeps the asked 1h.
+func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"model":"claude-sonnet-5","system":[{"type":"text","text":"` + strings.Repeat("x", 4000) +
+		`","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	phaseAfter := func(u Usage) accountant.CachePhase {
+		st, pings := newSavingsTracker(), NewPingStore()
+		step := func(at time.Time, u Usage) accountant.Result {
+			c := &capture{savings: st, pings: pings, provider: string(bschemas.Anthropic)}
+			c.accBegin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "claude-sonnet-5", At: at}, body)
+			c.accEnd(thread.Result{}, body, nil)
+			if c.accReq.Facts.TTL != time.Hour {
+				t.Fatalf("asked 1h on every breakpoint, facts TTL = %v", c.accReq.Facts.TTL)
+			}
+			c.accBilledTTL(u)
+			return st.compute(c.accReq, u)
+		}
+		step(t0, u)
+		// The second turn bills a write, not a read: a billed read would beat the clock (accountant R45).
+		return step(t0.Add(20*time.Minute), Usage{CacheWrite: int64(len(body)), CacheWrite1h: int64(len(body))}).Phase
+	}
+	n := int64(len(body))
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: 0}); got == accountant.PhaseHot {
+		t.Errorf("billed 5m, gap 20m: phase = %q, want not hot (the entry expired after 5 minutes)", got)
+	}
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: n}); got != accountant.PhaseHot {
+		t.Errorf("billed 1h, gap 20m: phase = %q, want hot", got)
+	}
+	if got := phaseAfter(Usage{CacheRead: n}); got != accountant.PhaseHot {
+		t.Errorf("wrote nothing, gap 20m: phase = %q, want hot (no tier billed: the asked 1h stands)", got)
+	}
+}

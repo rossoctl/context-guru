@@ -593,12 +593,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
 		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
 		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
-		price_estimated,
+		price_estimated, acc_priced,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -673,7 +673,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			 * safe direction — it claims LESS about the row. */
 			sourceOf(e.Source),
 			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
-			e.SessionAlias, boolInt(e.PriceEstimated),
+			e.SessionAlias, boolInt(e.PriceEstimated), boolInt(e.AccountantPriced),
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
 		)
