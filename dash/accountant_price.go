@@ -191,6 +191,7 @@ const EndedChangeComponent = "ended_change"
 var envelopeComponents = map[string]bool{
 	"expand": true, "adjudicate": true, "headttl": true,
 	"toolschema": true, "toolfilter": true, "cachesplit": true,
+	"tailbreakpoint": true,
 }
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
