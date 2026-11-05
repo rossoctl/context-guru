@@ -19,8 +19,8 @@ This page lists which search tool each client and model uses when `ultrahigh` de
 ## What the proxy defers
 
 **What it is.** Every request carries the full definition of every tool the client offers. Many
-of them are never used. To defer a tool is to keep its definition out of the model's context,
-but not out of reach: the model sees only the tool's name, and loads the definition through a
+of them are never used. To defer a tool is to keep its definition out of the prompt, but not
+out of reach: the model sees only the tool's name, and loads the definition through a
 search tool when it needs it. Nothing is lost, so a wrong guess costs one search turn, not a
 missing tool.
 
@@ -46,7 +46,7 @@ missing tool.
    ToolSearch, AskUserQuestion, Context Guru's own tools, a tool that `tool_choice` forces, and
    the account's `keep` list.
 5. It weighs at least 200 tokens on the original request. These are tokens of the proxy's own
-   tokenizer (o200k), about 340 Claude tokens.
+   tokenizer (o200k): about 340 Claude tokens on Sonnet and Opus, about 275 on Haiku.
 
 More details:
 
@@ -60,6 +60,9 @@ More details:
   or MCP servers on it. Rules 1, 4 and 5 still apply, and `keep` wins when a name is on both lists.
 - **Turn it off** with `toolfilter: {defer: off}`, or leave `ultrahigh`. In Claude Code,
   `ENABLE_TOOL_SEARCH=false` also turns it off.
+
+The code is in `tooldefer/tooldefer.go`: the rule in its package comment, the thresholds
+(`UserSessions`, `ProjectSessions`, `MinTokens`) and the never-defer list.
 
 ## Claude Code with `ToolSearch`: how it works
 
