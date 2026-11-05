@@ -7,7 +7,7 @@ go 1.26.4
 require github.com/maximhq/bifrost/core v1.7.0
 
 // accountant prices context operations. This module's tests import it and its shared test cases.
-require github.com/rossoctl/accountant v0.1.1-0.20261105060029-23e2ed1c3cc1
+require github.com/rossoctl/accountant v0.1.1-0.20261105063645-c1f0f7a052db
 
 require (
 	github.com/alexaandru/go-sitter-forest/c v1.9.4
