@@ -243,7 +243,6 @@ func TestSplicePropertyKeepsWireInvariant(t *testing.T) {
 	const cases = 400
 	for n := 0; n < cases; n++ {
 		var wire []string
-		var exch [][]string // the wire messages of each exchange, with its id
 		var ids []string
 		textOf := func() string { return texts[rng.Intn(len(texts))] }
 		turns := 2 + rng.Intn(6)
@@ -256,7 +255,6 @@ func TestSplicePropertyKeepsWireInvariant(t *testing.T) {
 			id := "t" + strconv.Itoa(k)
 			ids = append(ids, id)
 			wire = append(wire, spliceTU(id), spliceTR(id, textOf()))
-			exch = append(exch, []string{spliceTU(id), spliceTR(id, "")})
 			wire = append(wire, `{"role":"assistant","content":"ok `+strconv.Itoa(k)+`"}`)
 		}
 		if len(ids) == 0 {
