@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -1175,5 +1176,61 @@ func TestOverviewCountsEstimatedRequests(t *testing.T) {
 	}
 	if full.EstimatedRequests != 2 || lean.EstimatedRequests != 2 {
 		t.Fatalf("estimated requests: full %d, lean %d, want 2 and 2 (of %d)", full.EstimatedRequests, lean.EstimatedRequests, full.Requests)
+	}
+}
+
+// Issue #915. An estimated request's saving is held OUT of every total. The Overview's net and total
+// saved, the components table and the API all read the same booked rows, so they agree, and the held
+// figure is shown on its own beside them. The full and the lean path report the same figures.
+func TestOverviewKeepsEstimatedSavingsOutOfTheTotals(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	price := modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
+	for i, est := range []bool{true, false} {
+		e := &Event{TS: now - int64(i)*1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 5000, TokensAfter: 4000, FreshInput: 100, CacheRead: 1000, OutputTokens: 10,
+			Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 1000, SavedUnique: 1000}}}
+		e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+			Saved: accountant.TierTokens{CacheWrite5m: 1000}}}})
+		if est {
+			e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
+		}
+		e.PriceMode(price, true)
+		insertReq(t, db, e)
+	}
+	f := Filter{TenantAll: true, Since: now - 60_000}
+	exact := 1000 * 3.75e-6
+	for name, get := range map[string]func() (*Overview, error){
+		"full": func() (*Overview, error) { return db.Overview(f) },
+		"lean": func() (*Overview, error) { return db.OverviewLean(f, nil, nil) },
+	} {
+		o, err := get()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o.EstimatedRequests != 1 || !accNear(o.EstimatedSavedUSD, exact) {
+			t.Errorf("%s: estimated requests %d, held %v, want 1 and %v", name, o.EstimatedRequests, o.EstimatedSavedUSD, exact)
+		}
+		if got := o.BaselineCostUSD - o.CostUSD; !accNear(got, exact) {
+			t.Errorf("%s: baseline delta %v, want only the exact request's %v", name, got, exact)
+		}
+	}
+	o, err := db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !accNear(o.NetSavedUSD, exact) || !accNear(o.TotalSavedUSD, exact) {
+		t.Errorf("net %v total %v, want both %v: the estimate must not be in either", o.NetSavedUSD, o.TotalSavedUSD, exact)
+	}
+	comps, err := db.Components(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum float64
+	for _, c := range comps {
+		sum += c.SavedUSD
+	}
+	if !accNear(sum, o.NetSavedUSD) {
+		t.Errorf("components sum %v != net saved %v", sum, o.NetSavedUSD)
 	}
 }
