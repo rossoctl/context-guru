@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- net saving may be too high: the gross is right, the penalty is not known. 0 on an exact figure
   -- and on every row written before this column existed, which is the claim those rows always made.
   price_estimated    INTEGER NOT NULL DEFAULT 0,
+  -- 1 when the accountant override applied to the request, so keepalive_saved_usd is the library's own
+  -- rescue decision and the read-side gate trusts it. 0 on a request the library did not price and on
+  -- every row written before this column existed, which keep the SQL reachability gate.
+  acc_priced         INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -765,6 +769,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "acc_priced", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
