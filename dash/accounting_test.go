@@ -1162,9 +1162,14 @@ func TestOverviewCountsEstimatedRequests(t *testing.T) {
 	for i, est := range []bool{true, false, true, false, false} {
 		e := &Event{TS: now - int64(i)*1000, SessionID: "s1", Model: "m1", TenantID: "t1",
 			TokensBefore: 100, TokensAfter: 90, FreshInput: 5, CacheRead: 40, OutputTokens: 5,
-			TokenAccounting: AccountingComplete, PriceEstimated: est}
+			TokenAccounting: AccountingComplete, PriceEstimated: est, EstimateHeld: est}
 		insertReq(t, db, e)
 	}
+	// A row written before #915: estimated, and it booked its figure. It is not "not counted".
+	old := &Event{TS: now - 9000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 100, TokensAfter: 90, FreshInput: 5, CacheRead: 40, OutputTokens: 5,
+		TokenAccounting: AccountingComplete, PriceEstimated: true}
+	insertReq(t, db, old)
 	f := Filter{TenantAll: true, Since: now - 60_000}
 	full, err := db.Overview(f)
 	if err != nil {
@@ -1175,7 +1180,7 @@ func TestOverviewCountsEstimatedRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	if full.EstimatedRequests != 2 || lean.EstimatedRequests != 2 {
-		t.Fatalf("estimated requests: full %d, lean %d, want 2 and 2 (of %d)", full.EstimatedRequests, lean.EstimatedRequests, full.Requests)
+		t.Fatalf("estimated requests: full %d, lean %d, want 2 and 2 (of %d); the old-meaning row must not count", full.EstimatedRequests, lean.EstimatedRequests, full.Requests)
 	}
 }
 

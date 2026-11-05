@@ -476,6 +476,8 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 				byID[key].Requests++
 				byID[key].Reads += int64(v[0])
 			}
+			// A deliberate $0, not a missing measurement: the request is priced.
+			out.pricedRequests++
 			continue
 		}
 		p, ok := modelinfo.Price{}, false

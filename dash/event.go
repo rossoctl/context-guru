@@ -458,9 +458,14 @@ type Event struct {
 	// BaselineCostUSD == CostUSD and every component SavedUSD 0, so every total, the components table
 	// and the keep-alive tab agree without a filter. This field keeps the figure that was not booked.
 	// 0 on an exact request and on a row from before the column existed.
-	EstimatedSavedUSD  float64 `json:"estimated_saved_usd,omitempty"`
-	CacheMissReason    string  `json:"cache_miss_reason"`
-	UncompressedReason string  `json:"uncompressed_reason"`
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd,omitempty"`
+	// EstimateHeld is true when the hold-out above applied to this row: the request is estimated AND its
+	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
+	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
+	// figure, and it reads here as false (the column defaults to 0, as acc_priced does). Stored.
+	EstimateHeld       bool   `json:"estimate_held,omitempty"`
+	CacheMissReason    string `json:"cache_miss_reason"`
+	UncompressedReason string `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
 	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
 	CacheMissCause string `json:"cache_miss_cause,omitempty"`
@@ -865,6 +870,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
+	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
 	e.priceCost(p, accountingComplete)
 }
 

@@ -248,9 +248,12 @@ func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
 	if want := 1000 * 0.3e-6; !accNear(e.EstimatedSavedUSD, want) {
 		t.Errorf("EstimatedSavedUSD = %v, want the held figure %v", e.EstimatedSavedUSD, want)
 	}
+	if !e.EstimateHeld {
+		t.Error("EstimateHeld = false on a held request")
+	}
 	e.Price(accTestPrice, true)
-	if e.AccountantEstimated() {
-		t.Fatal("Price left the estimate flag set")
+	if e.AccountantEstimated() || e.EstimatedSavedUSD != 0 || e.EstimateHeld {
+		t.Fatal("Price left the estimate state set")
 	}
 }
 

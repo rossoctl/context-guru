@@ -122,7 +122,8 @@ What the library prices:
   read-side reachability test. The entry TTL given to the library follows the billed tier: if the
   request asked for 1h and the response billed 5m, the library judges the next gap against 5 minutes.
 - **Tool-filter credit.** A request whose `toolfilter` row is `priced_by = accountant` adds no dollars
-  to the measured filter credit (the net saving has them). It still counts in the request count, the
+  to the measured filter credit (the net saving has them). The exception is a request whose figure was held out
+  (`estimate_held = 1`): the net saving has nothing for it, so the measured credit keeps its dollars. It still counts in the request count, the
   tokens not sent and the first date, so the Realized block and the item list stay.
 - **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
 - **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
@@ -158,11 +159,23 @@ Limits:
   agree. The figure that was not booked is stored in `requests.estimated_saved_usd` and sent as `estimated_saved_usd`
   (request JSON) and as `estimated_saved_usd` (Overview, summed over the window). The request detail shows it on its
   own line, marked "≈". The Preset card says how many requests are not counted and shows the estimated figure beside
-  them (`estimated_requests`, on the full and the lean path). A row written before the column existed reads as exact and
-  keeps the figure it was booked with. The keep-alive rescue and the split saving do not depend on a break and stay booked.
+  them (`estimated_requests`, on the full and the lean path). The count uses a separate marker,
+  `requests.estimate_held` (sent as `estimate_held`), set only when the hold-out applied. `price_estimated` alone is not
+  enough: it existed before the hold-out, and a row written then has `price_estimated = 1` and DID book its figure.
+  Such a row has `estimate_held = 0` (the column defaults to 0), keeps the figure it was booked with, and is not in
+  `estimated_requests`. The hold-out covers the whole figure: every component, the head-TTL premium and rescue legs
+  (so the 1h premium of a thread's first request shows as $0 there), the ended-change break and the filter's part.
+  The figure can be negative when the request's net effect is a cost (a tool-names list, an injected expand or
+  adjudicate declaration). The UI then shows "a cost of $x". The keep-alive rescue (`keepalive_saved_usd`) and the
+  split saving do not depend on a break and stay booked, each in its own column.
+  The filter's dollars on a held request are owned by the measured tool-filter credit, not by the held figure:
+  the credit keeps its dollars for such a request, so no total counts it twice and none leaves it out.
 - A request the provider rejected (any status that is not 2xx) books no saved tokens: `tokens_after` equals
   `tokens_before`, `saved_unique` and `attempted_tokens` are 0, and each component row has `saved_gross` 0,
-  `saved_unique` 0 and `acted` false. The provider billed none of it, so tokens and dollars agree. A status of 0
+  `saved_unique` 0 and `acted` false. The provider billed none of it, so tokens and dollars agree. This holds even when the
+  error body carries a `usage` object: the proxy then skips the accountant for that request (`acc_fallback`
+  reason `rejected_status`), so the row books 0 dollars too: `baseline_cost_usd` equals `cost_usd` and every
+  component `saved_usd` is 0. A status of 0
   (the request never reached a provider, such as `/compact`) and any 2xx are not changed.
 - The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
   every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active

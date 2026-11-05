@@ -215,7 +215,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD = "", false, false, 0
+	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimateHeld = "", false, false, 0, false
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		return
@@ -340,9 +340,18 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// prefix is the thing the missing history held. A figure nothing measured is not booked
 		// (issue #915). The request books no break-affected saving, and the figure is kept in
 		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
-		// keep-alive tab and the API still agree. The keep-alive rescue and the split saving do not
-		// depend on a break, so they stay booked below.
+		// keep-alive tab and the API still agree.
+		//
+		// What is held out: fig.DeltaUSD, which is every component's figure, the head-TTL premium and
+		// rescue legs (the headttl row), the ended-change break, and the filter's part. The figure can
+		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
+		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
+		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
+		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
+		// do not depend on a break. The filter's dollars are owned by the measured credit
+		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
 			e.Components[i].SavedUSD, e.Components[i].SavedFirstUSD, e.Components[i].SavedReplayUSD = 0, 0, 0

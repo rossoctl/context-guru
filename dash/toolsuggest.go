@@ -196,8 +196,13 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 // those are facts about what the filter did, not dollars (context-guru#911). A request the library could
 // not price (priced_by='none') or one written before the switch has nothing in the baseline, so its
 // measured credit stays the only place its filter saving appears.
-const declFilterInBaseline = `EXISTS (SELECT 1 FROM request_components c
-		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `')`
+//
+// A request whose figure was held out (r.estimate_held = 1, #915) is NOT in the baseline: the books hold the
+// whole estimated figure out, the filter part included, so the measured credit is the one place that
+// request's filter saving appears, in dollars. The measured credit owns it (it is measured from the rate
+// card and the tier, and it does not depend on the unknown cache state), and the totals never count it.
+const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM request_components c
+		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `'))`
 
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
 // #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
