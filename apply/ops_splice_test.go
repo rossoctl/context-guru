@@ -1,6 +1,8 @@
 package apply_test
 
 import (
+	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,5 +110,191 @@ func TestSpliceKeepsSurvivorsWithIdenticalSiblingText(t *testing.T) {
 	}
 	if res.Trace.OpsDropped != 0 || len(res.Trace.Ops) != 1 || res.Trace.Ops[0].MessageSplice == nil {
 		t.Fatalf("ops = %+v dropped = %d: the splice was not reported", res.Trace.Ops, res.Trace.OpsDropped)
+	}
+}
+
+// dropExchanges is a count-changing component for the tests below. It removes every tool exchange whose
+// tool_use id is in dropIDs (the assistant message, its tool messages, and the sibling user text that follows
+// them up to the next assistant message) and puts one summary message where the first removed exchange began.
+// The tests do not run in parallel, so the package variable is safe.
+type dropExchanges struct{}
+
+var dropIDs map[string]bool
+
+func (dropExchanges) Name() string                 { return "dropex" }
+func (dropExchanges) Enabled(*components.Ctx) bool { return true }
+func (dropExchanges) Reformat(req *bschemas.BifrostChatRequest, _ *components.Report, _ *components.Ctx) error {
+	var out []bschemas.ChatMessage
+	summarized := false
+	in := req.Input
+	for i := 0; i < len(in); i++ {
+		m := in[i]
+		if m.Role == bschemas.ChatMessageRoleAssistant && m.ChatAssistantMessage != nil &&
+			len(m.ChatAssistantMessage.ToolCalls) > 0 &&
+			m.ChatAssistantMessage.ToolCalls[0].ID != nil && dropIDs[*m.ChatAssistantMessage.ToolCalls[0].ID] {
+			j := i + 1
+			for j < len(in) && in[j].Role != bschemas.ChatMessageRoleAssistant {
+				j++
+			}
+			if !summarized {
+				sum := m
+				sum.ChatAssistantMessage = nil
+				schema.SetMessageText(&sum, "summary")
+				out = append(out, sum)
+				summarized = true
+			}
+			i = j - 1
+			continue
+		}
+		out = append(out, m)
+	}
+	req.Input = out
+	return nil
+}
+
+func init() {
+	components.Register("dropex", func([]byte) (components.Component, error) { return dropExchanges{}, nil })
+}
+
+func spliceTU(id string) string {
+	return `{"role":"assistant","content":[{"type":"tool_use","id":"` + id + `","name":"Bash","input":{"command":"` + id + `"}}]}`
+}
+
+func spliceTR(id, text string) string {
+	return `{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + id + `","content":"out ` + id + `"},{"type":"text","text":"` + text + `"}]}`
+}
+
+// checkWireOrder asserts the invariant on a forwarded body: every tool_result follows the message that holds
+// its tool_use, and the kept messages are exactly the wanted raw messages, in order, each once.
+func checkWireOrder(t *testing.T, body []byte, want []string) {
+	t.Helper()
+	msgs := gjson.GetBytes(body, "messages").Array()
+	seenUse := map[string]bool{}
+	var got []string
+	for i, m := range msgs {
+		for _, blk := range m.Get("content").Array() {
+			if blk.Get("type").String() == "tool_result" && !seenUse[blk.Get("tool_use_id").String()] {
+				t.Fatalf("message %d holds a tool_result for %q before its tool_use: %s", i, blk.Get("tool_use_id").String(), body)
+			}
+		}
+		for _, blk := range m.Get("content").Array() {
+			if blk.Get("type").String() == "tool_use" {
+				seenUse[blk.Get("id").String()] = true
+			}
+		}
+		got = append(got, m.Raw)
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("forwarded messages:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func summaryMsg() string { return `{"role":"assistant","content":"summary"}` }
+
+// Round-1 finding of #930, trace A: a standalone user text and a kept exchange's sibling text have the same
+// bytes. The standalone message must keep its own wire message.
+func TestSpliceStandaloneTextEqualToKeptSiblingText(t *testing.T) {
+	dropIDs = map[string]bool{"d": true}
+	u0 := `{"role":"user","content":"CALL_TOOL again"}`
+	b := []string{u0, spliceTU("b"), spliceTR("b", "CALL_TOOL again"), spliceTU("d"), spliceTR("d", "x")}
+	body := `{"model":"claude-x","messages":[` + strings.Join(b, ",") + `]}`
+	res := traceOf(t, "dropex", bschemas.Anthropic, body)
+	if !res.Changed {
+		t.Fatal("precondition: the count-changing rewrite must be written back")
+	}
+	checkWireOrder(t, res.Body, []string{b[0], b[1], b[2], summaryMsg()})
+}
+
+// Round-1 finding of #930, trace B.
+func TestSpliceKeptPlainUserBeforeExchangeWithSameText(t *testing.T) {
+	dropIDs = map[string]bool{"d": true}
+	b := []string{`{"role":"user","content":"continue"}`, spliceTU("a"), spliceTR("a", "continue"), spliceTU("d"), spliceTR("d", "x")}
+	body := `{"model":"claude-x","messages":[` + strings.Join(b, ",") + `]}`
+	res := traceOf(t, "dropex", bschemas.Anthropic, body)
+	if !res.Changed {
+		t.Fatal("precondition: the count-changing rewrite must be written back")
+	}
+	checkWireOrder(t, res.Body, []string{b[0], b[1], b[2], summaryMsg()})
+}
+
+// Two kept exchanges with the same sibling text, a standalone text of that text before and after each.
+func TestSpliceRepeatedSiblingTextAdversarial(t *testing.T) {
+	dropIDs = map[string]bool{"d": true}
+	s := "CALL_TOOL again"
+	u := `{"role":"user","content":"` + s + `"}`
+	a1 := `{"role":"assistant","content":"ok1"}`
+	a2 := `{"role":"assistant","content":"ok2"}`
+	a3 := `{"role":"assistant","content":"ok3"}`
+	b := []string{u, a1, u, spliceTU("a"), spliceTR("a", s), a2, u, spliceTU("b"), spliceTR("b", s), a3, u, spliceTU("d"), spliceTR("d", s)}
+	body := `{"model":"claude-x","messages":[` + strings.Join(b, ",") + `]}`
+	res := traceOf(t, "dropex", bschemas.Anthropic, body)
+	if !res.Changed {
+		t.Fatal("precondition: the count-changing rewrite must be written back")
+	}
+	checkWireOrder(t, res.Body, append(append([]string{}, b[:11]...), summaryMsg()))
+}
+
+// A seeded property test: random transcripts of standalone texts and tool exchanges with repeated sibling text,
+// a random subset of the exchanges dropped. Every result must keep the invariant and the exact kept sequence.
+func TestSplicePropertyKeepsWireInvariant(t *testing.T) {
+	texts := []string{"CALL_TOOL again", "continue", "x"}
+	rng := rand.New(rand.NewSource(930))
+	changed := 0
+	const cases = 400
+	for n := 0; n < cases; n++ {
+		var wire []string
+		var exch [][]string // the wire messages of each exchange, with its id
+		var ids []string
+		textOf := func() string { return texts[rng.Intn(len(texts))] }
+		turns := 2 + rng.Intn(6)
+		for k := 0; k < turns; k++ {
+			if rng.Intn(2) == 0 {
+				wire = append(wire, `{"role":"user","content":"`+textOf()+`"}`)
+				wire = append(wire, `{"role":"assistant","content":"ok `+strconv.Itoa(k)+`"}`)
+				continue
+			}
+			id := "t" + strconv.Itoa(k)
+			ids = append(ids, id)
+			wire = append(wire, spliceTU(id), spliceTR(id, textOf()))
+			exch = append(exch, []string{spliceTU(id), spliceTR(id, "")})
+			wire = append(wire, `{"role":"assistant","content":"ok `+strconv.Itoa(k)+`"}`)
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		dropIDs = map[string]bool{}
+		for _, id := range ids {
+			if rng.Intn(2) == 0 {
+				dropIDs[id] = true
+			}
+		}
+		if len(dropIDs) == 0 {
+			dropIDs[ids[rng.Intn(len(ids))]] = true
+		}
+		// The expected kept sequence: drop the wire messages of a dropped exchange, summary at the first drop.
+		var want []string
+		sum := false
+		for i := 0; i < len(wire); i++ {
+			id := gjson.Get(wire[i], "content.0.id").String()
+			if id != "" && dropIDs[id] {
+				if !sum {
+					want = append(want, summaryMsg())
+					sum = true
+				}
+				i += 1 // skip the tool_result message; the plain assistant after it is kept
+				continue
+			}
+			want = append(want, wire[i])
+		}
+		body := `{"model":"claude-x","messages":[` + strings.Join(wire, ",") + `]}`
+		res := traceOf(t, "dropex", bschemas.Anthropic, body)
+		if !res.Changed {
+			continue
+		}
+		changed++
+		checkWireOrder(t, res.Body, want)
+	}
+	if changed < cases/2 {
+		t.Fatalf("only %d of %d generated cases were rewritten; the test is not exercising the rebuild", changed, cases)
 	}
 }

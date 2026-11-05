@@ -1783,7 +1783,7 @@ function renderSavedLedger(o, ka, partial) {
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
   const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
-    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + ' · estimate' }),
+    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
       el('strong', { text: usd(parts.manual) })),
     parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
   // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside

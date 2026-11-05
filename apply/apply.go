@@ -1982,21 +1982,27 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			toolSlotByID[id] = k
 		}
 	}
-	// keptWire is the wire messages a kept tool message names, by its tool_call_id. A text block that sits
+	// keptWireOf is the wire message a kept tool message names, by its tool_call_id. A text block that sits
 	// beside a tool_result in one wire message has the same bytes on every turn ("continue"), so matching
 	// it by bytes alone takes the first turn's slot, which a splice may have removed. It would emit that
 	// turn's wire message, with its orphan tool_result, and leave the survivor's message out (#910).
-	// A byte match therefore prefers a slot of a wire message a kept tool message already names.
-	keptWire := map[int]bool{}
-	for i := range out {
-		if out[i].Role != bschemas.ChatMessageRoleTool || out[i].ChatToolMessage == nil || out[i].ChatToolMessage.ToolCallID == nil {
-			continue
+	// A sibling text is therefore matched to a slot of the wire message that its ADJACENT kept tool message
+	// names. Nothing else uses this preference: a standalone message (a wholeMessage slot) has the same
+	// bytes as a sibling text, and giving it the sibling's wire would put a tool_result before its tool_use.
+	keptWireOf := func(i int) (int, bool) {
+		if i < 0 || i >= len(out) {
+			return 0, false
 		}
-		if k, ok := toolSlotByID[*out[i].ChatToolMessage.ToolCallID]; ok {
-			if bi, _, ok := splitSlotPath(slots[k].path); ok {
-				keptWire[bi] = true
-			}
+		m := out[i]
+		if m.Role != bschemas.ChatMessageRoleTool || m.ChatToolMessage == nil || m.ChatToolMessage.ToolCallID == nil {
+			return 0, false
 		}
+		k, ok := toolSlotByID[*m.ChatToolMessage.ToolCallID]
+		if !ok {
+			return 0, false
+		}
+		bi, _, ok := splitSlotPath(slots[k].path)
+		return bi, ok
 	}
 	var parts [][]byte
 	// emitted guards against emitting one body message TWICE: several normalized
@@ -2004,6 +2010,7 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 	// tool_result blocks), and a count-changing component may leave them
 	// non-contiguous — which duplicated the raw message, and with it its tool_use_id.
 	emitted := map[int]bool{}
+	var order []int // the body index of each kept message, in emitted order
 	for i := range out {
 		mb, err := json.Marshal(out[i])
 		if err != nil {
@@ -2020,13 +2027,19 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			}
 		}
 		if matched < 0 {
+			// The wire messages of the kept tool messages next to this one: a sibling text sits before or
+			// after the tool_result block of its own wire message.
+			prevWire, hasPrev := keptWireOf(i - 1)
+			nextWire, hasNext := keptWireOf(i + 1)
 			for k := range slots {
 				if used[k] || !bytes.Equal(mb, slots[k].pre) {
 					continue
 				}
-				if bi, _, ok := splitSlotPath(slots[k].path); ok && keptWire[bi] {
-					matched = k // the survivor of a kept wire message
-					break
+				if slots[k].kind == anthropicSiblingText {
+					if bi, _, ok := splitSlotPath(slots[k].path); ok && ((hasPrev && bi == prevWire) || (hasNext && bi == nextWire)) {
+						matched = k // the sibling text of the kept tool message beside it
+						break
+					}
 				}
 				if matched < 0 {
 					matched = k
@@ -2047,6 +2060,12 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		}
 		emitted[bi] = true
 		parts = append(parts, []byte(orig[bi].Raw))
+		order = append(order, bi)
+	}
+	// Defence in depth: a matching mistake must never reach the provider as an invalid body.
+	if !wireOrderValid(orig, order) {
+		slog.Warn("context-guru: rebuilt messages break the wire order; forwarding the original", "kept", order)
+		return body, false
 	}
 	var buf bytes.Buffer
 	buf.WriteByte('[')
@@ -2062,6 +2081,47 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		return body, false
 	}
 	return res, true
+}
+
+// wireOrderValid checks the kept body messages of a rebuild, in emitted order. Two rules must hold.
+// The kept messages keep their original relative order. A message that holds a tool_result does not
+// come before the message that holds its tool_use. If a rule fails, the caller forwards the original.
+func wireOrderValid(orig []gjson.Result, order []int) bool {
+	useAt := map[string]int{} // tool_use id -> position in order of the message that holds it
+	for pos, bi := range order {
+		if pos > 0 && bi <= order[pos-1] {
+			return false
+		}
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() == "tool_use" {
+				useAt[blk.Get("id").String()] = pos
+			}
+		}
+	}
+	// A tool_result is checked against the use in the ORIGINAL body, so a use that was removed is not blamed here.
+	origUse := map[string]int{}
+	for bi := range orig {
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() == "tool_use" {
+				origUse[blk.Get("id").String()] = bi
+			}
+		}
+	}
+	for pos, bi := range order {
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() != "tool_result" {
+				continue
+			}
+			id := blk.Get("tool_use_id").String()
+			if u, ok := origUse[id]; ok && u >= bi {
+				continue // the original body already had this order; not our change
+			}
+			if up, ok := useAt[id]; ok && up >= pos {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // toolCallIDAt reads the tool_use_id of the tool_result block a tool-text slot points at.
