@@ -61,10 +61,9 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 // An unknown lifetime cannot prove an expiry, so the library would never rescue after a gap past
 // the TTL (design §5.2). The TTL is 1h only when EVERY breakpoint of the forwarded body asks for it,
 // as the keeper decides: a 1h head over a 5m tail leaves a tail that expires in five minutes. The
-// keeper also needs the billed tier, which is known only after the response; the facts are written
-// before it, so a request that asks for 1h and is billed 5m keeps the 1h here. The library then
-// treats a gap of 5 to 60 minutes as hot, which can overstate a rescue (an edge case: a gateway that
-// downgrades the tier).
+// keeper also needs the billed tier, which is known only after the response. These facts are written
+// before it, so they hold the ASKED tier. accBilledTTL corrects it once the usage arrives, before the
+// library prices the request (context-guru#919).
 func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte, pings *PingStore,
 	session string, t accountant.Thread) accountant.EntryFacts {
 	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
@@ -86,3 +85,32 @@ func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // accPingKey is the key the ping store keeps one thread's ping facts under: the session and the
 // thread id as the accountant sees it ("main" for the primary thread).
 func accPingKey(session, threadID string) string { return session + "\x00" + threadID }
+
+// accBilledTTL lowers the entry TTL from the tier the request asked for (1h) to the tier the response
+// billed, when a gateway downgraded it. It runs after the usage arrives and before Compute, which reads
+// the facts' TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of
+// 5 to 60 minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
+//
+// The rule is keepalive.ResolveTier's: one hour needs every write billed at the one-hour tier. A request
+// that wrote nothing bills no tier, so the asked tier stands. Only an exact lifetime has a TTL that can be
+// lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd and is not
+// redone; it matters only when another thread of the session touched the entry. Nil-safe.
+func (c *capture) accBilledTTL(u Usage) {
+	if c == nil || c.accReq == nil {
+		return
+	}
+	f := &c.accReq.Facts
+	if f.Lifetime != accountant.LifetimeExact || f.TTL <= 5*time.Minute {
+		return
+	}
+	if u.CacheWrite > 0 && u.CacheWrite1h < u.CacheWrite {
+		f.TTL = 5 * time.Minute
+		// The library judges each part of the entry by the TTL of the breakpoint that wrote it, so the
+		// breakpoints must say 5m too. A copy: the slice may be the one the client hash cache holds.
+		bps := append([]accountant.Breakpoint(nil), c.accReq.Breakpoints...)
+		for i := range bps {
+			bps[i].TTL = "5m"
+		}
+		c.accReq.Breakpoints = bps
+	}
+}

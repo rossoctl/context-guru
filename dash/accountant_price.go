@@ -214,7 +214,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated = "", false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		return
@@ -335,6 +335,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
 	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
 	e.PriceEstimated = estimated
+	e.AccountantPriced = true
 	return ""
 }
 

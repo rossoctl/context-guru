@@ -476,12 +476,66 @@ func TestDeclCreditSkipsRequestsTheAccountantPriced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.FilterRequests != 2 || c.FilterReads != 2000 {
-		t.Fatalf("filter half = %d requests / %d reads, want 2 / 2000 (the priced request is already in the baseline)",
+	if c.FilterRequests != 3 || c.FilterReads != 3000 {
+		t.Fatalf("filter half = %d requests / %d reads, want 3 / 3000 (the priced request keeps its facts and adds no dollars)",
 			c.FilterRequests, c.FilterReads)
 	}
 	// 2,000 cache-read tokens at flatPrice's $0.1/MTok.
 	if math.Abs(c.FilterUSD-0.0002) > 1e-9 {
 		t.Errorf("filter USD = %g, want 0.0002", c.FilterUSD)
+	}
+}
+
+// The accountant's pricing drops only the DOLLARS of a request's filter credit. The requests, the tokens
+// the filter did not send and the first date are facts, so they stay (context-guru#911). The items of
+// /api/adapt/tools must then agree with the total: both add no dollars for the same rows.
+func TestFilterCreditKeepsFactsAndSkipsDollarsForAccountantPricedRows(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(day(0)+int64(i), "s1", "claude", 100, 90)
+		e.TenantID, e.Tools, e.FilteredDeclTokens, e.DeclDigest = "t1", 2, 5000, "d1"
+		e.Components = append(e.Components, CompRow{Component: "toolfilter", Kind: KindEnvelope, Acted: true,
+			Mutated: true, PricedBy: PricedByAccountant})
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: day(0), inv: &Inventory{Digest: "d1",
+		UseFingerprint: 1, Decls: []Decl{{Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 5000}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Requests != 10 || got.Reads != 50000 || got.Since != day(0) {
+		t.Errorf("facts = %d requests / %d reads / since %d, want 10 / 50000 / %d", got.Requests, got.Reads, got.Since, day(0))
+	}
+	if got.USD != 0 {
+		t.Errorf("USD = %g, want 0: the accountant booked these tokens", got.USD)
+	}
+	doc, err := db.ToolFilterDocFor(Filter{Tenant: "t1"}, flatPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Realized == nil || doc.Realized.Requests != 10 {
+		t.Errorf("Realized = %+v, want the measured block with 10 requests", doc.Realized)
+	}
+	saved, err := db.adaptToolsSaved(Filter{Tenant: "t1"}, flatPrice, []string{"mcp__srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Filter.Requests != 10 || saved.Filter.USD != 0 {
+		t.Errorf("saved.filter = %d requests / $%g, want 10 / 0", saved.Filter.Requests, saved.Filter.USD)
+	}
+	sum := 0.0
+	for _, it := range saved.Filter.Items {
+		sum += it.USD
+	}
+	if sum > saved.Filter.USD+1e-12 {
+		t.Errorf("items sum to $%g, more than the total $%g: %+v", sum, saved.Filter.USD, saved.Filter.Items)
 	}
 }

@@ -253,6 +253,9 @@ type adaptToolsReq struct {
 	tools                 int
 	cacheRead, cacheWrite int64
 	cacheWrite1h, fresh   int64
+	// inBaseline is set (opt.onlyFiltered only) when the accountant priced this request's toolfilter
+	// removal: its tokens count, its dollars do not, as in DeclFilterSavings (context-guru#911).
+	inBaseline bool
 }
 
 // adaptToolsSet is one declaration set: its tool count, when it was first seen, and the billed
@@ -332,13 +335,15 @@ type carriedRequest struct {
 func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	keyOf func(session, kind, name, server string) string, opt carriedOpts) (*carriedScan, error) {
 	where, args := f.where()
+	inBaselineCol := `0`
 	if opt.onlyFiltered {
 		where += ` AND r.filtered_decl_tokens > 0`
+		inBaselineCol = declFilterInBaseline
 	}
 	out := &carriedScan{Items: map[string]*carried{}, keepRequests: opt.perRequest}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
-		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input
+		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input, `+inBaselineCol+`
 		FROM requests r WHERE `+where+` AND r.tools > 0 ORDER BY r.ts`, args...)
 	if err != nil {
 		return nil, err
@@ -346,7 +351,7 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	for rows.Next() {
 		var t, s string
 		var q adaptToolsReq
-		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh); err != nil {
+		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh, &q.inBaseline); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -465,6 +470,14 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			continue
 		}
 		m := sums[st]
+		if r.inBaseline {
+			// The accountant booked this request's removal: count the request and the tokens, add no dollars.
+			for key, v := range m {
+				byID[key].Requests++
+				byID[key].Reads += int64(v[0])
+			}
+			continue
+		}
 		p, ok := modelinfo.Price{}, false
 		if price != nil && r.model != "" {
 			p, ok = price(r.model)
