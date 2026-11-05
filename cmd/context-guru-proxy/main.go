@@ -973,6 +973,13 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	if d.rec == nil {
 		return
 	}
+	// The keeper calls this from its own goroutine. A panic here (a price lookup, the row build) would end the
+	// whole process, so log it and carry on without this row (issue #918).
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("context-guru: keep-alive ping row panicked; the row is dropped", "panic", p)
+		}
+	}()
 	var price modelinfo.Price
 	priced := false
 	if d.prices != nil && r.Model != "" {

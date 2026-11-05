@@ -17,6 +17,8 @@ type savingsTracker struct {
 	clients sync.Map // *accountant.Request -> clientHash
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
 	onEnd func(*accountant.Request)
+	// written is the last state file's bytes, for save to skip an unchanged write.
+	written lastSaved
 }
 
 // clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does

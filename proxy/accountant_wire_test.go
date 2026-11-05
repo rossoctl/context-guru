@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"github.com/rossoctl/accountant"
 	"io"
 	"math"
 	"net/http"
@@ -291,5 +292,44 @@ func TestResponsesWireBooksNoSavingAndSaysWhy(t *testing.T) {
 		if saved := e.BaselineCostUSD - e.CostUSD; saved > 1e-12 {
 			t.Errorf("request %d: booked a saving of %g on a wire the accountant does not read", i+1, saved)
 		}
+	}
+}
+
+// A panic in the savings begin (a hostile body) is recovered: the record is dropped, the figure is lost, and the
+// caller goes on (issue #918).
+func TestAccBeginRecoversAndDrops(t *testing.T) {
+	s := newSavingsTracker()
+	s.trackers = nil // BeginRequest on a nil Trackers panics
+	c := &capture{savings: s}
+	c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s"}, benchBody())
+	if c.accReq != nil {
+		t.Error("a panicked begin left a record")
+	}
+}
+
+// The panic must not lose the request: the handler forwards it, and the event books no saving.
+func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
+	var got int
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got++
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer up.Close()
+	h, _, _ := accHandler(t, up.URL)
+	h.savings.trackers = nil
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-panic")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || got != 1 {
+		t.Errorf("status %d, upstream calls %d, want 200 and 1", resp.StatusCode, got)
 	}
 }

@@ -370,3 +370,26 @@ func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
 		t.Errorf("wrote nothing, gap 20m: phase = %q, want hot (no tier billed: the asked 1h stands)", got)
 	}
 }
+
+// A panic in the library while a ping is priced is recovered: the keeper's goroutine must live (issue #918).
+func TestPingSavingsRecoversFromALibraryPanic(t *testing.T) {
+	origOps, origStd := pingOps, accountantStandalone
+	defer func() { pingOps, accountantStandalone = origOps, origStd }()
+	pings := NewPingStore()
+
+	pingOps = func(accountant.Ping, accountant.Billing) (accountant.RequestOps, accountant.PingFacts) {
+		panic("boom in PingOps")
+	}
+	if _, ok := PingSavings(okReport(), pings); ok {
+		t.Error("a panicking PingOps reported a figure")
+	}
+	pingOps = origOps
+	accountantStandalone = func(accountant.RequestOps) accountant.Result { panic("boom in ComputeStandalone") }
+	if _, ok := PingSavings(okReport(), pings); ok {
+		t.Error("a panicking ComputeStandalone reported a figure")
+	}
+	accountantStandalone = origStd
+	if _, ok := PingSavings(okReport(), pings); !ok {
+		t.Error("after the panics a normal ping was not priced")
+	}
+}

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,4 +159,79 @@ func TestAccDropForgetsTheClientHash(t *testing.T) {
 		t.Fatalf("accDrop left %d client hashes and accReq %v", held(), c.accReq)
 	}
 	(*capture)(nil).accDrop() // nil-safe, as before
+}
+
+// A file from another proxy version is ignored (fail open). A file without the wrap is the old format (issue #917).
+func TestSavingsStateRefusesAnotherProxyVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	twoTurns(t, path)
+	if !newSavingsTracker().restore(path, time.Now()) {
+		t.Fatal("a file of the current version was not restored")
+	}
+	raw, _ := os.ReadFile(path)
+	old := strings.Replace(string(raw), fmt.Sprintf(`"cgStateVersion":%d`, accStateVersion), `"cgStateVersion":1`, 1)
+	if old == string(raw) {
+		t.Fatal("the version field is not in the file")
+	}
+	os.WriteFile(path, []byte(old), 0o600)
+	if newSavingsTracker().restore(path, time.Now()) {
+		t.Error("a file with an old proxy version was restored")
+	}
+	// The bare library snapshot, as the first release wrote it.
+	var f accStateFile
+	json.Unmarshal(raw, &f)
+	os.WriteFile(path, f.Snapshot, 0o600)
+	if newSavingsTracker().restore(path, time.Now()) {
+		t.Error("an unwrapped snapshot was restored")
+	}
+}
+
+// restore removes the temp files a crash left, and only those.
+func TestSavingsStateRemovesStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	stale := filepath.Join(dir, "state.json.tmp123")
+	other := filepath.Join(dir, "other.tmp1")
+	os.WriteFile(stale, []byte("x"), 0o600)
+	os.WriteFile(other, []byte("x"), 0o600)
+	newSavingsTracker().restore(path, time.Now())
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("the stale temp file stayed")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Error("restore removed a file that is not ours")
+	}
+}
+
+// save writes nothing when the state did not change, and writes again when it did or when the file is gone.
+func TestSavingsStateSkipsAnUnchangedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	c, _, _ := twoTurns(t, path) // saved once through a different tracker
+	_ = c
+	s := newSavingsTracker()
+	if err := s.save(path); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(path, old, old)
+	if err := s.save(path); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(path)
+	if fi.ModTime().After(old.Add(time.Minute)) {
+		t.Error("an unchanged state was written again")
+	}
+	os.Remove(path)
+	if err := s.save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Error("a removed file was not written again")
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("save left %s", e.Name())
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -23,6 +24,15 @@ func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
 	if c == nil || c.savings == nil {
 		return
 	}
+	// The savings record is a side figure. A panic while hashing a hostile body must cost that figure only, and
+	// must not reach the pre-forward recover, which would throw away the pipeline's rewrite of the request
+	// (issue #918). The record is dropped, and the event books no saving.
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: BeginRequest panicked; the request is recorded with no saving", "panic", p)
+			c.accDrop()
+		}
+	}()
 	c.accReq = c.savings.begin(meta, client)
 	c.accClient = client
 }
