@@ -228,3 +228,25 @@ func assertPremiumBooked(t *testing.T, client, fwd []byte, ops []accountant.Oper
 	}
 	t.Fatalf("no ttlPremium effect: ops %+v, effects %+v", ops, res.CacheEffects)
 }
+
+func TestMessageOpsExplainTheDeferralList(t *testing.T) {
+	m0, m1 := `{"role":"user","content":"hi"}`, `{"role":"system","content":"env"}`
+	m1l := `{"role":"system","content":"env\n\nlist of names"}`
+	ins := `{"role":"system","content":"list of names"}`
+	for _, tc := range []struct {
+		name, before, after string
+		wantOps             int
+	}{
+		{"appended", `{"messages":[` + m0 + `,` + m1 + `]}`, `{"messages":[` + m0 + `,` + m1l + `]}`, 1},
+		{"inserted", `{"messages":[` + m0 + `,` + m1 + `]}`, `{"messages":[` + m0 + `,` + ins + `,` + m1 + `]}`, 1},
+		{"unchanged", `{"messages":[` + m0 + `]}`, `{"messages":[` + m0 + `]}`, 0},
+	} {
+		ops := messageOps("tooldefer", []byte(tc.before), []byte(tc.after))
+		if len(ops) != tc.wantOps {
+			t.Fatalf("%s: %d ops, want %d", tc.name, len(ops), tc.wantOps)
+		}
+		if got, want := opsDelta(ops, accountant.SectionMessages), sectionDelta([]byte(tc.before), []byte(tc.after), accountant.SectionMessages); got != want {
+			t.Errorf("%s: ops explain %d bytes of messages, the bodies differ by %d", tc.name, got, want)
+		}
+	}
+}

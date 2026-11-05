@@ -135,3 +135,24 @@ func TestTheTailBreakpointIsAddedPastTheLookback(t *testing.T) {
 		t.Fatalf("not added past the lookback:\n%s", out)
 	}
 }
+
+// The tail mark is reported as an operation on the last message, sized in wire bytes, so the
+// accountant's sum check holds (#906).
+func TestTailOpCoversTheMarkBytes(t *testing.T) {
+	body := tailBody(`{"type":"ephemeral"}`, 5000)
+	out, ok := markTail(body)
+	if !ok {
+		t.Fatal("no tail mark")
+	}
+	op, ok := tailOp(body, out)
+	if !ok {
+		t.Fatal("no operation")
+	}
+	last := len(gjson.GetBytes(out, "messages").Array()) - 1
+	if op.At.Index != last || op.SizeAfter.Bytes-op.SizeBefore.Bytes != len(out)-len(body) {
+		t.Fatalf("op %+v, body grew by %d", op, len(out)-len(body))
+	}
+	if again, _ := tailOp(body, out); again.ChangeID != op.ChangeID {
+		t.Fatal("the ChangeID is not stable")
+	}
+}

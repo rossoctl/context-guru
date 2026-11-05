@@ -181,7 +181,8 @@ Limits:
   of 10,000 threads (the oldest go first), the next request of the thread is a first request again.
 - The figures are estimates. The library converts removed bytes to tokens with the request's own
   billed-token ratio. A figure that implies more removed tokens than the request had is rejected
-  (`implausible_size`).
+  (`implausible_size`). The bound counts message tokens, so it leaves out operations on the tool
+  section (removed or rewritten declarations).
 - The cost and the provider's cache saving are not the library's.
 - Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
   the summarize ledger and the replay cap value those rows with the legacy rule at read time, and

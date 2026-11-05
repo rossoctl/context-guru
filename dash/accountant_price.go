@@ -191,6 +191,7 @@ const EndedChangeComponent = "ended_change"
 var envelopeComponents = map[string]bool{
 	"expand": true, "adjudicate": true, "headttl": true,
 	"toolschema": true, "toolfilter": true, "cachesplit": true,
+	"tailbreakpoint": true, "tooldefer": true,
 }
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
@@ -347,12 +348,24 @@ func inAdded(rows []CompRow, name string) bool {
 	return false
 }
 
+// toolSectionOperators are the operators whose operations act on the tools section, not on messages:
+// the declaration filter and the schema rewrite (proxy/accountant_envelope.go reports them from a body
+// diff), and the two declarations the proxy injects. Their tokens are not in TokensBefore, which counts
+// message text only.
+var toolSectionOperators = map[string]bool{
+	"context-guru.toolfilter": true, "context-guru.toolschema": true,
+	"context-guru.expand": true, "context-guru.adjudicate": true,
+}
+
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
-// AccountantFigure.ByComponent: not DryRun, not a spend.
+// AccountantFigure.ByComponent: not DryRun, not a spend, and not an operation on the tools section.
+// TokensBefore is the size of the messages. A tool declaration is not in it, so 2,188 removed
+// declaration tokens would look larger than a 121-token conversation and drop the whole result (#907).
+// The bound stays for every operation on messages.
 func (e *Event) countedSavedTokens() int {
 	n := 0
 	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
+		if o.DryRun || o.Call != nil || toolSectionOperators[o.Operator] {
 			continue
 		}
 		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
