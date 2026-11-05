@@ -1982,6 +1982,22 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			toolSlotByID[id] = k
 		}
 	}
+	// keptWire is the wire messages a kept tool message names, by its tool_call_id. A text block that sits
+	// beside a tool_result in one wire message has the same bytes on every turn ("continue"), so matching
+	// it by bytes alone takes the first turn's slot, which a splice may have removed. It would emit that
+	// turn's wire message, with its orphan tool_result, and leave the survivor's message out (#910).
+	// A byte match therefore prefers a slot of a wire message a kept tool message already names.
+	keptWire := map[int]bool{}
+	for i := range out {
+		if out[i].Role != bschemas.ChatMessageRoleTool || out[i].ChatToolMessage == nil || out[i].ChatToolMessage.ToolCallID == nil {
+			continue
+		}
+		if k, ok := toolSlotByID[*out[i].ChatToolMessage.ToolCallID]; ok {
+			if bi, _, ok := splitSlotPath(slots[k].path); ok {
+				keptWire[bi] = true
+			}
+		}
+	}
 	var parts [][]byte
 	// emitted guards against emitting one body message TWICE: several normalized
 	// messages can share a body index (an Anthropic user message with several
@@ -2005,9 +2021,15 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		}
 		if matched < 0 {
 			for k := range slots {
-				if !used[k] && bytes.Equal(mb, slots[k].pre) {
-					matched = k
+				if used[k] || !bytes.Equal(mb, slots[k].pre) {
+					continue
+				}
+				if bi, _, ok := splitSlotPath(slots[k].path); ok && keptWire[bi] {
+					matched = k // the survivor of a kept wire message
 					break
+				}
+				if matched < 0 {
+					matched = k
 				}
 			}
 		}
