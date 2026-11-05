@@ -252,19 +252,16 @@ form, and only for names it deferred. Source: the
 
 **On any fault, the proxy disables, and never switches.** It marks the `ToolSearch` description
 hash disabled, per tenant. It defers nothing for that hash until the mark expires. The live thread
-pays one cache rewrite. 3 reasons:
+pays one cache rewrite. 2 reasons (since #934):
 
 1. `unknown_description`: the description hash is unknown. A new Claude Code version is likely.
-2. `non_select_query_for_our_tool`: a query names a tool the proxy deferred, but not in the
-   `select:` form. A format change is likely.
-3. `break`: the model called a deferred tool that was never loaded, or got a "not loaded" error.
+2. `break`: the model called a deferred tool that was never loaded, or got a "not loaded" error.
 
 | # | Kind | Statement | Signal | Threshold (proposed) | Baseline |
 |---|---|---|---|---|---|
 | T1 | side effect | No user loses a tool. | `cg_tooldefer_client_disabled_total{reason="break"}`; `/stats` `tool_defer.client_search_disabled.break` | **any** | not shipped yet |
 | T2 | intent | A Claude Code release does not silently stop option B. | `cg_tooldefer_client_disabled_total{reason="unknown_description"}`, with the `desc_hash` from the log line and the Claude Code version | any; report the version and the hash | not shipped yet |
-| T3 | intent | The `select:` form is the only form used for the proxy's tools. | `cg_tooldefer_client_disabled_total{reason="non_select_query_for_our_tool"}` | any | not shipped yet |
-| T4 | side effect | A disable costs at most one cache rewrite on the live thread. `break` and `non_select_query_for_our_tool` stop deferral on the live thread and cost exactly one (confirmed in the #900 review). `unknown_description` is decided at thread start and costs none. | for each `break` or `non_select_query_for_our_tool` log line: misses (`cache_write > cache_read`) on the later requests of that `session` and `thread` | more than 1 miss per disable | not shipped yet |
+| T4 | side effect | A disable costs at most one cache rewrite on the live thread. `break` stops deferral on the live thread and costs exactly one. `unknown_description` is decided at thread start and costs none. | for each `break` log line: misses (`cache_write > cache_read`) on the later requests of that `session` and `thread` | more than 1 miss per disable | not shipped yet |
 
 - **What counts as a `break` (#900):** only a deferred tool's own error result: "not loaded",
   "no such tool" or "does not exist". A direct call that worked is a use, not a break.
@@ -274,12 +271,17 @@ pays one cache rewrite. 3 reasons:
   - `add_backs` now counts the #825 path only.
   - The probe log line `cg.tooldefer_probe` carries `probe=server|client`.
   - Metric: `cg_tooldefer_client_disabled_total{reason}`, with `reason` one of
-    `unknown_description`, `non_select_query_for_our_tool`, `break`.
-  - `/stats`: `tool_defer.client_search_disabled`, an object with the same 3 reasons.
+    `unknown_description`, `break`.
+  - `/stats`: `tool_defer.client_search_disabled`, an object with the same 2 reasons.
+  - **#934 (merged as 442fe9a0, in the next release) removed the reason
+    `non_select_query_for_our_tool`.** Claude Code's own ToolSearch indexes every tool, also the
+    ones the proxy defers (the #871 controlled test). So a keyword query for one of our tools
+    works, and it no longer disables anything. Releases up to v0.6.7 still send this third label.
+    The monitor ignores it.
   - Log (warn): `cg.tooldefer_client_search_disabled`, with `reason`, `desc_hash` (8 characters),
     `session` and `thread`. It holds no query text.
-- **How it counts:** `unknown_description` and `non_select_query_for_our_tool` count once per
-  tenant and hash per 24 h. `break` counts every time. So T2 and T3 count disables, not events.
+- **How it counts:** `unknown_description` counts once per tenant and hash per 24 h. `break`
+  counts every time. So T2 counts disables, not events.
 - **Disable scope:** per tenant and description hash, for 24 h. A proxy restart clears it.
 - **Known-good hash today:** `88033eceb421f1c2`. It was the only `ToolSearch` description in 109
   captures. A T2 alert with any other hash means a new description.
@@ -326,11 +328,11 @@ pays one cache rewrite. 3 reasons:
 | G7 | A `cg_*` metric for tool deferral. Only `/stats` and the database show it today. | Export the `/stats` `tool_defer` counters as `cg_tooldefer_*`. | No |
 | G9 | The expand rate of `extract_llm` alone (E2). The database counts expands per request, not per component that made the marker. Only the sweep has its own column. | Record the component that made each restored marker, as a count per component (for example `expands_by_component` in `request_components`). | No |
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
-| G6 | Tool deferral disables, by reason (T1 to T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
+| G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, S1, S6, X1, X4, T1, T2, T3, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, K7, K8, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, E1, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
