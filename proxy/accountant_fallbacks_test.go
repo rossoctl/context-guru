@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/tooldefer"
 )
 
 // accPostBody sends body to the handler under session and returns the response status.
@@ -103,5 +106,47 @@ func TestRemovedToolDeclarationsDoNotTripThePlausibilityBound(t *testing.T) {
 		if i == 1 && e.BaselineCostUSD <= e.CostUSD {
 			t.Errorf("no saving booked for the removed declarations: baseline %v cost %v", e.BaselineCostUSD, e.CostUSD)
 		}
+	}
+}
+
+// Tool deferral (`defer: auto`) marks declarations defer_loading, adds the search tool and puts a
+// names list at messages[1], all after the pipeline reported its operations. The tools half is the
+// envelope reporter's; the names list is its own operation. Without it every request of a deferred
+// thread failed check_sum and conservation (#908).
+func TestToolDeferReportsItsNamesList(t *testing.T) {
+	up := billedUpstream(t)
+	defer up.Close()
+	for _, tc := range []struct {
+		name string
+		msgs []any
+	}{
+		// Claude Code's shape: a system message already at messages[1], the list is appended to it.
+		{"appended", []any{map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "system", "content": "# Environment\nwd: /w"}}},
+		// No message at index 1: the list is a new system message.
+		{"inserted", []any{map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "assistant", "content": "hello"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rec, tap := accHandlerOpts(t, up.URL,
+				"pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [mcp__big]\n",
+				func(o *Options) { o.ToolDeferPath = filepath.Join(t.TempDir(), tooldefer.FileName) })
+			// The provider check of deferral runs on the first request; seed it as passed.
+			h.toolDefer().prober.Seed(tooldefer.ProbeKey{Upstream: up.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"},
+				tooldefer.Pass, time.Now())
+			decl := func(name string, n int) map[string]any {
+				return map[string]any{"name": name, "description": strings.Repeat("Does a thing. ", n),
+					"input_schema": map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}}}
+			}
+			b, _ := json.Marshal(map[string]any{"model": "claude-sonnet-5-5", "max_tokens": 64,
+				"tools":    []any{decl("bash", 3), decl("mcp__big", 300)},
+				"messages": tc.msgs})
+			accPostBody(t, h, "sess-defer", b)
+			accPostBody(t, h, "sess-defer", b)
+			waitForRows(t, rec, 2)
+			for _, e := range tap.all() {
+				accNoSumFailure(t, e)
+			}
+		})
 	}
 }

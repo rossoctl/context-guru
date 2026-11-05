@@ -1588,7 +1588,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
 				// the never-defer list, and the names list must see the tools as they go upstream.
 				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
+				preDefer := body
 				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
+				// Deferral adds its names list to the messages after the pipeline reported its
+				// operations. Report it as an operation of its own, after theirs (#908).
+				if di != nil && !bytes.Equal(preDefer, body) {
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], messageOps("tooldefer", preDefer, body)...)
+				}
 			}
 			// The savings record ends HERE, after both injections, with the body that goes
 			// upstream: the provider bills the injected tool declarations, so the library's
