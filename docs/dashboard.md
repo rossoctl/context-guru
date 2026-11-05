@@ -141,10 +141,20 @@ Limits:
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
   can be too high if a component broke the cache on that request (accountant design §6.4). The
   event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
-  in the request JSON. The request detail marks the net saving with "≈" and says why in its tooltip.
-  Overview counts them (`estimated_requests`, on the full and the lean path) and the Preset card says how many of
-  the window's requests they are. The totals and charts add such a figure like any other: they do not mark it. A row written before
-  the column existed reads as exact.
+  in the request JSON. The library prices each removal as a write the provider would have made. If the cache was
+  in fact already warm (a restart that lost the state file, or a session begun before the proxy), the figure is
+  about 2x too high, and the proxy cannot say by how much, because the size of the unseen warm prefix is what the
+  missing history held. So the proxy books no saving on such a request: `baseline_cost_usd` equals `cost_usd` and
+  every component `saved_usd` is 0. Net saved, total saved, the Components table and the keep-alive tab therefore
+  agree. The figure that was not booked is stored in `requests.estimated_saved_usd` and sent as `estimated_saved_usd`
+  (request JSON) and as `estimated_saved_usd` (Overview, summed over the window). The request detail shows it on its
+  own line, marked "≈". The Preset card says how many requests are not counted and shows the estimated figure beside
+  them (`estimated_requests`, on the full and the lean path). A row written before the column existed reads as exact and
+  keeps the figure it was booked with. The keep-alive rescue and the split saving do not depend on a break and stay booked.
+- A request the provider rejected (any status that is not 2xx) books no saved tokens: `tokens_after` equals
+  `tokens_before`, `saved_unique` and `attempted_tokens` are 0, and each component row has `saved_gross` 0,
+  `saved_unique` 0 and `acted` false. The provider billed none of it, so tokens and dollars agree. A status of 0
+  (the request never reached a provider, such as `/compact`) and any 2xx are not changed.
 - The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
   every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
   changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.

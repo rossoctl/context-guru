@@ -526,6 +526,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
+	// A request the provider rejected saved nothing: book no tokens beside its zero dollars (#914).
+	e.DropUnbilledSavings()
 	e.ThreadID = c.thread
 	e.AgentCompaction = c.agentComp
 	// The provider's terminal reason, off the same response bytes the token tiers came
