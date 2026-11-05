@@ -783,6 +783,27 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.UncompressedReason = uncompressedReason(e, tr)
 }
 
+// DropUnbilledSavings removes the token saving from a request the provider rejected (issue #914).
+// The provider billed none of its tokens, so cost and baseline are 0, and a token saving booked
+// beside them would disagree with the dollar saving. It sets TokensAfter to TokensBefore, zeroes
+// SavedUnique, and zeroes SavedGross and SavedUnique on every component row. A row keeps Mutated
+// (the proxy did rewrite the body) but is no longer Acted. A status of 0 is a request that never
+// reached a provider (/compact, an upstream that did not answer), and a 2xx was billed, so
+// neither is touched. AttemptedTokens goes to 0 too: Overview divides the gross saving by it over
+// the rows that have it, and a rejected row must leave both sides. FrozenTokens describes the
+// cache freeze, not a saving, and stays.
+func (e *Event) DropUnbilledSavings() {
+	if e.Status == 0 || (e.Status >= 200 && e.Status < 300) {
+		return
+	}
+	e.TokensAfter = e.TokensBefore
+	e.SavedUnique, e.AttemptedTokens = 0, 0
+	for i := range e.Components {
+		c := &e.Components[i]
+		c.SavedGross, c.SavedUnique, c.Acted = 0, 0, false
+	}
+}
+
 // uncompressedReason answers "why didn't you compact this?" from what the trace
 // shows. Empty means we did compact.
 func uncompressedReason(e *Event, tr apply.Trace) string {
