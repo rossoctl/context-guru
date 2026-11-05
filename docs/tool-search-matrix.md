@@ -16,6 +16,54 @@ This page lists which search tool each client and model uses when `ultrahigh` de
 | Responses client with no `tool_search` of its own (the proxy checks the tools, not the model) | Our `context_guru_tools` | The proxy, in band | Tools the history rule picks | A 400 turns deferral off for the tenant and model | #825, #884, #897 |
 | Responses client with no search, gpt-5.6 and later | OpenAI's server-side search | The provider | Not built yet | - | #876 |
 
+## What the proxy defers
+
+**What it is.** Every request carries the full definition of every tool the client offers. Many
+of them are never used. To defer a tool is to keep its definition out of the prompt, but not
+out of reach: the model sees only the tool's name, and loads the definition through a
+search tool when it needs it. Nothing is lost, so a wrong guess costs one search turn, not a
+missing tool.
+
+**How it works.**
+
+- **On Claude models,** the tool stays in `tools` with `defer_loading: true`. The model sees its
+  name in a short names list at `messages[1]`. That is Claude Code's own deferred-tools block when
+  it exists, else a system message the proxy inserts there. A search loads the definition inline,
+  so the cached prefix stays the same.
+- **On GPT, GLM and Kimi,** which ignore `defer_loading`, the proxy removes the tool from `tools`
+  and lists its name. When the model searches for it with `context_guru_tools`, the proxy adds the
+  tool back, and keeps it for the rest of the thread.
+- **The set is decided once per thread,** at its first request, and never changes inside the
+  thread. A tool that moved between loaded and deferred would rewrite the whole cached prefix. The
+  set is stored with tool names only, and a restart keeps it.
+
+**The tool history rule.** A tool is deferred only when all of these hold:
+
+1. The thread has not used it so far.
+2. The user's last 3 sessions, in any project, declared it and used it in none.
+3. This project did not use it in its last 10 sessions (the project veto).
+4. It is not on the never-defer list. The list holds Bash, Read, Edit, Write, Agent, Skill,
+   ToolSearch, AskUserQuestion, Context Guru's own tools, a tool that `tool_choice` forces, and
+   the account's `keep` list.
+5. It weighs at least 200 tokens on the original request. These are tokens of the proxy's own
+   tokenizer (o200k): about 340 Claude tokens on Sonnet and Opus, about 275 on Haiku.
+
+More details:
+
+- **An MCP server is one unit.** All its tools are deferred together, or none is. A use of any of
+  its tools counts as a use of the server, and the 200-token minimum applies to the server's total.
+- **A load counts as a use.** A tool the model loaded through search stays loaded in the user's
+  next sessions.
+- **No history, no deferral.** With fewer than 3 sessions of history for the user, nothing is
+  deferred.
+- **The `always_defer` list** (#878) skips rules 2 and 3 and the 3-session minimum, for the tools
+  or MCP servers on it. Rules 1, 4 and 5 still apply, and `keep` wins when a name is on both lists.
+- **Turn it off** with `toolfilter: {defer: off}`, or leave `ultrahigh`. In Claude Code,
+  `ENABLE_TOOL_SEARCH=false` also turns it off.
+
+The code is in `tooldefer/tooldefer.go`: the rule in its package comment, the thresholds
+(`UserSessions`, `ProjectSessions`, `MinTokens`) and the never-defer list.
+
 ## Claude Code with `ToolSearch`: how it works
 
 - **Thread start.** The proxy checks a hash of the `ToolSearch` description. The description
