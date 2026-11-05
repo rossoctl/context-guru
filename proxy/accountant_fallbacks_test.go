@@ -76,3 +76,32 @@ func TestTailBreakpointReportsItsBytes(t *testing.T) {
 		t.Fatalf("second request fell back: %s", got)
 	}
 }
+
+// A small conversation that drops a large tool list: the removed declarations are many times the
+// size of the messages. The plausibility bound reads message tokens, so it dropped the whole result
+// with implausible_size (#907).
+func TestRemovedToolDeclarationsDoNotTripThePlausibilityBound(t *testing.T) {
+	up := billedUpstream(t)
+	defer up.Close()
+	h, rec, tap := accHandlerYAML(t, up.URL,
+		"pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    remove: [big_one, big_two]\n")
+	decl := func(name string, n int) map[string]any {
+		return map[string]any{"name": name, "description": strings.Repeat("Does a thing. ", n),
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}}}
+	}
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"tools":    []any{decl("bash", 3), decl("big_one", 400), decl("big_two", 400)},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+	accPostBody(t, h, "sess-tools", b)
+	accPostBody(t, h, "sess-tools", b)
+	waitForRows(t, rec, 2)
+	for i, e := range tap.all() {
+		accNoSumFailure(t, e)
+		if e.TokensBefore >= 100 {
+			t.Fatalf("precondition: messages must be small, TokensBefore = %d", e.TokensBefore)
+		}
+		if i == 1 && e.BaselineCostUSD <= e.CostUSD {
+			t.Errorf("no saving booked for the removed declarations: baseline %v cost %v", e.BaselineCostUSD, e.CostUSD)
+		}
+	}
+}
