@@ -274,7 +274,9 @@ function resolveTime(v, nowMs) {
   if (v === 'now') return nowMs;
   if (typeof v === 'string') {
     const m = /^now-(\d+)([smhdw])$/.exec(v);
-    if (m) return nowMs - Number(m[1]) * RANGE_UNIT_MS[m[2]];
+    // Round `now` down to 30 s so a relative range gives the same since for 30 s and the server cache can hit.
+    // The server keeps since exact (issue #916), so this rounding is the UI's own choice.
+    if (m) return Math.floor(nowMs / 30000) * 30000 - Number(m[1]) * RANGE_UNIT_MS[m[2]];
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : 0;
   }
