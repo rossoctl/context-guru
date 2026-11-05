@@ -114,9 +114,9 @@ func TestClientModeAddsOnlyOurToolsToSelectQueries(t *testing.T) {
 	}
 }
 
-// A keyword query that does not name our tools passes through. One that names them is a format
-// change: the hash is disabled and the thread stops deferring.
-func TestClientModeNonSelectQueryDisables(t *testing.T) {
+// A keyword query passes through untouched, also one that names a deferred tool: Claude Code's own
+// search finds it (#871). Nothing is disabled and the thread keeps deferring.
+func TestClientModeKeywordQueryPassesThrough(t *testing.T) {
 	e, _ := clientEnv(t, filepath.Join(t.TempDir(), FileName))
 	Apply(e, creq(body(catalogue(), "")))
 	o := Apply(e, creq(body(catalogue(), "", searchRound("t1", "cron jobs", noMatch)...)))
@@ -124,20 +124,20 @@ func TestClientModeNonSelectQueryDisables(t *testing.T) {
 		t.Fatalf("keyword query: %s", show(o))
 	}
 	o = Apply(e, creq(body(catalogue(), "", searchRound("t2", "+Workflow script", noMatch)...)))
-	if o.Changed || o.ClientDisabled != ReasonNonSelectQuery || e.Gate.DisabledNonSel.Load() != 1 {
-		t.Fatalf("a non-select query for our tool: %s (%q)", show(o), o.ClientDisabled)
+	if !o.Changed || result(o.Body, 3) != noMatch || o.ClientDisabled != "" {
+		t.Fatalf("a keyword query for our tool: %s (%q)", show(o), o.ClientDisabled)
 	}
 	h := DescHash(body(catalogue(), ""))
-	if !e.Gate.ClientDisabled("", h) {
-		t.Fatal("hash not marked disabled")
+	if e.Gate.ClientDisabled("", h) {
+		t.Fatal("hash marked disabled")
 	}
-	// The live thread stays undeferred, and a new thread defers nothing.
-	if o = Apply(e, creq(body(catalogue(), "", searchRound("t3", "x", noMatch)...))); o.Changed {
-		t.Fatalf("live thread still deferred: %s", show(o))
+	// The live thread keeps deferring, and a new thread defers too.
+	if o = Apply(e, creq(body(catalogue(), "", searchRound("t3", "x", noMatch)...))); !o.Changed {
+		t.Fatalf("live thread stopped deferring: %s", show(o))
 	}
 	r := creq(body(catalogue(), ""))
 	r.Thread = "new"
-	if o = Apply(e, r); o.Changed || o.Why != "client_search_disabled" {
+	if o = Apply(e, r); !o.Changed || o.Why == "client_search_disabled" {
 		t.Fatalf("new thread: %s", show(o))
 	}
 }
