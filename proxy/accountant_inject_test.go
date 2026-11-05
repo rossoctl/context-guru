@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // M4: the savings record ends with the body that goes upstream, AFTER expand.Inject and
@@ -90,9 +91,19 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 				row = &e.Components[i]
 			}
 		}
-		if row == nil || row.Kind != dash.KindEnvelope || row.SavedUSD >= 0 {
-			t.Fatalf("%s: row %+v, want an envelope row with a cost", name, row)
+		// This is the first request of its thread, so the library priced it as an estimate and the
+		// books hold it out (issue #915): the row exists and books 0. The library's own figure for
+		// the row is the cost.
+		if row == nil || row.Kind != dash.KindEnvelope || row.SavedUSD != 0 {
+			t.Fatalf("%s: row %+v, want an envelope row that books nothing on an estimated request", name, row)
 		}
+		price := modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
+		if fig := e.AccountantFigure(price); fig.ByComponent[name] >= 0 {
+			t.Fatalf("%s: the library's figure is %v, want a cost", name, fig.ByComponent[name])
+		}
+	}
+	if !e.PriceEstimated || e.EstimatedSavedUSD == 0 {
+		t.Fatalf("the first request of a thread must be held as an estimate: estimated %v held %v", e.PriceEstimated, e.EstimatedSavedUSD)
 	}
 	var sum float64
 	for _, c := range e.Components {

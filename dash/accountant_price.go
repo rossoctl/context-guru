@@ -215,7 +215,7 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD = "", false, false, 0
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		return
@@ -332,6 +332,22 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		c.SavedFirstUSD, c.SavedReplayUSD = fig.ByComponentFirst[c.Component], fig.ByComponentReplay[c.Component]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	if estimated {
+		// The library could not rule out a break: it had no history for the thread, so it priced
+		// each removal as a write the provider would have made. When the cache was in fact warm
+		// (a restart that lost the state file, or a session begun before the proxy) the figure is
+		// about 2x too high, and the proxy cannot say by how much: the size of the unseen warm
+		// prefix is the thing the missing history held. A figure nothing measured is not booked
+		// (issue #915). The request books no break-affected saving, and the figure is kept in
+		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
+		// keep-alive tab and the API still agree. The keep-alive rescue and the split saving do not
+		// depend on a break, so they stay booked below.
+		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.BaselineCostUSD = e.CostUSD
+		for i := range e.Components {
+			e.Components[i].SavedUSD, e.Components[i].SavedFirstUSD, e.Components[i].SavedReplayUSD = 0, 0, 0
+		}
+	}
 	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
 	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
 	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD

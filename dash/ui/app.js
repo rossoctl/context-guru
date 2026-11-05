@@ -1825,8 +1825,9 @@ function renderSavedLedger(o, ka, partial) {
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
       o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
-        text: 'Includes ' + num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests priced as an estimate: the first '
-          + 'request of a thread, or the first after a restart that lost its state. Their net saving can be too high.' }) : null,
+        text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm. '
+          + 'Estimated saving, not in any total: ' + usd(o.estimated_saved_usd || 0) + '.' }) : null,
     ]));
 
   // Tools and skills filter.
@@ -3707,8 +3708,10 @@ async function openRequest(id, fromURL) {
       // thread yet), so the gross saving is right and the net may be too high. Marked "≈", the
       // same way this page marks every other estimate.
       kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'
-          + (e.price_estimated ? ' An estimate: there was no history to tell whether a change broke the cache, so the net may be too high.' : '')),
-        priced ? (e.price_estimated ? '≈ ' : '') + usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
+          + (e.price_estimated ? ' Not counted: there was no history to tell whether the cache was already warm, so no saving is booked. The estimate is shown on the next line.' : '')),
+        priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
+      e.price_estimated ? kv(term('Estimated saving (not counted)', 'What the accountant would have booked with no history. It can be about 2x too high when the cache was already warm, so it is in no total.'),
+        priced ? '≈ ' + usd(e.estimated_saved_usd || 0) : '—') : null,
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.

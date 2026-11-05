@@ -236,6 +236,18 @@ func TestPriceMode_PenaltyUnknownIsAnEstimate(t *testing.T) {
 	if fb := e.AccountantFallback(); fb != "" || !e.AccountantEstimated() {
 		t.Fatalf("fallback %q estimated %v, want the override applied as an estimate", fb, e.AccountantEstimated())
 	}
+	// Issue #915: the estimate is held apart. The books get no saving from it.
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("an estimated request booked a baseline delta of %v, want 0", e.BaselineCostUSD-e.CostUSD)
+	}
+	for _, c := range e.Components {
+		if c.SavedUSD != 0 || c.SavedFirstUSD != 0 || c.SavedReplayUSD != 0 {
+			t.Errorf("component %s booked %v from an estimated request, want 0", c.Component, c.SavedUSD)
+		}
+	}
+	if want := 1000 * 0.3e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("EstimatedSavedUSD = %v, want the held figure %v", e.EstimatedSavedUSD, want)
+	}
 	e.Price(accTestPrice, true)
 	if e.AccountantEstimated() {
 		t.Fatal("Price left the estimate flag set")
@@ -331,8 +343,13 @@ func TestPriceEstimatedIsStoredAndReadBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := map[string]bool{}
+	held := map[string]float64{}
 	for _, e := range page.Requests {
 		got[e.SessionID] = e.PriceEstimated
+		held[e.SessionID] = e.EstimatedSavedUSD
+	}
+	if !accNear(held["est"], est.EstimatedSavedUSD) || est.EstimatedSavedUSD == 0 || held["exact"] != 0 {
+		t.Fatalf("stored estimated_saved_usd = %v, want %v on est and 0 on exact", held, est.EstimatedSavedUSD)
 	}
 	if len(got) != 2 || !got["est"] || got["exact"] {
 		t.Fatalf("stored price_estimated = %v, want est true and exact false", got)

@@ -85,6 +85,7 @@
   }
  ],
  "estimated_requests": 0,
+ "estimated_saved_usd": 0,
  "estimator_divergence": 1.0011168816663873,
  "estimator_divergence_compacted": 1.0012067457085105,
  "estimator_divergence_compacted_rows": 79,

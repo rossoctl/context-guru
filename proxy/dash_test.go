@@ -694,11 +694,34 @@ func TestDashboardBooksTheAccountantSaving(t *testing.T) {
 	}
 	resp.Body.Close()
 	waitForRows(t, rec, 1)
+	// The first request of a thread has no history, so its saving is an estimate and is held out of
+	// the books (issue #915). It is booked from the second request on.
+	first, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := first.Requests[0]; !f.PriceEstimated || f.BaselineCostUSD != f.CostUSD || f.EstimatedSavedUSD <= 0 {
+		t.Fatalf("first request: estimated %v baseline %v cost %v held %v, want an estimate held out of the books",
+			f.PriceEstimated, f.BaselineCostUSD, f.CostUSD, f.EstimatedSavedUSD)
+	}
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("x-context-guru-session", "sess-acc")
+	resp2, err := srv.Client().Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	waitForRows(t, rec, 2)
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := page.Requests[0]
+	e := page.Requests[0] // newest first
+	if e.PriceEstimated {
+		t.Fatalf("the second request of the thread is still an estimate")
+	}
 	if e.TokensBefore <= e.TokensAfter {
 		t.Fatalf("the pipeline did not compact (%d -> %d)", e.TokensBefore, e.TokensAfter)
 	}
