@@ -1,0 +1,90 @@
+<!doctype html>
+<!-- Source of docs/img/readme/savings-{light,dark}.png. Render: scripts/render-savings-figure.sh -->
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=block" rel="stylesheet">
+<style>
+:root{--bg:#fbfbf9;--card:#ffffff;--ink:#0d1117;--sub:#57606a;--line:#e4e7eb;
+ --carry:#1f6feb;--carry-soft:#e7f0fe;--pay:#e5532d;--pay-soft:#fdece7;--chip:#f1f3f5;}
+html.dark{--bg:#0d1117;--card:#161b22;--ink:#f0f3f6;--sub:#9aa4b0;--line:#2a313a;
+ --carry:#58a6ff;--carry-soft:#14243a;--pay:#ff7b58;--pay-soft:#3a1f17;--chip:#21262d;}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:Inter,sans-serif;width:1200px;padding:56px 56px 52px}
+h1{font-size:62px;font-weight:800;letter-spacing:-2px;line-height:1.04}
+h1 .n{background:linear-gradient(90deg,var(--carry),var(--pay));-webkit-background-clip:text;color:transparent}
+.lede{margin-top:14px;font-size:22px;color:var(--sub)}
+.lede b{font-weight:600}
+.lede .c{color:var(--carry)} .lede .p{color:var(--pay)}
+.grid{margin-top:36px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.card{background:var(--card);border:2px solid var(--line);border-radius:22px;padding:30px 32px 28px;position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--a)}
+.card.carry{--a:var(--carry);--s:var(--carry-soft)} .card.pay{--a:var(--pay);--s:var(--pay-soft)}
+.card.both{--a:linear-gradient(var(--carry),var(--pay));--s:var(--carry-soft)}
+.top{display:flex;justify-content:space-between;align-items:center}
+.kick{font-size:15px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:var(--carry)}
+.pay .kick{color:var(--pay)} .kick .p{color:var(--pay)}
+.chip{font-size:15px;font-weight:600;padding:6px 13px;border-radius:999px;background:var(--chip);color:var(--sub);font-family:ui-monospace,"DejaVu Sans Mono",monospace}
+.chip.on{background:var(--a);color:#fff} .both .chip.on{background:var(--carry)}
+.chip i{font-style:normal;opacity:.75}
+h2{margin-top:16px;font-size:31px;font-weight:700;letter-spacing:-.6px}
+.num{margin-top:12px;display:flex;align-items:baseline;gap:14px}
+.num b{font-size:84px;font-weight:800;letter-spacing:-3px;line-height:1;color:var(--a)}
+.both .num b{color:var(--carry)}
+.num span{font-size:17px;font-weight:600;color:var(--sub);letter-spacing:.6px;text-transform:uppercase}
+.bar{margin-top:20px;height:12px;border-radius:6px;background:var(--s);position:relative}
+.bar i{position:absolute;top:0;bottom:0;border-radius:6px;background:var(--a)}
+.bar i.r{opacity:.35}
+.both .bar i{background:var(--carry)}
+.scale{display:flex;justify-content:space-between;font-size:13px;color:var(--sub);margin-top:6px}
+p{margin-top:18px;font-size:20px;line-height:1.4;color:var(--sub)}
+.split{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.split div{background:var(--s);border-radius:14px;padding:13px 15px;font-size:18px;line-height:1.35}
+.split div b{display:block;font-weight:700;color:var(--ink);margin-bottom:6px}
+.split .chip{display:inline-block;margin-top:8px;font-size:13px;padding:4px 10px;background:var(--card)}
+.foot{margin-top:24px;font-size:15px;color:var(--sub);text-align:center}
+</style></head>
+<body>
+<script>if(location.hash==='#dark')document.documentElement.className='dark'</script>
+<h1>Context Guru saves <span class="n">15–30%</span><br>of your API cost in four ways</h1>
+<div class="lede"><b class="c">Carry less</b> context. <b class="p">Pay less</b> for what you still carry.</div>
+
+<div class="grid">
+ <!-- 1. Tool outputs -->
+ <div class="card carry">
+  <div class="top"><span class="kick">Carry less</span><span class="chip on">conservative</span></div>
+  <h2>Smaller tool outputs</h2>
+  <div class="num"><b>~1%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:3.3%"></i></div>
+  <p>Strip formatting, color codes and repeated results.</p>
+ </div>
+
+ <!-- 2. Tools & MCP -->
+ <div class="card carry">
+  <div class="top"><span class="kick">Carry less</span><span class="chip on">ultrahigh <i>· experimental</i></span></div>
+  <h2>Tool search for MCP &amp; skills</h2>
+  <div class="num"><b>5–10%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:16.7%"></i><i class="r" style="left:16.7%;width:16.6%"></i></div>
+  <p>Unused tools become names only. The model searches when it needs one.</p>
+ </div>
+
+ <!-- 3. Compaction -->
+ <div class="card both">
+  <div class="top"><span class="kick">Carry less <span class="p">· pay less</span></span></div>
+  <h2>Compaction when it matters</h2>
+  <div class="num"><b>~5%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:16.7%"></i></div>
+  <div class="split">
+   <div><b>Summarize early</b>Before the context limit, while the cache is warm.<br><span class="chip">medium · high</span></div>
+   <div><b>Sweep cold turns</b>Drop old outputs once their cache expires.<br><span class="chip">xhigh</span></div>
+  </div>
+ </div>
+
+ <!-- 4. Cache -->
+ <div class="card pay">
+  <div class="top"><span class="kick">Pay less</span><span class="chip on">default</span></div>
+  <h2>Smart cache management</h2>
+  <div class="num"><b>15–20%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:50%"></i><i class="r" style="left:50%;width:16.7%"></i></div>
+  <p>Reusing the cache costs less than rebuilding it. Keep it warm while idle, within a budget.</p>
+ </div>
+</div>
+</body></html>

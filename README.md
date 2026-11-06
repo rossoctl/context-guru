@@ -26,7 +26,10 @@ the box, before you opt into anything that trims content.
 Full docs: **[rossoctl.github.io/context-guru](https://rossoctl.github.io/context-guru/)**.
 
 <p align="center">
-<img src="docs/img/context_guru_stats_sqaure.png" alt="context-guru saves 5–15% of your API cost in four ways" width="720" />
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/savings-dark.png">
+<img src="docs/img/readme/savings-light.png" alt="Context Guru saves 15–30% of your API cost in four ways: smaller tool outputs (~1%), tool search for MCP and skills (5–10%), compaction when it matters (~5%), smart cache management (15–20%)" width="720" />
+</picture>
 </p>
 
 ## Install
