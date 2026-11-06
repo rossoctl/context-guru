@@ -10,7 +10,7 @@ for theme in light dark; do
   out="docs/img/readme/savings-$theme.png"
   # Render taller than the content: headless Chromium can skip painting the last rows of the window.
   "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars \
-    --force-device-scale-factor=2 --window-size=1200,1400 --virtual-time-budget=5000 \
+    --force-device-scale-factor=2 --window-size=1200,1500 --virtual-time-budget=5000 \
     --screenshot="$out" "$src#$theme"
   # Crop the empty rows below the cards, keep a 52 px (104 device px) bottom margin.
   python3 - "$out" <<'PY'

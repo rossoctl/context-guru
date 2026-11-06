@@ -15,7 +15,7 @@ h1 .n{background:linear-gradient(90deg,var(--carry),var(--pay));-webkit-backgrou
 .lede{margin-top:14px;font-size:22px;color:var(--sub)}
 .lede b{font-weight:600}
 .lede .c{color:var(--carry)} .lede .p{color:var(--pay)}
-.grid{margin-top:36px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.grid{margin-top:26px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
 .card{background:var(--card);border:2px solid var(--line);border-radius:22px;padding:30px 32px 28px;position:relative;overflow:hidden}
 .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--a)}
 .card.carry{--a:var(--carry);--s:var(--carry-soft)} .card.pay{--a:var(--pay);--s:var(--pay-soft)}
@@ -40,13 +40,23 @@ p{margin-top:18px;font-size:20px;line-height:1.4;color:var(--sub)}
 .split{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .split div{background:var(--s);border-radius:14px;padding:13px 15px;font-size:18px;line-height:1.35}
 .split div b{display:block;font-weight:700;color:var(--ink);margin-bottom:6px}
-.split .chip{display:inline-block;margin-top:8px;font-size:13px;padding:4px 10px;background:var(--card)}
-.foot{margin-top:24px;font-size:15px;color:var(--sub);text-align:center}
+.split .chip{display:inline-block;margin-top:10px;font-size:15px;padding:5px 12px}
+.split .chip.pill{background:linear-gradient(90deg,var(--carry),var(--pay));color:#fff}
+.sum{margin-top:30px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:22px;font-weight:600;color:var(--sub)}
+.sum .t{font-weight:800;font-size:25px;padding:7px 15px;border-radius:12px;background:var(--chip)}
+.sum .t.c{color:var(--carry)} .sum .t.p{color:var(--pay)} .sum .t.b{color:var(--carry)}
+.sum .eq{font-weight:800;font-size:26px;padding:7px 17px;border-radius:12px;color:#fff;background:linear-gradient(90deg,var(--carry),var(--pay))}
+.sum small{flex-basis:100%;font-size:16px;font-weight:500}
 </style></head>
 <body>
 <script>if(location.hash==='#dark')document.documentElement.className='dark'</script>
 <h1>Context Guru saves <span class="n">15–30%</span><br>of your API cost in four ways</h1>
 <div class="lede"><b class="c">Carry less</b> context. <b class="p">Pay less</b> for what you still carry.</div>
+
+<div class="sum">
+ <span class="t c">~1%</span>+<span class="t c">2–5%</span>+<span class="t b">5–10%</span>+<span class="t p">15–20%</span>=<span class="eq">15–30%</span>
+ <small>Together, all four. The savings overlap, so the total is less than the plain sum.</small>
+</div>
 
 <div class="grid">
  <!-- 1. Tool outputs -->
@@ -62,8 +72,8 @@ p{margin-top:18px;font-size:20px;line-height:1.4;color:var(--sub)}
  <div class="card carry">
   <div class="top"><span class="kick">Carry less</span><span class="chip on">ultrahigh <i>· experimental</i></span></div>
   <h2>Tool search for MCP &amp; skills</h2>
-  <div class="num"><b>5–10%</b><span>lower cost</span></div>
-  <div class="bar"><i style="left:0;width:16.7%"></i><i class="r" style="left:16.7%;width:16.6%"></i></div>
+  <div class="num"><b>2–5%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:6.7%"></i><i class="r" style="left:6.7%;width:10%"></i></div>
   <p>Unused tools become names only. The model searches when it needs one.</p>
  </div>
 
@@ -71,11 +81,11 @@ p{margin-top:18px;font-size:20px;line-height:1.4;color:var(--sub)}
  <div class="card both">
   <div class="top"><span class="kick">Carry less <span class="p">· pay less</span></span></div>
   <h2>Compaction when it matters</h2>
-  <div class="num"><b>~5%</b><span>lower cost</span></div>
-  <div class="bar"><i style="left:0;width:16.7%"></i></div>
+  <div class="num"><b>5–10%</b><span>lower cost</span></div>
+  <div class="bar"><i style="left:0;width:16.7%"></i><i class="r" style="left:16.7%;width:16.6%"></i></div>
   <div class="split">
-   <div><b>Summarize early</b>Before the context limit, while the cache is warm.<br><span class="chip">medium · high</span></div>
-   <div><b>Sweep cold turns</b>Drop old outputs once their cache expires.<br><span class="chip">xhigh</span></div>
+   <div><b>Summarize early</b>Before the context limit, while the cache is warm.<br><span class="chip pill">medium/high</span></div>
+   <div><b>Sweep cold turns</b>Drop old outputs once their cache expires.<br><span class="chip pill">xhigh</span></div>
   </div>
  </div>
 

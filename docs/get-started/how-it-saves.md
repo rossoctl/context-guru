@@ -46,7 +46,7 @@ them need the others, and none of them touch what the model sees or does.
     tool catalogue is never invoked in that session. Deferral sends the same set on
     every turn of a thread, so the cached prefix stays valid.
 
-    **Expected:** 5–10% lower cost, depending on how many MCP tools and skills you
+    **Expected:** 2–5% lower cost, depending on how many MCP tools and skills you
     declare. A replay of live sessions measured 5.9% ([#485](https://github.com/rossoctl/context-guru/issues/485)).
     See [Experimental: ultrahigh](https://github.com/rossoctl/context-guru#experimental-ultrahigh)
     for accuracy and limits. To drop a fixed list of tools instead, use
@@ -74,13 +74,13 @@ them need the others, and none of them touch what the model sees or does.
 
     It works in two parts:
 
-    - **Summarize early** (`medium`, `high`): fold older turns before the context
+    - **Summarize early** (`medium`/`high`): fold older turns before the context
       limit, while the cache is still warm. See [`summarize`](../components/summarize.md).
     - **Sweep cold turns** (`xhigh`): after a turn's cache has expired, drop the old
       tool outputs that the task no longer needs.
 
-    **Measured:** ~5% lower cost on `xhigh` (live, 2026-11). Most of it comes from the
-    sweep, so `medium` and `high` save less.
+    **Expected:** 5–10% lower cost. On `xhigh` we measured about 5% (live, 2026-11).
+    Most of it comes from the sweep, so `medium`/`high` save less.
 
 === "Smart cache management"
 
@@ -113,6 +113,7 @@ them need the others, and none of them touch what the model sees or does.
 
 ---
 
-*These are separate baselines measured independently — the four don't simply add
-up, and your own mix will vary with how you use tools, how long your sessions run,
+*Together: ~1% + 2–5% + 5–10% + 15–20% ≈ 15–30% with all four on. Some numbers are
+measured and some are expected. The savings overlap, so the total is less than the
+plain sum. Your own mix will vary with how you use tools, how long your sessions run,
 and how often they sit idle.*
