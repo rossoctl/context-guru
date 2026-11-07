@@ -120,8 +120,9 @@ func sharedComp(c cases.Case, comp string) bool {
 
 // expectedByComponent is the case's expected figure of each component, the way AccFigure.ByComponent
 // builds it: the priced rewrite and setting ops (a spend is priced by the host, so it is left out)
-// plus the counted breaks whose ChangeID a component owns. Rescue, split and TTL effects are their
-// own AccFigure fields, not component figures; a counted break nobody owns is EndedBreakUSD.
+// plus the counted breaks whose ChangeID a component owns, plus each mark premium (on the owner of its
+// ChangeID, else on the tail breakpoint). Rescue, split and TTL effects are their own AccFigure fields,
+// not component figures; a counted break nobody owns is EndedBreakUSD.
 func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) map[string]int64 {
 	picos := map[string]int64{}
 	rate := c.StepRate(s)
@@ -134,10 +135,21 @@ func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) ma
 		}
 	}
 	for _, e := range s.Expected.Effects {
-		if !e.Counted() || e.Kind != accountant.EffectBreak {
+		if !e.Counted() {
 			continue
 		}
-		if comp, ok := comps[e.ChangeID]; ok && e.ChangeID != "" {
+		switch e.Kind {
+		case accountant.EffectBreak:
+			if comp, ok := comps[e.ChangeID]; ok && e.ChangeID != "" {
+				picos[comp] += rate.Picos(e.Saved) - rate.Picos(e.Caused)
+			}
+		case accountant.EffectMarkPremium:
+			// The premium of a breakpoint the host added: a cost on the component whose span covers the
+			// mark, else on the tail breakpoint (AccountantFigure does the same).
+			comp, ok := comps[e.ChangeID]
+			if !ok || e.ChangeID == "" {
+				comp = "tailbreakpoint"
+			}
 			picos[comp] += rate.Picos(e.Saved) - rate.Picos(e.Caused)
 		}
 	}

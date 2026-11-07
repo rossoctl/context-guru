@@ -92,6 +92,8 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//   split:      same shape as rescue: a saving.
 		//   ttlPremium: Saved is the 5m write, Caused the dearer 1h write: value < 0 (a cost).
 		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
+		//   markPremium: Saved is the input the client body would have billed, Caused the dearer write the
+		//               host's added mark made the provider bill: value < 0 (a cost).
 		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
 		switch ce.Kind {
 		case accountant.EffectBreak:
@@ -113,6 +115,17 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			f.SplitUSD += value
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
 			f.TTLUSD += value
+		case accountant.EffectMarkPremium:
+			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
+			// operation whose span covers the mark. With no owner it belongs to the tail breakpoint,
+			// the only component that adds a mark (accountant design §4.4). Without this case the
+			// effect was unpriced and every request with the default tail breakpoint booked no saving.
+			c, ok := owner[ce.ChangeID]
+			if !ok || ce.ChangeID == "" {
+				c = "tailbreakpoint"
+			}
+			f.ByComponent[c] += value
+			f.DeltaUSD += value
 		default:
 			f.Unpriced = append(f.Unpriced, "effect:"+string(ce.Kind)+":unknown_kind")
 			continue

@@ -416,3 +416,50 @@ func TestPriceMode_ToolSectionTokensAreNotBoundedByMessageTokens(t *testing.T) {
 		t.Fatalf("message operation: fallback %q, want %q", fb, FallbackImplausibleSize)
 	}
 }
+
+// A markPremium effect is the write premium of a breakpoint the host added (accountant#49). It is a cost.
+// Before the dashboard knew the kind, every request with the default tail breakpoint fell back with
+// "unpriced" (effect:markPremium:unknown_kind) and booked no saving at all.
+func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T) {
+	premium := accountant.CacheEffect{Kind: accountant.EffectMarkPremium,
+		Saved: accountant.TierTokens{Input: 2000}, Caused: accountant.TierTokens{CacheWrite5m: 2000}}
+	// 2,000 tokens move from input ($3/M) to a 5m write ($3.75/M): a cost of 2000 x 0.75e-6.
+	cost := 2000 * (3.75e-6 - 3e-6)
+	run := func(changeID string) *Event {
+		e := switchEvent()
+		e.Components = append(e.Components, CompRow{Component: "tailbreakpoint", Acted: true, Mutated: true})
+		ops := e.accRes.Ops
+		ops = append(ops, accountant.PricedOp{Operator: "context-guru.tailbreakpoint", ChangeID: "cg:tailbreakpoint:x"})
+		res := *e.accRes
+		res.Ops = ops
+		p := premium
+		p.ChangeID = changeID
+		res.CacheEffects = append(res.CacheEffects, p)
+		e.SetAccountant(res)
+		e.PriceMode(accTestPrice, true)
+		return e
+	}
+	for name, changeID := range map[string]string{"owned": "cg:tailbreakpoint:x", "no owner": ""} {
+		t.Run(name, func(t *testing.T) {
+			e := run(changeID)
+			if fb := e.AccountantFallback(); fb != "" {
+				t.Fatalf("fell back: %q (a markPremium effect must be priced)", fb)
+			}
+			var tail, sum float64
+			for _, c := range e.Components {
+				sum += c.SavedUSD
+				if c.Component == "tailbreakpoint" {
+					tail = c.SavedUSD
+				}
+			}
+			if !accNear(tail, -cost) {
+				t.Fatalf("tailbreakpoint saved_usd = %v, want the premium as a cost %v", tail, -cost)
+			}
+			// The mask saving (1000 cache-read tokens) minus the premium is the whole delta, and the rows add up to it.
+			want := 1000*0.3e-6 - cost
+			if !accNear(e.BaselineCostUSD-e.CostUSD, want) || !accNear(sum, want) {
+				t.Fatalf("baseline delta %v, component sum %v, want %v", e.BaselineCostUSD-e.CostUSD, sum, want)
+			}
+		})
+	}
+}
