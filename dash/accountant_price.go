@@ -117,8 +117,10 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			f.TTLUSD += value
 		case accountant.EffectMarkPremium:
 			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
-			// operation whose span covers the mark. With no owner it belongs to the tail breakpoint,
-			// the only component that adds a mark (accountant design §4.4). Without this case the
+			// operation whose span covers the mark. With no owner it goes on the tail breakpoint row,
+			// the component that adds the mark in every default preset (accountant design §4.4). The
+			// opt-in cacheinject also adds marks: its premium with no covering operation lands on the same
+			// row, so the total is right and only the row name is approximate. Without this case the
 			// effect was unpriced and every request with the default tail breakpoint booked no saving.
 			c, ok := owner[ce.ChangeID]
 			if !ok || ce.ChangeID == "" {
