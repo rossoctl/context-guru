@@ -778,12 +778,10 @@ func (h *Handler) deferStats() any {
 		"client_loads":   g.ClientLoads.Load(),
 		"direct_calls":   g.DirectCalls.Load(),
 		"mixed_searches": g.MixedSearches.Load(),
-		// Client-search mode (#898) disabled, by reason. unknown_description and
-		// non_select_query_for_our_tool count once per tenant and hash per 24 h; break counts every
-		// time. The same numbers are cg_tooldefer_client_disabled_total.
+		// Client-search mode (#898) disabled, by reason. unknown_description counts
+		// once per tenant and hash per 24 h; break counts every time. The same numbers are cg_tooldefer_client_disabled_total.
 		"client_search_disabled": map[string]int64{
 			tooldefer.ReasonUnknownDescription: g.DisabledUnknown.Load(),
-			tooldefer.ReasonNonSelectQuery:     g.DisabledNonSel.Load(),
 			tooldefer.ReasonBreak:              g.DisabledBreak.Load(),
 		},
 		"probes_pass":  pass,

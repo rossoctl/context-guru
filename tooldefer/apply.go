@@ -234,20 +234,14 @@ func Apply(env Env, r Req) (o Outcome) {
 		o.Client = true
 		a := AugmentSearches(rs, r.Session, r.Thread, out, set)
 		reason := ""
-		switch {
-		case a.Bad:
-			reason = ReasonNonSelectQuery
+		// A break is a call to a deferred tool whose own result says it is not loaded. A call no
+		// search loaded that worked is a use (the API accepts it), counted as a direct call.
+		// A tool tool_choice kept loaded on this request is declared in full, so it never breaks.
+		broke, direct := ReadCalls(a.Body, set)
+		if broke && !forcedAny(r.Orig, set) {
+			reason = ReasonBreak
 		}
-		if reason == "" {
-			// A break is a call to a deferred tool whose own result says it is not loaded. A call no
-			// search loaded that worked is a use (the API accepts it), counted as a direct call.
-			// A tool tool_choice kept loaded on this request is declared in full, so it never breaks.
-			broke, direct := ReadCalls(a.Body, set)
-			if broke && !forcedAny(r.Orig, set) {
-				reason = ReasonBreak
-			}
-			o.Direct = direct
-		}
+		o.Direct = direct
 		if reason != "" {
 			// A format change. Disable the description hash and stop deferring on this thread. This
 			// changes `tools` once, so the live thread pays one cache rewrite, on purpose: a broken
