@@ -4,6 +4,8 @@
  },
  "attempted_requests": 591,
  "attempted_tokens": 20900053,
+ "avoided_compaction_assumed": false,
+ "avoided_compaction_usd": 0,
  "baseline_cost_usd": 3.0431815,
  "billed_input_rows": 591,
  "billed_input_tokens": 20923693,

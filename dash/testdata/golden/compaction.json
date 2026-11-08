@@ -84,10 +84,13 @@
   }
  },
  "replay_ledger": {
+  "avoided_compaction_usd": 0,
   "by_component": {},
   "closed_client_compaction": 0,
   "closed_counterfactual": 0,
   "conversations": 0,
+  "reopened_epochs": 0,
+  "summary_assumed": false,
   "window_unknown_conversations": 0
  },
  "scanned": 591

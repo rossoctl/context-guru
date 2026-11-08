@@ -153,8 +153,14 @@ type Overview struct {
 	SummarizeCorrectionUSD float64 `json:"summarize_correction_usd"`
 	// ReplayCapCorrectionUSD is what ApplyReplayLedger moved the baseline by: the credit of the
 	// replaying components (extract_llm, searchfold, ...) earned after the counterfactual client
-	// compaction, or after a real one. Zero or negative.
+	// compaction, or after a real one, for the removals made before that close. A removal first made
+	// after a close earns again until the next one (#940). Zero or negative.
 	ReplayCapCorrectionUSD float64 `json:"replay_cap_correction_usd"`
+	// AvoidedCompactionUSD is the price of the compaction requests the world without context-guru paid at
+	// its counterfactual closes and we did not. It is not a saving on any request and no total above
+	// includes it. AvoidedCompactionAssumed is true when it rests on the assumed summary size.
+	AvoidedCompactionUSD     float64 `json:"avoided_compaction_usd"`
+	AvoidedCompactionAssumed bool    `json:"avoided_compaction_assumed"`
 	// ReplayCapNotApplied is true when the cap could not be computed (it errored or timed out), so
 	// the figures above carry the stored, uncapped replay credit. The page says so.
 	ReplayCapNotApplied bool `json:"replay_cap_not_applied"`

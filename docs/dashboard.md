@@ -230,6 +230,24 @@ Limits:
 - Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
   the summarize ledger and the replay cap value those rows with the legacy rule at read time, and
   sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
+- The replay cap works in epochs (#940). A close ends the replay credit of the removals made before it.
+  A removal first made after a close earns credit until the next close. There are two kinds of close:
+  - A real client compaction. Both worlds pay for it, so there is no one-time credit.
+  - A counterfactual compaction: the point where the baseline (the transcript that the provider billed
+    plus what we removed) reaches the compaction point. The baseline then restarts from a summary of
+    80,000 tokens. That size is an assumption: it is the median of the first turn after 34 real compactions.
+    The next close is when the summary plus the growth since the close reaches the compaction point again.
+
+  Inside an epoch after a close, the replay credit of a row counts up to the first-removal tokens seen
+  since that close. The first epoch of a conversation counts its replay in full, because a window that
+  starts mid-session cannot know what was removed before it.
+
+  `avoided_compaction_usd` is the price of the compaction request that the baseline pays at each
+  counterfactual close and we do not: the compaction point in tokens at the cache-read rate, plus the
+  summary at the output rate. It is a separate figure. It is not a saving on any request, and no total
+  includes it. `avoided_compaction_assumed` is true when it rests on the assumed summary size. The rule
+  does not subtract the turns where our trimmed transcript is larger than the baseline summary, so it can
+  over-count on those turns.
 - The savings tracker runs only when a dashboard is on. The pipeline records what each component
   changed on every request, with or without a dashboard (a scan of the changed messages). That cost
   is accepted.
