@@ -3,7 +3,7 @@
 #
 # Build the release list from this, not from memory: a list kept by hand once mixed in PRs of the
 # release before. For each commit it prints the short SHA, the PR number and the subject, and
-# marks the kinds that stay out of the release notes (docs, test, ci, chore, refactor).
+# marks the kinds that stay out of the release notes (docs, test, ci, chore, build, refactor).
 # The default <since-tag> is the newest release tag vX.Y.Z (pre-release tags such as -rc1 are
 # skipped).
 set -euo pipefail
@@ -17,8 +17,12 @@ git log --first-parent --reverse --format='%h%x09%s' "$tag..origin/main" | while
   if [ -z "$n" ]; then
     n=$(grep -oE 'pull request #[0-9]+' <<<"$subj" | tr -dc 0-9 || true)
     if [ -n "$n" ]; then
-      subj=$(gh pr view "$n" --repo "$repo" --json title --jq .title) \
-        || { echo "WARNING: could not read the title of #$n; the list goes on" >&2; subj="(title unread) $subj"; }
+      if t=$(gh pr view "$n" --repo "$repo" --json title --jq .title); then
+        subj=$t
+      else
+        echo "WARNING: could not read the title of #$n; the list goes on" >&2
+        subj="(title unread) $subj"
+      fi
     fi
   fi
   kind=feature/fix

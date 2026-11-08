@@ -17,17 +17,31 @@ mkdir -p "$out"
 sum=$out/summary.txt
 : > "$sum"
 rc=0
+child=
 trap 'echo "DONE rc=$rc" >> "$sum"' EXIT
 # A stop must not read as a pass: without this, the EXIT trap writes the rc=0 it started with.
-trap 'rc=143; exit 143' HUP INT TERM
+# Bash runs a trap only when the foreground command ends, so each step runs in the background and
+# the script waits for it; the trap then stops the step at once instead of after it finishes.
+trap 'rc=143; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null; exit 143' HUP INT TERM
 GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
-echo "commit $(git rev-parse HEAD 2>/dev/null || echo unknown)" >> "$sum"
+echo "commit $(git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)" >> "$sum"
+
+# run <log> <cmd...>: run the command in the background, wait for it, and return its exit code.
+run() {
+  local log=$1; shift
+  "$@" > "$log" 2>&1 &
+  child=$!
+  wait "$child"
+  local r=$?
+  child=
+  return "$r"
+}
 
 # step <name> <cmd...>: run the command, and run it once more if it fails.
 step() {
   local name=$1; shift
-  if "$@" > "$out/$name.log" 2>&1; then echo "ok      $name" >> "$sum"; return; fi
-  if "$@" > "$out/$name.rerun.log" 2>&1; then echo "flaky   $name (passed on the 2nd run; see $name.log)" >> "$sum"; return; fi
+  if run "$out/$name.log" "$@"; then echo "ok      $name" >> "$sum"; return; fi
+  if run "$out/$name.rerun.log" "$@"; then echo "flaky   $name (passed on the 2nd run; see $name.log)" >> "$sum"; return; fi
   echo "FAILED  $name (twice; see $name.log, $name.rerun.log)" >> "$sum"
   rc=1
 }
