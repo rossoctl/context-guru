@@ -25,7 +25,7 @@ jobs:
         with:
           # go.mod is the single source of truth for the toolchain (see ci.yaml).
           go-version-file: go.mod
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: go
           # Manual build: the default build is pure Go, and one explicit command
@@ -36,6 +36,6 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build ./...
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:go"
