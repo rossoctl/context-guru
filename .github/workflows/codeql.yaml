@@ -1,0 +1,41 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 05:17 UTC. New queries ship without a code change.
+    - cron: "17 5 * * 1"
+
+# The `main` ruleset has a code_scanning rule (tool CodeQL). It waits for results
+# from this workflow. No paths-ignore here: the rule needs a result on every PR.
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod is the single source of truth for the toolchain (see ci.yaml).
+          go-version-file: go.mod
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          # Manual build: the default build is pure Go, and one explicit command
+          # keeps the scan the same as `make build`.
+          build-mode: manual
+          # Default query suite.
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
