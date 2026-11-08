@@ -7,7 +7,8 @@
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
 #   - every check run on the head has finished with success (or skipped / neutral);
-#   - every commit on the PR has a Signed-off-by line (the DCO check needs it).
+#   - every commit on the PR has a Signed-off-by line, or a remediation commit of its author signs it
+#     off (the DCO check needs it; unsigned-commits.sh holds the rule).
 # It does NOT check for a behavior change. The integrator reads the diff for that, and needs a
 # human developer's yes in words (RELEASING.md, step 2).
 #
@@ -70,10 +71,11 @@ while IFS=$'\t' read -r status concl name; do
   esac
 done <<<"$runs"
 
-# DCO: every commit carries a sign-off. Only the author can add one; a merge past a missing
-# sign-off needs the release owner, case by case.
-unsigned=$(api "the commits" api --paginate "repos/$repo/pulls/$pr/commits" \
-  --jq '.[] | select(.commit.message | test("Signed-off-by: ") | not) | .sha[0:12]')
+# DCO: every commit carries a sign-off, or a later commit of its author signs it off (the remediation
+# commit of .github/dco.yml; the rule is in unsigned-commits.sh). Only the author can add one; a merge
+# past a missing sign-off needs the release owner, case by case.
+commits=$(api "the commits" api --paginate "repos/$repo/pulls/$pr/commits" --jq '.[]' | jq -s '.')
+unsigned=$("$(dirname "$0")/unsigned-commits.sh" <<<"$commits")
 [ -z "$unsigned" ] || no "commits with no Signed-off-by: $(tr '\n' ' ' <<<"$unsigned")"
 
 if [ "$fail" = 0 ]; then echo "READY (now read the diff for a behavior change)"; fi

@@ -116,7 +116,7 @@ Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the cu
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
-- every commit has a `Signed-off-by:` line.
+- every commit has a `Signed-off-by:` line, or a later commit of its author signs it off by a remediation line (`scripts/release/unsigned-commits.sh` has the rule; `CONTRIBUTING.md` shows how to write one).
 
 It does not check for a behavior change. Read the diff for that yourself.
 
