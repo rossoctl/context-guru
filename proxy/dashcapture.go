@@ -659,7 +659,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
 	// belongs to one model, so a request on another model between two requests on this one does
 	// not refresh it. SinceLastMs below keeps the per-thread gap.
-	cause, modelGap, known, lastWasSame, prevPromptTokens := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+	cause, modelGap, known, lastWasSame, prevPromptTokens, prevOneHour := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
 		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
 	//
 	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
@@ -677,7 +677,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
-	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model), cause, prevPromptTokens)
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
@@ -761,12 +761,15 @@ func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 	return sinceMs
 }
 
-func cacheAttributionTTLMs(provider, model string) int64 {
-	ttl, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil)
-	if kind != apply.CacheLifetimeExact {
+// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
+// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
+// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
+// five minutes. false (also "unknown") keeps the five-minute lifetime.
+func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
+	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
 		return 0
 	}
-	return ttl.Milliseconds()
+	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
