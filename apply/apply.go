@@ -977,6 +977,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 					if nb, ok := applyMetaWrites(cur, len(chat.Input[i].Content.ContentBlocks), w); ok {
 						edits[bi] = nb
 						changed = true
+						// The mark is on the wire, so the change that carries it is real. Without this the
+						// operation is dropped and the accountant's sum check fails on the added bytes (#938).
+						written[i] = true
 						continue
 					}
 				}

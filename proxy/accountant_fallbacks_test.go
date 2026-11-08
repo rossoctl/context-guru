@@ -80,6 +80,61 @@ func TestTailBreakpointReportsItsBytes(t *testing.T) {
 	}
 }
 
+// cacheinjectConversation is a Claude Code shaped body with n tool turns. The client marks the system
+// block and its newest message and nothing else, so cacheinject has marks of its own to add.
+func cacheinjectConversation(n int) []byte {
+	msgs := []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "fix it"}}}}
+	for k := 0; k < n; k++ {
+		id := "tu_" + string(rune('a'+k))
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": id, "name": "bash", "input": map[string]any{"command": "ls"}}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": bigToolOutput()}}})
+	}
+	last := msgs[len(msgs)-1].(map[string]any)["content"].([]any)
+	last[0].(map[string]any)["cache_control"] = map[string]any{"type": "ephemeral"}
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64, "messages": msgs,
+		"system": []any{map[string]any{"type": "text", "text": "s1", "cache_control": map[string]any{"type": "ephemeral"}}}})
+	return b
+}
+
+// cacheinject adds cache_control marks to messages the client did not mark. The marks lengthen the forwarded
+// body. The metadata-only write path put them on the wire without recording that the message was written, so
+// the operation that carries the mark was dropped: ops=0 for bodies=+37 bytes, the sum check failed on every
+// request, and the event booked no saving (#938).
+func TestCacheinjectMarksAreReportedAndPriced(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"cacheinject alone":           "pipeline: [cacheinject]\n",
+		"without the tail breakpoint": "pipeline: [cacheinject]\ncache:\n  tail_breakpoint: false\n",
+		"with cachesplit":             "pipeline: [cachesplit, cacheinject]\n",
+		// A text rewrite and a mark can land on one message: the two operations share its wire bytes.
+		"with a text rewrite": "pipeline: [mask, cacheinject]\ncomponents:\n  mask:\n    keep_recent: 1\n    min_tokens: 50\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := billedUpstream(t)
+			defer up.Close()
+			h, rec, tap := accHandlerYAML(t, up.URL, yaml)
+			for n := 2; n <= 4; n++ {
+				accPostBody(t, h, "sess-ci", cacheinjectConversation(n))
+			}
+			waitForRows(t, rec, 3)
+			evs := tap.all()
+			for i, e := range evs {
+				if res, ok := e.AccountantResult(); ok && i > 0 {
+					for _, c := range res.Checks {
+						t.Errorf("request %d: check failed: %s %s", i+1, c.Check, c.Detail)
+					}
+				}
+				if i == 0 {
+					continue // the first request of a thread is held out as an estimate
+				}
+				if fb := e.AccountantFallback(); fb != "" {
+					t.Errorf("request %d fell back: %s", i+1, fb)
+				}
+			}
+		})
+	}
+}
+
 // A small conversation that drops a large tool list: the removed declarations are many times the
 // size of the messages. The plausibility bound reads message tokens, so it dropped the whole result
 // with implausible_size (#907).
