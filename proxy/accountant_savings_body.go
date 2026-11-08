@@ -22,22 +22,63 @@ import (
 // although the provider read it (accountant#21). The size is the wire size, with the marks, because the
 // library checks the operations' bytes against the bytes that really went upstream.
 func accBodies(raw []byte) accountant.Body {
-	if !gjson.GetBytes(raw, "messages").IsArray() {
-		return accountant.NewBody(nil, nil, nil)
+	body, _ := accParse(raw)
+	return body
+}
+
+// accSections are the three top-level values accParse reads, found in one pass over the body. Like gjson.Get, the
+// first key of a name wins.
+type accSections struct {
+	tools, system, messages gjson.Result
+}
+
+func accScan(raw []byte) accSections {
+	var sec accSections
+	var seen [3]bool
+	root := gjson.ParseBytes(raw)
+	if !root.IsObject() {
+		return sec
+	}
+	root.ForEach(func(k, v gjson.Result) bool {
+		var i int
+		var dst *gjson.Result
+		switch k.String() {
+		case "tools":
+			i, dst = 0, &sec.tools
+		case "system":
+			i, dst = 1, &sec.system
+		case "messages":
+			i, dst = 2, &sec.messages
+		default:
+			return true
+		}
+		if !seen[i] {
+			seen[i], *dst = true, v
+		}
+		return !(seen[0] && seen[1] && seen[2])
+	})
+	return sec
+}
+
+// accParse is accBodies and accBreakpoints on one parse of the body.
+func accParse(raw []byte) (accountant.Body, []accountant.Breakpoint) {
+	sec := accScan(raw)
+	if !sec.messages.IsArray() {
+		return accountant.NewBody(nil, nil, nil), nil
 	}
 	var tools, system, msgs [][]byte
 	var sizes []int // the wire size of each element, in hash order
 	add := func(dst *[][]byte, v gjson.Result) {
-		*dst = append(*dst, withoutCacheMarks(v.Raw))
+		*dst = append(*dst, withoutCacheMarks(raw, v))
 		sizes = append(sizes, len(v.Raw))
 	}
-	gjson.GetBytes(raw, "tools").ForEach(func(_, v gjson.Result) bool { add(&tools, v); return true })
-	if s := gjson.GetBytes(raw, "system"); s.IsArray() {
-		s.ForEach(func(_, v gjson.Result) bool { add(&system, v); return true })
-	} else if s.Exists() {
-		add(&system, s)
+	sec.tools.ForEach(func(_, v gjson.Result) bool { add(&tools, v); return true })
+	if sec.system.IsArray() {
+		sec.system.ForEach(func(_, v gjson.Result) bool { add(&system, v); return true })
+	} else if sec.system.Exists() {
+		add(&system, sec.system)
 	}
-	gjson.GetBytes(raw, "messages").ForEach(func(_, v gjson.Result) bool { add(&msgs, v); return true })
+	sec.messages.ForEach(func(_, v gjson.Result) bool { add(&msgs, v); return true })
 	built := accountant.NewBody(tools, system, msgs)
 	for i := range built.Pos {
 		built.Pos[i].Bytes = int32(sizes[i])
@@ -47,15 +88,20 @@ func accBodies(raw []byte) accountant.Body {
 	// (the token ratio, the span of a splice, sawOriginal) is the wire size, as the operations' sizes are. A body
 	// decoded from a snapshot has no table either, so a restart changes nothing. The table is unexported: build the
 	// value again from the exported fields, which drops it (review of #893, finding 2).
-	return accountant.Body{Start: built.Start, Pos: built.Pos}
+	return accountant.Body{Start: built.Start, Pos: built.Pos}, accBreakpointsOf(sec)
 }
 
 // withoutCacheMarks is one element's JSON without any cache_control: the element's own, the ones on its content
 // blocks, and the ones nested deeper, such as a mark inside a tool_result block's own content array (issue #917).
 // An element with none is returned as it is, byte for byte, so the common case costs no allocation. The result is
 // only hashed. It is never sent anywhere.
-func withoutCacheMarks(raw string) []byte {
+func withoutCacheMarks(body []byte, v gjson.Result) []byte {
+	raw := v.Raw
 	if !strings.Contains(raw, "cache_control") {
+		// Slice the original bytes when Index points at this very element, else copy. The result is only read.
+		if i := v.Index; i > 0 && i+len(raw) <= len(body) && string(body[i:i+len(raw)]) == raw {
+			return body[i : i+len(raw) : i+len(raw)]
+		}
 		return []byte(raw)
 	}
 	out := raw
@@ -121,7 +167,12 @@ func findCacheMark(v gjson.Result, prefix string) string {
 // longer TTL (1h over 5m), because the provider keeps the entry for the longest TTL asked for at
 // it. ttl defaults to "5m".
 func accBreakpoints(raw []byte) []accountant.Breakpoint {
-	if !gjson.GetBytes(raw, "messages").IsArray() {
+	_, bps := accParse(raw)
+	return bps
+}
+
+func accBreakpointsOf(sec accSections) []accountant.Breakpoint {
+	if !sec.messages.IsArray() {
 		return nil
 	}
 	var out []accountant.Breakpoint
@@ -142,15 +193,37 @@ func accBreakpoints(raw []byte) []accountant.Breakpoint {
 		}
 		return "5m"
 	}
+	// mark finds the first cache_control and the first content of an object in one pass, as Get does for each key.
+	mark := func(el gjson.Result) (cc, content gjson.Result) {
+		if !el.IsObject() {
+			return
+		}
+		var gotCC, gotContent bool
+		el.ForEach(func(k, v gjson.Result) bool {
+			switch k.String() {
+			case "cache_control":
+				if !gotCC {
+					gotCC, cc = true, v
+				}
+			case "content":
+				if !gotContent {
+					gotContent, content = true, v
+				}
+			}
+			return !(gotCC && gotContent)
+		})
+		return
+	}
 	scan := func(sec accountant.Section, arr gjson.Result) {
 		i := 0
 		arr.ForEach(func(_, el gjson.Result) bool {
-			if cc := el.Get("cache_control"); cc.Exists() {
+			cc, content := mark(el)
+			if cc.Exists() {
 				add(accountant.Position{Section: sec, Index: i}, ttl(cc))
 			}
-			if content := el.Get("content"); content.IsArray() {
+			if content.IsArray() {
 				content.ForEach(func(_, blk gjson.Result) bool {
-					if cc := blk.Get("cache_control"); cc.Exists() {
+					if cc, _ := mark(blk); cc.Exists() {
 						add(accountant.Position{Section: sec, Index: i}, ttl(cc))
 					}
 					return true
@@ -160,10 +233,10 @@ func accBreakpoints(raw []byte) []accountant.Breakpoint {
 			return true
 		})
 	}
-	scan(accountant.SectionTools, gjson.GetBytes(raw, "tools"))
-	if s := gjson.GetBytes(raw, "system"); s.IsArray() {
-		scan(accountant.SectionSystem, s)
+	scan(accountant.SectionTools, sec.tools)
+	if sec.system.IsArray() {
+		scan(accountant.SectionSystem, sec.system)
 	}
-	scan(accountant.SectionMessages, gjson.GetBytes(raw, "messages"))
+	scan(accountant.SectionMessages, sec.messages)
 	return out
 }

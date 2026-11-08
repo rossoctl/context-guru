@@ -44,7 +44,7 @@ func newSavingsTracker() *savingsTracker {
 // begin opens the request record with the client body, before any component ran. The Trackers bound
 // their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	body, bps := accBodies(client), accBreakpoints(client)
+	body, bps := accParse(client)
 	req := s.trackers.BeginRequest(meta, body, bps)
 	s.clients.Store(req, clientHash{raw: client, body: body, bps: bps})
 	return req
@@ -63,7 +63,7 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 	if v, ok := s.clients.LoadAndDelete(req); ok && bytes.Equal(v.(clientHash).raw, forwarded) {
 		fwd, bps = v.(clientHash).body, v.(clientHash).bps
 	} else {
-		fwd, bps = accBodies(forwarded), accBreakpoints(forwarded)
+		fwd, bps = accParse(forwarded)
 	}
 	facts.SharedWarm = s.siblings.sharedWarm(req.Meta.Session, th.ID, req.Meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
