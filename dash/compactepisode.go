@@ -302,8 +302,9 @@ type CompactionAssumptions struct {
 	// SpanRule says WHY the span is the width it is: it is an attribution boundary derived from the
 	// fill threshold, not a tuning knob. See spanFor.
 	SpanRule string `json:"span_rule"`
-	// ClientCeilings is one entry per model this query actually measured, because the ceiling is a
-	// fact about the CLIENT's behaviour on that model and a single number would be an average of
+	// ClientCeilings is one entry per model and source this query actually measured (noteCeiling),
+	// because the ceiling is a fact about the CLIENT's behaviour on that model, and a model can have
+	// both a table conversation and a configured one. A single number would be an average of
 	// things that are not comparable. Each carries its provenance, so a reader can tell which
 	// published figures rest on a measurement and which on an assumption.
 	ClientCeilings []ClientCeilingUsed `json:"client_ceilings"`

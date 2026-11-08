@@ -64,7 +64,8 @@ import (
 type Options struct {
 	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
 	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
-	// is set.
+	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
+	// "claude-code" or "claude-cli"). All other requests use the table.
 	ClaudeCompact     compactionpoint.ClaudeCode
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
