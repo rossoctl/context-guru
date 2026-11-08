@@ -19,8 +19,10 @@ import (
 // tools to it. Claude Code's own result stays as it is. The API expands a tool_reference for a tool
 // with defer_loading, with no server-side search in `tools` (measured live, #898).
 //
-// The accepted query is only the exact select form (selectNames). Every other query passes through.
-// The proxy does not read a query in any other way. The measured behavior of Claude Code's search:
+// The accepted query is only the exact select form (selectNames). Every other query passes through,
+// also one that names a deferred tool: Claude Code's own search indexes every tool it has, so it
+// answers such a query itself and the model loads the tool (#871). The proxy does not read a query
+// in any other way. The measured behavior of Claude Code's search:
 //   - `select:` is matched in any case ("Select:"), names are split on "," and trimmed, so a space
 //     after the comma is fine;
 //   - a name it does not know is dropped; when no name is known, the result is the text
@@ -28,10 +30,9 @@ import (
 //   - the result is capped at max_results (default 5).
 //
 // Fail closed on a format change, never switch to another search tool: a hash of ToolSearch's
-// description (DescHash) is the version key. An unknown hash defers nothing on the thread. A query that
-// names one of our tools in any other form, or a call to a deferred tool that no result loaded, marks
-// the hash disabled (Gate.DisableClient) and the thread stops deferring: `tools` changes once, so that
-// thread pays one cache rewrite.
+// description (DescHash) is the version key. An unknown hash defers nothing on the thread. A call to a
+// deferred tool whose own result says it is not loaded marks the hash disabled (Gate.DisableClient)
+// and the thread stops deferring: `tools` changes once, so that thread pays one cache rewrite.
 //
 // Every added list is written to the thread's record by tool_use id the first time, and replayed from
 // there on every later request. The bytes are then the same on every request, also after a restart.
@@ -117,9 +118,6 @@ type Augment struct {
 	// Loads is the deferred tools that results written now carry; Answered how many calls were new.
 	Loads    []string
 	Answered int
-	// Bad is true when a new query names one of our tools in a form other than the exact select form.
-	// Body is then the input.
-	Bad bool
 }
 
 // AugmentSearches adds, to the result of every ToolSearch call in body, a tool_reference for each
@@ -170,10 +168,6 @@ func AugmentSearches(rs store.Store, session, thread string, body []byte, deferr
 			c, isCall := calls[id]
 			if b.Get("type").String() != "tool_result" || !isCall {
 				continue
-			}
-			if _, isSel := selectNames(c.query); !isSel && namesOurs(c.query, deferred) {
-				a.Bad = true
-				return a // the format is not what the proxy knows: it adds nothing
 			}
 			res := b.Get("content")
 			// The result shapes the proxy extends: the no-match text, or references only. An error or
@@ -273,16 +267,6 @@ func ourNames(sel []string, deferred map[string]bool, res gjson.Result, max int)
 		}
 	}
 	return out
-}
-
-// namesOurs reports whether a query holds the exact name of a deferred tool.
-func namesOurs(q string, deferred map[string]bool) bool {
-	for n := range deferred {
-		if strings.Contains(q, n) {
-			return true
-		}
-	}
-	return false
 }
 
 // ReadCalls reads the proxy's deferred tools that the model called in the transcript. broke: a call's
