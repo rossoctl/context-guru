@@ -125,6 +125,7 @@ It does not check for a behavior change. Read the diff for that yourself.
 An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
 
 - **A rebase with no other change:** run `scripts/release/approval-still-valid.sh <pr> <approved-sha>`. It compares the patch of the approved head with the patch of the new head, each against its own base, and prints `git range-diff`. The same patch means only the base moved, so both approvals still count. Post its output on the PR.
+- **A commit that changes only comments** (owner rule, David Amid, 2026-11-08: "doc comments don't change the approval"): both approvals stay valid. No new review round. The script prints `COMMENTS ONLY` when the new head descends from the approved head, has the same merge base, and every changed file is `.go` or `.sh` with only blank or whole-line comment changes (`//`, `/* */`, `#`). These are not comments: code, a line with code and a trailing comment, string literals, struct tags, `//go:` directives, `// +build`, `#!`, `# shellcheck`, `.md` pages, config. Those need a re-check of the delta. The PR owner posts the script output on the PR.
 - **Any new code, or a conflict resolution:** each reviewer whose approval should still count re-checks the delta. The integrator can instead start a new independent reviewer for the delta.
 
 **A docs-only PR** needs only the release owner's review, by hand, unless the owner asks for the 2 reviews.

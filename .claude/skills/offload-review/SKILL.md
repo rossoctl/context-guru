@@ -113,7 +113,7 @@ The next round starts that reviewer fresh, and does not resume the session that 
    outside its worktree. Check that checkout with `git status` before you go on.
 4. **If both verdicts are `approve`**, check the diff for a behavior change (a default, a time
    limit, what gets cached, offloaded or shown). If there is none, tell the user that the PR is
-   ready to merge. If there is one, tell the user that the PR is approved but needs a human
+   ready to merge. Fix the non-blocking comment notes first (see "Comments after the approval"). If there is one, tell the user that the PR is approved but needs a human
    developer's yes before it merges, and name the old and the new behavior. See RELEASING.md,
    "Behavior changes need a human's permission". Then stop.
 5. **Fix the findings** in your own worktree. Check each finding first: fix the real ones; for
@@ -121,6 +121,20 @@ The next round starts that reviewer fresh, and does not resume the session that 
 6. **Run step 2 again** for round 2. Each reviewer checks its own earlier findings.
 7. After the last round of the budget, report both verdicts to the user. Do not start another
    round on your own.
+
+## Comments after the approval
+
+Owner rule (David Amid, 2026-11-08): "doc comments don't change the approval." A commit made after
+both approvals that changes **only comments** keeps both approvals. Do not run a new round for it.
+
+- **Comments are:** Go `//` and `/* */` lines, and `#` lines in shell scripts.
+- **Comments are not:** code, test code, string literals, struct tags, build tags and any `//go:`
+  directive (`//go:build`, `//go:embed`, `//go:generate`), `// +build`, `.md` pages, config. A change
+  to any of these needs a re-check of the delta.
+- **Fix the non-blocking comment notes** of the last round now. Do not leave them for a follow-up.
+- Push, then run `scripts/release/approval-still-valid.sh <pr> <approved-sha>`. It prints
+  `COMMENTS ONLY` when the rule holds. Post its output on the PR.
+- When the script prints `CHANGED`, the rule does not apply. Follow step 5 and step 6.
 
 ## Same head
 
