@@ -27,6 +27,13 @@ type PrefixFacts struct {
 	// RewroteEarlier is sticky: some earlier, non-bypassed request of the thread was rewritten,
 	// so the provider cache holds a history that differs from the original one.
 	RewroteEarlier bool
+	// OneHour says the provider BILLED the entry this request left in the cache at the one-hour
+	// tier (cache_write_1h > 0), not that the request asked for it. A request that wrote nothing
+	// keeps the tier of the previous same-model request (ObservePrefix fills that in). Metadata
+	// only: a token count.
+	OneHour bool
+	// NoWrite says the request wrote no cache, so it read an existing entry and left its tier as is.
+	NoWrite bool
 }
 
 // FactsOf reads the prefix facts off a captured event.
@@ -38,6 +45,7 @@ func FactsOf(e *Event) PrefixFacts {
 		Bypassed: e.Bypassed, Messages: e.Messages,
 		PromptTokens: e.FreshInput + e.CacheRead + e.CacheWrite,
 		Rewrote:      !e.Bypassed && e.TokensAfter < e.TokensBefore,
+		OneHour:      e.CacheWrite1h > 0, NoWrite: e.CacheWrite == 0,
 	}
 }
 
@@ -53,6 +61,8 @@ func FactsOf(e *Event) PrefixFacts {
 //     after it refreshed this model's entry (see entryAgeMs).
 //   - known: false when the thread has no facts at all. The caller then keeps the gap it
 //     measured itself (a restart forgets facts but not recency).
+//   - prevOneHour: the billed tier of that same-model previous request's entry (PrefixFacts.OneHour).
+//     false when unknown, which keeps the five-minute lifetime.
 //   - prevPromptTokens: that same-model previous request's whole prompt (fresh input + cache
 //     read + cache write), 0 when there is none. AttributeCache uses it to tell a hit that
 //     covers the prompt from a partial read (#496).
@@ -71,9 +81,9 @@ func FactsOf(e *Event) PrefixFacts {
 // It must run once per request, in request order, with the key ObserveThread uses. fromThread is
 // the thread a new thread inherits from (hasFrom says there is one); it is read only when the
 // thread has no facts yet.
-func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known, lastWasSame bool, prevPromptTokens int64) {
+func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom bool, cur PrefixFacts, commit bool) (cause string, gapMs int64, known, lastWasSame bool, prevPromptTokens int64, prevOneHour bool) {
 	if r == nil {
-		return "", 0, false, false, 0
+		return "", 0, false, false, 0, false
 	}
 	key := thread.Key(session, threadID)
 	r.mu.Lock()
@@ -102,6 +112,9 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 		delete(r.lastFacts, failedKey)
 		// A bypassed request re-writes the original history into the cache, which ends the
 		// effect of an earlier rewrite.
+		if cur.NoWrite && same {
+			cur.OneHour = prev.OneHour
+		}
 		cur.RewroteEarlier = same && !cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote)
 		r.lastFacts[key] = cur
 		r.lastFacts[perModel(key)] = cur
@@ -109,13 +122,13 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	switch {
 	case same:
 		gap := cur.TS - prev.TS
-		return prefixCause(prev, cur, gap), gap, true, lastWasSame, prev.PromptTokens
+		return prefixCause(prev, cur, gap), gap, true, lastWasSame, prev.PromptTokens, prev.OneHour
 	case failedSame, hadAny && cur.Messages > 0 && cur.Messages <= shortFirstMessages:
-		return CauseFirstOnModel, -1, hadAny, false, 0
+		return CauseFirstOnModel, -1, hadAny, false, 0, false
 	case hadAny:
-		return CauseModelChanged, -1, true, false, 0
+		return CauseModelChanged, -1, true, false, 0, false
 	}
-	return "", 0, false, false, 0
+	return "", 0, false, false, 0, false
 }
 
 // shortFirstMessages is the largest message count of a request that counts as a short first
