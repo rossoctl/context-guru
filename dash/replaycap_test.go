@@ -911,3 +911,18 @@ func TestApplyReplayLedgerCarriesTheAvoidedCompactionApart(t *testing.T) {
 	nearEq(t, "net saved", o.NetSavedUSD, 10)
 	nearEq(t, "baseline", o.BaselineCostUSD, 20)
 }
+
+// The cap only removes credit: a row after a close whose first removal is worth more than its net (the rest of
+// it is a cost) counts no more than it stored.
+func TestReplayCapNeverCountsMoreThanARowStored(t *testing.T) {
+	compaction := capTestRow(2, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	mixed := capTestRow(3, 30_000, 100, 30_000, "", 0)
+	mixed.Credits = []compCredit{{Component: "extract_llm", Gross: 200, Unique: 100, USD: 1, FirstUSD: 3}} // net 1, first 3
+	rows := []capRow{epochRow(1, 100_000, 100, 100_000, 100, 0), compaction, mixed}
+	c := walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"]
+	if c.CountedUSD > c.StoredUSD+1e-9 {
+		t.Errorf("counted %v > stored %v: the cap added credit", c.CountedUSD, c.StoredUSD)
+	}
+	nearEq(t, "past cap", c.PastCapUSD, 0)
+}

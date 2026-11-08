@@ -362,6 +362,10 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 					keep = 0
 				}
 				counted = c.FirstUSD + replayUSD*keep
+				// The cap only removes credit. A row whose first removal is worth more than its net (a negative
+				// replay part, the rest of it a cost) must not count more than it stored.
+				counted = math.Min(counted, c.USD)
+				countedFirst = math.Min(countedFirst, counted)
 			}
 			epochUnique[c.Component] += c.Unique
 			past := c.USD - counted
