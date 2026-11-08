@@ -59,6 +59,31 @@ its dedup memory, frozen offload decisions and cache boundary across the compact
 | **Bob** | Yes. Set `model.compressionThreshold` in `~/.bob/settings.json` (restart required) — `0.9` compacts at 90% instead of the default 50%, a large value disables it in practice. `/compress` still forces it on demand. |
 | **Claude Code** | No. Every threshold knob is clamped to at most the model's window, so it can only compact *earlier*. `DISABLE_AUTO_COMPACT` turns it off entirely, but then a long session walks into the provider's hard context limit with no summary to fall back on. |
 
+## When you change the compaction point
+
+If you move Claude Code's compaction point, Context Guru reads it and uses it. The savings figures
+and the summarize trigger then follow your setting, not the built-in table.
+
+- **What it reads** (Claude Code 2.1.319, checked in the shipped client): the env vars
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_AUTO_COMPACT` and
+  `DISABLE_COMPACT`, and the settings keys `autoCompactWindow`, `autoCompactEnabled` and
+  `modelSettings.<model>.autoCompactWindow` (what `/autocompact` writes). Files: `settings.json`
+  and `.claude.json` in `$CLAUDE_CONFIG_DIR` (default `~/.claude` and `~`). Project settings files
+  are not read.
+- **When:** once, when the local proxy starts. A setting changed while the proxy runs takes effect at
+  the next proxy restart. The plugin starts the proxy from a session hook, so the proxy inherits the
+  env of the session that started it.
+- **If auto-compact is off,** C is the model window.
+- **If a value is odd or missing,** the built-in table value is used. A settings file larger than
+  4 MiB is skipped (a long-lived `.claude.json` can be), and C then falls back to the table for what
+  that file would have set.
+- **Which requests:** only requests with a Claude Code User-Agent. Codex and Bob requests on the same
+  proxy use the table.
+- **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
+  provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
+- **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.
+- A hosted proxy reads nothing. Codex and Bob are not read.
+
 ## Bob: prefer lossless components
 
 Bob cannot expand a `<<cg:HASH>>` marker — it has no way to call the expand tool (see

@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
@@ -75,8 +76,11 @@ type capture struct {
 	// thread is the session thread this request belongs to (see internal/thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
-	thread     string
-	agentComp  bool
+	thread    string
+	agentComp bool
+	// cpoint and cpointSrc are C for this request and where it came from (#948).
+	cpoint     int
+	cpointSrc  string
 	inherits   string
 	hasInherit bool
 	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
@@ -415,6 +419,14 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 	}
 }
 
+// noteCompactionPoint records C (billed tokens) and its source, so the replay cap and the
+// episode panel read the figure this request ran under and not a recomputed one (#948).
+func (c *capture) noteCompactionPoint(tokens int, source string) {
+	if c != nil {
+		c.cpoint, c.cpointSrc = tokens, source
+	}
+}
+
 func (c *capture) noteModel(model string) {
 	if c != nil {
 		c.model = model
@@ -498,6 +510,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.FromTrace(c.trace, c.unique)
 	e.ThreadID = c.thread
 	e.AgentCompaction = c.agentComp
+	// Only a user-configured C is stored: the table value scales with the window and is read back
+	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
+	if c.cpointSrc == string(compactionpoint.Configured) && c.cpoint > 0 {
+		e.CompactionPoint, e.CompactionPointSource = c.cpoint, c.cpointSrc
+	}
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
