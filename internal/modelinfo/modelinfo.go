@@ -101,10 +101,11 @@ func (p Price) CacheWrite5mFor(model string) float64 {
 
 // CacheWrite1hFor is the 1-hour cache-WRITE rate per token. No gateway states it, so it is always
 // derived: the operator's Write1hFrac, else AnthropicCacheWrite1hFrac, times the fresh input rate.
-// The model is part of the signature so a per-model rule can arrive without a caller change.
-func (p Price) CacheWrite1hFor(_ string) float64 {
+// The operator's rate is never below the 5-minute rate, so every path that prices a 1-hour write
+// gets the same number.
+func (p Price) CacheWrite1hFor(model string) float64 {
 	if p.Write1hFrac > 0 {
-		return p.Input * p.Write1hFrac
+		return max(p.Input*p.Write1hFrac, p.CacheWrite5mFor(model))
 	}
 	return p.Input * AnthropicCacheWrite1hFrac
 }

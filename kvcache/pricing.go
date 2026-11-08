@@ -115,10 +115,14 @@ func DefaultMultipliers() Multipliers { return Multipliers{}.WithDefaults() }
 // then omitted rather than computed as zero.
 func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pricing {
 	// The caller's multiples ride on the price, and Price decides each blank tier for this model:
-	// a multiple the caller set wins, and an unset read multiple follows the model. The write
-	// multiples always carry a default here, as before.
-	userRead := m.CacheRead
+	// a multiple the caller set wins, and an unset read multiple follows the model. An unset
+	// 1-hour multiple follows the price list's entry. The 5-minute multiple always carries a
+	// default here, as before.
+	userRead, userW1h := m.CacheRead, m.Write1h
 	m = m.WithDefaults()
+	if userW1h <= 0 && p.Write1hFrac > 0 {
+		m.Write1h = p.Write1hFrac
+	}
 	p.ReadFrac, p.WriteFrac, p.Write1hFrac = userRead, m.Write5m, m.Write1h
 	out := Pricing{
 		Model: model, Input: p.Input, Output: p.Output, CacheRead: p.CacheRead,

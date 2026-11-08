@@ -111,3 +111,16 @@ func TestShippedPriceListSetsNoCacheWrite1hFrac(t *testing.T) {
 		}
 	}
 }
+
+// A 1-hour write is never cheaper than a 5-minute one. A Claude entry bills the 5-minute write at
+// 1.25x, so a 1-hour multiple of 1.0 gives the 5-minute rate on every path, not 1.0x on some.
+func TestOneHourFracBelowTheFiveMinuteRateGivesTheFiveMinuteRate(t *testing.T) {
+	tb, err := ParseTable([]byte("models:\n  - {match: claude-sonnet*, in: 3, out: 15, cache_write_1h_frac: 1.0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := tb.Price(context.Background(), "claude-sonnet-4-6")
+	if got, want := p.CacheWrite1h(), 3.75e-6; math.Abs(got-want) > 1e-18 {
+		t.Fatalf("CacheWrite1h = %v, want %v (the 5-minute rate)", got, want)
+	}
+}

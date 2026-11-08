@@ -35,3 +35,26 @@ func TestEventPriceUsesThePriceListOneHourRate(t *testing.T) {
 		t.Errorf("Claude row cost = %v, want %v", got, want)
 	}
 }
+
+// The live keep-alive row prices a 1-hour lapse at the entry's 1-hour rate, not at 2.0x.
+func TestTheLivePanelUsesThePriceListOneHourRate(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	e := kaAgent(now-100_000, "hour", 0.10)
+	e.CacheWrite, e.CacheWrite1h = 100_000, 100_000
+	fx := newKAFixture(t, e)
+	price := func(string) (modelinfo.Price, bool) {
+		return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6, Write1hFrac: 1.5}, true
+	}
+	got, err := fx.db.KeepAliveLive(Filter{TenantAll: true}, now, 280, 2, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got.Rows))
+	}
+	// A lapse: 100k x (4.5e-6 - 3e-7) = $0.42. A ping: 100k x 3e-7 + 15e-6 = $0.030015.
+	// 0.42 / 0.030015 = 13.99, so 13 pings. At 2.0x it would be 18.
+	if r := got.Rows[0]; r.Breakeven1hPings != 13 {
+		t.Errorf("breakeven_1h_pings = %d, want 13 (the entry's 1.5x)", r.Breakeven1hPings)
+	}
+}
