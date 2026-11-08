@@ -11,7 +11,7 @@ This page lists which search tool each client and model uses when `ultrahigh` de
 | Claude Code, search off on purpose (`ENABLE_TOOL_SEARCH=false`) | None | - | Nothing | - | #485 |
 | Claude Code, search off, not on purpose, Claude model | Anthropic's server-side search (`tool_search_tool_bm25`) | The provider | Tools the history rule picks | A 400 turns deferral off for the tenant and model | #485 |
 | Codex, gpt-5.5 (declares its own `tool_search`, `execution: client`) | Codex's own `tool_search` | Codex | Nothing. The proxy adds no `context_guru_tools`. Codex's loads count as uses in the history | - | #876, #897 |
-| Codex, gpt-5.6 and later | Codex's own `tool_search` | Codex | Nothing. Codex sends `additional_tools` and no `tools` | - | #876 |
+| Codex, gpt-5.6 and later | None (Codex sends an empty `tools` array and puts its tools in `additional_tools`) | - | Nothing. There is nothing to defer | - | #876 |
 | Chat Completions client with no search (GLM, Kimi, GPT chat) | Our `context_guru_tools` | The proxy, in band | Tools the history rule picks | A 400 turns deferral off for the tenant and model | #825, #879 |
 | Responses client with no `tool_search` of its own, any non-Claude model (the proxy checks the model name, then the tools) | Our `context_guru_tools` | The proxy, in band | Tools the history rule picks | A 400 turns deferral off for the tenant and model | #825, #884, #897 |
 
@@ -22,13 +22,17 @@ last row). Only one kind of client would gain from it:
 | Client | Search tool today | Does #876 help? |
 |---|---|---|
 | Codex on gpt-5.5 | Codex's own `tool_search`, run by Codex | No. The proxy keeps Codex's search and defers nothing (#897). |
-| Codex on gpt-5.6 and later | None needed: Codex sends no `tools`, only `additional_tools` | No. There is nothing to defer. |
+| Codex on gpt-5.6 and later | None: Codex sends an empty `tools` array, and its tools go in `additional_tools` | No. There is nothing to defer. |
 | **An app on the OpenAI Responses API directly** (the OpenAI SDK, an agent framework) **with no search tool of its own**, gpt-5.6 and later | Our `context_guru_tools` | **Yes.** It is the only case. OpenAI's search would replace ours. |
 | The same app, but it declares its own `tool_search` | The app's own search | No. Native search first. |
 | A Chat Completions client (GLM, Kimi, GPT chat) | Our `context_guru_tools` | No. #876 is for the Responses API only. |
 
-Even there the gain is small. The tool stays in `tools` instead of being removed and added back,
-and OpenAI charges for each search. So #876 waits for a real client that needs it.
+Even there the gain is small:
+
+- **Gain:** the tool stays in `tools` with `defer_loading`, so it is not removed and added back.
+- **Cost:** each server-side search is a paid tool call on the OpenAI side.
+
+So #876 waits for a real client that needs it.
 
 ## Configuration by client
 
