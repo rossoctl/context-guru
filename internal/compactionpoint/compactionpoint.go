@@ -151,7 +151,13 @@ func (p Point) Tokens(window int) int {
 // FromClient reports whether the point came from the client itself (a user setting or the client's
 // own default) and so carries an absolute C that a request row must store (#948, #963).
 func (p Point) FromClient() bool {
-	return (p.Source == Configured || p.Source == ClientDefault) && p.Abs > 0
+	return IsClientSource(string(p.Source)) && p.Abs > 0
+}
+
+// IsClientSource is the ONE rule for "this source carries an absolute C that a row stores". The
+// request-row writer and the dash walks use it.
+func IsClientSource(src string) bool {
+	return Source(src) == Configured || Source(src) == ClientDefault
 }
 
 // table is matched by SUBSTRING against the normalized model id, LONGEST pattern first, so

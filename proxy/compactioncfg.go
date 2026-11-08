@@ -135,9 +135,9 @@ func short(s string) string {
 // never has a user setting. Fail open: any odd value gives the table.
 //
 // WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
-// (dash.AgentFor: "claude-code" or "claude-cli", "bob", "codex"; the client sets it itself). A request
-// of another client on the same local proxy gets the table. Bob also gets its own verified default
-// when the user set nothing (#963). Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
+// own (clientOf below; the client sets it itself). A request of another client on the same local
+// proxy gets the table. Bob also gets its own verified default when the user set nothing (#963).
+// Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
 // claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same
 // env is also covered, which is right, because it reads the same settings. A request with no
 // User-Agent gets the table.
@@ -149,13 +149,13 @@ func short(s string) string {
 func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
 	if h.opts.Tenants == nil && r != nil {
-		switch dash.AgentFor(r.UserAgent()) {
-		case "claude-code", "claude-cli":
+		switch clientOf(r.UserAgent()) {
+		case "claude":
 			if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
 				return p
 			}
 		case "bob":
-			if p, ok := h.opts.BobCompact.Resolve(window); ok {
+			if p, ok := h.opts.BobCompact.Resolve(window, h.bobWindow(model)); ok {
 				return p
 			}
 		case "codex":
@@ -167,12 +167,64 @@ func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) c
 	return compactionpoint.For(model)
 }
 
-func isClaudeCodeAgent(userAgent string) bool {
+// clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which
+// matches the substring "bob" or "codex" anywhere and serves the dashboard's filter. A wrong match
+// here would give a stranger's request another client's C, so Bob and Codex are matched by the
+// start of the User-Agent they send: Bob Shell sends `bobshell/<version>` (bob.js, the request
+// headers of its API client); Codex sends its originator first, `codex_cli_rs/...` by default (and
+// `codex_exec`, `codex-tui` and the like). Claude Code keeps the dash.AgentFor rule from #955.
+func clientOf(userAgent string) string {
+	l := strings.ToLower(strings.TrimSpace(userAgent))
+	switch {
+	case strings.HasPrefix(l, "bobshell/"):
+		return "bob"
+	case strings.HasPrefix(l, "codex"):
+		return "codex"
+	}
 	switch dash.AgentFor(userAgent) {
 	case "claude-code", "claude-cli":
-		return true
+		return "claude"
 	}
-	return false
+	return ""
+}
+
+// bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that
+// passed through this proxy (noteBobModelInfo). 0 = not seen. Metadata only: a number for each
+// model id, in memory, at most bobWindowMax entries.
+func (h *Handler) bobWindow(model string) int {
+	h.bobWinMu.Lock()
+	defer h.bobWinMu.Unlock()
+	return h.bobWin[model]
+}
+
+const bobWindowMax = 512
+
+// noteBobModelInfo records data[].model_name -> data[].model_info.max_input_tokens (the LiteLLM
+// shape Bob reads in getLiteLLMModels). A body that is not that shape records nothing.
+func (h *Handler) noteBobModelInfo(body []byte) {
+	data := gjson.GetBytes(body, "data")
+	if !data.IsArray() {
+		return
+	}
+	got := map[string]int{}
+	data.ForEach(func(_, v gjson.Result) bool {
+		name := v.Get("model_name").String()
+		w := v.Get("model_info.max_input_tokens")
+		if name != "" && len(name) <= 128 && w.Type == gjson.Number && w.Int() > 0 && w.Int() < 1<<40 && len(got) < bobWindowMax {
+			got[name] = int(w.Int())
+		}
+		return true
+	})
+	if len(got) == 0 {
+		return
+	}
+	h.bobWinMu.Lock()
+	defer h.bobWinMu.Unlock()
+	h.bobWin = got // the whole catalog replaces the old one: bounded, and never stale
+}
+
+func isBobModelInfo(r *http.Request) bool {
+	return r.Method == http.MethodGet && (r.URL.Path == "/inference/v1/model/info" || r.URL.Path == "/v1/model/info")
 }
 
 // ReadBobCompact reads Bob Shell's model.compressionThreshold (#963) from the user settings file

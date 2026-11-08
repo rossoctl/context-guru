@@ -211,16 +211,11 @@ func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
 	}
 }
 
-// isClientSource reports a source whose C is an absolute number a request row stores (#948, #963).
-func isClientSource(src string) bool {
-	return src == string(compactionpoint.Configured) || src == string(compactionpoint.ClientDefault)
-}
-
 // capConversationPoint is C for one conversation: the user's own setting when a row recorded one
 // (the newest such row, because the setting can change between sessions), else the table (#948).
 func capConversationPoint(conv []capRow) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
-		if isClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 {
+		if compactionpoint.IsClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 {
 			return compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
 		}
 	}

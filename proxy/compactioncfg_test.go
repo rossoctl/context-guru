@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,10 @@ import (
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
+
+type fixedWin int
+
+func (w fixedWin) Window(context.Context, string) (int, bool) { return int(w), true }
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
@@ -141,10 +148,12 @@ func TestCompactEndpointRecordsTheConfiguredPoint(t *testing.T) {
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		Preset: cfg.Preset, Dashboard: rec, Prices: fixedPricer{},
 		ClaudeCompact: compactionpoint.ClaudeCode{EnvWindow: "200k"},
+		BobCompact:    compactionpoint.Bob{Read: true},
+		Windows:       fixedWin(1_000_000),
 	})
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
-	for _, ua := range []string{"claude-cli/2.1.319 (external, cli)", "codex_cli_rs/0.160.0"} {
+	for _, ua := range []string{"claude-cli/2.1.319 (external, cli)", "codex_cli_rs/0.160.0", "bobshell/1.0.3"} {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/compact?provider=anthropic",
 			strings.NewReader(string(anthropicRequest("claude-opus-5"))))
 		req.Header.Set("User-Agent", ua)
@@ -154,7 +163,7 @@ func TestCompactEndpointRecordsTheConfiguredPoint(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	waitForRows(t, rec, 2)
+	waitForRows(t, rec, 3)
 	page, _ := rec.DB().Requests(dash.Filter{}, 0, 10)
 	got := map[string]int{}
 	for _, e := range page.Requests {
@@ -162,8 +171,11 @@ func TestCompactEndpointRecordsTheConfiguredPoint(t *testing.T) {
 		if e.Agent == "claude-cli" && (e.CompactionPointSource != "configured") {
 			t.Errorf("claude-cli row source = %q", e.CompactionPointSource)
 		}
+		if e.Agent == "bob" && (e.CompactionPointSource != "client_default" || e.CompactionPoint != 100_000) {
+			t.Errorf("bob row = %d %q, want 100000 client_default", e.CompactionPoint, e.CompactionPointSource)
+		}
 	}
-	if got["claude-cli"] == 0 || got["codex"] != 0 {
+	if got["claude-cli"] == 0 || got["codex"] != 0 || got["bob"] == 0 {
 		t.Errorf("recorded points = %v, want a configured C on the Claude Code row only", got)
 	}
 }
@@ -221,17 +233,79 @@ func TestCompactionPointForBobAndCodex(t *testing.T) {
 		r.Header.Set("User-Agent", ua)
 		return r
 	}
-	if p := h.compactionPointFor(req("bob-shell/1.0.3"), body, 1_000_000); p.Source != compactionpoint.ClientDefault || p.Tokens(1_000_000) != 500_000 {
-		t.Errorf("bob: %+v", p)
+	// Our window 1M, Bob's window not seen: 0.5 x 200,000.
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Source != compactionpoint.ClientDefault || p.Tokens(1_000_000) != 100_000 {
+		t.Errorf("bob, window not seen: %+v", p)
+	}
+	h.noteBobModelInfo([]byte(`{"data":[{"model_name":"claude-opus-5","model_info":{"max_input_tokens":400000}},{"model_name":"x","model_info":{}}]}`))
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Tokens(1_000_000) != 200_000 {
+		t.Errorf("bob, window seen 400k: %+v", p)
+	}
+	// A model with no entry in the info response keeps the fallback.
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), []byte(`{"model":"other"}`), 1_000_000); p.Tokens(1_000_000) != 100_000 {
+		t.Errorf("bob, model not in info: %+v", p)
 	}
 	if p := h.compactionPointFor(req("codex_cli_rs/0.160.0"), body, 272_000); p.Source != compactionpoint.Configured || p.Tokens(272_000) != 150_000 {
 		t.Errorf("codex: %+v", p)
 	}
-	if p := h.compactionPointFor(req("curl/8"), body, 1_000_000); p.Source != compactionpoint.Assumed {
-		t.Errorf("other client must use the table: %+v", p)
+	for _, ua := range []string{"curl/8", "bobcat/1.0", "my-bob-tool/2", "xcodex/1", ""} {
+		if p := h.compactionPointFor(req(ua), body, 1_000_000); p.Source != compactionpoint.Assumed {
+			t.Errorf("UA %q must use the table: %+v", ua, p)
+		}
 	}
 	h.opts.Tenants = &TenantSource{}
-	if p := h.compactionPointFor(req("bob-shell/1.0.3"), body, 1_000_000); p.Source == compactionpoint.ClientDefault {
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Source == compactionpoint.ClientDefault {
 		t.Error("hosted proxy must read nothing")
+	}
+}
+
+func TestNoteBobModelInfoIsBoundedAndSafe(t *testing.T) {
+	h := &Handler{}
+	h.noteBobModelInfo([]byte(`not json`))
+	h.noteBobModelInfo([]byte(`{"data":"x"}`))
+	h.noteBobModelInfo([]byte(`{"data":[{"model_name":"a","model_info":{"max_input_tokens":-5}}]}`))
+	if h.bobWindow("a") != 0 {
+		t.Error("a bad value must record nothing")
+	}
+	var sb strings.Builder
+	sb.WriteString(`{"data":[`)
+	for i := 0; i < 2000; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{"model_name":"m%d","model_info":{"max_input_tokens":1000}}`, i)
+	}
+	sb.WriteString(`]}`)
+	h.noteBobModelInfo([]byte(sb.String()))
+	if len(h.bobWin) > bobWindowMax {
+		t.Errorf("map holds %d entries", len(h.bobWin))
+	}
+}
+
+// The model/info response passes through unchanged and the proxy keeps the window.
+func TestBobModelInfoPassThroughRecordsWindow(t *testing.T) {
+	const info = `{"data":[{"model_name":"claude-opus-5","model_info":{"max_input_tokens":200000}}]}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/inference/v1/model/info" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, info)
+	}))
+	defer up.Close()
+	h := New(nil, store.NewMemory(store.Options{}), metrics.NewAggregator(), Options{BobUpstream: up.URL})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/inference/v1/model/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != info {
+		t.Errorf("body changed: %s", b)
+	}
+	if h.bobWindow("claude-opus-5") != 200_000 {
+		t.Errorf("window = %d", h.bobWindow("claude-opus-5"))
 	}
 }

@@ -87,21 +87,31 @@ and the summarize trigger then follow your setting, not the built-in table.
 ### Bob and Codex
 
 The same rules hold: read once at start, local mode only, `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off`
-turns it off, a bad value gives the table. Checked in the shipped clients (Bob Shell 1.0.3,
-Codex CLI 0.160.0).
+turns it off. Checked in the shipped clients (Bob Shell 1.0.3, Codex CLI 0.160.0). A request counts
+as Bob when its User-Agent starts with `bobshell/`. It counts as Codex when it starts with `codex`.
 
 - **Bob.** Key `model.compressionThreshold` in `~/.bob/settings.json` (the system file wins). It is
   a fraction of the model window. Default **0.5**. Bob compacts when the prompt tokens the provider
   reported for the last response reach `fraction x window`. So C is `fraction x window`, also when
-  you changed nothing. On a 200,000 window the default C is 100,000. The table gave about 199,000.
-  Not read: the project `.bob/settings.json`, and a server-side Bob experiment that can override the
-  default.
+  you changed nothing.
+  - **Which window.** Bob uses the window from its own model list (`max_input_tokens` in
+    `/inference/v1/model/info`), or 200,000 when the list has none. Our window can be larger.
+    So C uses `min(our window, Bob's window)`. The proxy reads Bob's window from the model list
+    when Bob fetches it through the proxy, and keeps one number for each model in memory. If the
+    proxy has not seen it, it uses `min(our window, 200,000)`. A lower C is the safe side: the
+    savings figure is never too high.
+  - **Example.** A 1,000,000 window in our table, Bob list not seen: default C is 100,000.
+    A 200,000 window, Bob list says 200,000: default C is 100,000. The table gave about 199,000.
+  - **A bad value** (not a number, zero, negative) gives **Bob's own default 0.5**, not the table.
+  - **Not read:** the project `.bob/settings.json`, and a server-side Bob experiment that can
+    override the default.
 - **Codex.** Key `model_auto_compact_token_limit` in `$CODEX_HOME/config.toml` (default
   `~/.codex`). It is a token count, and Codex caps it at 0.9 of its own window. C is that count.
   **Codex has no default here.** Its default depends on a per-model catalog that changes with each
-  release, and its window differs from ours. With no key set, Codex uses the table. If you set
-  `model_auto_compact_token_limit_scope` to anything but `total`, or
-  `model_post_turn_compact_threshold_percent` above 0, Context Guru does not derive C and uses the table.
+  release, and its window differs from ours. With no key set, Codex uses the table.
+  - **A bad value** gives the table.
+  - If you set `model_auto_compact_token_limit_scope` to anything but `total`, or
+    `model_post_turn_compact_threshold_percent` above 0, Context Guru does not derive C and uses the table.
 
 ## Bob: prefer lossless components
 

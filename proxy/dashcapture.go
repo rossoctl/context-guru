@@ -512,7 +512,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.AgentCompaction = c.agentComp
 	// Only a client-set C (the user's setting or the client's own default, #963) is stored: the table value scales with the window and is read back
 	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
-	if (c.cpointSrc == string(compactionpoint.Configured) || c.cpointSrc == string(compactionpoint.ClientDefault)) && c.cpoint > 0 {
+	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {
 		e.CompactionPoint, e.CompactionPointSource = c.cpoint, c.cpointSrc
 	}
 	// The provider's terminal reason, off the same response bytes the token tiers came

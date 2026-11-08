@@ -27,8 +27,17 @@ import (
 //     response, i.e. the PROVIDER-REPORTED prompt tokens. That is the same ruler as billed input
 //     (ClientToBilled = 1.0 is right here, not a guess). After a compaction the client seeds it with
 //     an estimate, JSON length / 4, until the next response. ex(model) is the model's context
-//     window from the gateway catalog (max_input_tokens, 200,000 when missing), so T is a fraction
-//     of the WHOLE window, with no reserve.
+//     window from Bob's OWN gateway catalog, GET /inference/v1/model/info (or /v1/model/info),
+//     field data[].model_info.max_input_tokens, 200,000 when the field or the model is missing
+//     (getLiteLLMModels and the `contextWindow: a.max_input_tokens||2e5` line). So T is a fraction
+//     of the WHOLE window of THAT catalog, with no reserve.
+//
+// WHICH WINDOW (review round 1). Bob's catalog window can differ from ours (ours is 1,000,000 for
+// claude-opus-5; Bob's catalog may say 200,000). A C built on a window larger than Bob's is too
+// high, the dangerous direction for this package. So Resolve takes min(our window, Bob's window):
+// Bob's window is the max_input_tokens the proxy saw in the model/info response it passed through
+// (BobWindow, a number for each model id); when the proxy has not seen it, Bob's own fallback
+// 200,000 is used. A lower C is the conservative side.
 //
 // NOT READ: the project file (the proxy does not know the directory), the old flat key
 // `chatCompression` (the client migrates it), and the server-side experiment flag. If that flag is
@@ -39,17 +48,39 @@ type Bob struct {
 	Threshold string
 }
 
+// BobFallbackWindow is the window Bob uses when its catalog has no max_input_tokens for a model.
+const BobFallbackWindow = 200_000
+
 // BobDefaultThreshold is the client's default, `fla = .5` in the client.
 const BobDefaultThreshold = 0.5
 
 // Resolve gives C for Bob: the user's fraction of the window when set, else the client default.
 // ok is false when nothing was read or the window is unknown: the caller then uses the table.
-func (b Bob) Resolve(window int) (Point, bool) {
-	if !b.Read || window <= 0 {
+//
+// window is OUR window for the model (0 = unknown). bobWindow is Bob's own max_input_tokens for the
+// model, seen in its model/info response (0 = not seen). The window used is
+// min(window, bobWindow), or min(window, BobFallbackWindow) when bobWindow is not seen.
+func (b Bob) Resolve(window, bobWindow int) (Point, bool) {
+	if !b.Read {
 		return Point{}, false
 	}
+	bw := bobWindow
+	if bw <= 0 {
+		bw = BobFallbackWindow
+	}
+	eff := bw
+	if window > 0 && window < bw {
+		eff = window
+	}
+	if window <= 0 && bobWindow <= 0 {
+		return Point{}, false // nothing known about this model: the table
+	}
 	t, src := BobDefaultThreshold, ClientDefault
-	note := "Bob Shell's own default model.compressionThreshold 0.5 of the model window (client compress(): " +
+	which := "Bob's window seen in its model/info response (or ours, if smaller)"
+	if bobWindow <= 0 {
+		which = "min(our window, 200,000), because the proxy has not seen Bob's own window for this model and 200,000 is Bob's fallback"
+	}
+	note := "Bob Shell's own default model.compressionThreshold 0.5 of the window " + which + " (client compress(): " +
 		"promptTokenCount >= T x window). The ruler is the provider-reported prompt tokens, so the factor to billed tokens is 1.0."
 	if raw := strings.TrimSpace(b.Threshold); raw != "" {
 		f, err := strconv.ParseFloat(raw, 64)
@@ -60,15 +91,19 @@ func (b Bob) Resolve(window int) (Point, bool) {
 				f = 1 // above 1 the client never compacts: the provider's limit is the window
 			}
 			t, src = f, Configured
-			note = "the user's own Bob model.compressionThreshold, a fraction of the model window " +
+			note = "the user's own Bob model.compressionThreshold, a fraction of the window (" + which + ") " +
 				"(client compress(): promptTokenCount >= T x window). The ruler is the provider-reported prompt tokens."
 		}
 	}
-	abs := int(math.Floor(t * float64(window)))
+	abs := int(math.Floor(t * float64(eff)))
 	if abs <= 0 {
 		return Point{}, false
 	}
-	return Point{Frac: float64(abs) / float64(window), Abs: abs, Source: src, Note: note}, true
+	p := Point{Abs: abs, Source: src, Note: note}
+	if window > 0 {
+		p.Frac = float64(abs) / float64(window)
+	}
+	return p, true
 }
 
 // Codex is the user's own auto-compact setting of Codex CLI (#963). A host fills it once, at
@@ -114,14 +149,19 @@ func (c Codex) Resolve(window int) (Point, bool) {
 	if s := strings.ToLower(strings.TrimSpace(c.Scope)); s != "" && s != "total" {
 		return Point{}, false
 	}
-	if p := strings.TrimSpace(c.PostTurn); p != "" && p != "0" {
-		return Point{}, false
+	if p := strings.TrimSpace(c.PostTurn); p != "" {
+		// Numeric compare: the client reads 0 as off, and TOML may write 0.0 or 0 alike.
+		if f, err := strconv.ParseFloat(p, 64); err != nil || f != 0 {
+			return Point{}, false
+		}
 	}
 	n, err := strconv.ParseInt(strings.ReplaceAll(strings.TrimSpace(c.Limit), "_", ""), 10, 64)
 	if err != nil || n <= 0 || n > 1<<40 {
 		return Point{}, false
 	}
 	abs := int(n)
+	// A SANITY BOUND only. The client clamps to 0.9 x ITS catalog window, which we do not know; the
+	// user's limit is the value used. We cap at 0.9 x our window so a typo cannot exceed it.
 	if window > 0 && abs > window*9/10 {
 		abs = window * 9 / 10
 	}

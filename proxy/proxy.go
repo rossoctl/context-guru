@@ -253,11 +253,14 @@ type upstream struct {
 
 // Handler serves the proxy + management routes.
 type Handler struct {
-	pipe   *components.Pipeline
-	store  store.Store
-	agg    *metrics.Aggregator
-	opts   Options
-	client *http.Client
+	// bobWin is Bob's own max_input_tokens for each model id, from its model/info response (#963).
+	bobWinMu sync.Mutex
+	bobWin   map[string]int
+	pipe     *components.Pipeline
+	store    store.Store
+	agg      *metrics.Aggregator
+	opts     Options
+	client   *http.Client
 	// dispatch is how every core call leaves this proxy (keep-alive pings, cheap-model calls).
 	// Use dispatcher(), which builds it.
 	dispatch *Dispatcher
@@ -668,7 +671,7 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
-		if isBobProfile(r) {
+		if isBobProfile(r) || (h.opts.Tenants == nil && isBobModelInfo(r)) {
 			// We have to read this one response, so do not let it arrive compressed.
 			req.Header.Del("Accept-Encoding")
 		}
@@ -682,6 +685,9 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 			return
 		}
 		if isBobProfile(r) && h.forwardBobProfile(w, resp) {
+			return
+		}
+		if h.opts.Tenants == nil && isBobModelInfo(r) && h.forwardBobModelInfo(w, resp) {
 			return
 		}
 		h.stream(w, resp)
@@ -729,6 +735,26 @@ func (h *Handler) forwardBobProfile(w http.ResponseWriter, resp *http.Response) 
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(out)
+	return true
+}
+
+// forwardBobModelInfo forwards Bob's model list unchanged and keeps one number for each model, the
+// window Bob will compact against (#963). It reports whether it answered the request. A body it
+// cannot read is not answered here: the caller then streams the response as before.
+func (h *Handler) forwardBobModelInfo(w http.ResponseWriter, resp *http.Response) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	h.noteBobModelInfo(body)
+	copyHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 	return true
 }
 

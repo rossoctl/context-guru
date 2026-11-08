@@ -724,3 +724,25 @@ func TestReplayCapCeilingMapsAgreeWhenSourcesMix(t *testing.T) {
 		}
 	}
 }
+
+// A client_default row (#963) is read back exactly like a configured one: the walk uses its absolute C
+// and the ledger carries it in CeilingConfigured.
+func TestReplayCapUsesAClientDefaultCompactionPoint(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 50_000, 100_000, "extract_llm", 1),
+		capTestRow(2, 110_000, 50_000, 140_000, "extract_llm", 1),
+		capTestRow(3, 120_000, 50_000, 160_000, "extract_llm", 1), // cf 210k: past 200k
+		capTestRow(4, 130_000, 50_000, 170_000, "extract_llm", 1),
+	}
+	for i := range rows {
+		rows[i].CPoint, rows[i].CPointSource = 200_000, "client_default"
+	}
+	got := walkReplayCap(rows, fixedWindow(1_000_000))
+	c := got.ByComponent["extract_llm"]
+	if got.ClosedCounterfactual != 1 || c.CountedUSD != 2 || c.PastCapUSD != 2 {
+		t.Errorf("client_default: closed=%d counted=%v past=%v", got.ClosedCounterfactual, c.CountedUSD, c.PastCapUSD)
+	}
+	if got.CeilingConfigured["m1"] != 200_000 {
+		t.Errorf("ledger C = %v / %v", got.CeilingConfigured, got.CeilingFrac)
+	}
+}

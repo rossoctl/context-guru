@@ -1114,7 +1114,7 @@ type ClientCeilingUsed struct {
 // one (the newest), else the table (#948). The fraction is C over the window, as spanFor wants it.
 func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
-		if isClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 && window > 0 {
+		if compactionpoint.IsClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 && window > 0 {
 			p := compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
 			p.Frac = float64(p.Abs) / float64(window)
 			return p
