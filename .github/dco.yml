@@ -1,0 +1,5 @@
+# Read by the DCO app (https://github.com/dcoapp/app) from the default branch.
+# A commit author may sign off an earlier commit of theirs by a follow-up commit. Only the author of
+# the unsigned commit counts: thirdParty stays off.
+allowRemediationCommits:
+  individual: true

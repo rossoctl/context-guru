@@ -14,6 +14,17 @@ git commit -s -m "feat: ..."
 This adds a `Signed-off-by:` trailer certifying you wrote or have the right to submit the
 patch. PRs with unsigned commits will not be merged.
 
+If one of your commits has no sign-off, do not rewrite the branch. Push a follow-up commit
+with `git commit -s --allow-empty` and this message, with your own name, email and the full SHA:
+
+```
+chore: DCO remediation for commit <short sha>
+
+I, Your Name <you@example.com>, hereby add my Signed-off-by to this commit: <full sha>
+```
+
+The DCO app accepts it for a commit you wrote. It does not accept it for a commit someone else wrote.
+
 When a commit was assisted by an AI agent, attribute it with an `Assisted-By:` trailer —
 do **not** use `Co-Authored-By` and do not add "Generated with" lines.
 
