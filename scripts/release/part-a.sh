@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# part-a.sh [<out-dir>]: run the integration check's Part A (RELEASING.md, step 5) in this
+# checkout, on a machine with Go and a C compiler (cgo is needed for -race).
+#
+# Each step writes <out-dir>/<step>.log. The summary is <out-dir>/summary.txt, and its last line
+# is ALWAYS "DONE rc=<n>", also when a step fails or the script is stopped, so a poller can wait
+# for that line. rc 0: every step passed. A failed step is run once more; the summary says
+# "flaky" when the second run passed, and "FAILED" when both failed.
+#
+# The whole run takes about 40 minutes. The dash race tests alone need up to 25 minutes on a
+# loaded machine, which is why they get -timeout 25m. Run it detached, and wait for the DONE line.
+#
+# GO: the go binary (default: go on PATH, else /usr/local/go/bin/go).
+set -uo pipefail
+out=${1:-$PWD/.part-a}
+mkdir -p "$out"
+sum=$out/summary.txt
+: > "$sum"
+rc=0
+trap 'echo "DONE rc=$rc" >> "$sum"' EXIT
+GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
+echo "commit $(git rev-parse HEAD 2>/dev/null || echo unknown)" >> "$sum"
+
+# step <name> <cmd...>: run the command, and run it once more if it fails.
+step() {
+  local name=$1; shift
+  if "$@" > "$out/$name.log" 2>&1; then echo "ok      $name" >> "$sum"; return; fi
+  if "$@" > "$out/$name.rerun.log" 2>&1; then echo "flaky   $name (passed on the 2nd run; see $name.log)" >> "$sum"; return; fi
+  echo "FAILED  $name (twice; see $name.log, $name.rerun.log)" >> "$sum"
+  rc=1
+}
+
+rest=$("$GO" list ./... | grep -vE '/(proxy|dash|context-guru-plugin)(/|$)')
+
+step vet           "$GO" vet ./...
+step build-purego  env CGO_ENABLED=0 "$GO" build ./...
+step build-record  env CGO_ENABLED=0 "$GO" build -tags cg_record ./...
+# The default build must not link otel, grpc or protobuf; only -tags cg_record may.
+step depguard      env CGO_ENABLED=1 "$GO" test -run TestDefaultBuild -count=1 ./cmd/context-guru-proxy/
+step race-proxy    env CGO_ENABLED=1 "$GO" test -race -timeout 20m ./proxy/...
+step race-dash     env CGO_ENABLED=1 "$GO" test -race -timeout 25m ./dash/...
+step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 10m ./context-guru-plugin
+# shellcheck disable=SC2086 # $rest is a list of packages
+step race-rest     env CGO_ENABLED=1 "$GO" test -race -timeout 20m $rest
+step race-record   env CGO_ENABLED=1 "$GO" test -race -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./cmd/context-guru-proxy/...
+exit "$rc"
