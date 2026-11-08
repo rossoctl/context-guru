@@ -1100,8 +1100,9 @@ type ClientCeilingUsed struct {
 	Frac float64 `json:"frac"`
 	// SpanFrac is what that ceiling produced for this model: `frac - fill_frac`.
 	SpanFrac float64 `json:"span_frac"`
-	// Provenance is "measured", "assumed" or "default". A measured ceiling came from watching a real
-	// client compact, in billed tokens; the other two did not, and an assumed ceiling that is too high
+	// Provenance is "measured", "assumed", "configured" or "window_fallback". A measured ceiling came
+	// from watching a real client compact, in billed tokens. A configured one is the user's own client
+	// setting (#948), taken as billed tokens at a factor of 1.0 that is not measured. The others did not, and an assumed ceiling that is too high
 	// makes the span too wide and OVER-reports.
 	Provenance string `json:"provenance"`
 	// Note is why this value, in enough detail to tell whether it still holds.
@@ -1121,10 +1122,11 @@ func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Poi
 	return compactionpoint.For(conv[0].Model)
 }
 
-// noteCeiling records the ceiling one model was measured against, once per model.
+// noteCeiling records the ceiling one model was measured against, once per model and source: a
+// model with a configured conversation and a table conversation gets two entries (#948).
 func (a *CompactionAssumptions) noteCeiling(model string, c compactionpoint.Point, span float64) {
 	for _, e := range a.ClientCeilings {
-		if e.Model == model {
+		if e.Model == model && e.Provenance == string(c.Source) {
 			return
 		}
 	}

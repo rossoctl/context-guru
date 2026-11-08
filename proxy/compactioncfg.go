@@ -3,12 +3,14 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
 
@@ -51,6 +53,12 @@ func ReadClaudeCompact(getenv func(string) string, home string) compactionpoint.
 		EnvDisable:     short(getenv("DISABLE_COMPACT")),
 	}
 	dir := strings.TrimSpace(getenv("CLAUDE_CONFIG_DIR"))
+	if dir == "" && home == "" {
+		return c // env only: with no home, a relative path would name a project file
+	}
+	if dir != "" && !filepath.IsAbs(dir) {
+		return c // a relative CLAUDE_CONFIG_DIR depends on the working directory: not read
+	}
 	globalCfg := filepath.Join(home, ".claude.json")
 	settings := filepath.Join(home, ".claude", "settings.json")
 	if dir != "" {
@@ -123,12 +131,32 @@ func short(s string) string {
 // compactionPointFor is C for this request: the user's own setting, read at start-up, when it
 // changes C for the request's model; else the bootstrap table. A hosted proxy (Options.Tenants)
 // never has a user setting. Fail open: any odd value gives the table.
-func (h *Handler) compactionPointFor(body []byte, window int) compactionpoint.Point {
+//
+// WHICH REQUESTS. The setting is Claude Code's, so it applies only to a request whose User-Agent is
+// Claude Code's (dash.AgentFor: "claude-code" or "claude-cli"; the client sets it itself). A Codex or
+// Bob request on the same local proxy gets the table. The limit: the header is the client's own
+// claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same
+// env is also covered, which is right, because it reads the same settings. A request with no
+// User-Agent gets the table.
+//
+// MODEL MATCH. A modelSettings key matches by substring on the normalized model id, longest key
+// first, the same style as the table in compactionpoint.For. So a key for claude-opus-5 also applies
+// to a newer id that contains it (claude-opus-5-1). That is the client's own rule too: its canonical
+// model name matches dated and variant spellings.
+func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
-	if h.opts.Tenants == nil {
+	if h.opts.Tenants == nil && r != nil && isClaudeCodeAgent(r.UserAgent()) {
 		if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
 			return p
 		}
 	}
 	return compactionpoint.For(model)
+}
+
+func isClaudeCodeAgent(userAgent string) bool {
+	switch dash.AgentFor(userAgent) {
+	case "claude-code", "claude-cli":
+		return true
+	}
+	return false
 }

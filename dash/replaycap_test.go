@@ -699,7 +699,28 @@ func TestReplayCapUsesTheUsersOwnCompactionPoint(t *testing.T) {
 	if got.ClosedCounterfactual != 1 || c.CountedUSD != 2 || c.PastCapUSD != 2 {
 		t.Errorf("configured: closed=%d counted=%v past=%v", got.ClosedCounterfactual, c.CountedUSD, c.PastCapUSD)
 	}
-	if got.CeilingConfigured["m1"] != 200_000 || got.CeilingFrac["m1"] != 0.2 {
+	if got.CeilingConfigured["m1"] != 200_000 {
 		t.Errorf("ledger C = %v / %v", got.CeilingConfigured, got.CeilingFrac)
+	}
+	if _, in := got.CeilingFrac["m1"]; in {
+		t.Errorf("a configured-only model must not carry a table fraction: %v", got.CeilingFrac)
+	}
+	if tbl.CeilingFrac["m1"] != 1 {
+		t.Errorf("table ledger frac = %v, want 1", tbl.CeilingFrac)
+	}
+}
+
+// One configured conversation and one table conversation on the same model: the two maps agree
+// (each source has its own entry) whatever the walk order.
+func TestReplayCapCeilingMapsAgreeWhenSourcesMix(t *testing.T) {
+	cfg := capTestRow(1, 100_000, 10_000, 100_000, "extract_llm", 1)
+	cfg.Session, cfg.CPoint, cfg.CPointSource = "a", 200_000, "configured"
+	tbl := capTestRow(2, 100_000, 10_000, 100_000, "extract_llm", 1)
+	tbl.Session = "b"
+	for _, rows := range [][]capRow{{cfg, tbl}, {tbl, cfg}} {
+		l := walkReplayCap(rows, fixedWindow(1_000_000))
+		if l.CeilingConfigured["m1"] != 200_000 || l.CeilingFrac["m1"] != 1 {
+			t.Errorf("configured=%v frac=%v", l.CeilingConfigured, l.CeilingFrac)
+		}
 	}
 }

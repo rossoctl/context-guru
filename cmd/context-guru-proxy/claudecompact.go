@@ -13,6 +13,11 @@ func claudeCompactAtStart(local bool) compactionpoint.ClaudeCode {
 	if !local {
 		return compactionpoint.ClaudeCode{}
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// No home: a relative path would read the working directory's own .claude/settings.json,
+		// which is a project file. Read env only.
+		return proxy.ReadClaudeCompact(os.Getenv, "")
+	}
 	return proxy.ReadClaudeCompact(os.Getenv, home)
 }

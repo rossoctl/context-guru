@@ -100,13 +100,16 @@ func (l *ComponentLedger) DeltaUSD() float64 { return -l.PastCapUSD }
 type ReplayLedger struct {
 	ByComponent map[string]*ComponentLedger `json:"by_component"`
 	// Conversations walked, and how many closed by each cause.
-	Conversations          int64              `json:"conversations"`
-	ClosedCounterfactual   int64              `json:"closed_counterfactual"`
-	ClosedClientCompaction int64              `json:"closed_client_compaction"`
-	WindowUnknownCovered   int64              `json:"window_unknown_conversations"`
-	CeilingFrac            map[string]float64 `json:"ceiling_frac,omitempty"`
+	Conversations          int64 `json:"conversations"`
+	ClosedCounterfactual   int64 `json:"closed_counterfactual"`
+	ClosedClientCompaction int64 `json:"closed_client_compaction"`
+	WindowUnknownCovered   int64 `json:"window_unknown_conversations"`
+	// CeilingFrac is, per model, C as a fraction of the window for the conversations that used the
+	// BOOTSTRAP TABLE. A model with only configured conversations is absent.
+	CeilingFrac map[string]float64 `json:"ceiling_frac,omitempty"`
 	// CeilingConfigured is, per model, the C in billed tokens the user's own client setting gave
-	// (#948). A model absent here used the bootstrap table. The dashboard shows which one it was.
+	// (#948), for the conversations that used it. When a setting changed between conversations, it
+	// holds the LAST one walked. A model absent here used only the table.
 	CeilingConfigured map[string]float64 `json:"ceiling_configured,omitempty"`
 }
 
@@ -266,9 +269,12 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 	cpt := capConversationPoint(conv)
 	limit := float64(cpt.Tokens(w))
 	ceil := limit / float64(w)
-	out.CeilingFrac[model] = ceil
+	// One entry per model and source, so the two maps never disagree: a table conversation writes
+	// CeilingFrac, a configured one writes CeilingConfigured, and a model with both has both.
 	if cpt.Source == compactionpoint.Configured {
 		out.CeilingConfigured[model] = limit
+	} else {
+		out.CeilingFrac[model] = ceil
 	}
 	f, _ := tokens.BilledDeltaFactor(model)
 	state := capOpen

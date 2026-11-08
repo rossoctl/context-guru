@@ -74,7 +74,11 @@ and the summarize trigger then follow your setting, not the built-in table.
   the next proxy restart. The plugin starts the proxy from a session hook, so the proxy inherits the
   env of the session that started it.
 - **If auto-compact is off,** C is the model window.
-- **If a value is odd or missing,** the built-in table value is used.
+- **If a value is odd or missing,** the built-in table value is used. A settings file larger than
+  4 MiB is skipped (a long-lived `.claude.json` can be), and C then falls back to the table for what
+  that file would have set.
+- **Which requests:** only requests with a Claude Code User-Agent. Codex and Bob requests on the same
+  proxy use the table.
 - **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
   provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
 - **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.

@@ -53,7 +53,7 @@ type Opts struct {
 	// mechanism acts. 0 = unknown, and components fall back to Window. See
 	// internal/compactionpoint for the definition and why it is not the window.
 	CompactionPoint int
-	// CompactionPointSource is "measured" | "assumed" | "window_fallback".
+	// CompactionPointSource is "measured" | "assumed" | "configured" | "window_fallback".
 	CompactionPointSource string
 	// CacheMode is "auto" (default) | "on" | "off" — see resolveCacheAware.
 	CacheMode string
