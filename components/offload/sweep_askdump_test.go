@@ -171,3 +171,25 @@ func TestAskDumpRecordsWhatTheComponentDidNotJustWhatTheModelSaid(t *testing.T) 
 			"being noted at the branch that took them (rows: %v)", vs)
 	}
 }
+
+// The file name comes from the session id. A hostile id must not move the file out of the dump directory.
+// Mutation that must fail this: use d.Session raw in the file name again.
+func TestAskDumpFileStaysInsideTheDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "dump")
+	writeSweepAskDump(dir, &sweepAskDump{Session: "x/../../escape", Seq: 1})
+
+	ents, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if !e.IsDir() {
+			t.Fatalf("a file %q was written outside the dump directory", e.Name())
+		}
+	}
+	in, err := os.ReadDir(dir)
+	if err != nil || len(in) != 1 {
+		t.Fatalf("want exactly 1 file inside the dump directory, got %d (err %v)", len(in), err)
+	}
+}
