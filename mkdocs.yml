@@ -87,6 +87,7 @@ validation:
 # green without publishing internal argument, and so a proposal can be added without a nav edit.
 exclude_docs: |
   superpowers/
+  img/readme/savings-figure.html
   proposals/
   plans/
 
