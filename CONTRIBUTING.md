@@ -27,7 +27,7 @@ git commit -s --allow-empty \
 
 - The declaration needs the full 40-character SHA. The short SHA in the subject is for people only.
 - The DCO app accepts it for a commit you wrote. It does not accept it for a commit someone else wrote.
-- `scripts/release/check-ready.sh` applies the same rule, so a remediated commit does not block the merge.
+- `scripts/release/check-ready.sh` applies the same rule, so a remediated commit does not block the merge. It skips merge commits, as the DCO app does.
 - The setting takes effect only after `.github/dco.yml` is on the default branch.
 
 When a commit was assisted by an AI agent, attribute it with an `Assisted-By:` trailer —

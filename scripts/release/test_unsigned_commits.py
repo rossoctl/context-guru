@@ -8,8 +8,9 @@ SHA_C = "c" * 40
 ME = ("DAVID BOAZ", "DAVIDBO@il.ibm.com")
 SIGN = "Signed-off-by: DAVID BOAZ <DAVIDBO@il.ibm.com>"
 
-def commit(sha, message, author=ME):
-    return {"sha": sha, "commit": {"message": message, "author": {"name": author[0], "email": author[1]}}}
+def commit(sha, message, author=ME, parents=1):
+    return {"sha": sha, "parents": [{"sha": "p%d" % i} for i in range(parents)],
+            "commit": {"message": message, "author": {"name": author[0], "email": author[1]}}}
 
 def remediation(sha, who=ME, signed=True):
     body = f"chore: DCO remediation\n\nI, {who[0]} <{who[1]}>, hereby add my Signed-off-by to this commit: {sha}\n"
@@ -51,6 +52,22 @@ def test_a_remediation_for_one_commit_does_not_cover_another():
 
 def test_a_commit_cannot_remediate_itself():
     assert unsigned([commit(SHA_A, remediation(SHA_A, signed=False))]) == [SHA_A[:12]]
+
+def test_a_declaration_written_by_someone_else_does_not_count():
+    # The text names the unsigned commit's author, but another person authored the commit that carries it.
+    other = ("Someone Else", "else@example.com")
+    assert unsigned([commit(SHA_A, "feat: a"), commit(SHA_B, remediation(SHA_A), author=other)]) == [SHA_A[:12]]
+
+def test_the_carrying_commit_must_match_both_name_and_email_of_the_author():
+    assert unsigned([commit(SHA_A, "feat: a"), commit(SHA_B, remediation(SHA_A), author=("DAVID BOAZ", "x@example.com"))]) == [SHA_A[:12]]
+    assert unsigned([commit(SHA_A, "feat: a"), commit(SHA_B, remediation(SHA_A), author=("Other Name", ME[1]))]) == [SHA_A[:12]]
+
+def test_a_merge_commit_is_not_listed():
+    # The DCO app skips a commit with more than one parent, and a git merge message has no sign-off.
+    assert unsigned([commit(SHA_A, "Merge branch x into y", parents=2)]) == []
+
+def test_a_merge_commit_does_not_hide_an_unsigned_commit_beside_it():
+    assert unsigned([commit(SHA_A, "feat: a"), commit(SHA_B, "Merge branch x into y", parents=2)]) == [SHA_A[:12]]
 
 if __name__ == "__main__":
     failed = 0
