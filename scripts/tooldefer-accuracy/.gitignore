@@ -1,0 +1,14 @@
+bin/
+cap/
+cfg/
+logs/
+runs/
+work/
+snap/
+tmpl/
+*.pid
+mcp.json
+mcp-noops.json
+settings.json
+capture
+*db-*/
