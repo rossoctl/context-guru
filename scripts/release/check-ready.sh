@@ -7,12 +7,11 @@
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
 #   - every check run on the head has finished with success (or skipped / neutral);
-#   - the head has a "CodeQL" check run from the code-scanning app that passed, and the PR has no
-#     open code-scanning alert. The check run alone is not enough: it can pass with an alert.
-#     GitHub's code-scanning rule on main reads both ("No new alerts in code changed by this
-#     pull request"). A PR opened before the CodeQL
-#     workflow existed (#945) has none; it needs a new push before it can merge. Without this
-#     check, an --admin merge bypasses the code-scanning rule with no sign (#943, #937, #944);
+#   - the head has a "CodeQL" check run from the code-scanning app that passed. GitHub's
+#     code-scanning rule on main reads this run ("No new alerts in code changed by this pull
+#     request"). A PR opened before the CodeQL workflow existed (#945) has none; it needs a new
+#     push before it can merge. Without this check, an --admin merge bypasses the code-scanning
+#     rule with no sign (#943, #937, #944);
 #   - every commit on the PR has a Signed-off-by line (the DCO check needs it).
 # It does NOT check for a behavior change. The integrator reads the diff for that, and needs a
 # human developer's yes in words (RELEASING.md, step 2).
@@ -76,12 +75,11 @@ while IFS=$'\t' read -r status concl name _app; do
   esac
 done <<<"$runs"
 
-# Code scanning, 2 parts:
-# 1. The "CodeQL" check run, posted by GitHub's code-scanning app (github-advanced-security), not
-#    the "analyze" job of the workflow and not any other job with that name. A missing run means
-#    no scan of this head reached the rule. It exists only on a PR to main, where the workflow runs.
-# 2. No open alert on the PR's merge ref. A passing check run does not prove that: the run can end
-#    "success" and still carry an alert, and only the ruleset blocks it.
+# Code scanning: the "CodeQL" check run, posted by GitHub's code-scanning app
+# (github-advanced-security), not the "analyze" job of the workflow and not any other job with that
+# name. A missing run means no scan of this head reached the rule. It exists only on a PR to main,
+# where the workflow runs. There is no check of the alert list: the list for the merge ref includes
+# the alerts of main itself, and it is empty, not an error, for a merge ref with no analysis yet.
 cq=$(printf '%s\n' "$runs" | awk -F'\t' '$3=="CodeQL" && $4=="github-advanced-security"{print $1"/"$2; exit}')
 case "$cq" in
   completed/success) echo "code scanning: CodeQL check run passed on the head" ;;
@@ -89,10 +87,6 @@ case "$cq" in
   completed/*) no "CodeQL check run: ${cq#completed/}" ;;
   *) no "CodeQL check run still ${cq%%/*}; wait for it" ;;
 esac
-alerts=$(api "the code-scanning alerts" api --paginate \
-  "repos/$repo/code-scanning/alerts?ref=refs/pull/$pr/merge&state=open&per_page=100" \
-  --jq '.[] | "#\(.number) \(.rule.id) \(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)"')
-[ -z "$alerts" ] || no "open code-scanning alerts on the PR: $(tr '\n' ' ' <<<"$alerts")"
 
 # DCO: every commit carries a sign-off. Only the author can add one; a merge past a missing
 # sign-off needs the release owner, case by case.

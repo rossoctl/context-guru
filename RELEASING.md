@@ -116,7 +116,7 @@ Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the cu
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
-- the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads, and the PR has no open code-scanning alert (a passing run can still carry an alert). **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
+- the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
 
 It does not check for a behavior change. Read the diff for that yourself.
