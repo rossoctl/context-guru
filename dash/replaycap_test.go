@@ -669,3 +669,37 @@ func TestReplayLedgerThroughSQLReadsAgentCompaction(t *testing.T) {
 	}
 	nearEq(t, "past real", l.ByComponent["searchfold"].PastClientCompact, 1)
 }
+
+// A user's own compaction point (#948) replaces the table value for the walk: the credit ends when
+// the counterfactual transcript reaches IT, and the ledger says which C was used.
+func TestReplayCapUsesTheUsersOwnCompactionPoint(t *testing.T) {
+	mk := func(ts, before, removed, billed int64, cpt int) capRow {
+		r := capTestRow(ts, before, removed, billed, "extract_llm", 1)
+		if cpt > 0 {
+			r.CPoint, r.CPointSource = cpt, "configured"
+		}
+		return r
+	}
+	rows := func(cpt int) []capRow {
+		return []capRow{
+			mk(1, 100_000, 50_000, 100_000, cpt), // cf 150k
+			mk(2, 110_000, 50_000, 140_000, cpt), // cf 190k
+			mk(3, 120_000, 50_000, 160_000, cpt), // cf 210k: past 200k
+			mk(4, 130_000, 50_000, 170_000, cpt),
+		}
+	}
+	// Table: C = the window, 1,000,000: nothing closes.
+	tbl := walkReplayCap(rows(0), fixedWindow(1_000_000))
+	if tbl.ClosedCounterfactual != 0 || tbl.ByComponent["extract_llm"].CountedUSD != 4 || len(tbl.CeilingConfigured) != 0 {
+		t.Fatalf("table: closed=%d counted=%v configured=%v", tbl.ClosedCounterfactual, tbl.ByComponent["extract_llm"].CountedUSD, tbl.CeilingConfigured)
+	}
+	// The user's setting: C = 200,000. Row 3 closes it, so rows 3 and 4 are past the cap.
+	got := walkReplayCap(rows(200_000), fixedWindow(1_000_000))
+	c := got.ByComponent["extract_llm"]
+	if got.ClosedCounterfactual != 1 || c.CountedUSD != 2 || c.PastCapUSD != 2 {
+		t.Errorf("configured: closed=%d counted=%v past=%v", got.ClosedCounterfactual, c.CountedUSD, c.PastCapUSD)
+	}
+	if got.CeilingConfigured["m1"] != 200_000 || got.CeilingFrac["m1"] != 0.2 {
+		t.Errorf("ledger C = %v / %v", got.CeilingConfigured, got.CeilingFrac)
+	}
+}

@@ -35,7 +35,6 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
@@ -550,6 +549,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("POST /signal", h.clientSignal)
 	m.HandleFunc("POST /tool-search", h.toolSearchSignal)
+	m.HandleFunc("POST /compaction-config", h.compactionConfigSignal)
 	m.HandleFunc("POST /tool-defer/probe", h.toolDeferProbe)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
@@ -857,8 +857,8 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 		WindowExact: windowExact,
 		// C, resolved beside the window because the fill fraction belongs over it rather than over
 		// the window — see internal/compactionpoint.
-		CompactionPoint:       compactionpoint.For(gjson.GetBytes(body, "model").String()).Tokens(window),
-		CompactionPointSource: string(compactionpoint.For(gjson.GetBytes(body, "model").String()).Source),
+		CompactionPoint:       h.compactionPointFor(tn, r, body, window).Tokens(window),
+		CompactionPointSource: string(h.compactionPointFor(tn, r, body, window).Source),
 		CacheMode:             cacheMode,
 		Tracker:               h.tracker,
 	})
@@ -1244,7 +1244,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// triggers scale with the model; 0 when unknown (absolutes apply).
 		window, windowExact := h.resolveWindow(r.Context(), body)
 		// C beside the window, resolved once for both the enforced and the observed path.
-		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
+		cpoint := h.compactionPointFor(tn, r, body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.
@@ -1286,6 +1286,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.

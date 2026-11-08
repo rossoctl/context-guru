@@ -221,6 +221,11 @@ CREATE TABLE IF NOT EXISTS requests (
   defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
   defer_net_usd       REAL    NOT NULL DEFAULT 0,
+  -- C, the client's own compaction point in billed tokens, and its source, written only when the
+  -- user's own client setting set it (#948). 0 and '' otherwise: the table value is read back from
+  -- the table. A number from a config file.
+  compaction_point        INTEGER NOT NULL DEFAULT 0,
+  compaction_point_source TEXT    NOT NULL DEFAULT '',
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -823,6 +828,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "defer_net_usd", "REAL NOT NULL DEFAULT 0"},
+	// The user's own compaction point (#948). Additive: an earlier row has none.
+	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

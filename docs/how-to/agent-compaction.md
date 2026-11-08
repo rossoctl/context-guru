@@ -59,6 +59,26 @@ its dedup memory, frozen offload decisions and cache boundary across the compact
 | **Bob** | Yes. Set `model.compressionThreshold` in `~/.bob/settings.json` (restart required) — `0.9` compacts at 90% instead of the default 50%, a large value disables it in practice. `/compress` still forces it on demand. |
 | **Claude Code** | No. Every threshold knob is clamped to at most the model's window, so it can only compact *earlier*. `DISABLE_AUTO_COMPACT` turns it off entirely, but then a long session walks into the provider's hard context limit with no summary to fall back on. |
 
+## When you change the compaction point
+
+If you move Claude Code's compaction point, Context Guru reads it and uses it. The savings figures
+and the summarize trigger then follow your setting, not the built-in table.
+
+- **What it reads** (Claude Code 2.1.319, checked in the shipped client): the env vars
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_AUTO_COMPACT` and
+  `DISABLE_COMPACT`, and the settings keys `autoCompactWindow`, `autoCompactEnabled` and
+  `modelSettings.<model>.autoCompactWindow` (what `/autocompact` writes).
+- **How it reads:** the plugin's session-start hook sends these few short values to the proxy
+  (`POST /compaction-config`). The hook runs at startup, resume, fork and clear, so a change shows
+  at the next session start. A change made inside a running session shows at its next resume or clear.
+- **If auto-compact is off,** C is the model window.
+- **If a value is odd or missing,** the built-in table value is used.
+- **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
+  provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
+- **To turn it off,** set `CONTEXT_GURU_CLIENT_SIGNALS=off` (this also turns off the other hook
+  signals), or set the plugin option `client_signals` to `off`.
+- Codex and Bob are not read yet.
+
 ## Bob: prefer lossless components
 
 Bob cannot expand a `<<cg:HASH>>` marker — it has no way to call the expand tool (see

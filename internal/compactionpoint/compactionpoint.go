@@ -111,6 +111,10 @@ const (
 	Measured Source = "measured"
 	// Assumed: reported behaviour or a reasoned bound, not observed.
 	Assumed Source = "assumed"
+	// Configured: the user changed the client's own auto-compact setting, and the host reported it
+	// (see ClaudeCode below). The number is the client's own threshold, taken as billed tokens by
+	// ClientToBilled. It beats the table.
+	Configured Source = "configured"
 	// WindowFallback: case 3 and case 4 together -- C == W, because either nothing compacts here
 	// (a fact) or we have never seen this client compact (a guess). This package cannot yet tell
 	// those apart, which is itself worth reporting rather than smoothing over.
@@ -120,7 +124,10 @@ const (
 // Point is one resolved C.
 type Point struct {
 	// Frac is C as a fraction of the model's context window, in provider-billed tokens.
-	Frac   float64
+	Frac float64
+	// Abs is C in absolute billed tokens, set only by a Configured point (a user's own number
+	// does not scale with the window). 0 = use Frac.
+	Abs    int
 	Source Source
 	// Note is why this value, in enough detail to tell whether it still holds.
 	Note string
@@ -128,6 +135,9 @@ type Point struct {
 
 // Tokens is C in absolute billed tokens for a given window. 0 when the window is unknown.
 func (p Point) Tokens(window int) int {
+	if p.Abs > 0 {
+		return p.Abs
+	}
 	if window <= 0 || p.Frac <= 0 {
 		return 0
 	}
@@ -195,4 +205,16 @@ func For(model string) Point {
 		}
 	}
 	return best
+}
+
+// Recorded rebuilds the Point a request row carries: the absolute C in billed tokens and the
+// source it had when the row was written (#948). A row with no recorded configured value gets the
+// table's answer for its model, so an old row reads as before. Only a Configured row has an
+// absolute C; the table value scales with the window and is better re-read from the table.
+func Recorded(model string, abs int, src string) Point {
+	if Source(src) == Configured && abs > 0 {
+		return Point{Abs: abs, Source: Configured,
+			Note: "the user's own Claude Code auto-compact setting, recorded on the request row"}
+	}
+	return For(model)
 }

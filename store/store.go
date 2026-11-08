@@ -265,6 +265,11 @@ const (
 	// to an off value, so new threads of that session are not deferred. A flag only (metadata),
 	// pinned for the same reason as ToolDeferPrefix: losing it would change a later decision.
 	ToolSearchOffPrefix = "cg:tso:"
+	// CompactionPointPrefix is a session's own Claude Code auto-compact settings (#948), as the
+	// plugin's session-start hook reported them: a few short setting values (window, percent,
+	// on/off flags), never content. Metadata, so the disk store keeps it under every storage
+	// level. Pinned: losing it makes C fall back to the table for the rest of the session.
+	CompactionPointPrefix = "cg:cpt:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
@@ -272,7 +277,7 @@ const (
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
 	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
-	ToolDeferPrefix, ToolSearchOffPrefix}
+	ToolDeferPrefix, ToolSearchOffPrefix, CompactionPointPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
