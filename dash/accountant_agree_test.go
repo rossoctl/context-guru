@@ -120,7 +120,7 @@ func sharedComp(c cases.Case, comp string) bool {
 
 // expectedByComponent is the case's expected figure of each component, the way AccFigure.ByComponent
 // builds it: the priced rewrite and setting ops (a spend is priced by the host, so it is left out)
-// plus the counted breaks whose ChangeID a component owns, plus each mark premium (on the owner of its
+// plus the counted breaks whose ChangeID a component owns, plus each mark premium and payback (on the owner of its
 // ChangeID, else on the tail breakpoint). Rescue, split and TTL effects are their own AccFigure fields,
 // not component figures; a counted break nobody owns is EndedBreakUSD.
 func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) map[string]int64 {
@@ -143,9 +143,10 @@ func expectedByComponent(c cases.Case, s cases.Step, comps map[string]string) ma
 			if comp, ok := comps[e.ChangeID]; ok && e.ChangeID != "" {
 				picos[comp] += rate.Picos(e.Saved) - rate.Picos(e.Caused)
 			}
-		case accountant.EffectMarkPremium:
-			// The premium of a breakpoint the host added: a cost on the component whose span covers the
-			// mark, else on the tail breakpoint (AccountantFigure does the same).
+		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
+			// The premium of a breakpoint the host added, and the payback of it on the next request: a cost
+			// and a saving on the component whose span covers the mark, else on the tail breakpoint
+			// (AccountantFigure does the same).
 			comp, ok := comps[e.ChangeID]
 			if !ok || e.ChangeID == "" {
 				comp = "tailbreakpoint"

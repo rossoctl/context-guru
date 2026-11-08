@@ -100,8 +100,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
-github.com/rossoctl/accountant v0.1.1-0.20261108054032-8e160764bb71 h1:fKOviX7sAMIbtgzyKiWPZstlUr3HU2ZuqAl3F57epnE=
-github.com/rossoctl/accountant v0.1.1-0.20261108054032-8e160764bb71/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
+github.com/rossoctl/accountant v0.1.1-0.20261108152158-5181d50c1f98 h1:TLElmj5QstW9PhlYIJz2HFtsEuiHHuSvzy79BT2h82U=
+github.com/rossoctl/accountant v0.1.1-0.20261108152158-5181d50c1f98/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
 github.com/spf13/cast v1.10.0 h1:h2x0u2shc1QuLHfxi+cTJvs30+ZAHOGRic8uyGTDWxY=
 github.com/spf13/cast v1.10.0/go.mod h1:jNfB8QC9IA6ZuY2ZjDp0KtFO2LZZlg4S/7bzP6qqeHo=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

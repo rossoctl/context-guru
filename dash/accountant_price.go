@@ -94,6 +94,8 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
 		//   markPremium: Saved is the input the client body would have billed, Caused the dearer write the
 		//               host's added mark made the provider bill: value < 0 (a cost).
+		//   markPayback: Saved is the input the client body would have billed, Caused the read the host's
+		//               mark made possible on the next request: value > 0 (a saving).
 		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
 		switch ce.Kind {
 		case accountant.EffectBreak:
@@ -115,7 +117,10 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			f.SplitUSD += value
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
 			f.TTLUSD += value
-		case accountant.EffectMarkPremium:
+		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
+			// markPayback is the other half of markPremium: the next request reads the tail the host's mark
+			// wrote, which the client body would have billed as input. Saved is that input, Caused the read:
+			// value > 0, a saving, owned like the premium it repays (accountant design §4.4, accountant#52).
 			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
 			// operation whose span covers the mark. With no owner it goes on the tail breakpoint row,
 			// the component that adds the mark in every default preset (accountant design §4.4). The
