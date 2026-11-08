@@ -432,14 +432,20 @@ type Event struct {
 	// earlier message had loaded. DeferGrossUSD and DeferNetUSD are the ledger's
 	// prices (tooldefer.Price): gross is what the deferred definitions would have cost, net takes
 	// off the names list and the search costs. Both 0 when the model has no price.
-	DeferTokens          int     `json:"defer_tokens,omitempty"`
-	DeferListTokens      int     `json:"defer_list_tokens,omitempty"`
-	DeferSearches        int     `json:"defer_searches,omitempty"`
-	DeferDroppedSearches int     `json:"defer_dropped_searches,omitempty"`
-	DeferLoaded          int     `json:"defer_loaded,omitempty"`
-	DeferWrongGuesses    int     `json:"defer_wrong_guesses,omitempty"`
-	DeferGrossUSD        float64 `json:"defer_gross_usd,omitempty"`
-	DeferNetUSD          float64 `json:"defer_net_usd,omitempty"`
+	DeferTokens          int `json:"defer_tokens,omitempty"`
+	DeferListTokens      int `json:"defer_list_tokens,omitempty"`
+	DeferSearches        int `json:"defer_searches,omitempty"`
+	DeferDroppedSearches int `json:"defer_dropped_searches,omitempty"`
+	// CompactionPoint and CompactionPointSource are C in billed tokens and its source, written
+	// ONLY when the user's own client setting set it (#948; compactionpoint.Configured). 0 and ""
+	// on every other row: the table value is read back from the table. A number from a config
+	// file, never content.
+	CompactionPoint       int     `json:"compaction_point,omitempty"`
+	CompactionPointSource string  `json:"compaction_point_source,omitempty"`
+	DeferLoaded           int     `json:"defer_loaded,omitempty"`
+	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
+	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
+	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 
 	TokenAccounting string `json:"token_accounting"`
 	// PriceEstimated is true when the accountant library priced this request without knowing whether a

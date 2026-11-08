@@ -63,6 +63,11 @@ import (
 // placeholder and the real provider key lives in the gateway env. That is an explicit
 // single-tenant/local fallback, never the hosted default.
 type Options struct {
+	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
+	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
+	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
+	// "claude-code" or "claude-cli"). All other requests use the table.
+	ClaudeCompact     compactionpoint.ClaudeCode
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's
@@ -873,6 +878,9 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	cp := h.newCapture(r, string(provider), "/compact", tn)
 	cp.notePreset(effPreset)
 	cp.noteModel(gjson.GetBytes(body, "model").String())
+	// C resolved ONCE: the gate below and the row the dashboard reads must carry the same figure.
+	cpoint := h.compactionPointFor(r, body, window)
+	cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 	start := time.Now()
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
 	// request's row, not to whichever tenant is in flight when the call returns.
@@ -887,8 +895,8 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 		WindowExact: windowExact,
 		// C, resolved beside the window because the fill fraction belongs over it rather than over
 		// the window — see internal/compactionpoint.
-		CompactionPoint:       compactionpoint.For(gjson.GetBytes(body, "model").String()).Tokens(window),
-		CompactionPointSource: string(compactionpoint.For(gjson.GetBytes(body, "model").String()).Source),
+		CompactionPoint:       cpoint.Tokens(window),
+		CompactionPointSource: string(cpoint.Source),
 		CacheMode:             cacheMode,
 		Tracker:               h.tracker,
 	})
@@ -1274,7 +1282,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// triggers scale with the model; 0 when unknown (absolutes apply).
 		window, windowExact := h.resolveWindow(r.Context(), body)
 		// C beside the window, resolved once for both the enforced and the observed path.
-		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
+		cpoint := h.compactionPointFor(r, body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.
@@ -1316,6 +1324,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.

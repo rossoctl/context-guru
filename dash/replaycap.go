@@ -128,11 +128,17 @@ func (l *ComponentLedger) DeltaUSD() float64 { return -l.PastCapUSD }
 type ReplayLedger struct {
 	ByComponent map[string]*ComponentLedger `json:"by_component"`
 	// Conversations walked, and how many closed by each cause.
-	Conversations          int64              `json:"conversations"`
-	ClosedCounterfactual   int64              `json:"closed_counterfactual"`
-	ClosedClientCompaction int64              `json:"closed_client_compaction"`
-	WindowUnknownCovered   int64              `json:"window_unknown_conversations"`
-	CeilingFrac            map[string]float64 `json:"ceiling_frac,omitempty"`
+	Conversations          int64 `json:"conversations"`
+	ClosedCounterfactual   int64 `json:"closed_counterfactual"`
+	ClosedClientCompaction int64 `json:"closed_client_compaction"`
+	WindowUnknownCovered   int64 `json:"window_unknown_conversations"`
+	// CeilingFrac is, per model, C as a fraction of the window for the conversations that used the
+	// BOOTSTRAP TABLE. A model with only configured conversations is absent.
+	CeilingFrac map[string]float64 `json:"ceiling_frac,omitempty"`
+	// CeilingConfigured is, per model, the C in billed tokens the user's own client setting gave
+	// (#948), for the conversations that used it. When a setting changed between conversations, it
+	// holds the LAST one walked. A model absent here used only the table.
+	CeilingConfigured map[string]float64 `json:"ceiling_configured,omitempty"`
 	// ReopenedEpochs counts the epochs that started after a close (#940): every close of either cause.
 	ReopenedEpochs int64 `json:"reopened_epochs"`
 	// AvoidedCompactionUSD is the price of the compaction requests the baseline paid at its
@@ -199,7 +205,10 @@ type capRow struct {
 	// AgentCompaction marks the agent's own compaction request (isAgentCompaction). Either flag is
 	// the evidence that a drop in tokens_before is the client compacting.
 	AgentCompaction bool
-	Credits         []compCredit
+	// CPoint and CPointSource are the user's own C on this row (#948); 0 and "" when the table set it.
+	CPoint       int
+	CPointSource string
+	Credits      []compCredit
 	// What Event.ComponentSavedUSD needs to price the first-removal split.
 	reason             string
 	fresh, read, write int64
@@ -230,7 +239,7 @@ func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
 }
 
 func newReplayLedger() *ReplayLedger {
-	return &ReplayLedger{ByComponent: map[string]*ComponentLedger{}, CeilingFrac: map[string]float64{}}
+	return &ReplayLedger{ByComponent: map[string]*ComponentLedger{}, CeilingFrac: map[string]float64{}, CeilingConfigured: map[string]float64{}}
 }
 
 // walkCapSession runs the rule over one session's rows, ordered by (model, ts, id). The session is
@@ -250,6 +259,17 @@ func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
 		walkCapConversation(rows[start:end], window, compaction, out)
 		start = end
 	}
+}
+
+// capConversationPoint is C for one conversation: the user's own setting when a row recorded one
+// (the newest such row, because the setting can change between sessions), else the table (#948).
+func capConversationPoint(conv []capRow) compactionpoint.Point {
+	for i := len(conv) - 1; i >= 0; i-- {
+		if conv[i].CPointSource == string(compactionpoint.Configured) && conv[i].CPoint > 0 {
+			return compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
+		}
+	}
+	return compactionpoint.For(conv[0].Model)
 }
 
 // compactionBetween reports whether any of the (unsorted) timestamps lies in [from, to].
@@ -296,9 +316,16 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 		out.WindowUnknownCovered++
 		w = assumedWindowFor(model, w)
 	}
-	ceil := compactionpoint.For(model).Frac
-	out.CeilingFrac[model] = ceil
-	limit := ceil * float64(w)
+	cpt := capConversationPoint(conv)
+	limit := float64(cpt.Tokens(w))
+	ceil := limit / float64(w)
+	// One entry per model and source, so the two maps never disagree: a table conversation writes
+	// CeilingFrac, a configured one writes CeilingConfigured, and a model with both has both.
+	if cpt.Source == compactionpoint.Configured {
+		out.CeilingConfigured[model] = limit
+	} else {
+		out.CeilingFrac[model] = ceil
+	}
 	f, _ := tokens.BilledDeltaFactor(model)
 
 	// The epoch. limited is false until the first close: the first epoch counts its replay in full.
@@ -407,6 +434,7 @@ func (l *ReplayLedger) addAvoided(model string, ceiling float64) {
 // or one with NULLs). summarize has its own ledger. The join is by request id, so a session-scoped
 // call touches only that session's component rows.
 const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.agent_compaction, r.tokens_before,
+		r.compaction_point, r.compaction_point_source,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
 		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
@@ -508,7 +536,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		var usd, first sql.NullFloat64
 		var acc sql.NullBool
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
-			&r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
+			&r.CPoint, &r.CPointSource, &r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
 			&comp, &gross, &unique, &usd, &first, &acc); err != nil {
 			return nil, err
 		}

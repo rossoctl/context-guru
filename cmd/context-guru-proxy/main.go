@@ -659,7 +659,9 @@ func main() {
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
 		AdaptOverride: adaptOverride,
-		Tenants:       tenants,   // nil => single-tenant, unchanged behaviour
+		Tenants:       tenants, // nil => single-tenant, unchanged behaviour
+		// The user's own Claude Code compaction setting, read once now (local mode only; #948).
+		ClaudeCompact: claudeCompactAtStart(tenants == nil),
 		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
 		MetricsToken:  *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is

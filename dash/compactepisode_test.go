@@ -1387,3 +1387,62 @@ func TestAColdStartReplayInsideTheSpanIsNeverCredit(t *testing.T) {
 		t.Errorf("excluded = %v, read = %v, want %v each", out.Ledger.PrefixChangeUSD, e.ReadCreditUSD, want)
 	}
 }
+
+// A user's own compaction point (#948) changes the span: the same rows, once on the table C and
+// once with a configured C, measure different spans, and the report says which C each used.
+func TestEpisodeWalkUsesTheUsersOwnCompactionPoint(t *testing.T) {
+	mk := func(cpt int) []compactRow {
+		rows := []compactRow{
+			row(1, 1_000, fresh),
+			row(2, 50_000, saved(100_000)),
+			row(3, 50_000, saved(100_000)),
+		}
+		if cpt > 0 {
+			for i := range rows {
+				rows[i].CPoint, rows[i].CPointSource = cpt, "configured"
+			}
+		}
+		return rows
+	}
+	// Window 1,000,000, fill 0.90. Table C = the window, so the derived span is 0.10 (100,000).
+	// Configured C = 950,000 gives a span of 0.05 (50,000) from the same rows.
+	tbl := walkCompactEpisodes(mk(0), exactWindow, testPrice, 0, 0.90, 0)
+	cfg := walkCompactEpisodes(mk(950_000), exactWindow, testPrice, 0, 0.90, 0)
+	if len(tbl.Assumptions.ClientCeilings) != 1 || len(cfg.Assumptions.ClientCeilings) != 1 {
+		t.Fatalf("ceilings: %+v / %+v", tbl.Assumptions.ClientCeilings, cfg.Assumptions.ClientCeilings)
+	}
+	tc, cc := tbl.Assumptions.ClientCeilings[0], cfg.Assumptions.ClientCeilings[0]
+	if tc.Provenance != "window_fallback" || tc.Frac != 1 || offUSD(tc.SpanFrac, 0.10) {
+		t.Errorf("table ceiling = %+v", tc)
+	}
+	if cc.Provenance != "configured" || offUSD(cc.Frac, 0.95) || offUSD(cc.SpanFrac, 0.05) {
+		t.Errorf("configured ceiling = %+v, want frac 0.95 (Abs/window), span 0.05", cc)
+	}
+	// The span change is visible in the episode: 100,000 of new content closes only the narrow one.
+	if e := only(t, tbl); e.State != EpisodeClosed {
+		t.Errorf("table: state %q", e.State)
+	}
+	if e := only(t, cfg); e.State != EpisodeClosed || e.Turns >= 3 {
+		t.Errorf("configured: %+v, want a closed episode that ends earlier than the table's", e)
+	}
+	// A configured C at or below the fill leaves no attributable span, and is counted as such.
+	if out := walkCompactEpisodes(mk(850_000), exactWindow, testPrice, 0, 0.90, 0); out.Coverage.NoAttributableSpan != 1 {
+		t.Errorf("C below the fill: no_attributable_span = %d, want 1", out.Coverage.NoAttributableSpan)
+	}
+}
+
+// A model with one configured and one table conversation gets one ceiling entry for each source.
+func TestEpisodeCeilingsAreReportedPerModelAndSource(t *testing.T) {
+	a := []compactRow{row(1, 1_000, fresh), row(2, 1_000, fresh)}
+	for i := range a {
+		a[i].Session, a[i].CPoint, a[i].CPointSource = "a", 950_000, "configured"
+	}
+	b := []compactRow{row(1, 1_000, fresh), row(2, 1_000, fresh)}
+	for i := range b {
+		b[i].Session = "b"
+	}
+	out := walkCompactEpisodes(append(a, b...), exactWindow, testPrice, 0, 0.90, 0)
+	if len(out.Assumptions.ClientCeilings) != 2 {
+		t.Fatalf("ceilings = %+v, want one per source", out.Assumptions.ClientCeilings)
+	}
+}

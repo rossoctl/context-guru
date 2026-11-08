@@ -195,7 +195,8 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
 	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held,
 	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
-	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches`
+	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
+	r.compaction_point, r.compaction_point_source`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -221,7 +222,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
 		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held,
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
-		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches)
+		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
+		&e.CompactionPoint, &e.CompactionPointSource)
 	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
 	e.EstimateHeld = held != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String

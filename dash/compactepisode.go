@@ -74,6 +74,9 @@ type compactRow struct {
 	// TokensBefore is our own tokenizer's count of the message text. Used ONLY to detect a
 	// client-side compaction (a drop), never as a fraction of the window.
 	TokensBefore int64
+	// CPoint and CPointSource are the user's own C on this row (#948); 0 and "" when the table set it.
+	CPoint       int
+	CPointSource string
 	// Billed is what the provider counted as input: fresh + cache read + cache write. The
 	// episode's span is measured in these, because the context window is stated in them.
 	Billed int64
@@ -304,8 +307,9 @@ type CompactionAssumptions struct {
 	// SpanRule says WHY the span is the width it is: it is an attribution boundary derived from the
 	// fill threshold, not a tuning knob. See spanFor.
 	SpanRule string `json:"span_rule"`
-	// ClientCeilings is one entry per model this query actually measured, because the ceiling is a
-	// fact about the CLIENT's behaviour on that model and a single number would be an average of
+	// ClientCeilings is one entry per model and source this query actually measured (noteCeiling),
+	// because the ceiling is a fact about the CLIENT's behaviour on that model, and a model can have
+	// both a table conversation and a configured one. A single number would be an average of
 	// things that are not comparable. Each carries its provenance, so a reader can tell which
 	// published figures rest on a measurement and which on an assumption.
 	ClientCeilings []ClientCeilingUsed `json:"client_ceilings"`
@@ -504,7 +508,7 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 		p := price(conv[0].Model)
 
 		// This conversation's own span, from this MODEL's compaction point.
-		ceil := compactionpoint.For(conv[0].Model)
+		ceil := episodeConversationPoint(conv, w)
 		if explicitCeiling {
 			ceil = compactionpoint.Point{Frac: ceilingFrac, Source: compactionpoint.Assumed,
 				Note: "supplied explicitly on the request"}
@@ -1102,18 +1106,33 @@ type ClientCeilingUsed struct {
 	Frac float64 `json:"frac"`
 	// SpanFrac is what that ceiling produced for this model: `frac - fill_frac`.
 	SpanFrac float64 `json:"span_frac"`
-	// Provenance is "measured", "assumed" or "default". A measured ceiling came from watching a real
-	// client compact, in billed tokens; the other two did not, and an assumed ceiling that is too high
+	// Provenance is "measured", "assumed", "configured" or "window_fallback". A measured ceiling came
+	// from watching a real client compact, in billed tokens. A configured one is the user's own client
+	// setting (#948), taken as billed tokens at a factor of 1.0 that is not measured. The others did not, and an assumed ceiling that is too high
 	// makes the span too wide and OVER-reports.
 	Provenance string `json:"provenance"`
 	// Note is why this value, in enough detail to tell whether it still holds.
 	Note string `json:"note"`
 }
 
-// noteCeiling records the ceiling one model was measured against, once per model.
+// episodeConversationPoint is C for one conversation: the user's own setting when a row recorded
+// one (the newest), else the table (#948). The fraction is C over the window, as spanFor wants it.
+func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Point {
+	for i := len(conv) - 1; i >= 0; i-- {
+		if conv[i].CPointSource == string(compactionpoint.Configured) && conv[i].CPoint > 0 && window > 0 {
+			p := compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
+			p.Frac = float64(p.Abs) / float64(window)
+			return p
+		}
+	}
+	return compactionpoint.For(conv[0].Model)
+}
+
+// noteCeiling records the ceiling one model was measured against, once per model and source: a
+// model with a configured conversation and a table conversation gets two entries (#948).
 func (a *CompactionAssumptions) noteCeiling(model string, c compactionpoint.Point, span float64) {
 	for _, e := range a.ClientCeilings {
-		if e.Model == model {
+		if e.Model == model && e.Provenance == string(c.Source) {
 			return
 		}
 	}
@@ -1168,6 +1187,7 @@ func compactAssumptions(spanFrac, fillFrac float64) CompactionAssumptions {
 // nothing on it, because the span is a quantity of WORK and the turns that did nothing still
 // consumed some. An INNER join would silently shorten every span to the turns summarize touched.
 const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id, r.model, r.ts, r.tokens_before,
+		r.compaction_point, r.compaction_point_source,
 		r.fresh_input + r.cache_read + r.cache_write AS billed,
 		r.cache_miss_reason, r.cache_write, r.cache_write_1h, r.cache_read, r.cg_llm_cost_usd,
 		%[1]s, r.fresh_input, %[2]s, %[4]s, %[5]s
@@ -1251,7 +1271,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 		var r compactRow
 		var acted int
 		if err := rows.Scan(&r.Tenant, &r.Session, &r.Thread, &r.Model, &r.TS, &r.TokensBefore,
-			&r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
+			&r.CPoint, &r.CPointSource, &r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
 			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted,
 			&r.FreshInput, &r.SavedUnique, &r.storedFirstUSD, &r.Accountant); err != nil {
 			return nil, err

@@ -7,6 +7,11 @@
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
 #   - every check run on the head has finished with success (or skipped / neutral);
+#   - the head has a "CodeQL" check run from the code-scanning app that passed. GitHub's
+#     code-scanning rule on main reads this run ("No new alerts in code changed by this pull
+#     request"). A PR opened before the CodeQL workflow existed (#945) has none; it needs a new
+#     push before it can merge. Without this check, an --admin merge bypasses the code-scanning
+#     rule with no sign (#943, #937, #944);
 #   - every commit on the PR has a Signed-off-by line (the DCO check needs it).
 # It does NOT check for a behavior change. The integrator reads the diff for that, and needs a
 # human developer's yes in words (RELEASING.md, step 2).
@@ -59,9 +64,9 @@ fi
 
 # CI: every check run on the head (the check-runs API; a check that reports only through the
 # older commit-status API does not show here. The DCO rule is checked separately below.)
-runs=$(api "the check runs" api --paginate "repos/$repo/commits/$sha/check-runs" --jq '.check_runs[] | "\(.status)\t\(.conclusion)\t\(.name)"')
+runs=$(api "the check runs" api --paginate "repos/$repo/commits/$sha/check-runs" --jq '.check_runs[] | "\(.status)\t\(.conclusion)\t\(.name)\t\(.app.slug)"')
 [ -n "$runs" ] || no "no CI check ran on the head (retarget to main, or close and reopen the PR)"
-while IFS=$'\t' read -r status concl name; do
+while IFS=$'\t' read -r status concl name _app; do
   [ -n "$name" ] || continue
   case "$status/$concl" in
     completed/success|completed/skipped|completed/neutral) echo "check $name: $concl" ;;
@@ -69,6 +74,19 @@ while IFS=$'\t' read -r status concl name; do
     *) no "check $name: still $status" ;;
   esac
 done <<<"$runs"
+
+# Code scanning: the "CodeQL" check run, posted by GitHub's code-scanning app
+# (github-advanced-security), not the "analyze" job of the workflow and not any other job with that
+# name. A missing run means no scan of this head reached the rule. It exists only on a PR to main,
+# where the workflow runs. There is no check of the alert list: the list for the merge ref includes
+# the alerts of main itself, and it is empty, not an error, for a merge ref with no analysis yet.
+cq=$(printf '%s\n' "$runs" | awk -F'\t' '$3=="CodeQL" && $4=="github-advanced-security"{print $1"/"$2; exit}')
+case "$cq" in
+  completed/success) echo "code scanning: CodeQL check run passed on the head" ;;
+  "") no "no CodeQL check run on the head (the PR must target main; then push again, or close and reopen it, so the CodeQL workflow scans it)" ;;
+  completed/*) no "CodeQL check run: ${cq#completed/}" ;;
+  *) no "CodeQL check run still ${cq%%/*}; wait for it" ;;
+esac
 
 # DCO: every commit carries a sign-off. Only the author can add one; a merge past a missing
 # sign-off needs the release owner, case by case.
