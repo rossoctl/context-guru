@@ -7,6 +7,10 @@
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
 #   - every check run on the head has finished with success (or skipped / neutral);
+#   - the head has a "CodeQL" check run that passed. GitHub's code-scanning rule on main reads
+#     it ("No new alerts in code changed by this pull request"). A PR opened before the CodeQL
+#     workflow existed (#945) has none; it needs a new push before it can merge. Without this
+#     check, an --admin merge bypasses the code-scanning rule with no sign (#943, #937, #944);
 #   - every commit on the PR has a Signed-off-by line (the DCO check needs it).
 # It does NOT check for a behavior change. The integrator reads the diff for that, and needs a
 # human developer's yes in words (RELEASING.md, step 2).
@@ -69,6 +73,14 @@ while IFS=$'\t' read -r status concl name; do
     *) no "check $name: still $status" ;;
   esac
 done <<<"$runs"
+
+# Code scanning: the "CodeQL" check run, posted by GitHub's code-scanning app, not the "analyze"
+# job of the workflow. A run that is missing means no scan of this head reached the rule.
+if ! printf '%s\n' "$runs" | awk -F'\t' '$1=="completed" && $2=="success" && $3=="CodeQL"{f=1} END{exit !f}'; then
+  no "no passing CodeQL check run on the head (push again, or close and reopen the PR, so the CodeQL workflow scans it)"
+else
+  echo "code scanning: CodeQL passed on the head"
+fi
 
 # DCO: every commit carries a sign-off. Only the author can add one; a merge past a missing
 # sign-off needs the release owner, case by case.

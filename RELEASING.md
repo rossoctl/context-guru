@@ -116,6 +116,7 @@ Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the cu
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
+- the head has a passing `CodeQL` check run, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
 
 It does not check for a behavior change. Read the diff for that yourself.
@@ -143,6 +144,8 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
   - **Any other failed rule needs the owner's yes for that PR.** Before a bypass, read which rules fail: `gh api repos/<org>/<repo>/rulesets/rule-suites?ref=refs/heads/main` lists recent merges, and `.../rule-suites/<id>` shows each rule's result.
   - **The code-scanning rule (CodeQL).** The `main` ruleset also needs CodeQL results with no errors and no high or critical security alerts. Until 2026-11-08 the repo had no CodeQL workflow, so this rule failed on every PR, and every merge from v0.6.1 to v0.6.7 went past it with `--admin` without anyone seeing it. The owner decided on 2026-11-08: add the CodeQL workflow and fix what it finds, and **merges wait until the rule passes**. After that, the standing rule holds as written, and a code-scanning failure needs the owner's yes for that PR.
+  - **`--admin` does not say which rules it bypasses.** Before an `--admin` merge, run `check-ready.sh`: it fails when the head has no passing `CodeQL` check run. After the merge, read the merge's rule results (`.../rule-suites/<id>`). If a rule other than the review rule failed, tell the owner. On 2026-11-08, #943, #937 and #944 merged past the code-scanning rule this way: they were opened before #945, so CodeQL never scanned them. The scans of `main` afterwards found no new alert.
+  - **Only alerts in changed lines block a PR.** A PR's CodeQL result covers only the code that PR changes. To see every open alert, read `main`: `gh api "repos/<org>/<repo>/code-scanning/alerts?ref=refs/heads/main&state=open"`. A false positive is dismissed only with the owner's yes, with the reason in the dismissal comment.
 - Read the result back from the server after each merge or edit. Do not trust a tool's "success" line alone.
 
 ### Stacked PRs
