@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -132,9 +134,10 @@ func short(s string) string {
 // changes C for the request's model; else the bootstrap table. A hosted proxy (Options.Tenants)
 // never has a user setting. Fail open: any odd value gives the table.
 //
-// WHICH REQUESTS. The setting is Claude Code's, so it applies only to a request whose User-Agent is
-// Claude Code's (dash.AgentFor: "claude-code" or "claude-cli"; the client sets it itself). A Codex or
-// Bob request on the same local proxy gets the table. The limit: the header is the client's own
+// WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
+// own (clientOf below; the client sets it itself). A request of another client on the same local
+// proxy gets the table. Bob also gets its own verified default when the user set nothing (#963).
+// Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
 // claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same
 // env is also covered, which is right, because it reads the same settings. A request with no
 // User-Agent gets the table.
@@ -145,18 +148,177 @@ func short(s string) string {
 // model name matches dated and variant spellings.
 func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
-	if h.opts.Tenants == nil && r != nil && isClaudeCodeAgent(r.UserAgent()) {
-		if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
-			return p
+	if h.opts.Tenants == nil && r != nil {
+		switch clientOf(r.UserAgent()) {
+		case "claude":
+			if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
+				return p
+			}
+		case "bob":
+			if p, ok := h.opts.BobCompact.Resolve(window, h.bobWindow(model)); ok {
+				return p
+			}
+		case "codex":
+			if p, ok := h.opts.CodexCompact.Resolve(window); ok {
+				return p
+			}
 		}
 	}
 	return compactionpoint.For(model)
 }
 
-func isClaudeCodeAgent(userAgent string) bool {
+// clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which
+// matches the substring "bob" or "codex" anywhere and serves the dashboard's filter. A wrong match
+// here would give a stranger's request another client's C, so Bob and Codex are matched by the
+// start of the User-Agent they send: Bob Shell sends `bobshell/<version>` (bob.js, the request
+// headers of its API client); Codex sends its originator first, `codex_cli_rs/...` by default (and
+// `codex_exec`, `codex-tui` and the like). Claude Code keeps the dash.AgentFor rule from #955.
+func clientOf(userAgent string) string {
+	l := strings.ToLower(strings.TrimSpace(userAgent))
+	switch {
+	case strings.HasPrefix(l, "bobshell/"):
+		return "bob"
+	case strings.HasPrefix(l, "codex"):
+		return "codex"
+	}
 	switch dash.AgentFor(userAgent) {
 	case "claude-code", "claude-cli":
-		return true
+		return "claude"
 	}
-	return false
+	return ""
+}
+
+// bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that
+// passed through this proxy (noteBobModelInfo). 0 = not seen. Metadata only: a number for each
+// model id, in memory, at most bobWindowMax entries.
+func (h *Handler) bobWindow(model string) int {
+	h.bobWinMu.Lock()
+	defer h.bobWinMu.Unlock()
+	return h.bobWin[model]
+}
+
+const bobWindowMax = 512
+
+// noteBobModelInfo records data[].model_name -> data[].model_info.max_input_tokens (the LiteLLM
+// shape Bob reads in getLiteLLMModels). A body that is not that shape records nothing.
+func (h *Handler) noteBobModelInfo(body []byte) {
+	data := gjson.GetBytes(body, "data")
+	if !data.IsArray() {
+		return
+	}
+	got := map[string]int{}
+	data.ForEach(func(_, v gjson.Result) bool {
+		name := v.Get("model_name").String()
+		w := v.Get("model_info.max_input_tokens")
+		if name != "" && len(name) <= 128 && w.Type == gjson.Number && w.Int() > 0 && w.Int() < 1<<40 && len(got) < bobWindowMax {
+			got[name] = int(w.Int())
+		}
+		return true
+	})
+	if len(got) == 0 {
+		return
+	}
+	h.bobWinMu.Lock()
+	defer h.bobWinMu.Unlock()
+	h.bobWin = got // the whole catalog replaces the old one: bounded, and never stale
+}
+
+func isBobModelInfo(r *http.Request) bool {
+	return r.Method == http.MethodGet && (r.URL.Path == "/inference/v1/model/info" || r.URL.Path == "/v1/model/info")
+}
+
+// ReadBobCompact reads Bob Shell's model.compressionThreshold (#963) from the user settings file
+// ~/.bob/settings.json and the system settings file, which wins in the client's merge. The project
+// file is not read (the proxy does not know the directory). Read is true whenever the read ran, so
+// Bob's own default (0.5) applies when nothing is set. Same switch as the others: off gives the zero
+// value. It never fails.
+func ReadBobCompact(getenv func(string) string, home string) compactionpoint.Bob {
+	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
+	case "off", "0", "false":
+		return compactionpoint.Bob{}
+	}
+	b := compactionpoint.Bob{Read: true}
+	var paths []string
+	if home != "" {
+		paths = append(paths, filepath.Join(home, ".bob", "settings.json"))
+	}
+	paths = append(paths, bobSystemSettingsPath(getenv))
+	for _, p := range paths { // later wins: system over user
+		if !filepath.IsAbs(p) {
+			continue
+		}
+		if raw := readSmall(p); raw != nil {
+			if v := gjson.GetBytes(raw, "model.compressionThreshold"); v.Type == gjson.Number || v.Type == gjson.String {
+				b.Threshold = short(v.String())
+			}
+		}
+	}
+	return b
+}
+
+// bobSystemSettingsPath is the client's own rule (getSystemSettingsPath in bob.js).
+func bobSystemSettingsPath(getenv func(string) string) string {
+	if p := strings.TrimSpace(getenv("BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH")); p != "" {
+		return p
+	}
+	if runtime.GOOS == "darwin" {
+		return "/Library/Application Support/Bob-Shell/settings.json"
+	}
+	return "/etc/bob-shell/settings.json"
+}
+
+// ReadCodexCompact reads three top-level keys of $CODEX_HOME/config.toml (default ~/.codex) (#963):
+// model_auto_compact_token_limit, model_auto_compact_token_limit_scope and
+// model_post_turn_compact_threshold_percent. It is a small line scanner, not a TOML parser: it reads
+// only `key = value` lines before the first [table] header, and skips anything it does not
+// understand (fail open). Same switch as the others.
+func ReadCodexCompact(getenv func(string) string, home string) compactionpoint.Codex {
+	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
+	case "off", "0", "false":
+		return compactionpoint.Codex{}
+	}
+	dir := strings.TrimSpace(getenv("CODEX_HOME"))
+	if dir == "" {
+		if home == "" {
+			return compactionpoint.Codex{}
+		}
+		dir = filepath.Join(home, ".codex")
+	}
+	if !filepath.IsAbs(dir) {
+		return compactionpoint.Codex{}
+	}
+	f, err := os.Open(filepath.Join(dir, "config.toml"))
+	if err != nil {
+		return compactionpoint.Codex{}
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || st.Size() > 4<<20 {
+		return compactionpoint.Codex{}
+	}
+	var c compactionpoint.Codex
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "[") {
+			break // the first table header ends the top level
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if i := strings.Index(v, "#"); i >= 0 { // a trailing comment (no setting here holds a #)
+			v = v[:i]
+		}
+		v = short(strings.Trim(strings.TrimSpace(v), `"'`))
+		switch strings.TrimSpace(k) {
+		case "model_auto_compact_token_limit":
+			c.Limit = v
+		case "model_auto_compact_token_limit_scope":
+			c.Scope = v
+		case "model_post_turn_compact_threshold_percent":
+			c.PostTurn = v
+		}
+	}
+	return c
 }

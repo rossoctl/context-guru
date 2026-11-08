@@ -426,7 +426,7 @@ type Event struct {
 	DeferSearches        int `json:"defer_searches,omitempty"`
 	DeferDroppedSearches int `json:"defer_dropped_searches,omitempty"`
 	// CompactionPoint and CompactionPointSource are C in billed tokens and its source, written
-	// ONLY when the user's own client setting set it (#948; compactionpoint.Configured). 0 and ""
+	// ONLY when the client set it: the user's own setting or the client's own default (#948, #963; compactionpoint.Configured, ClientDefault). 0 and ""
 	// on every other row: the table value is read back from the table. A number from a config
 	// file, never content.
 	CompactionPoint       int     `json:"compaction_point,omitempty"`
