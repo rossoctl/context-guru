@@ -430,8 +430,9 @@ func TestALargePartialReadIsAMiss(t *testing.T) {
 // ttlTurn mirrors proxy/dashcapture.go: the TTL comes from the billed tier of the thread's
 // previous same-model request, as ObservePrefix returns it.
 func ttlTurn(r *Recorder, ts int64, f PrefixFacts, read, write, write1h int64) *Event {
-	f.TS = ts
-	f.OneHour, f.NoWrite = write1h > 0, write == 0
+	ev := &Event{TS: ts, CacheRead: read, CacheWrite: write, CacheWrite1h: write1h}
+	derived := FactsOf(ev)
+	f.TS, f.OneHour, f.NoWrite, f.PromptTokens = ts, derived.OneHour, derived.NoWrite, derived.PromptTokens
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", "s", "th", f.Model, ts, 0)
 	cause, modelGap, known, _, prevPrompt, prevOneHour := r.ObservePrefix("s", "th", "", false, f, true)
 	if known {
@@ -495,5 +496,32 @@ func TestSummarizerOnA1hThreadMissIsPricedAtTheRead(t *testing.T) {
 	p := modelinfo.Price{CacheRead: 1, CacheWrite: 10}
 	if got := e.uniqueRate(p, SummarizerComponents[0]); got != p.CacheRead {
 		t.Errorf("summarizer rate = %v, want the read rate %v", got, p.CacheRead)
+	}
+}
+
+func TestTTLExpiryOnAMixedWriteKeepsFiveMinutes(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	ttlTurn(r, t0, base(), 0, 50_000, 10_000) // 1h head (10k) over a 5m tail (40k)
+	// Head still alive, tail re-created, nothing differed.
+	if got := ttlTurn(r, t0+20*60_000, base(), 10_000, 40_000, 0).CacheMissReason; got != CacheTTLExpiry {
+		t.Errorf("reason = %q, want %q", got, CacheTTLExpiry)
+	}
+}
+
+func TestTTLTierIsInheritedFromTheParentThread(t *testing.T) {
+	r := newFactsRecorder()
+	f := base()
+	f.TS, f.OneHour = 1_700_000_000_000, true
+	r.ObservePrefix("s1", "", "", false, f, true)
+	fork := base()
+	fork.TS, fork.NoWrite = f.TS+60_000, true // a read-only first request of the fork
+	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", true, fork, true); !oneHour {
+		t.Error("fork's first request did not inherit the parent's 1h tier")
+	}
+	next := base()
+	next.TS, next.NoWrite = f.TS+120_000, true
+	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", false, next, true); !oneHour {
+		t.Error("the fork's second request lost the inherited 1h tier")
 	}
 }

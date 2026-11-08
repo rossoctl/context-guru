@@ -27,8 +27,10 @@ type PrefixFacts struct {
 	// RewroteEarlier is sticky: some earlier, non-bypassed request of the thread was rewritten,
 	// so the provider cache holds a history that differs from the original one.
 	RewroteEarlier bool
-	// OneHour says the provider BILLED the entry this request left in the cache at the one-hour
-	// tier (cache_write_1h > 0), not that the request asked for it. A request that wrote nothing
+	// OneHour says the provider BILLED the WHOLE write of this request at the one-hour tier
+	// (cache_write_1h >= cache_write > 0), not that the request asked for it. A mixed write (a
+	// 1h head over a 5m tail) is not one-hour: its tail dies in five minutes. This is the rule
+	// of keepalive ResolveTier. A request that wrote nothing
 	// keeps the tier of the previous same-model request (ObservePrefix fills that in). Metadata
 	// only: a token count.
 	OneHour bool
@@ -45,7 +47,7 @@ func FactsOf(e *Event) PrefixFacts {
 		Bypassed: e.Bypassed, Messages: e.Messages,
 		PromptTokens: e.FreshInput + e.CacheRead + e.CacheWrite,
 		Rewrote:      !e.Bypassed && e.TokensAfter < e.TokensBefore,
-		OneHour:      e.CacheWrite1h > 0, NoWrite: e.CacheWrite == 0,
+		OneHour:      e.CacheWrite > 0 && e.CacheWrite1h >= e.CacheWrite, NoWrite: e.CacheWrite == 0,
 	}
 }
 
