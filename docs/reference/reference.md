@@ -918,6 +918,11 @@ Containment applies only to entries that look like a model id (one containing a 
 let the public map answer. `window:` optionally supplies a context window for a model the
 public map does not list either.
 
+`cache_write_1h_frac:` optionally sets an entry's 1-hour cache-write rate as a multiple of
+`in`. Unset or 0, it is 2.0x (Anthropic's rate). Set it when a gateway bills the 1-hour write at
+another rate, for example `1.0` for the input rate. A 1-hour write never costs less than a
+5-minute write, so a value below the entry's 5-minute rate gives the 5-minute rate.
+
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
 indistinguishable from "every model is free".

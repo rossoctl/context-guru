@@ -20,6 +20,9 @@
 # `cache_write` defaults to 1.25x for Claude and GPT-5.6+, and 1x for older
 # OpenAI and Gemini models. State either rate explicitly when this gateway bills
 # differently.
+# `cache_write_1h_frac` (per entry only) is the 1-hour cache-write rate as a multiple of
+# `in`. Unset or 0 means 2.0x, Anthropic's rate. Set it when this gateway bills the 1-hour
+# write at another rate. A value below the 5-minute rate gives the 5-minute rate.
 #
 # A trailing `*` matches a family. The longest match wins, so a specific id always
 # beats the family it belongs to regardless of order in this file.

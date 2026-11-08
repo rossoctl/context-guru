@@ -60,6 +60,9 @@ type tableFileModel struct {
 	Out        float64 `yaml:"out"`
 	CacheRead  float64 `yaml:"cache_read"`
 	CacheWrite float64 `yaml:"cache_write"`
+	// CacheWrite1hFrac is the 1-hour cache-write rate as a multiple of In. 0 (unset) means
+	// AnthropicCacheWrite1hFrac. A gateway that bills the 1-hour write at the input rate sets 1.0.
+	CacheWrite1hFrac float64 `yaml:"cache_write_1h_frac"`
 	// Window optionally overrides the context window for a model the public map
 	// does not list either (a preview id), so fraction triggers still scale.
 	Window int `yaml:"window"`
@@ -111,12 +114,16 @@ func ParseTable(b []byte) (*Table, error) {
 		if m.In < 0 || m.Out < 0 || m.CacheRead < 0 || m.CacheWrite < 0 {
 			return nil, fmt.Errorf("model price list: %q has a negative rate", m.Match)
 		}
+		if m.CacheWrite1hFrac < 0 {
+			return nil, fmt.Errorf("model price list: %q: cache_write_1h_frac must not be negative", m.Match)
+		}
 		if m.In == 0 && m.Out == 0 {
 			return nil, fmt.Errorf("model price list: %q has no rates; omit the entry rather than pricing it free", m.Match)
 		}
 		p := Price{
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
+			Write1hFrac: m.CacheWrite1hFrac,
 		}
 		// A blank tier is filled at lookup, when the model is known (Price.CacheReadFor). The
 		// file-level multiples travel with the entry. A cache_read_frac the file leaves unset
