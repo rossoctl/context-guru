@@ -4,9 +4,9 @@ d=json.load(sys.stdin)
 name=d.get("tool_name",""); sid=d.get("session_id")
 BLOCK={"Artifact","ArtifactComments","ArtifactData","Workflow","ScheduleWakeup","CronCreate","CronDelete","Monitor","SendMessage",
        "EnterWorktree","ExitWorktree","PushNotification","TaskStop","RemoteTrigger","EndConversation","DesignSync"}
-cmd=str((d.get("tool_input") or {}).get("command",""))
+ti=d.get("tool_input"); cmd=str(ti.get("command","")) if isinstance(ti,dict) else ""
 import re
-bash_bad = name=="Bash" and re.search(r"crontab|launchctl|osascript|\bat\s+\d|systemctl|schtasks|nohup|tail -f|sleep\s+\d{3}",cmd) is not None
+bash_bad = name=="Bash" and re.search(r"crontab|launchctl|osascript|(^|[;&|]\s*)at\s+\d|systemctl|schtasks|nohup|tail -f|sleep\s+\d{3}",cmd) is not None
 blk = bash_bad or name in BLOCK or (name.startswith("mcp__ops__") and name!="mcp__ops__search_runbooks")
 with open((os.environ.get("TD871_ROOT") or os.path.dirname(os.path.abspath(__file__)))+"/logs/hook.jsonl","a") as f:
     f.write(json.dumps({"t":time.time(),"sid":sid,"tool":name,"blocked":blk,"cmd":cmd[:80] if name=="Bash" else None,"agent":d.get("agent_id") or d.get("agent_type")})+"\n")

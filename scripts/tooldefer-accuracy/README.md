@@ -26,7 +26,7 @@ The right-tool count on **40 tasks** (20 direct, 20 vague). A run is right when 
 Each `claude` process gets `ANTHROPIC_BASE_URL` set to the test proxy and `ANTHROPIC_CUSTOM_HEADERS=` empty.
 The test proxy chains to `tap.py` on 127.0.0.1:18970. `tap.py` forwards to `TD871_GATEWAY_URL`.
 Free ports needed: 18970, 18972, 18981, 18990-18993, 19000-19003.
-`runcc-raw.sh` is the no-proxy arm. The runner adds an `/anthropic` prefix that only the proxy strips; `runcc-raw.sh` drops it.
+The runner adds an `/anthropic` prefix that only the proxy strips. `NW3` must be 4 or less.
 
 ## Commands, in order
 
@@ -66,6 +66,7 @@ Run them from this folder.
 - **Pass:** for each model, s3b's right-tool count is **at least the s1 count minus 1 task per rep**, and no client sees a 4xx.
   - Sonnet, 3 reps: s3b at least s1 - 3. Opus, 2 reps: s3b at least s1 - 2. Judge s3b first. Report s3 too.
 - **Baseline, 2026-11-04, main 44f8318d** (s1 / s3 / s3b): Opus 5.5 **73 / 72 / 74** of 80; Sonnet 5.5 **107 / 109 / 117** of 120.
+- **`analyze.py` keeps two kinds of row out of the score** and prints their counts: invalid runs (`rc != 0`, timeout 124, or no `result` line) and s3b runs that used the server search (`srv > 0`, or the `tool_search_tool_bm25` tool in a request: the wrong path). Both counts should be 0. The driver stops with exit 2 if the client probe does not pass within 30 s.
 - **Also check:** `client_search_disabled` is 0; `retries_400` is 0; the `4xx` column is 0.
 - **Duplicate response ids** that `analyze.py` prints come from the gateway replaying Haiku background calls
   (the title and summary calls). Check that none is a test run before you fail a run.
@@ -100,6 +101,6 @@ Rebuild the seed with the current binary: an older seed may not match a newer sc
 ## Files
 
 `driver.py` runs tasks. `analyze.py` scores. `tap.py` is the logging forwarder. `hook.py` records tool calls and denies side effects.
-`runcc.sh` / `runcc-raw.sh` start one `claude`. `startproxy.sh` / `stopproxy.sh` manage a test proxy. `warm.sh` warms a proxy.
+`runcc.sh` starts one `claude`. `startproxy.sh` / `stopproxy.sh` manage a test proxy. `warm.sh` warms a proxy.
 `mcp_probe.py` / `mcp_ops.py` are fake MCP servers. `tasks.tsv` holds the 40 tasks. `show.py` prints the tap log.
 `setup.sh`, `build.sh`, `seed.sh` are the helpers.

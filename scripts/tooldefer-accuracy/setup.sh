@@ -8,9 +8,6 @@ chmod +x "$(dirname "$0")"/*.sh 2>/dev/null || true
 cat > mcp.json <<J
 {"mcpServers":{"probe":{"command":"python3","args":["-I","$D/mcp_probe.py"]},"ops":{"command":"python3","args":["-I","$D/mcp_ops.py"]}}}
 J
-cat > mcp-noops.json <<J
-{"mcpServers":{"probe":{"command":"python3","args":["-I","$D/mcp_probe.py"]}}}
-J
 cat > settings.json <<J
 {"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"TD871_ROOT=$D python3 -I $D/hook.py"}]}]}}
 J

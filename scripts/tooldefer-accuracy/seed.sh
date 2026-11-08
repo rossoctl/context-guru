@@ -10,4 +10,5 @@ for m in claude-sonnet-5-5 claude-opus-5-5 claude-sonnet-5-5 claude-opus-5-5; do
 done
 curl -s http://127.0.0.1:18972/stats | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('tool_defer'),indent=0))"
 ./stopproxy.sh seed
+sqlite3 snap/dash.db "pragma wal_checkpoint(truncate)" >/dev/null  # move the WAL into dash.db: the driver copies dash.db alone
 sqlite3 snap/dash.db "select count(distinct session_id) from tool_defer_history" # expect 4

@@ -1,5 +1,5 @@
-# Accuracy-test driver. Lanes s1, s2 run in parallel threads; s3 runs serially (it restores the
-# seeded snapshot before each run). Resumable: a run with a row in logs/runs.jsonl is skipped.
+# Accuracy-test driver. Each setup runs NW<n> parallel workers (NW3 <= 4, one proxy per worker). Workers of s3 and s3b restore the
+# seeded snapshot and restart their proxy before each run. Resumable: a run with a row in logs/runs.jsonl is skipped.
 # usage: driver.py <model> <reps> <task-ids,|all> <setups e.g. s1,s2,s3> <seconds budget>
 import json, os, subprocess, sys, threading, time, uuid, shutil
 D=os.environ.get("TD871_ROOT") or os.path.dirname(os.path.abspath(__file__)); MODEL=sys.argv[1]; REPS=int(sys.argv[2]); IDS=sys.argv[3]; SETUPS=sys.argv[4].split(","); BUDGET=float(sys.argv[5])
@@ -32,6 +32,7 @@ def restore_s3(w,setup="s3"):
     n="px%s-%d"%(setup[1:],w); port=str(18990+off+w); dd=D+"/%sdb-%d"%(setup,w)
     snap_stats(n,port)
     subprocess.run([D+"/stopproxy.sh",n])
+    open(D+"/logs/%s.log"%n,"w").close()  # fresh log: the probe wait below must see only this proxy's lines
     for f in ("dash.db","dash.db-wal","dash.db-shm","context-guru-tooldefer.db"):
         p=dd+"/"+f
         if os.path.exists(p): os.remove(p)
@@ -42,9 +43,13 @@ def restore_s3(w,setup="s3"):
         # The client probe must pass before a thread starts, or the thread takes the server-side path. A throwaway run starts it.
         lg=D+"/logs/%s.log"%n
         subprocess.run([D+"/runcc.sh","warm-%s-%d.jsonl"%(setup,w),"acc-%s-%d"%(setup,w),"%s-%d"%(setup,w),port,MODEL,D+"/mcp.json","-","--","Reply with the word OK. (Warm-up id "+str(uuid.uuid4())+".)","--max-turns","1"],capture_output=True,text=True)
+        want="probe=client model=%s route=/v1/messages verdict=pass"%MODEL
         for _ in range(60):
-            if "probe=client" in open(lg).read() and "probe=client model=%s route=/v1/messages verdict=pass"%MODEL in open(lg).read(): break
+            if want in open(lg).read(): break
             time.sleep(0.5)
+        else:
+            print("FATAL: the client probe did not pass in 30 s on",n,"- the thread would take the server path. Stop.",flush=True)
+            os._exit(2)
 def one(setup,rep,t,w):
     tid,grp,kind,want,prompt=t
     nonce=str(uuid.uuid4())
@@ -61,6 +66,7 @@ def one(setup,rep,t,w):
     with LOCK: open(D+"/logs/runs.jsonl","a").write(json.dumps(row)+"\n")
     print(setup,rep,tid,row["rc"],row["secs"],flush=True)
 import queue
+assert int(os.environ.get("NW3",4))<=4, "NW3 must be 4 or less: the README lists 4 ports per setup"
 NW={"s1":int(os.environ.get("NW1",2)),"s2":int(os.environ.get("NW2",2)),"s3":int(os.environ.get("NW3",4)),"s3b":int(os.environ.get("NW3",4))}
 qs={s:queue.Queue() for s in SETUPS}
 for rep in range(1,REPS+1):
@@ -75,7 +81,7 @@ def worker(s,w):
 th=[threading.Thread(target=worker,args=(s,w)) for s in SETUPS for w in range(NW[s])]
 for x in th: x.start()
 for x in th: x.join()
-for w in range(4):
+for w in range(max(NW.values())):
     for nm,off in (("px3-%d",0),("px3b-%d",10)):
         snap_stats(nm%w,18990+off+w)
         subprocess.run([D+"/stopproxy.sh",nm%w])

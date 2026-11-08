@@ -8,7 +8,6 @@ snap/
 tmpl/
 *.pid
 mcp.json
-mcp-noops.json
 settings.json
 capture
 *db-*/
