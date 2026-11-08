@@ -3,8 +3,8 @@
 # checkout, on a machine with Go and a C compiler (cgo is needed for -race).
 #
 # Each step writes <out-dir>/<step>.log. The summary is <out-dir>/summary.txt, and its last line
-# is ALWAYS "DONE rc=<n>", also when a step fails or the script is stopped, so a poller can wait
-# for that line. rc 0: every step passed. A failed step is run once more; the summary says
+# is "DONE rc=<n>" on every exit except SIGKILL: also when a step fails or the script is stopped
+# (a stop gives rc=143), so a poller can wait for that line. rc 0: every step passed. A failed step is run once more; the summary says
 # "flaky" when the second run passed, and "FAILED" when both failed.
 #
 # The whole run takes about 40 minutes. The dash race tests alone need up to 25 minutes on a
@@ -18,6 +18,8 @@ sum=$out/summary.txt
 : > "$sum"
 rc=0
 trap 'echo "DONE rc=$rc" >> "$sum"' EXIT
+# A stop must not read as a pass: without this, the EXIT trap writes the rc=0 it started with.
+trap 'rc=143; exit 143' HUP INT TERM
 GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
 echo "commit $(git rev-parse HEAD 2>/dev/null || echo unknown)" >> "$sum"
 
@@ -35,8 +37,10 @@ rest=$("$GO" list ./... | grep -vE '/(proxy|dash|context-guru-plugin)(/|$)')
 step vet           "$GO" vet ./...
 step build-purego  env CGO_ENABLED=0 "$GO" build ./...
 step build-record  env CGO_ENABLED=0 "$GO" build -tags cg_record ./...
-# The default build must not link otel, grpc or protobuf; only -tags cg_record may.
-step depguard      env CGO_ENABLED=1 "$GO" test -run TestDefaultBuild -count=1 ./cmd/context-guru-proxy/
+step vet-record    "$GO" vet -tags cg_record ./...
+# The default build must not link otel, grpc or protobuf; only -tags cg_record may. CGO_ENABLED=0,
+# as CI runs it: the pure-Go build is the one that ships.
+step depguard      env CGO_ENABLED=0 "$GO" test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf -count=1 ./cmd/context-guru-proxy/
 step race-proxy    env CGO_ENABLED=1 "$GO" test -race -timeout 20m ./proxy/...
 step race-dash     env CGO_ENABLED=1 "$GO" test -race -timeout 25m ./dash/...
 step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 10m ./context-guru-plugin

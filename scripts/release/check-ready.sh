@@ -11,14 +11,23 @@
 # It does NOT check for a behavior change. The integrator reads the diff for that, and needs a
 # human developer's yes in words (RELEASING.md, step 2).
 #
-# Exit 0: ready. Exit 1: not ready (each reason is printed). Exit 2: wrong input.
+# The review markers are trusted as offload-review trusts them. Do not filter out reviews by the
+# PR author: offload-review posts both reviews with the login of the person who ran it, which is
+# often the author.
+#
+# Exit 0: ready. Exit 1: not ready (each reason is printed). Exit 2: wrong input, or a gh call
+# failed (the message names it).
 set -euo pipefail
 pr=${1:?usage: check-ready.sh <pr> [<repo>]}
 repo=${2:-rossoctl/context-guru}
 fail=0
 no() { echo "NOT READY: $*"; fail=1; }
 
-pj=$(gh pr view "$pr" --repo "$repo" --json state,isDraft,mergeable,headRefOid,title)
+# api <what> <gh args...>: run gh, and stop with exit 2 and a clear message if the call fails, so a
+# network or login error never reads as "not ready" or as "no reviews".
+api() { local what=$1; shift; gh "$@" || { echo "ERROR: could not read $what from GitHub (gh $1 failed)" >&2; exit 2; }; }
+
+pj=$(api "the PR" pr view "$pr" --repo "$repo" --json state,isDraft,mergeable,headRefOid,title)
 sha=$(jq -r .headRefOid <<<"$pj")
 echo "PR #$pr: $(jq -r .title <<<"$pj")"
 echo "head: $sha"
@@ -28,7 +37,8 @@ m=$(jq -r .mergeable <<<"$pj")
 [ "$m" = MERGEABLE ] || no "mergeable=$m (CONFLICTING: the author rebases; UNKNOWN: ask again in a minute)"
 
 # Review markers: <!-- offload-review reviewer=N round=R sha=S backend=B verdict=V -->
-markers=$(gh api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body' \
+bodies=$(api "the reviews" api --paginate "repos/$repo/pulls/$pr/reviews" --jq '.[].body')
+markers=$(printf '%s\n' "$bodies" \
   | grep -oE '<!-- offload-review reviewer=[12] round=[0-9]+ sha=[0-9a-f]+ backend=[a-z0-9_-]+ verdict=[a-z]+' || true)
 if [ -z "$markers" ]; then
   no "no offload-review marker on the PR"
@@ -47,8 +57,9 @@ else
   done
 fi
 
-# CI: every check run on the head.
-runs=$(gh api --paginate "repos/$repo/commits/$sha/check-runs" --jq '.check_runs[] | "\(.status)\t\(.conclusion)\t\(.name)"')
+# CI: every check run on the head (the check-runs API; a check that reports only through the
+# older commit-status API does not show here. The DCO rule is checked separately below.)
+runs=$(api "the check runs" api --paginate "repos/$repo/commits/$sha/check-runs" --jq '.check_runs[] | "\(.status)\t\(.conclusion)\t\(.name)"')
 [ -n "$runs" ] || no "no CI check ran on the head (retarget to main, or close and reopen the PR)"
 while IFS=$'\t' read -r status concl name; do
   [ -n "$name" ] || continue
@@ -61,7 +72,7 @@ done <<<"$runs"
 
 # DCO: every commit carries a sign-off. Only the author can add one; a merge past a missing
 # sign-off needs the release owner, case by case.
-unsigned=$(gh api --paginate "repos/$repo/pulls/$pr/commits" \
+unsigned=$(api "the commits" api --paginate "repos/$repo/pulls/$pr/commits" \
   --jq '.[] | select(.commit.message | test("Signed-off-by: ") | not) | .sha[0:12]')
 [ -z "$unsigned" ] || no "commits with no Signed-off-by: $(tr '\n' ' ' <<<"$unsigned")"
 

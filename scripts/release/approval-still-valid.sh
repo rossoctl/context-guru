@@ -6,7 +6,9 @@
 # taken against its own merge base with the PR's base branch. Same patch-id: only the base moved
 # (a clean rebase, or a clean merge of the base), so the approval still counts. Different: the
 # head carries new code or a conflict resolution, and a reviewer must re-check the delta.
-# It prints `git range-diff` either way, so the result can be posted on the PR.
+# It prints `git range-diff` either way, so the result can be posted on the PR. When the new head
+# is a merge of the base into the branch, also check `git show --remerge-diff <merge>`: it must be
+# empty, which shows the merge resolved no conflict by hand.
 #
 # Run it inside a clone of the repo. Exit 0: same change. Exit 1: changed. Exit 2: wrong input.
 set -euo pipefail
