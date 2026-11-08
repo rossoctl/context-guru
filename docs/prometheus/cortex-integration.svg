@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 800" width="1180" height="800" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1d6fb8"/></marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5e35b1"/></marker>
+  </defs>
+  <rect width="1180" height="800" fill="#ffffff"/>
+  <text x="590" y="24" text-anchor="middle" font-size="17" font-weight="bold">Cortex integration: two proxies, one shared metrics module</text>
+
+  <!-- Cortex machine -->
+  <rect x="20" y="45" width="660" height="345" rx="8" fill="#f4f7fb" stroke="#7a8ca5" stroke-dasharray="5,4"/>
+  <text x="30" y="383" font-size="12" fill="#555">Laptop with Cortex (service on :47600)</text>
+  <g stroke="#333" stroke-width="2" fill="none"><circle cx="75" cy="100" r="8" fill="#fff"/><path d="M75,108 L75,128 M62,115 L88,115 M75,128 L65,140 M75,128 L85,140"/></g>
+  <text x="75" y="152" text-anchor="middle">User</text>
+  <path d="M75,160 L75,184" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="83" y="176" font-size="10" fill="#555">uses</text>
+  <rect x="35" y="185" width="80" height="50" rx="5" fill="#fff" stroke="#333"/>
+  <text x="75" y="215" text-anchor="middle">Harness</text>
+  <path d="M115,210 L140,210" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="140" y="75" width="250" height="168" rx="6" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="265" y="95" text-anchor="middle" font-weight="bold">Cortex proxy (cortex)</text>
+  <rect x="155" y="108" width="220" height="40" rx="4" fill="#fff" stroke="#1d6fb8"/>
+  <text x="265" y="125" text-anchor="middle" font-size="12">Plugins pipeline</text>
+  <text x="265" y="139" text-anchor="middle" font-size="10" fill="#555">plugins rewrite the request</text>
+  <rect x="155" y="178" width="220" height="40" rx="4" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="265" y="195" text-anchor="middle" font-size="12">accountant (library)</text>
+  <text x="265" y="209" text-anchor="middle" font-size="10" fill="#555">replaces Avoided; then Sink.Observe(Result)</text>
+  <path d="M265,148 L265,177" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="166" font-size="9" fill="#555">operations, usage</text>
+  <path d="M265,218 L265,251" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="243" font-size="9" fill="#555" dy="-6">Result</text>
+
+  <rect x="140" y="252" width="250" height="118" rx="6" fill="#f1f8f2" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <rect x="155" y="262" width="220" height="44" rx="4" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="265" y="278" text-anchor="middle" font-size="12" font-weight="bold">accountant/metrics</text>
+  <text x="265" y="290" text-anchor="middle" font-size="10" fill="#555">the Sink: Result to counters (5.2)</text>
+  <text x="265" y="300" text-anchor="middle" font-size="10" fill="#2e7d32">shared module, OTel API only</text>
+  <rect x="155" y="320" width="220" height="38" rx="4" fill="#fff" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="265" y="336" text-anchor="middle" font-size="12" font-weight="bold">OTel SDK</text>
+  <text x="265" y="350" text-anchor="middle" font-size="10" fill="#555">aggregates in memory, pushes in background</text>
+  <path d="M265,306 L265,319" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="316" font-size="9" fill="#555">OTel API</text>
+
+  <rect x="425" y="95" width="140" height="50" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="495" y="115" text-anchor="middle">Session API</text>
+  <text x="495" y="131" text-anchor="middle" font-size="10">:9094, store + archive</text>
+  <rect x="425" y="185" width="140" height="45" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="495" y="205" text-anchor="middle">agentop</text>
+  <text x="495" y="221" text-anchor="middle" font-size="11">terminal UI</text>
+  <g stroke="#333" stroke-width="2" fill="none"><circle cx="625" cy="188" r="8" fill="#fff"/><path d="M625,196 L625,216 M612,203 L638,203 M625,216 L615,228 M625,216 L635,228"/></g>
+  <text x="625" y="240" text-anchor="middle">User</text>
+  <path d="M612,203 L566,203" stroke="#5e35b1" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+  <text x="575" y="195" font-size="9" fill="#5e35b1">views</text>
+  <path d="M495,185 L495,146" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="503" y="170" font-size="10" fill="#555">reads</text>
+  <path d="M375,128 L425,120" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- cg machine -->
+  <rect x="20" y="405" width="660" height="345" rx="8" fill="#f4f7fb" stroke="#7a8ca5" stroke-dasharray="5,4"/>
+  <text x="30" y="743" font-size="12" fill="#555">Machine with the context-guru proxy (cg)</text>
+  <g stroke="#333" stroke-width="2" fill="none"><circle cx="75" cy="460" r="8" fill="#fff"/><path d="M75,468 L75,488 M62,475 L88,475 M75,488 L65,500 M75,488 L85,500"/></g>
+  <text x="75" y="512" text-anchor="middle">User</text>
+  <path d="M75,520 L75,544" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="83" y="536" font-size="10" fill="#555">uses</text>
+  <rect x="35" y="545" width="80" height="50" rx="5" fill="#fff" stroke="#333"/>
+  <text x="75" y="575" text-anchor="middle">Harness</text>
+  <path d="M115,570 L140,570" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="140" y="435" width="250" height="168" rx="6" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="265" y="455" text-anchor="middle" font-weight="bold">context-guru proxy (cg)</text>
+  <rect x="155" y="468" width="220" height="40" rx="4" fill="#fff" stroke="#1d6fb8"/>
+  <text x="265" y="485" text-anchor="middle" font-size="12">Components pipeline</text>
+  <text x="265" y="499" text-anchor="middle" font-size="10" fill="#555">components rewrite the request</text>
+  <rect x="155" y="538" width="220" height="40" rx="4" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="265" y="555" text-anchor="middle" font-size="12">accountant (library)</text>
+  <text x="265" y="569" text-anchor="middle" font-size="10" fill="#555">prices the request, then Sink.Observe(Result)</text>
+  <path d="M265,508 L265,537" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="526" font-size="9" fill="#555">operations, usage</text>
+  <path d="M265,578 L265,611" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="603" font-size="9" fill="#555" dy="-6">Result</text>
+
+  <rect x="140" y="612" width="250" height="118" rx="6" fill="#f1f8f2" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <rect x="155" y="622" width="220" height="44" rx="4" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="265" y="638" text-anchor="middle" font-size="12" font-weight="bold">accountant/metrics</text>
+  <text x="265" y="650" text-anchor="middle" font-size="10" fill="#555">the Sink: Result to counters (5.2)</text>
+  <text x="265" y="660" text-anchor="middle" font-size="10" fill="#2e7d32">same shared module as in Cortex</text>
+  <rect x="155" y="680" width="220" height="38" rx="4" fill="#fff" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="265" y="696" text-anchor="middle" font-size="12" font-weight="bold">OTel SDK</text>
+  <text x="265" y="710" text-anchor="middle" font-size="10" fill="#555">aggregates in memory, pushes in background</text>
+  <path d="M265,666 L265,679" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="273" y="676" font-size="9" fill="#555">OTel API</text>
+
+  <rect x="425" y="455" width="140" height="50" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="495" y="475" text-anchor="middle">Dashboard API</text>
+  <text x="495" y="491" text-anchor="middle" font-size="10">/api/*, SQLite</text>
+  <rect x="425" y="545" width="140" height="45" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="495" y="565" text-anchor="middle">Dashboard UI</text>
+  <text x="495" y="581" text-anchor="middle" font-size="11">/dashboard/</text>
+  <g stroke="#333" stroke-width="2" fill="none"><circle cx="625" cy="548" r="8" fill="#fff"/><path d="M625,556 L625,576 M612,563 L638,563 M625,576 L615,588 M625,576 L635,588"/></g>
+  <text x="625" y="600" text-anchor="middle">User</text>
+  <path d="M612,563 L566,563" stroke="#5e35b1" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+  <text x="575" y="555" font-size="9" fill="#5e35b1">views</text>
+  <path d="M495,545 L495,506" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="503" y="530" font-size="10" fill="#555">reads</text>
+  <path d="M375,488 L425,480" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <!-- Central server -->
+  <rect x="920" y="150" width="240" height="270" rx="10" fill="none" stroke="#555" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="930" y="168" font-size="12" fill="#555">Central server</text>
+  <rect x="940" y="185" width="200" height="60" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.5"/>
+  <text x="1040" y="211" text-anchor="middle" font-weight="bold">OTel Collector</text>
+  <text x="1040" y="229" text-anchor="middle" font-size="12">adds proxy + machine labels</text>
+  <rect x="940" y="270" width="200" height="50" rx="8" fill="#fde8e4" stroke="#c62828" stroke-width="1.5"/>
+  <text x="1040" y="300" text-anchor="middle" font-weight="bold">Prometheus</text>
+  <rect x="940" y="345" width="200" height="50" rx="8" fill="#ede7f6" stroke="#5e35b1" stroke-width="1.5"/>
+  <text x="1040" y="375" text-anchor="middle" font-weight="bold">Grafana</text>
+  <path d="M1040,245 L1040,270" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M1040,345 L1040,321" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <g stroke="#333" stroke-width="2" fill="none"><circle cx="1040" cy="465" r="8" fill="#fff"/><path d="M1040,473 L1040,493 M1027,480 L1053,480 M1040,493 L1030,505 M1040,493 L1050,505"/></g>
+  <text x="1040" y="525" text-anchor="middle">Manager</text>
+  <path d="M1040,455 L1040,396" stroke="#5e35b1" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+  <text x="1048" y="438" font-size="10" fill="#5e35b1">sees</text>
+  <text x="1048" y="451" font-size="10" font-weight="bold" fill="#5e35b1">Aggregated savings</text>
+
+  <!-- pushes -->
+  <path d="M375,339 L890,339 L890,205 L940,205" fill="none" stroke="#1d6fb8" stroke-width="1.8" marker-end="url(#arrowBlue)"/>
+  <path d="M375,699 L900,699 L900,225 L940,225" fill="none" stroke="#1d6fb8" stroke-width="1.8" marker-end="url(#arrowBlue)"/>
+  <text x="700" y="332" font-size="12" fill="#1d6fb8">Both SDKs push OTLP</text>
+  <text x="700" y="357" font-size="12" fill="#1d6fb8">over HTTPS (outgoing only)</text>
+  <text x="20" y="772" font-size="12" fill="#555">Each proxy passes the accountant's Result to accountant/metrics through its Sink. The accountant itself imports no OTel (R23). Blue arrow = data leaves the machine.</text>
+  <text x="20" y="790" font-size="12" fill="#555">A user sees the details of their own traffic on their own machine. A manager sees only the aggregates at the central server. Session and request IDs never leave the machine.</text>
+</svg>
