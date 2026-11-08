@@ -1,6 +1,6 @@
 # How it saves money
 
-context-guru saves **15–30% of your API cost in four ways** — two from carrying less
+context-guru saves **15–35% of your API cost in four ways** — two from carrying less
 context, two from paying less for what you still carry. Each is independent: none of
 them need the others, and none of them touch what the model sees or does.
 
@@ -113,7 +113,7 @@ them need the others, and none of them touch what the model sees or does.
 
 ---
 
-*Together: ~1% + 2–5% + 5–10% + 15–20% ≈ 15–30% with all four on. Some numbers are
+*Together: ~1% + 2–5% + 5–10% + 15–20% ≈ 15–35% with all four on. Some numbers are
 measured and some are expected. The savings overlap, so the total is less than the
 plain sum. Your own mix will vary with how you use tools, how long your sessions run,
 and how often they sit idle.*
