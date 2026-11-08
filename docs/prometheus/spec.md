@@ -147,13 +147,19 @@ Three needs drive these requirements.
 - R17. The collector adds the labels `machine` and `proxy`. It sends the data to Prometheus with remote write.
 - R19. The product ships a default collector URL, so the push works from the first run. The URL is a setting. The user or the operator can change it in the config file, with a flag, or with an environment variable. The access token is a setting too (R44). A setting turns the push off. If the URL is empty, the proxy makes no connection and writes one log line at start. The PR chooses the names of the settings. Data leaves every machine from the first run, so the PR names this at the top: who it affects, what is sent, and how to turn it off (`RELEASING.md`).
 - R20. If the collector is down or slow, the proxy keeps working. A failed push never delays or changes a request, and it never blocks a request. Fail open.
+- R46. Metrics reporting must not affect the response time of a request. This covers every step: pricing the result into numbers, recording them, and the push.
+  1. The extra time on the path of a request is a fixed small amount that does not depend on the collector, the number of series or the size of the request. **Open:** choose the budget, for example under 50 microseconds at p99 per request.
+  2. Work that needs the response, such as the savings counters, runs after the last byte is sent to the client. It never delays the answer or the first byte of a stream (time to first byte).
+  3. Recording makes no network call, no disk write and no blocking lock. A failure or a panic in the metrics code is caught and counted, and the request continues (R20).
+  4. The push runs in its own background task (R16). A full or slow export never slows a request.
+  5. The proxy reports `llm_inference_added_seconds` without counting its own metrics time as upstream time, so the figure shows what the metrics cost, not what the provider took.
 - R22. The pull path is retired. The `/metrics` endpoint and the local Prometheus and Grafana setup are removed. The product is new and has no legacy users, and the central server replaces them. The developer (David Boaz) decided this. The PR names the change at the top: who it affects, the old and new behavior, and that the user's own view is the proxy dashboard (R8). The dashboard and its local DB do not use `/metrics`, so they are not affected.
 
 ### 3.3 Consistency across proxies
 
 - R23. The `accountant` library stays free of metrics code. It imports the standard library only, and it never sends or stores a metric. `boundary_test.go` keeps enforcing this.
 - R24. Pricing a request stays pure. It has no side effects. Reporting a metric happens after the pricing, from the result.
-- R25. The savings metrics are the same on every proxy. Each metric has the same name, unit and meaning, and every proxy computes it from the same `accountant` result.
+- R25. The savings metrics are the same on every proxy. Each metric has the same name, unit and meaning, and every proxy computes it from the same `accountant` result. The token counters are therefore equal for the same request. The `usd` counters are not shared: each proxy prices tokens with its own rate table (R47).
 - R26. A proxy needs no copy of the metric code. Adding the savings metrics to a proxy takes a small, fixed amount of code in that proxy. The totals, the split by kind, the failed checks and the metric definitions exist once.
 - R27. The common metrics are defined once, in one place that both proxies import. A fix or a new common metric is made once and reaches every proxy.
 - R28. Each proxy can add its own metrics under its own prefix (`cortex_`, `contextguru_`). The common set does not fix the full list.
@@ -169,6 +175,7 @@ Three needs drive these requirements.
 - R35. `saved` and `added` are two counters. A change can cost more than it saves. Net is `saved - added` in a query. The cost of the compaction model's own calls is part of `added`, booked under the component that made the call (R45).
 - R36. A request the `accountant` cannot price adds nothing to `saved` or `added`. It adds 1 to a counter of unpriced requests, by reason.
 
+- R47. Each proxy keeps its own rate table. The common module takes a `Pricer` from the proxy and shares no rates. Two proxies can price the same tokens differently. A `usd` figure is a figure of one proxy, and the `proxy` label says which. A comparison of proxies by money (A6) must state this, and a comparison by tokens needs no caveat. A price from a fallback rate is counted in `llm_inference_estimated_cost_usd_total` and `llm_savings_estimated_total`.
 - R45. The cost of an LLM call that a component makes itself, such as compaction, is booked as `added` (cost and tokens) under that component's `component` label. There is no separate counter, so net is always `saved - added`. **Open:** confirm that the `accountant` sees these calls (open question 4). If it does not, the proxy must pass them to the `accountant` as a `spend` change.
 
 ### 3.5 Convention
@@ -216,9 +223,14 @@ These notes say how the requirements can be met. They are proposals. The PR may 
 | Requirement | Proposed way |
 |---|---|
 | R23, R24 | The `accountant` keeps its pure `Compute`. The proxy reports after the response returns. |
-| R25, R26 | A small hook in the `accountant` (`Sink`, called as `Observe(Meta, Usage, Result)`) and helper methods on `Result` (`Totals()`, `ByKind()`, `Failed()`). A `Multi(...)` helper passes the same data to several consumers: the shared metrics, the local ledger and any proxy-only metrics. |
-| R27 | A separate Go module `accountant/metrics`. It uses the OpenTelemetry API only. The proxy gives it a `Meter` and the price rates. |
+| R25, R26 | A small hook in the `accountant` (`Sink`, called as `Observe(Meta, Usage, Result)`), a `Kind` field on `PricedOp` (below) and helper methods on `Result` (`Totals()`, `ByKind()`, `Failed()`). A `Multi(...)` helper passes the same data to several consumers: the shared metrics, the local ledger and any proxy-only metrics. |
+| R27, R47 | A separate Go module `accountant/metrics`. It uses the OpenTelemetry API only. The proxy gives it a `Meter` and a `Pricer`, an interface with one method, `Price(model, at, tier) (usdPerToken, estimated)`. The rates stay in the proxy. |
 | R28 | The proxy adds its own metrics with its own prefix. |
+
+Decisions:
+- **Process boundary (R46).** The metrics code runs in the proxy process, as a library. `Observe` only adds to in-memory counters, after the response, so it meets R46 with no extra process. A separate process is chosen only if the latency benchmark (section 10) shows that the in-process version breaks the budget of R46 and the separate process passes it. A separate process adds a write to a socket on each request, so it must never block: a full buffer drops the data and counts it. In the diagram, the dashed green box is a logical group, not a process.
+- **Pricing (R47).** No shared rate table. Each proxy gives the module its own `Pricer`.
+- **`Kind` on `PricedOp`.** The simplest change is one new field, `PricedOp.Kind`, copied from the input `Operation` when the library builds the result. It is a pure copy and adds no import, so R23 holds. The alternative, passing the input operations to `Observe` as well, was rejected: it adds a second argument and a join by `OpID`.
 
 Open choices:
 - If `Result` already carries the meta and the usage, the hook can be `Observe(Result)`.
@@ -503,7 +515,7 @@ Questions the data must answer. Each has a query or a drill-down.
 | A3 | How much do cache breaks cost compared with the savings? | Break `added` cost / `saved` cost. |
 | A4 | Is keep-alive worth it? | Payoff ratio above 1 by model and by idle time. |
 | A5 | Which preset saves most? | Saving rate grouped by `preset`. Needs enough machines per preset. |
-| A6 | Do the two proxies differ? | Compare `proxy` values on the same metric names (R40). |
+| A6 | Do the two proxies differ? | Compare `proxy` values on the same metric names (R40). Compare tokens directly. Money differs if the rate tables differ (R47). |
 | A7 | How much of the figure is an estimate? | `estimated_total / priced_total`. If above 20 percent, treat the headline as a range. |
 | A8 | Why do requests miss the cache? | Misses by cause, and cost by cause. |
 | A9 | Does a model change break the cache often? | `cause="model_changed"` count and cost. |
@@ -543,7 +555,7 @@ Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money bot
 
 | Test | What it checks |
 |---|---|
-| Same numbers everywhere | The same priced result gives the same totals in the shared metrics, in the local ledger and in any proxy-only metric (R25, R26). |
+| Same numbers everywhere | The same priced result gives the same token totals in the shared metrics, in the local ledger and in any proxy-only metric (R25, R26). The `usd` totals are checked against the proxy's own rate table only (R47). |
 | Totals add up | The split by kind adds up to the total. The total equals the sum of the parts (R26). |
 | No duplicate code | The cg proxy and the Cortex proxy report the savings metrics through the same shared code. A check fails if either proxy defines a common metric itself (R26, R27). |
 | Money at request time | A rate change does not change counters already recorded. |
@@ -559,6 +571,7 @@ Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money bot
 | Third proxy | A test proxy with a new `proxy` value appears with no change to the collector or Prometheus (R11). |
 | Fail open | A collector that hangs or refuses does not delay a request or change a response. |
 | Async push | With a collector that never answers, the time of a request and its answer is the same as with the push turned off, within test noise (R16). |
+| Latency budget | The time of a request and its answer, and the time to first byte of a stream, are the same with the metrics on and off, within the budget of R46. A benchmark in the PR runs both and reports the difference at p50 and p99, with a collector that answers, hangs and refuses. |
 | Record is cheap | Recording one metric takes a fixed small time and makes no network call. A benchmark in the PR reports the time (R16). |
 | Export failure | A failed push is counted. The next successful push carries the totals, so a counter does not lose counts. |
 | Machine ID | The `machine` label is the install ID. It holds no host name (R43). |
