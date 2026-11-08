@@ -112,9 +112,13 @@ const (
 	// Assumed: reported behaviour or a reasoned bound, not observed.
 	Assumed Source = "assumed"
 	// Configured: the user changed the client's own auto-compact setting, and the local proxy read it at start-up
-	// (see ClaudeCode). The number is the client's own threshold, taken as billed tokens by
+	// (see ClaudeCode, Codex, Bob). The number is the client's own threshold, taken as billed tokens by
 	// ClientToBilled. It beats the table.
 	Configured Source = "configured"
+	// ClientDefault: the user changed nothing, and the client's own VERIFIED default threshold is
+	// used (see Bob, #963). Like Configured it is an absolute number in billed tokens and it is
+	// stored on the request row.
+	ClientDefault Source = "client_default"
 	// WindowFallback: case 3 and case 4 together -- C == W, because either nothing compacts here
 	// (a fact) or we have never seen this client compact (a guess). This package cannot yet tell
 	// those apart, which is itself worth reporting rather than smoothing over.
@@ -125,8 +129,8 @@ const (
 type Point struct {
 	// Frac is C as a fraction of the model's context window, in provider-billed tokens.
 	Frac float64
-	// Abs is C in absolute billed tokens, set only by a Configured point (a user's own number
-	// does not scale with the window). 0 = use Frac.
+	// Abs is C in absolute billed tokens, set only by a Configured or ClientDefault point (the
+	// client's own number does not scale with OUR window). 0 = use Frac.
 	Abs    int
 	Source Source
 	// Note is why this value, in enough detail to tell whether it still holds.
@@ -142,6 +146,12 @@ func (p Point) Tokens(window int) int {
 		return 0
 	}
 	return int(p.Frac * float64(window))
+}
+
+// FromClient reports whether the point came from the client itself (a user setting or the client's
+// own default) and so carries an absolute C that a request row must store (#948, #963).
+func (p Point) FromClient() bool {
+	return (p.Source == Configured || p.Source == ClientDefault) && p.Abs > 0
 }
 
 // table is matched by SUBSTRING against the normalized model id, LONGEST pattern first, so
@@ -208,13 +218,21 @@ func For(model string) Point {
 }
 
 // Recorded rebuilds the Point a request row carries: the absolute C in billed tokens and the
-// source it had when the row was written (#948). A row with no recorded configured value gets the
-// table's answer for its model, so an old row reads as before. Only a Configured row has an
-// absolute C; the table value scales with the window and is better re-read from the table.
+// source it had when the row was written (#948, #963). A row with no recorded client value gets the
+// table's answer for its model, so an old row reads as before. Only a Configured or ClientDefault
+// row has an absolute C; the table value scales with the window and is better re-read from the table.
 func Recorded(model string, abs int, src string) Point {
-	if Source(src) == Configured && abs > 0 {
-		return Point{Abs: abs, Source: Configured,
-			Note: "the user's own Claude Code auto-compact setting, recorded on the request row"}
+	switch Source(src) {
+	case Configured:
+		if abs > 0 {
+			return Point{Abs: abs, Source: Configured,
+				Note: "the user's own client auto-compact setting, recorded on the request row"}
+		}
+	case ClientDefault:
+		if abs > 0 {
+			return Point{Abs: abs, Source: ClientDefault,
+				Note: "the client's own default auto-compact threshold, recorded on the request row"}
+		}
 	}
 	return For(model)
 }

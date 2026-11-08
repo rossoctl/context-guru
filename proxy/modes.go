@@ -100,7 +100,7 @@ type reqInfo struct {
 	windowExact bool
 	// compactionPoint is C in provider-billed tokens: where the CONVERSATION'S OWN compaction
 	// mechanism acts, which is the denominator a fill fraction belongs over rather than the window.
-	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "configured" | "window_fallback", carried so a
+	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "window_fallback", carried so a
 	// decision made on a guess is distinguishable from one made on a measurement.
 	// See internal/compactionpoint.
 	compactionPoint       int

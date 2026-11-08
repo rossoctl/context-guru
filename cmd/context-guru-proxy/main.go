@@ -663,6 +663,8 @@ func main() {
 		Tenants:       tenants, // nil => single-tenant, unchanged behaviour
 		// The user's own Claude Code compaction setting, read once now (local mode only; #948).
 		ClaudeCompact: claudeCompactAtStart(tenants == nil),
+		BobCompact:    bobCompactAtStart(tenants == nil),
+		CodexCompact:  codexCompactAtStart(tenants == nil),
 		Upstreams:     upstreams, // the allow-list; a tenant picks a name, never a URL
 		MetricsToken:  *metricsToken,
 		// Both come from the dashboard's store, so both are nil when the dashboard is

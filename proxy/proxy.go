@@ -66,7 +66,11 @@ type Options struct {
 	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
 	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
 	// "claude-code" or "claude-cli"). All other requests use the table.
-	ClaudeCompact     compactionpoint.ClaudeCode
+	ClaudeCompact compactionpoint.ClaudeCode
+	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
+	// start-up in local mode. BobCompact also gives Bob's own default. The zero value changes nothing.
+	BobCompact        compactionpoint.Bob
+	CodexCompact      compactionpoint.Codex
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's

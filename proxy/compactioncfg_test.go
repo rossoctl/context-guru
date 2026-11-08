@@ -167,3 +167,71 @@ func TestCompactEndpointRecordsTheConfiguredPoint(t *testing.T) {
 		t.Errorf("recorded points = %v, want a configured C on the Claude Code row only", got)
 	}
 }
+
+func TestReadBobCompact(t *testing.T) {
+	home := t.TempDir()
+	if b := ReadBobCompact(envOf(map[string]string{"BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH": filepath.Join(home, "none.json")}), home); !b.Read || b.Threshold != "" {
+		t.Errorf("no file: %+v", b)
+	}
+	writeCfg(t, filepath.Join(home, ".bob", "settings.json"), `{"model":{"compressionThreshold":0.8,"other":"x"},"ibm":{"teamId":"secret"}}`)
+	sys := filepath.Join(t.TempDir(), "s.json")
+	env := envOf(map[string]string{"BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH": sys})
+	if b := ReadBobCompact(env, home); b.Threshold != "0.8" {
+		t.Errorf("user file: %+v", b)
+	}
+	writeCfg(t, sys, `{"model":{"compressionThreshold":0.6}}`)
+	if b := ReadBobCompact(env, home); b.Threshold != "0.6" {
+		t.Errorf("system file must win: %+v", b)
+	}
+	off := envOf(map[string]string{ClaudeCompactOffEnv: "off"})
+	if b := ReadBobCompact(off, home); b.Read || b.Threshold != "" {
+		t.Errorf("switch off: %+v", b)
+	}
+}
+
+func TestReadCodexCompact(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, filepath.Join(dir, "config.toml"), "model = \"gpt-6-sol\"\nmodel_auto_compact_token_limit = 180000 # c\nmodel_auto_compact_token_limit_scope = \"total\"\n\n[tui]\nmodel_auto_compact_token_limit = 5\n")
+	c := ReadCodexCompact(envOf(map[string]string{"CODEX_HOME": dir}), "")
+	if c.Limit != "180000" || c.Scope != "total" || c.PostTurn != "" {
+		t.Errorf("got %+v", c)
+	}
+	home := t.TempDir()
+	writeCfg(t, filepath.Join(home, ".codex", "config.toml"), "model_post_turn_compact_threshold_percent = 70\n")
+	if c := ReadCodexCompact(envOf(nil), home); c.PostTurn != "70" {
+		t.Errorf("default dir: %+v", c)
+	}
+	if c := ReadCodexCompact(envOf(map[string]string{ClaudeCompactOffEnv: "off", "CODEX_HOME": dir}), home); c != (compactionpoint.Codex{}) {
+		t.Errorf("switch off: %+v", c)
+	}
+	if c := ReadCodexCompact(envOf(nil), t.TempDir()); c != (compactionpoint.Codex{}) {
+		t.Errorf("no file: %+v", c)
+	}
+}
+
+// The request's User-Agent chooses the client's rule.
+func TestCompactionPointForBobAndCodex(t *testing.T) {
+	h := &Handler{opts: Options{
+		BobCompact:   compactionpoint.Bob{Read: true},
+		CodexCompact: compactionpoint.Codex{Limit: "150000"},
+	}}
+	body := []byte(`{"model":"claude-opus-5"}`)
+	req := func(ua string) *http.Request {
+		r := httptest.NewRequest("POST", "/", nil)
+		r.Header.Set("User-Agent", ua)
+		return r
+	}
+	if p := h.compactionPointFor(req("bob-shell/1.0.3"), body, 1_000_000); p.Source != compactionpoint.ClientDefault || p.Tokens(1_000_000) != 500_000 {
+		t.Errorf("bob: %+v", p)
+	}
+	if p := h.compactionPointFor(req("codex_cli_rs/0.160.0"), body, 272_000); p.Source != compactionpoint.Configured || p.Tokens(272_000) != 150_000 {
+		t.Errorf("codex: %+v", p)
+	}
+	if p := h.compactionPointFor(req("curl/8"), body, 1_000_000); p.Source != compactionpoint.Assumed {
+		t.Errorf("other client must use the table: %+v", p)
+	}
+	h.opts.Tenants = &TenantSource{}
+	if p := h.compactionPointFor(req("bob-shell/1.0.3"), body, 1_000_000); p.Source == compactionpoint.ClientDefault {
+		t.Error("hosted proxy must read nothing")
+	}
+}

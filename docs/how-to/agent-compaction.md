@@ -77,12 +77,31 @@ and the summarize trigger then follow your setting, not the built-in table.
 - **If a value is odd or missing,** the built-in table value is used. A settings file larger than
   4 MiB is skipped (a long-lived `.claude.json` can be), and C then falls back to the table for what
   that file would have set.
-- **Which requests:** only requests with a Claude Code User-Agent. Codex and Bob requests on the same
-  proxy use the table.
+- **Which requests:** each client's setting applies only to requests with that client's User-Agent.
+  Other requests use the table.
 - **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
   provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
 - **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.
-- A hosted proxy reads nothing. Codex and Bob are not read.
+- A hosted proxy reads nothing.
+
+### Bob and Codex
+
+The same rules hold: read once at start, local mode only, `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off`
+turns it off, a bad value gives the table. Checked in the shipped clients (Bob Shell 1.0.3,
+Codex CLI 0.160.0).
+
+- **Bob.** Key `model.compressionThreshold` in `~/.bob/settings.json` (the system file wins). It is
+  a fraction of the model window. Default **0.5**. Bob compacts when the prompt tokens the provider
+  reported for the last response reach `fraction x window`. So C is `fraction x window`, also when
+  you changed nothing. On a 200,000 window the default C is 100,000. The table gave about 199,000.
+  Not read: the project `.bob/settings.json`, and a server-side Bob experiment that can override the
+  default.
+- **Codex.** Key `model_auto_compact_token_limit` in `$CODEX_HOME/config.toml` (default
+  `~/.codex`). It is a token count, and Codex caps it at 0.9 of its own window. C is that count.
+  **Codex has no default here.** Its default depends on a per-model catalog that changes with each
+  release, and its window differs from ours. With no key set, Codex uses the table. If you set
+  `model_auto_compact_token_limit_scope` to anything but `total`, or
+  `model_post_turn_compact_threshold_percent` above 0, Context Guru does not derive C and uses the table.
 
 ## Bob: prefer lossless components
 

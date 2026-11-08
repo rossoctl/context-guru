@@ -107,8 +107,8 @@ type ReplayLedger struct {
 	// CeilingFrac is, per model, C as a fraction of the window for the conversations that used the
 	// BOOTSTRAP TABLE. A model with only configured conversations is absent.
 	CeilingFrac map[string]float64 `json:"ceiling_frac,omitempty"`
-	// CeilingConfigured is, per model, the C in billed tokens the user's own client setting gave
-	// (#948), for the conversations that used it. When a setting changed between conversations, it
+	// CeilingConfigured is, per model, the C in billed tokens the user's own client setting, or the
+	// client's own default (#948, #963), gave, for the conversations that used it. When a setting changed between conversations, it
 	// holds the LAST one walked. A model absent here used only the table.
 	CeilingConfigured map[string]float64 `json:"ceiling_configured,omitempty"`
 }
@@ -211,11 +211,16 @@ func walkCapSession(rows []capRow, window windowFn, out *ReplayLedger) {
 	}
 }
 
+// isClientSource reports a source whose C is an absolute number a request row stores (#948, #963).
+func isClientSource(src string) bool {
+	return src == string(compactionpoint.Configured) || src == string(compactionpoint.ClientDefault)
+}
+
 // capConversationPoint is C for one conversation: the user's own setting when a row recorded one
 // (the newest such row, because the setting can change between sessions), else the table (#948).
 func capConversationPoint(conv []capRow) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
-		if conv[i].CPointSource == string(compactionpoint.Configured) && conv[i].CPoint > 0 {
+		if isClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 {
 			return compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
 		}
 	}
@@ -271,7 +276,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 	ceil := limit / float64(w)
 	// One entry per model and source, so the two maps never disagree: a table conversation writes
 	// CeilingFrac, a configured one writes CeilingConfigured, and a model with both has both.
-	if cpt.Source == compactionpoint.Configured {
+	if cpt.Source == compactionpoint.Configured || cpt.Source == compactionpoint.ClientDefault {
 		out.CeilingConfigured[model] = limit
 	} else {
 		out.CeilingFrac[model] = ceil
