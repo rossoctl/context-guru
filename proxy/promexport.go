@@ -586,9 +586,8 @@ func (h *Handler) renderMetrics() string {
 		// deferring for that client version.
 		if _, g := h.deferPeek(); g != nil {
 			promHeaderProc(&b, "cg_tooldefer_client_disabled_total",
-				"Times tool deferral through Claude Code's ToolSearch was disabled, by reason. unknown_description: the ToolSearch description hash was not verified. non_select_query_for_our_tool: a query named a deferred tool in a form other than select:. break: a deferred tool's own result said it is not loaded. unknown_description and non_select_query_for_our_tool count once per tenant and hash per 24 h; break counts every time.", "counter")
+				"Times tool deferral through Claude Code's ToolSearch was disabled, by reason. unknown_description: the ToolSearch description hash was not verified. break: a deferred tool's own result said it is not loaded. unknown_description counts once per tenant and hash per 24 h; break counts every time.", "counter")
 			promLine(&b, "cg_tooldefer_client_disabled_total", `reason="unknown_description"`, float64(g.DisabledUnknown.Load()))
-			promLine(&b, "cg_tooldefer_client_disabled_total", `reason="non_select_query_for_our_tool"`, float64(g.DisabledNonSel.Load()))
 			promLine(&b, "cg_tooldefer_client_disabled_total", `reason="break"`, float64(g.DisabledBreak.Load()))
 		}
 
