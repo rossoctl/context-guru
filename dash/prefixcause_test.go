@@ -4,6 +4,7 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -523,5 +524,66 @@ func TestTTLTierIsInheritedFromTheParentThread(t *testing.T) {
 	next.TS, next.NoWrite = f.TS+120_000, true
 	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", false, next, true); !oneHour {
 		t.Error("the fork's second request lost the inherited 1h tier")
+	}
+}
+
+// restartedWith stores one request (the given cache write), restarts the recorder on the same
+// database, seeds it, and returns the new recorder.
+func restartedWith(t *testing.T, ts, read, write, write1h int64) *Recorder {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "d.db")
+	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(&Event{TS: ts, TenantID: "t1", SessionID: "s", ThreadID: "th", Model: "m",
+		CacheRead: read, CacheWrite: write, CacheWrite1h: write1h})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
+		if n == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec.Close()
+	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec2.Close() })
+	if n, err := rec2.SeedSessions(ts + 1_200_000); err != nil || n != 1 {
+		t.Fatalf("SeedSessions = %d, %v; want 1", n, err)
+	}
+	return rec2
+}
+
+// After a restart, a miss 20 minutes later with a changed prefix is labelled from the seeded tier.
+func TestSeededTierAfterARestart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	changed := base()
+	changed.DeclDigest = "d2"
+	cases := []struct {
+		name                 string
+		read, write, write1h int64
+		wantExpiry           bool
+	}{
+		{"1h thread is not an expiry", 0, 50_000, 50_000, false},
+		{"5m thread is an expiry", 0, 50_000, 0, true},
+		{"mixed write seeds 5m", 0, 50_000, 10_000, true},
+		{"latest row wrote nothing seeds 5m", 50_000, 0, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := restartedWith(t, t0, c.read, c.write, c.write1h)
+			// A restart forgets which models were seen, so the first request on a model reads
+			// cold_start. Another thread marks the model seen, as live traffic does within seconds.
+			r.ObserveThread("t1", "other", "", "m", t0+60_000, 0)
+			got := ttlTurn(r, t0+20*60_000, changed, 0, 50_000, 50_000).CacheMissReason
+			if (got == CacheTTLExpiry) != c.wantExpiry {
+				t.Errorf("reason = %q, want ttl_expiry=%v", got, c.wantExpiry)
+			}
+		})
 	}
 }

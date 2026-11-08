@@ -190,6 +190,10 @@ type Recorder struct {
 	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
 	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
 	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
+	// seedTier holds, per thread.Key(session, thread), the billed one-hour tier of the thread's
+	// latest request before a restart (SeedSessions). ObservePrefix reads it only while the
+	// thread has no lastFacts. Absent means unknown, which keeps the five-minute lifetime.
+	seedTier  map[string]bool
 	seenModel map[string]bool
 	// graceSeen holds, per thread.Key(session, thread), when that thread's cached prefix was
 	// last REFRESHED: by its own last request or by a keep-alive ping that read the cache. It
@@ -245,6 +249,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
 		lastFacts: map[string]PrefixFacts{},
+		seedTier:  map[string]bool{},
 		seenModel: map[string]bool{},
 		graceSeen: map[string]int64{},
 		seenKeys:  map[string]struct{}{},
@@ -701,6 +706,7 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 		if now-ts > staleSession {
 			delete(r.lastSeen, k)
 			delete(r.lastTail, k)
+			delete(r.seedTier, k)
 		}
 	}
 	// The grace clock ages by the same rule: a thread silent for two hours has lost its
@@ -750,7 +756,7 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	//
 	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
 	// session, or a restart would re-date the main thread with a subagent's last request.
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash, r.cache_write, r.cache_write_1h FROM requests r
 		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
 			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
@@ -761,21 +767,27 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	defer rows.Close()
 	seeded := map[string]int64{}
 	tails := map[string]uint64{}
+	oneHour := map[string]bool{}
 	for rows.Next() {
 		var sid, tid string
-		var ts, tail int64
+		var ts, tail, write, write1h int64
 		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
 		// comes back negative and scanning it straight into a uint64 fails the whole
 		// query — which it did on every start, silently costing the seeding this function
 		// exists for ("could not recover session recency" in the log). The bits are the
 		// same; only the Go type of the container differs.
-		if err := rows.Scan(&sid, &tid, &ts, &tail); err != nil {
+		if err := rows.Scan(&sid, &tid, &ts, &tail, &write, &write1h); err != nil {
 			return 0, err
 		}
 		id := thread.Key(sid, tid)
 		seeded[id] = ts
 		if tail != 0 {
 			tails[id] = uint64(tail)
+		}
+		// The same rule as FactsOf: only a whole 1h write is the one-hour tier. A row that
+		// wrote nothing leaves the tier unknown.
+		if write > 0 && write1h >= write {
+			oneHour[id] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -790,6 +802,12 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 			r.lastSeen[id] = ts
 			if t, ok := tails[id]; ok {
 				r.lastTail[id] = t
+			}
+			if oneHour[id] {
+				if r.seedTier == nil {
+					r.seedTier = map[string]bool{}
+				}
+				r.seedTier[id] = true
 			}
 		}
 	}
