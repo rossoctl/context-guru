@@ -19,6 +19,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -33,6 +34,10 @@ jobs:
           build-mode: manual
           # Default query suite.
       - name: Build
+        # The scan covers the code in the shipped (untagged) binary only. It does not
+        # cover _test.go files or the cg_record and cg_skeleton build tags. They are not
+        # in the release binary. An alert in test code would block merges for code that
+        # no user runs.
         env:
           CGO_ENABLED: "0"
         run: go build ./...
