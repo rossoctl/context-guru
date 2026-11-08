@@ -109,11 +109,12 @@ func (p Price) CacheWrite1hFor(_ string) float64 {
 	return p.Input * AnthropicCacheWrite1hFrac
 }
 
-// Resolved returns the price with both cache tiers filled for the model and the multiples
+// Resolved returns the price with both cache tiers filled for the model and their multiples
 // cleared. A price source calls it once the model is known. Callers then read the fields.
+// Write1hFrac stays: no field states the 1-hour rate, so CacheWrite1h still needs it.
 func (p Price) Resolved(model string) Price {
 	p.CacheRead, p.CacheWrite = p.CacheReadFor(model), p.CacheWrite5mFor(model)
-	p.ReadFrac, p.WriteFrac, p.Write1hFrac = 0, 0, 0
+	p.ReadFrac, p.WriteFrac = 0, 0
 	return p
 }
 
