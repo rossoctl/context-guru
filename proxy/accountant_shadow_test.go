@@ -39,4 +39,9 @@ func TestFallbackReasonIsLogged(t *testing.T) {
 	if !strings.Contains(buf.String(), `"reason":"unpriced"`) {
 		t.Fatalf("acc_fallback lacks the reason:\n%s", buf.String())
 	}
+	// #939. unpriced names its cause, as no_result does. This one is the library's request-level refusal,
+	// so the value is the bare reason with no operation id.
+	if n := strings.Count(buf.String(), `"why":"ratio_range"`); n != 2 {
+		t.Fatalf(`"why":"ratio_range" appears %d times, want 2 (one for each event):`+"\n%s", n, buf.String())
+	}
 }

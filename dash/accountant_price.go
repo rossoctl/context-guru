@@ -219,6 +219,23 @@ func (e *Event) AccountantEstimated() bool { return e.PriceEstimated }
 // An event with no usage or no price books no saving too, and its reason is FallbackUnpriced.
 func (e *Event) AccountantFallback() string { return e.accFallback }
 
+// Causes behind FallbackUnpriced. They are for the log line only: no stored column and no API field
+// carries them, so a new cause here changes nothing a client can read.
+const (
+	UnpricedNoUsage = "no_usage" // the request has no billed token counts (accounting is not complete)
+	UnpricedNoPrice = "no_price" // the model has no price
+)
+
+// UnpricedWhy names the cause when AccountantFallback is FallbackUnpriced, and is "" for any other
+// reason. It is UnpricedNoUsage or UnpricedNoPrice when the event itself cannot be priced, or the
+// library's "opID:reason" for the first operation or effect it could not price.
+func (e *Event) UnpricedWhy() string {
+	if e.accFallback != FallbackUnpriced {
+		return ""
+	}
+	return e.accUnpricedWhy
+}
+
 // PriceMode is Price, then an override of each component's SavedUSD, of BaselineCostUSD, of
 // KeepAliveSavedUSD and of CachesplitSavedUSD from the library's figure. CacheSavedUSD (the
 // provider's own cache, a measurement), CostUSD and CGLLMCostUSD always stay as Price set them.
@@ -231,8 +248,13 @@ func (e *Event) AccountantFallback() string { return e.accFallback }
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimateHeld = "", false, false, 0, false
+	e.accUnpricedWhy = ""
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
+		e.accUnpricedWhy = UnpricedNoUsage
+		if accountingComplete {
+			e.accUnpricedWhy = UnpricedNoPrice // usage is complete, so the zero price is the cause
+		}
 		return
 	}
 	e.accFallback = e.accOverride(p)
@@ -268,6 +290,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	estimated := false
 	for _, u := range fig.Unpriced {
 		if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
+			// "opID:reason". A request-level refusal has no operation, so its id is empty: drop the colon.
+			e.accUnpricedWhy = strings.TrimPrefix(u, ":")
 			return FallbackUnpriced
 		}
 		estimated = true

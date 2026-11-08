@@ -139,6 +139,11 @@ measured is not shown.
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
 `upstream_rounds=N` (an expand loop) or `compute_panicked`.
 
+For `unpriced` the line carries `why` too: `no_usage` (the request has no billed token counts), `no_price`
+(the model has no price), or the library's own cause for the first operation or effect it could not price,
+as `opID:reason` (or `reason` alone when the refusal is for the whole request, as `ratio_range` is). The
+cause is in the log line only. No stored column and no API field carries it.
+
 `unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
 `messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
 Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
@@ -208,9 +213,11 @@ Limits:
   event books no saving. A request with no usage, or a model with no price, books no saving and logs
   `unpriced`.
 - A change the pipeline made that no operation can describe drops every operation of the request
-  (`ops_dropped`): a message whose only change is a `cache_control` mark, a cache anchor written
-  after a count-changing splice, and a splice that moves the later messages in a request the equal-count
-  writeback handled. Such a request books no saving.
+  (`ops_dropped`): a cache anchor written after a count-changing splice, and a splice that moves the
+  later messages in a request the equal-count writeback handled. Such a request books no saving. A
+  message whose only change is an added `cache_control` mark is not in this list: the mark is written at
+  its path and reported as an operation, so a `cacheinject` mark is priced (#938). It used to be in this
+  list.
 - A request whose response called `context_guru_expand` (more than one upstream round) books no
   saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
 - The thread state lives in memory. After a restart, and for a thread dropped by the library's cap

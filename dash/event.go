@@ -129,6 +129,8 @@ type Event struct {
 	accUnsupportedWire bool
 	// accFallback is why PriceMode booked no saving (see AccountantFallback).
 	accFallback string
+	// accUnpricedWhy names which cause lies behind accFallback == FallbackUnpriced (see UnpricedWhy).
+	accUnpricedWhy string
 
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms

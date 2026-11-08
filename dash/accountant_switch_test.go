@@ -143,7 +143,8 @@ func TestPriceMode_FallsBackToNoSaving(t *testing.T) {
 		if got := e.AccountantFallback(); got != c.reason {
 			t.Errorf("%s: fallback reason %q, want %q", name, got, c.reason)
 		}
-		e.accFallback = "" // the copy carries no reason; every other field must match
+		e.accFallback = ""    // the copy carries no reason; every other field must match
+		e.accUnpricedWhy = "" // the cause of an unpriced reason is part of the reason, not of the figures
 		// A fallback row is marked, so the read views do not value it with the legacy rule.
 		for i := range e.Components {
 			if e.Components[i].PricedBy != PricedByNone {
@@ -308,15 +309,70 @@ func TestPriceMode_AnUnpricedEventSaysWhyItBooksNoSaving(t *testing.T) {
 	for name, tc := range map[string]struct {
 		price    modelinfo.Price
 		complete bool
+		why      string
 	}{
-		"no usage": {accTestPrice, false},
-		"no price": {modelinfo.Price{}, true},
+		"no usage": {accTestPrice, false, UnpricedNoUsage},
+		"no price": {modelinfo.Price{}, true, UnpricedNoPrice},
 	} {
 		e := switchEvent()
 		e.PriceMode(tc.price, tc.complete)
 		if fb := e.AccountantFallback(); fb != FallbackUnpriced {
 			t.Errorf("%s: fallback = %q, want %q", name, fb, FallbackUnpriced)
 		}
+		if w := e.UnpricedWhy(); w != tc.why {
+			t.Errorf("%s: UnpricedWhy = %q, want %q (#939)", name, w, tc.why)
+		}
+	}
+}
+
+// #939. An operation the library could not price is the third cause of "unpriced", and it names itself.
+// penalty_unknown is not one of them: it prices the event as an estimate and leaves no reason.
+func TestPriceMode_UnpricedWhyNamesTheOperationTheLibraryCouldNotPrice(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Unpriced = []accountant.Unpriced{
+		{OpID: "op1", Reason: accountant.ReasonPenaltyUnknown},
+		{OpID: "op2", Reason: "no_rate"},
+	}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != FallbackUnpriced {
+		t.Fatalf("fallback = %q, want %q", fb, FallbackUnpriced)
+	}
+	if w := e.UnpricedWhy(); w != "op2:no_rate" {
+		t.Fatalf("UnpricedWhy = %q, want the operation that has no price", w)
+	}
+
+	est := switchEvent()
+	est.accRes.Unpriced = []accountant.Unpriced{{OpID: "op1", Reason: accountant.ReasonPenaltyUnknown}}
+	est.PriceMode(accTestPrice, true)
+	if w := est.UnpricedWhy(); w != "" {
+		t.Fatalf("an estimated event has UnpricedWhy = %q, want empty", w)
+	}
+}
+
+// UnpricedWhy is for the unpriced reason only, and a second PriceMode call on the same event clears it.
+func TestUnpricedWhyIsEmptyForEveryOtherReason(t *testing.T) {
+	e := switchEvent()
+	e.PriceMode(modelinfo.Price{}, true)
+	if e.UnpricedWhy() == "" {
+		t.Fatal("setup: the no-price event has no cause")
+	}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb == FallbackUnpriced {
+		t.Fatalf("setup: the repriced event still falls back as unpriced (%q)", fb)
+	}
+	if w := e.UnpricedWhy(); w != "" {
+		t.Fatalf("after a repricing UnpricedWhy = %q, want empty", w)
+	}
+
+	// A different reason leaves it empty too: the cause belongs to unpriced alone.
+	o := switchEvent()
+	o.SetAccountantContext(1, false) // a dropped operation: ops_dropped
+	o.PriceMode(accTestPrice, true)
+	if fb := o.AccountantFallback(); fb != FallbackOpsDropped {
+		t.Fatalf("setup: fallback = %q, want %q", fb, FallbackOpsDropped)
+	}
+	if w := o.UnpricedWhy(); w != "" {
+		t.Fatalf("ops_dropped event has UnpricedWhy = %q, want empty", w)
 	}
 }
 
