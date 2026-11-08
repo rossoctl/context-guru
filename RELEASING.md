@@ -142,6 +142,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
   - **Any other failed rule needs the owner's yes for that PR.** Before a bypass, read which rules fail: `gh api repos/<org>/<repo>/rulesets/rule-suites?ref=refs/heads/main` lists recent merges, and `.../rule-suites/<id>` shows each rule's result.
+  - **The code-scanning rule (CodeQL).** The `main` ruleset also needs CodeQL results with no errors and no high or critical security alerts. Until 2026-11-08 the repo had no CodeQL workflow, so this rule failed on every PR, and every merge from v0.6.1 to v0.6.7 went past it with `--admin` without anyone seeing it. The owner decided on 2026-11-08: add the CodeQL workflow and fix what it finds, and **merges wait until the rule passes**. After that, the standing rule holds as written, and a code-scanning failure needs the owner's yes for that PR.
 - Read the result back from the server after each merge or edit. Do not trust a tool's "success" line alone.
 
 ### Stacked PRs
