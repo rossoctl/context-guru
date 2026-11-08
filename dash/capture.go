@@ -726,6 +726,7 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
 		r.lastFacts = map[string]PrefixFacts{}
+		r.seedTier = map[string]bool{}
 		r.graceSeen = map[string]int64{}
 	}
 }
@@ -756,7 +757,7 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	//
 	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
 	// session, or a restart would re-date the main thread with a subagent's last request.
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash, r.cache_write, r.cache_write_1h FROM requests r
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
 		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
 			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
@@ -767,16 +768,15 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	defer rows.Close()
 	seeded := map[string]int64{}
 	tails := map[string]uint64{}
-	oneHour := map[string]bool{}
 	for rows.Next() {
 		var sid, tid string
-		var ts, tail, write, write1h int64
+		var ts, tail int64
 		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
 		// comes back negative and scanning it straight into a uint64 fails the whole
 		// query — which it did on every start, silently costing the seeding this function
 		// exists for ("could not recover session recency" in the log). The bits are the
 		// same; only the Go type of the container differs.
-		if err := rows.Scan(&sid, &tid, &ts, &tail, &write, &write1h); err != nil {
+		if err := rows.Scan(&sid, &tid, &ts, &tail); err != nil {
 			return 0, err
 		}
 		id := thread.Key(sid, tid)
@@ -784,13 +784,12 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 		if tail != 0 {
 			tails[id] = uint64(tail)
 		}
-		// The same rule as FactsOf: only a whole 1h write is the one-hour tier. A row that
-		// wrote nothing leaves the tier unknown.
-		if write > 0 && write1h >= write {
-			oneHour[id] = true
-		}
 	}
 	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	oneHour, err := r.seedOneHourTiers(now - staleSession)
+	if err != nil {
 		return 0, err
 	}
 	r.mu.Lock()
@@ -812,6 +811,37 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 		}
 	}
 	return len(seeded), nil
+}
+
+// seedOneHourTiers returns the threads whose billed tier is the one-hour tier. The source is the
+// thread's latest successful, non-ping row that WROTE cache (cache_write > 0): a failed request
+// writes no entry, and a full hit leaves the tier of the earlier write as it was. This is the
+// live rule (ObservePrefix keeps the tier over a read-only turn; only a 2xx request commits).
+// It is a second query, with the shape of the first, so recency and tail still come from the
+// latest row. The FactsOf rule decides the tier: the write is all one-hour.
+func (r *Recorder) seedOneHourTiers(since int64) (map[string]bool, error) {
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.cache_write, r.cache_write_1h FROM requests r
+		WHERE r.ts >= ? AND r.keepalive = 0 AND r.cache_write > 0 AND r.status >= 200 AND r.status < 300
+			AND r.id = (SELECT r2.id FROM requests r2
+			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
+				AND r2.cache_write > 0 AND r2.status >= 200 AND r2.status < 300
+			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var sid, tid string
+		var write, write1h int64
+		if err := rows.Scan(&sid, &tid, &write, &write1h); err != nil {
+			return nil, err
+		}
+		if write1h >= write {
+			out[thread.Key(sid, tid)] = true
+		}
+	}
+	return out, rows.Err()
 }
 
 // SeedGraceSessions primes the restart grace's clock (graceSeen) from the database, the same
