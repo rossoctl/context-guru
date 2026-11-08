@@ -155,7 +155,7 @@ func (c Codex) Resolve(window int) (Point, bool) {
 			return Point{}, false
 		}
 	}
-	n, err := strconv.ParseInt(strings.ReplaceAll(strings.TrimSpace(c.Limit), "_", ""), 10, 64)
+	n, err := strconv.ParseInt(strings.ReplaceAll(strings.TrimSpace(c.Limit), "_", ""), 10, 32)
 	if err != nil || n <= 0 || n > 1<<40 {
 		return Point{}, false
 	}
