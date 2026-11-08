@@ -4,6 +4,8 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 func newFactsRecorder() *Recorder {
@@ -23,7 +25,7 @@ func causeMiss(r *Recorder, session, threadID string, ts int64, f PrefixFacts) *
 func causeMissWith(r *Recorder, session, threadID string, ts int64, f PrefixFacts, read int64, status int) *Event {
 	f.TS = ts
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
-	cause, modelGap, known, _, prevPrompt := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
+	cause, modelGap, known, _, prevPrompt, _ := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
 	if known {
 		since = modelGap
 	}
@@ -168,12 +170,12 @@ func TestAnInheritingThreadComparesWithItsParent(t *testing.T) {
 	changed.SystemHash = "s2"
 	r := newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
+	if got, _, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", true, changed, true); got != CauseSystemChanged {
 		t.Errorf("fork from the primary thread = %q, want %q", got, CauseSystemChanged)
 	}
 	r = newFactsRecorder()
 	r.ObservePrefix("s1", "", "", false, base(), true)
-	if got, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
+	if got, _, _, _, _, _ := r.ObservePrefix("s1", "p:fork", "", false, changed, true); got != "" {
 		t.Errorf("fork with no parent = %q, want no cause", got)
 	}
 }
@@ -374,7 +376,7 @@ func usageTurn(r *Recorder, session, threadID string, ts int64, f PrefixFacts, f
 	f.TS = ts
 	f.PromptTokens = fresh + read + write
 	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
-	cause, modelGap, known, _, prevPrompt := r.ObservePrefix(session, threadID, "", false, f, true)
+	cause, modelGap, known, _, prevPrompt, _ := r.ObservePrefix(session, threadID, "", false, f, true)
 	if known {
 		since = modelGap
 	}
@@ -422,5 +424,104 @@ func TestALargePartialReadIsAMiss(t *testing.T) {
 	r := newFactsRecorder()
 	if e := usageTurn(r, "s2", "", t0, base(), 0, 50_000, 350_000); e.CacheMissReason != CacheHit {
 		t.Errorf("first request of a thread = %q, want hit (as today)", e.CacheMissReason)
+	}
+}
+
+// ttlTurn mirrors proxy/dashcapture.go: the TTL comes from the billed tier of the thread's
+// previous same-model request, as ObservePrefix returns it.
+func ttlTurn(r *Recorder, ts int64, f PrefixFacts, read, write, write1h int64) *Event {
+	ev := &Event{TS: ts, CacheRead: read, CacheWrite: write, CacheWrite1h: write1h}
+	derived := FactsOf(ev)
+	f.TS, f.OneHour, f.NoWrite, f.PromptTokens = ts, derived.OneHour, derived.NoWrite, derived.PromptTokens
+	seenSession, seenModel, since, _ := r.ObserveThread("t1", "s", "th", f.Model, ts, 0)
+	cause, modelGap, known, _, prevPrompt, prevOneHour := r.ObservePrefix("s", "th", "", false, f, true)
+	if known {
+		since = modelGap
+	}
+	ttl := int64(fiveMin)
+	if prevOneHour {
+		ttl = 3_600_000
+	}
+	e := &Event{CacheWrite: write, CacheRead: read, CacheWrite1h: write1h}
+	e.AttributeCache(seenSession, seenModel, since, ttl, cause, prevPrompt)
+	return e
+}
+
+func TestTTLExpiryUsesTheBilledTier(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	const min = int64(60_000)
+	changed := func() PrefixFacts { f := base(); f.SystemHash = "s2"; return f }
+	for _, tc := range []struct {
+		name    string
+		write1h int64
+		gapMin  int64
+		next    PrefixFacts
+		want    string
+	}{
+		{"1h thread, miss after 20 min, changed prefix", 400_000, 20, changed(), CachePrefixChange},
+		{"1h thread, miss after 20 min, no change", 400_000, 20, base(), CacheUnknown},
+		{"1h thread, miss after 70 min", 400_000, 70, changed(), CacheTTLExpiry},
+		{"1h asked, billed 5m, miss after 10 min", 0, 10, changed(), CacheTTLExpiry},
+		{"5m thread, miss after 10 min", 0, 10, changed(), CacheTTLExpiry},
+		{"5m thread, miss after 3 min", 0, 3, changed(), CachePrefixChange},
+	} {
+		r := newFactsRecorder()
+		ttlTurn(r, t0, base(), 0, 400_000, tc.write1h)
+		if got := ttlTurn(r, t0+tc.gapMin*min, tc.next, 0, 400_000, tc.write1h).CacheMissReason; got != tc.want {
+			t.Errorf("%s: reason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTTLTierSurvivesAReadOnlyTurn(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	const min = int64(60_000)
+	r := newFactsRecorder()
+	ttlTurn(r, t0, base(), 0, 400_000, 400_000)
+	ttlTurn(r, t0+2*min, base(), 400_000, 0, 0) // read only: keeps the 1h tier
+	f := base()
+	f.SystemHash = "s2"
+	if got := ttlTurn(r, t0+30*min, f, 0, 400_000, 400_000).CacheMissReason; got != CachePrefixChange {
+		t.Errorf("reason = %q, want %q", got, CachePrefixChange)
+	}
+}
+
+func TestSummarizerOnA1hThreadMissIsPricedAtTheRead(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	ttlTurn(r, t0, base(), 0, 400_000, 400_000)
+	f := base()
+	f.SystemHash = "s2"
+	e := ttlTurn(r, t0+20*60_000, f, 0, 400_000, 400_000)
+	p := modelinfo.Price{CacheRead: 1, CacheWrite: 10}
+	if got := e.uniqueRate(p, SummarizerComponents[0]); got != p.CacheRead {
+		t.Errorf("summarizer rate = %v, want the read rate %v", got, p.CacheRead)
+	}
+}
+
+func TestTTLExpiryOnAMixedWriteKeepsFiveMinutes(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	r := newFactsRecorder()
+	ttlTurn(r, t0, base(), 0, 50_000, 10_000) // 1h head (10k) over a 5m tail (40k)
+	// Head still alive, tail re-created, nothing differed.
+	if got := ttlTurn(r, t0+20*60_000, base(), 10_000, 40_000, 0).CacheMissReason; got != CacheTTLExpiry {
+		t.Errorf("reason = %q, want %q", got, CacheTTLExpiry)
+	}
+}
+
+func TestTTLTierIsInheritedFromTheParentThread(t *testing.T) {
+	r := newFactsRecorder()
+	f := base()
+	f.TS, f.OneHour = 1_700_000_000_000, true
+	r.ObservePrefix("s1", "", "", false, f, true)
+	fork := base()
+	fork.TS, fork.NoWrite = f.TS+60_000, true // a read-only first request of the fork
+	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", true, fork, true); !oneHour {
+		t.Error("fork's first request did not inherit the parent's 1h tier")
+	}
+	next := base()
+	next.TS, next.NoWrite = f.TS+120_000, true
+	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", false, next, true); !oneHour {
+		t.Error("the fork's second request lost the inherited 1h tier")
 	}
 }

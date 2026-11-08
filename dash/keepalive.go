@@ -991,15 +991,6 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 // landed in the one-hour tier.
 const ttlTTL1h = modelinfo.AnthropicCacheTTL1h
 
-// write1hMultiple is the provider's published price for a ONE-HOUR cache write: 2.0x base
-// input, against 1.25x for the five-minute tier and 0.1x for a read.
-//
-// Derived from Input rather than read off the operator's price list, because the list carries
-// one `cache_write` rate per model and it is the 5-minute one — which is what the provider
-// bills for the tier this service's models actually grant. Any 1-hour figure on this page is
-// therefore explicitly a "what it would be" and is labelled as one.
-const write1hMultiple = modelinfo.AnthropicCacheWrite1hFrac
-
 // KeepAliveLiveRow is one session that may still hold a provider cache entry RIGHT NOW: which
 // lifetime is in force on it, how long that entry has left, and what one ping and one lapse
 // would each cost on this session's own prefix at its own model's rates.
@@ -1163,7 +1154,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				if r.PingUSDEach > 0 {
 					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
 					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
-					miss1h := float64(r.Prefix) * (p.Input*write1hMultiple - p.CacheRead)
+					miss1h := float64(r.Prefix) * (p.CacheWrite1h() - p.CacheRead)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
 					// pings bridges twelve times the wall clock: K x X per span still, but the

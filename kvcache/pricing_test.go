@@ -231,3 +231,19 @@ func TestPriceListStatesTheReadMultipleAsSet(t *testing.T) {
 		t.Errorf("a set read multiple was lost: %+v", l.Multipliers)
 	}
 }
+
+// The simulator prices a 1-hour write at the entry's own multiple when the caller set none.
+func TestFromPriceKeepsTheEntryOneHourFrac(t *testing.T) {
+	tb, err := modelinfo.ParseTable([]byte("models:\n  - {match: acme/flat-1, in: 3, out: 15, cache_write_1h_frac: 1.0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := tb.Price(context.Background(), "acme/flat-1")
+	if got := FromPrice("acme/flat-1", p, Multipliers{}, "table").Write1h; math.Abs(got-3e-6) > 1e-18 {
+		t.Fatalf("Write1h = %v, want 3e-6 (the entry's 1.0x)", got)
+	}
+	// A multiple the caller sets still wins over the entry's.
+	if got := FromPrice("acme/flat-1", p, Multipliers{Write1h: 2.0}, "table").Write1h; math.Abs(got-6e-6) > 1e-18 {
+		t.Fatalf("Write1h with the caller's 2.0x = %v, want 6e-6", got)
+	}
+}
