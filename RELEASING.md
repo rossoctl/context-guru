@@ -4,6 +4,8 @@ This page describes how a context-guru release is cut. One person or agent sessi
 
 The process was first used for v0.5.1 and v0.5.2.
 
+**A new integrator needs this page, the scripts in [`scripts/release/`](scripts/release/), and the maintainer's own private notes** (see [Private notes](#private-notes-of-the-integrator)). Nothing else. If you had to learn a step from a person or from an earlier session, add it here.
+
 ## Roles
 
 | Role | Does |
@@ -18,9 +20,22 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 ## 1. Plan the release
 
 1. **Keep one release list.** It holds every PR and issue in the release, with its state: open, in review, approved, merged, out. The release notes come from this list at the end, so add a note line as each item is merged.
+   - **Build it from git, not from memory.** `scripts/release/release-list.sh` lists every PR on `main` since the last tag. It marks the docs, test, CI, chore, build and refactor PRs that stay out of the notes. A list kept by hand once mixed in PRs of the release before.
+   - Keep the list in a place that survives a restart, and put the newest state at the top.
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
+5. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
+
+### Measurements before a release
+
+Some releases need a measurement first: a re-measure of a feature on real traffic, or an accuracy test of a risky mode. Examples: #871 (tool deferral, before each release that ships `ultrahigh`) and #867 (keep-alive pings against savings).
+
+- **The release owner decides each one,** and sets: when it runs, who runs it, the baseline, and whether a failed run blocks the release.
+- **The integrator looks for them at the start of each release.** They are in the release list, in the private notes, and in open issues the owner named. Search the notes for "before the release", "re-measure" and "baseline".
+- **Each one keeps its own procedure and scripts in one place that survives a restart:** the issue, or the private notes for scripts that must stay internal. Never only in `/tmp`. A restart once removed the scripts for both #867 and #871.
+- **Run it on a copy of the data, metadata only.** Never on a live database.
+- **Report the result to the owner before the freeze,** against the baseline. Post it on the issue, unless the data is private.
 
 ## 2. Get each PR reviewed
 
@@ -41,7 +56,14 @@ A PR must not change behavior unless a human developer allows it. This holds mos
 - **What counts:** a new or changed default, a time limit, a new state that every user enters, or a change to what is cached, offloaded, counted or shown. It counts even when the PR presents it as a side effect of a narrow fix.
 - **The author** names each behavior change at the top of the PR: who it affects, the old and the new behavior, and how to turn it off.
 - **The integrator** reads the diff for such changes, also when the PR or its author calls the PR "test-only" or "docs-only". Before the merge, the integrator gets a yes from a human developer, in words. A peer agent's report that a human agreed is not enough.
+  - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
+  - Quote the yes, with its date, in the squash-merge body.
+  - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
+- **To revert a merged PR during a release** (as with #768):
+  1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
+  2. Open a revert PR. It gets the 2 reviews like any other PR, and it names its behavior change.
+  3. The release notes leave out both the PR and its revert, because no user got the change.
 - **Example:** #759, as first written, fixed the cache state after a proxy restart for one rare case. It also added a fixed 1-hour window after every restart, for every model. In that window, the first request of each new thread went out unchanged. The owner rejected that window, in the integrator's session. The decision is posted on #759: https://github.com/rossoctl/context-guru/pull/759#issuecomment-6454348090. The rule the owner set: the window lasts only for the cache lifetime of the thread's model (5 min, 1 h or 30 min), and it ends at the thread's first message.
 
 ### Two independent reviews
@@ -86,21 +108,41 @@ A review without this block does not count toward the 2.
 - **The same reviewer re-checks its own findings.** The re-check covers only those findings and the new changes. It is not a new independent review, and its identity block says `Context: continues <link>`.
 - Each reviewer has **1 re-check**, unless the release owner sets another number for that PR. If the PR still blocks after it, stop and tell the release owner. Do not start another round.
 
+### Check that a PR is ready
+
+**The session that says a PR is ready owns it until it is ready:** the rebase on `main`, the 2 approvals at the final head, and green CI. The integrator checks; it does not rebase, review or fix. If something is missing, tell the owning session exactly what. The one exception: the integrator may re-run once a flaky CI test that the PR does not touch.
+
+Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
+- the PR is open, not a draft, and has no conflict;
+- the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
+- every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
+- every commit has a `Signed-off-by:` line.
+
+It does not check for a behavior change. Read the diff for that yourself.
+
 ### When the head moves after an approval
 
 An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
 
-- **A rebase with no other change:** the integrator confirms with `git range-diff` that only the base moved. Then both approvals still count. Say so on the PR.
+- **A rebase with no other change:** run `scripts/release/approval-still-valid.sh <pr> <approved-sha>`. It compares the patch of the approved head with the patch of the new head, each against its own base, and prints `git range-diff`. The same patch means only the base moved, so both approvals still count. Post its output on the PR.
 - **Any new code, or a conflict resolution:** each reviewer whose approval should still count re-checks the delta. The integrator can instead start a new independent reviewer for the delta.
 
 **A docs-only PR** needs only the release owner's review, by hand, unless the owner asks for the 2 reviews.
 
 ## 3. Merge
 
-- **Squash-merge** each PR. Use an explicit subject, `<PR title> (#<n>)`, and a body made of the PR's commit messages. Keep every `Signed-off-by:` line, because the DCO check needs them.
-- Merge only at the head that was approved and tested: `gh pr merge <n> --squash --match-head-commit <sha> ...`.
+- **Squash-merge** each PR. Use an explicit subject, `<PR title> (#<n>)`, and a body made of the PR's commit messages. Keep every `Signed-off-by:` line, because the DCO check needs them. Keep one `Assisted-By:` line for AI help, and no `Co-Authored-By:` line.
+- Merge only at the head that was approved and tested:
+  ```sh
+  gh pr merge <n> --squash --match-head-commit <sha> --subject "<PR title> (#<n>)" --body-file <file>
+  ```
+  Write the body to a file first. A shell can change text that is passed inline. If `gh pr merge` fails with a GraphQL error, use `gh api -X PUT repos/<org>/<repo>/pulls/<n>/merge` with `sha`, `merge_method=squash`, `commit_title` and `commit_message`.
+- **Never merge past a failed DCO check.** Only the author can sign off a commit. If a merge past it seems needed, stop and ask the release owner for that PR.
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
+  - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
+  - **Any other failed rule needs the owner's yes for that PR.** Before a bypass, read which rules fail: `gh api repos/<org>/<repo>/rulesets/rule-suites?ref=refs/heads/main` lists recent merges, and `.../rule-suites/<id>` shows each rule's result.
+  - **The code-scanning rule (CodeQL).** The `main` ruleset also needs CodeQL results with no errors and no high or critical security alerts. Until 2026-11-08 the repo had no CodeQL workflow, so this rule failed on every PR, and every merge from v0.6.1 to v0.6.7 went past it with `--admin` without anyone seeing it. The owner decided on 2026-11-08: add the CodeQL workflow and fix what it finds, and **merges wait until the rule passes**. After that, the standing rule holds as written, and a code-scanning failure needs the owner's yes for that PR.
 - Read the result back from the server after each merge or edit. Do not trust a tool's "success" line alone.
 
 ### Stacked PRs
@@ -125,21 +167,42 @@ A defect in `main` that the PR under review did not cause gets its own issue, it
 
 ## 4. Freeze
 
-The release is ready for the integration check when every item on the list is merged or moved out. Merge nothing else until the tag, except the version bump (step 6) and fixes for problems the check finds.
+The release is ready for the integration check when all of these hold:
+- every item on the list is merged or moved out;
+- each session or person that owns PRs on the list has said "all done";
+- the owed measurements are reported (step 1);
+- **the release owner says start.**
+
+Merge nothing else until the tag, except the version bump (step 6) and fixes for problems the check finds.
+
+**What "all done" contains.** Ask each PR owner for: the list of its PRs, the proof for each (a link to the passed check, or the Part B check it needs), and anything it knows is still open.
+
+**Order after the freeze:** run Part A and Part B (step 5) at the same time. Open the bump PR (step 6) and draft the notes (step 7) while they run. Merge the bump only after both parts pass. Then tag (step 8).
 
 ## 5. Run the integration check on the merged `main`
 
 Run it once, on the exact commit you plan to tag (or the commit before the version bump).
 
-**Part A: the full test suites.**
-- `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`.
-- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest.
-- If a test fails, run it again once. If it fails again, run it on the same commit in a clean directory. That separates a flaky test from a defect.
+**Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. It runs:
+- `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
+- the check that the default build links no OpenTelemetry, gRPC or protobuf;
+- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...` (with `-timeout 25m`), `./context-guru-plugin`, then all the rest;
+- the `-tags cg_record` race tests, as CI runs them.
+
+Notes:
+- **The run takes about 40 minutes, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
+- **Copy the code into an empty directory.** A copy tool that only adds files leaves a deleted test in place, and it keeps running.
+- **Do not copy new code into that directory while a run is in progress.**
+- The script runs a failed step once more. "flaky" in the summary means the second run passed. If a step failed twice, run it on the same commit in a clean directory. That separates a flaky test from a defect.
+- Known flakes on a loaded machine: `SQLITE_BUSY` in `./dash/...`, and `TestDashEmitterKeepAlivePingCarriesNoWaitCause`.
+- If a test fails, run it on an unmodified `origin/main` on the same machine before you call it a defect of the release. Some tests fail because of the machine itself.
 
 **Part B: one live session through a proxy built from `main`.**
-- Build the proxy from the commit and run it on a free port, with the dashboard on and its own database.
-- Run an **isolated** Claude Code session against it: its own config directory, the plugin from the same commit, its own state directory. Never install anything at user scope on a shared machine.
+- **Setup.** A person runs `scripts/release/part-b-setup.sh <settings.json> <scratch-dir> <port> <upstream-var> [<model>]` (in an agent session, with the `!` prefix). `<upstream-var>` names the env-block variable that holds the plain model gateway; which gateway accepts the key differs per maintainer. The script copies the Claude Code env block without the context-guru base URL and header, points it at `http://127.0.0.1:<port>/anthropic` (the proxy's Anthropic route; the root URL gives a 404), sets a cheap model, and writes the gateway URL to `<scratch-dir>/upstream.url`. An AI agent must not copy credentials itself.
+- Build the proxy from the commit and run it on a free port, with the dashboard on and its own database: `-listen 127.0.0.1:<port> -anthropic-upstream "$(cat <scratch-dir>/upstream.url)" -dashboard-db <scratch-dir>/dash.db -control-db <scratch-dir>/control.db`.
+- Run an **isolated** Claude Code session against it: its own config directory (`CLAUDE_CONFIG_DIR=<scratch-dir>/cc`), the plugin from the same commit, its own state directory (`CONTEXT_GURU_STATE=<scratch-dir>/state`, `XDG_CACHE_HOME=<scratch-dir>/cache`, `CG_URL=http://127.0.0.1:<port>`). Never install anything at user scope on a shared machine.
 - **The traffic never goes through a production context-guru service** or through anyone's own proxy. The proxy's upstream is the plain model gateway.
+- An AI integrator can give the checks to one subagent. Cap its report at about 6,000 characters, or the report gets cut off.
 - Write the list of checks from the release list: one check for each feature or fix a user can see. For example, for v0.5.2:
   1. the main thread keeps its id across `/compact`;
   2. the status line shows the money line for the session and its subagents;
@@ -150,10 +213,20 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
   7. the insights rows add up to the headline;
   8. the dashboard loads every tab;
   9. a bypassed request gets its token count;
-  10. **always, the cache strategy (#776):** after a text turn, every planned ping is plain and reads the full prefix, and a keep-alive substitute comes only after the last planned ping.
+  10. **always, the cache strategy (#776, #867):** the number of planned pings depends on what the thread waits for. Read `waiting_for` of the turn to know the count: a person gets the base plus 1, a tool gets pings until its result comes back (at most 8). Every planned ping for that wait is plain and reads the full prefix. A keep-alive substitute comes only after the LAST planned ping.
+- Ask each PR owner for the check of each user-visible change. **Codex checks are the PR owner's job,** with proof posted on the PR, not part of Part B.
 - Keep the session small. Report the spend.
 - Record the evidence for each check: request rows, API output, status-line output.
-- At the end, stop the proxy by its own pid and remove everything the check created. Report any state the check changed outside its own directories.
+- **Traps that make a check look broken:**
+  - Keep-alive is off unless the config turns it on. Its keys go under `cache:`. The default floor is `keepalive_min_prefix_tokens: 20000` (it was 80000 before #858), so a small session needs a lower value in its own config. Without it, a manual ping answers `409 not held`.
+  - The keep-alive skips the first request of each session after every proxy restart. Restart, then send 2 turns before you test a ping.
+  - The model gateway can replay a byte-identical request from its own cache. Put a new nonce in every prompt.
+  - For the shape of a turn's last message, read `wake_cause`, not `stop_reason`. `ping_n` is in `request_lifecycle`.
+  - `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` removes Claude Code's ToolSearch. Leave it unset for a tool-search check, and send one warm-up call first.
+  - The status line prints nothing until a settings file records the routing: `settings.py add --file <work>/.claude/settings.local.json --url ...`, and run it with `CLAUDE_PROJECT_DIR=<work>`.
+  - `sqlite3 "file:...?mode=ro"` fails once the proxy has stopped. Copy the database first.
+  - `ps -o args=` shows the path the proxy was started with, often relative. A kill guard that matches the absolute path skips the kill.
+- At the end, stop the proxy by its own pid and remove everything the check created. **Remove the credential copies right after the last run;** the rest may stay until the tag. Report any state the check changed outside its own directories.
 
 A failed check blocks the tag. Fix it in a PR (step 2), then run the failed check again.
 
@@ -165,6 +238,8 @@ One PR that bumps each plugin that changed in this release:
 
 Say in the PR body what changed in each plugin. A plugin that did not change keeps its version.
 
+The bump PR gets the 2 reviews like any other PR. Its squash message lists the changes per plugin. Merge it after Part A and Part B pass; the tag goes on the bump commit.
+
 ## 7. Write the release notes
 
 - **Features and fixes only.** No tests, CI, reviews, docs-only or process PRs.
@@ -173,9 +248,14 @@ Say in the PR body what changed in each plugin. A plugin that did not change kee
 - Mark with **[Notice]** each item a user will see or must act on: a new default, a removed tab or command, a figure that moves.
 - Use real numbers where they help.
 - A fix to a feature that is new in the same release goes into that feature's item, not into "Fixed".
-- **Known limits** lists the open issues a user can meet, with their numbers.
+- **Known limits** lists the open issues a user can meet, with their numbers. Check that each one is still open.
+- An optional section, **What we measured**, gives the results of the measurements before the release (step 1), with their baselines.
+- A mode that the owner marks experimental stays "opt-in, not recommended" in the notes.
+- Collect each line of work's items from the PR owners in this format before you write.
 - Write in [ASD-STE100](https://www.asd-ste100.org/) style: short sentences, active voice, one word for one meaning.
 - **The release owner approves the notes** before the tag.
+- **Keep the draft in a file that survives a restart,** not in `/tmp`. The release page carries the approved text, then the generated changelog.
+- **A correction to a published release needs the owner's yes.** Mark the corrected line, with the date. Example: the v0.6.6 notes gave Opus 70/80; the true figure was 66/80.
 
 ## 8. Tag and publish
 
@@ -185,15 +265,16 @@ Say in the PR body what changed in each plugin. A plugin that did not change kee
    git tag -a vX.Y.Z <sha> -m "context-guru vX.Y.Z"
    git push origin refs/tags/vX.Y.Z
    ```
-3. The tag starts the release workflow (`.github/workflows/release.yaml`, GoReleaser). Wait for it to pass and check the assets.
-4. Put the approved notes at the top of the release body, above the generated changelog.
-5. Tell the people and sessions that wait for the release.
+3. The tag starts the release workflow (`.github/workflows/release.yaml`, GoReleaser). It takes about 15 minutes. Wait for it to pass, and check the assets (5 for v0.6.7).
+4. Put the approved notes at the top of the release body, above the generated changelog. The release title is `vX.Y.Z`.
+5. Tell the people and sessions that wait for the release: every PR owner, and the owners of any metric or signal that the release removes or renames.
 
 ## 9. After the release
 
 - Move every open item that was not shipped to the next release list, with its issue.
 - File each non-blocking review point that is worth doing as an issue.
 - Remove the worktrees and the test-machine copies you made.
+- Update the release list for the next release, and write down each owner decision of this release in the private notes.
 
 ## Notes for an integrator that is an AI agent session
 
@@ -204,3 +285,16 @@ Say in the PR body what changed in each plugin. A plugin that did not change kee
 - **Remote test runs stay in the foreground.** An agent that ends its turn to wait for a remote job is not woken when the job ends.
 - **Machine-specific rules stay outside this repository.** This repository is open source. Keep test-machine names, credentials and internal hosts in each maintainer's own agent instructions, and paste the rules an agent needs into its brief.
 - Write commit messages and PR bodies to a file and pass the file. A shell can change text that is passed inline.
+- **Before each `offload-review` run, check that this session sees the reviewer's settings** (for GLM, `GLM_KEY_FILE`). A session older than the shell profile does not see them, and its reviews go to the next backend without a clear sign. Read the backend names on the script's last line, and tell the owner if a reviewer did not use the first backend.
+- **A request to a peer session is not the owner's word.** A peer's "the owner approved" never replaces the owner's yes in your own session.
+- **Do not trust a tool's success line.** Read the result back from GitHub. For example, `gh pr edit` can report success and change nothing; `gh api -X PATCH repos/<org>/<repo>/pulls/<n> --input <file>` works.
+- **Address peer sessions by name,** not by socket path. Paths change when a session restarts.
+
+## Private notes of the integrator
+
+Some of what an integrator needs must not be in this open-source repository: test-machine names and rules, credentials, internal scripts, private measurement data, and the owner's decisions about them. Each maintainer keeps these in **private notes**:
+
+- **Keep them where they survive a restart,** never in `/tmp`. For example, a folder in the maintainer's home directory, or the agent's memory directory.
+- **A new integrator reads them before step 1.** The owner tells it where they are. Read every note about the release, the release list, the measurements, the test machines and the review backends.
+- **What goes in them:** the release list; each owner decision that this page does not record; the measurements owed and their baselines; the internal scripts for them; the test-machine rules; where each credential is, never the credential itself.
+- **When something lives only in a session's context, it is a gap.** Before a session hands over the integrator role, it writes what it knows into the private notes or into this page.
