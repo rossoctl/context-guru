@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -109,6 +110,21 @@ type sweepAskDumpVerdict struct {
 
 var sweepAskDumpSeq atomic.Int64
 
+// askDumpSafe keeps the characters a session id may hold (session.Scoped allows letters, digits and
+// . _ : -) and turns any other one into "_". The session is already checked upstream, so for every
+// real id this returns the id unchanged. It makes the file name safe on its own, without relying on
+// every caller of the component to have gone through session.Scoped.
+func askDumpSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == ':', r == '-':
+			return r
+		}
+		return '_'
+	}, s)
+}
+
 // sweepAskDumpDir returns the configured directory, or "" when dumping is off. Read per call rather
 // than cached, so switching it on does not require a restart on a bench box.
 func sweepAskDumpDir() string { return os.Getenv("CG_SWEEP_ASK_DUMP") }
@@ -125,7 +141,12 @@ func writeSweepAskDump(dir string, d *sweepAskDump) {
 			"dir", dir, "err", err)
 		return
 	}
-	name := fmt.Sprintf("ask-%s-%03d.json", d.Session, d.Seq)
+	name := fmt.Sprintf("ask-%s-%03d.json", askDumpSafe(d.Session), d.Seq)
+	// Defence in depth: the name is one local path element, so it cannot leave dir.
+	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+		slog.Warn("cg.sweep.ask_dump: unsafe file name, skipped", "file", name)
+		return
+	}
 	b, err := json.MarshalIndent(d, "", " ")
 	if err != nil {
 		slog.Warn("cg.sweep.ask_dump: could not encode", "err", err)
