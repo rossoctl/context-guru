@@ -20,8 +20,7 @@ import (
 func runSignal(t *testing.T, env []string, payload string) {
 	t.Helper()
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "signal.sh"))
-	// A HOME of its own, so the hook never reads the developer's real settings files (#948).
-	cmd.Env = append([]string{"PATH=/usr/bin:/bin:/usr/local/bin", "HOME=" + t.TempDir()}, env...)
+	cmd.Env = append([]string{"PATH=/usr/bin:/bin:/usr/local/bin"}, env...)
 	cmd.Stdin = strings.NewReader(payload)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("signal.sh must always exit 0: %v", err)
@@ -253,10 +252,8 @@ func TestSignalHookSendsToolSearchOffOnEverySessionStart(t *testing.T) {
 	}{
 		{"startup", []string{"/tool-search"}},
 		{"fork", []string{"/tool-search"}},
-		// resume and clear also send the compaction settings report (#948), empty when nothing is set,
-		// so a setting the user removed clears the proxy's record.
-		{"resume", []string{"/compaction-config", "/signal", "/tool-search"}},
-		{"clear", []string{"/compaction-config", "/signal", "/tool-search"}},
+		{"resume", []string{"/signal", "/tool-search"}},
+		{"clear", []string{"/signal", "/tool-search"}},
 		{"compact", []string{"/signal"}}, // compaction keeps the session id
 	} {
 		t.Run(tc.source, func(t *testing.T) {
@@ -306,84 +303,5 @@ func TestSignalHookSendsToolSearchOffOnEverySessionStart(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// The session-start hook reports the settings that move Claude Code's own auto-compact point
-// (#948) to /compaction-config: only the closed keys, from the env and from the user's settings
-// files, and nothing else of those files or of the hook payload.
-func TestSignalHookSendsCompactionConfig(t *testing.T) {
-	home := t.TempDir()
-	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
-	os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{
-		"autoCompactWindow": 300000, "autoCompactEnabled": true, "apiKeyHelper": "secret-helper",
-		"modelSettings": {"claude-opus-5": {"autoCompactWindow": "250k", "effort": "high"}}}`), 0o644)
-	ch := make(chan map[string]any, 4)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var got map[string]any
-		json.NewDecoder(r.Body).Decode(&got)
-		got["path"] = r.URL.Path
-		ch <- got
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	env := []string{"HOME=" + home, "CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k",
-		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60", "DISABLE_AUTO_COMPACT=1"}
-	runSignal(t, env, `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"startup","cwd":"/nowhere","prompt":"secret prompt"}`)
-	select {
-	case got := <-ch:
-		mw, _ := got["model_windows"].(map[string]any)
-		if got["path"] != "/compaction-config" || got["session"] != "abc-123" || got["harness"] != "claude-code" ||
-			got["env_pct"] != "60" || got["env_disable_auto"] != "1" || got["settings_window"] != "300000" ||
-			got["settings_enabled"] != "true" || mw["claude-opus-5"] != "250k" || len(mw) != 1 {
-			t.Errorf("body = %v", got)
-		}
-		for k := range got {
-			switch k {
-			case "path", "session", "harness", "env_pct", "env_disable_auto", "settings_window", "settings_enabled", "model_windows":
-			default:
-				t.Errorf("unexpected field %q", k)
-			}
-		}
-		if b, _ := json.Marshal(got); strings.Contains(string(b), "secret") {
-			t.Errorf("the body carries content: %s", b)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("nothing reached the server")
-	}
-}
-
-// With no setting changed, a startup sends nothing; a resume sends an empty report, so a setting
-// the user removed clears the proxy's record.
-func TestSignalHookCompactionConfigSendsNothingWhenNothingIsSet(t *testing.T) {
-	ch := make(chan map[string]any, 4)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var got map[string]any
-		json.NewDecoder(r.Body).Decode(&got)
-		got["path"] = r.URL.Path
-		ch <- got
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	env := []string{"HOME=" + t.TempDir(), "CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k"}
-	runSignal(t, env, `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"startup"}`)
-	select {
-	case got := <-ch:
-		t.Fatalf("startup with nothing set sent %v", got)
-	case <-time.After(1500 * time.Millisecond):
-	}
-	runSignal(t, env, `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"resume"}`)
-	var paths []string
-	for i := 0; i < 2; i++ {
-		select {
-		case got := <-ch:
-			paths = append(paths, got["path"].(string))
-		case <-time.After(5 * time.Second):
-			t.Fatalf("resume sent %v", paths)
-		}
-	}
-	sort.Strings(paths)
-	if paths[0] != "/compaction-config" || paths[1] != "/signal" {
-		t.Errorf("resume sent %v", paths)
 	}
 }

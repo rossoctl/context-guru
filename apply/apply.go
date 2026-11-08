@@ -344,13 +344,6 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 // field: on a real 600 KB request `metadata` sits behind `messages`, so each query walked
 // the whole transcript to reach it.
 func explicitSession(header string, body []byte) string {
-	return ExplicitSession(header, body)
-}
-
-// ExplicitSession is the id a request names its own session by: the header, else the agent's id in
-// the body's metadata, else "". A host that must find state a client's hook wrote under that id
-// (the proxy, for the compaction point, #948) reads it here, so it cannot disagree with BodyOpts.
-func ExplicitSession(header string, body []byte) string {
 	md := gjson.GetBytes(body, "metadata")
 	return session.Explicit(header, func(k string) (string, bool) {
 		r := md.Get(k)

@@ -310,7 +310,6 @@ func (h *Handler) purgeToolDefer(ctx context.Context, tenantID string) (int64, e
 	if mem, ok := h.store.(*store.Memory); ok {
 		mem.DropPrefix(store.ToolDeferPrefix + tenantID + ":")
 		mem.DropPrefix(store.ToolSearchOffPrefix + tenantID + ":")
-		mem.DropPrefix(store.CompactionPointPrefix + tenantID + ":")
 	}
 	h.defer_.mu.Lock()
 	f := h.defer_.file
@@ -318,7 +317,6 @@ func (h *Handler) purgeToolDefer(ctx context.Context, tenantID string) (int64, e
 	if f != nil {
 		f.Store.DropPrefix(store.ToolDeferPrefix + tenantID + ":")
 		f.Store.DropPrefix(store.ToolSearchOffPrefix + tenantID + ":")
-		f.Store.DropPrefix(store.CompactionPointPrefix + tenantID + ":")
 		return dash.PurgeToolDefer(ctx, f.DB, tenantID)
 	}
 	path := h.opts.ToolDeferPath

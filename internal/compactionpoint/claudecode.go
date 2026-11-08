@@ -9,7 +9,8 @@ import (
 )
 
 // ClaudeCode is what the user set to move Claude Code's own auto-compact point (#948). A host
-// fills it from what the plugin reported. Every field is the RAW text of the setting, so the
+// fills it once, at start-up, from its env and the user's settings files (proxy.ReadClaudeCompact).
+// Every field is the RAW text of the setting, so the
 // parsing rules below live in one place, next to the client rules they copy.
 //
 // WHERE EACH SETTING IS FROM. Read from the shipped client, `claude` 2.1.319 (its bundled

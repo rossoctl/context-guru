@@ -60,52 +60,6 @@ if ev == "SessionStart" and kind in ("startup", "resume", "fork", "clear") and o
     # value is at most 5 characters, and the shell above sends nothing unless the WHOLE value is one,
     # so a long value can never be cut into an off value.
     print("/tool-search " + json.dumps({"session": sid, "enable_tool_search": os.environ.get("ENABLE_TOOL_SEARCH", "")[:16]}))
-if ev == "SessionStart" and kind in ("startup", "resume", "fork", "clear"):
-    # The settings that move Claude Code'"'"'s own auto-compact point (#948). Read here, where Claude
-    # Code runs, from the sources the client reads (verified on claude 2.1.319, see
-    # internal/compactionpoint/claudecode.go): four env vars, and `autoCompactWindow`,
-    # `modelSettings.<model>.autoCompactWindow` and `autoCompactEnabled` in settings.json. Only
-    # these closed keys are read, only short values are sent, and the hook payload (prompt, paths)
-    # is never sent. A later source overrides an earlier one: user, project, project-local.
-    cfg = {"session": sid, "harness": "claude-code"}
-    env = os.environ
-    for k, f in (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "env_window"), ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "env_pct"),
-                 ("DISABLE_AUTO_COMPACT", "env_disable_auto"), ("DISABLE_COMPACT", "env_disable")):
-        if env.get(k, "").strip():
-            cfg[f] = env[k].strip()[:32]
-    cwd = d.get("cwd", "")
-    home = os.path.expanduser("~")
-    paths = [os.path.join(home, ".claude.json"), os.path.join(home, ".claude", "settings.json")]
-    if isinstance(cwd, str) and cwd.startswith("/"):
-        paths += [os.path.join(cwd, ".claude", "settings.json"), os.path.join(cwd, ".claude", "settings.local.json")]
-    for path in paths:
-        try:
-            with open(path) as fh:
-                st = json.load(fh)
-        except Exception:
-            continue
-        if not isinstance(st, dict):
-            continue
-        v = st.get("autoCompactWindow")
-        if isinstance(v, (int, float, str)) and not isinstance(v, bool):
-            cfg["settings_window"] = str(v)[:32]
-        v = st.get("autoCompactEnabled")
-        if isinstance(v, bool):
-            cfg["settings_enabled"] = "true" if v else "false"
-        ms = st.get("modelSettings")
-        if isinstance(ms, dict):
-            mw = cfg.setdefault("model_windows", {})
-            for name, val in list(ms.items())[:16]:
-                w = val.get("autoCompactWindow") if isinstance(val, dict) else None
-                if isinstance(w, (int, float, str)) and not isinstance(w, bool) and isinstance(name, str) and len(name) <= 64:
-                    mw[name] = str(w)[:32]
-    if not cfg.get("model_windows"):
-        cfg.pop("model_windows", None)
-    # startup and fork start a NEW session id: send only when there is something to say. resume and
-    # clear may meet a record from an earlier run of the id, so they always send, and an empty
-    # report clears it.
-    if len(cfg) > 2 or kind in ("resume", "clear"):
-        print("/compaction-config " + json.dumps(cfg))
 ' 2>/dev/null <<<"$STDIN")" || exit 0
 [ -n "$BODIES" ] || exit 0
 ORIGIN="$(printf '%s' "$ANTHROPIC_BASE_URL" | sed -E 's#^(https?://[^/]+).*#\1#')"

@@ -35,6 +35,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
@@ -61,6 +62,10 @@ import (
 // placeholder and the real provider key lives in the gateway env. That is an explicit
 // single-tenant/local fallback, never the hosted default.
 type Options struct {
+	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
+	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
+	// is set.
+	ClaudeCompact     compactionpoint.ClaudeCode
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's
@@ -549,7 +554,6 @@ func (h *Handler) Mux() *http.ServeMux {
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("POST /signal", h.clientSignal)
 	m.HandleFunc("POST /tool-search", h.toolSearchSignal)
-	m.HandleFunc("POST /compaction-config", h.compactionConfigSignal)
 	m.HandleFunc("POST /tool-defer/probe", h.toolDeferProbe)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
@@ -857,8 +861,8 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 		WindowExact: windowExact,
 		// C, resolved beside the window because the fill fraction belongs over it rather than over
 		// the window — see internal/compactionpoint.
-		CompactionPoint:       h.compactionPointFor(tn, r, body, window).Tokens(window),
-		CompactionPointSource: string(h.compactionPointFor(tn, r, body, window).Source),
+		CompactionPoint:       h.compactionPointFor(body, window).Tokens(window),
+		CompactionPointSource: string(h.compactionPointFor(body, window).Source),
 		CacheMode:             cacheMode,
 		Tracker:               h.tracker,
 	})
@@ -1244,7 +1248,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// triggers scale with the model; 0 when unknown (absolutes apply).
 		window, windowExact := h.resolveWindow(r.Context(), body)
 		// C beside the window, resolved once for both the enforced and the observed path.
-		cpoint := h.compactionPointFor(tn, r, body, window)
+		cpoint := h.compactionPointFor(body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.

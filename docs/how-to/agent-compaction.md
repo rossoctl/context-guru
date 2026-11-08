@@ -67,17 +67,18 @@ and the summarize trigger then follow your setting, not the built-in table.
 - **What it reads** (Claude Code 2.1.319, checked in the shipped client): the env vars
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_AUTO_COMPACT` and
   `DISABLE_COMPACT`, and the settings keys `autoCompactWindow`, `autoCompactEnabled` and
-  `modelSettings.<model>.autoCompactWindow` (what `/autocompact` writes).
-- **How it reads:** the plugin's session-start hook sends these few short values to the proxy
-  (`POST /compaction-config`). The hook runs at startup, resume, fork and clear, so a change shows
-  at the next session start. A change made inside a running session shows at its next resume or clear.
+  `modelSettings.<model>.autoCompactWindow` (what `/autocompact` writes). Files: `settings.json`
+  and `.claude.json` in `$CLAUDE_CONFIG_DIR` (default `~/.claude` and `~`). Project settings files
+  are not read.
+- **When:** once, when the local proxy starts. A setting changed while the proxy runs takes effect at
+  the next proxy restart. The plugin starts the proxy from a session hook, so the proxy inherits the
+  env of the session that started it.
 - **If auto-compact is off,** C is the model window.
 - **If a value is odd or missing,** the built-in table value is used.
 - **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
   provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
-- **To turn it off,** set `CONTEXT_GURU_CLIENT_SIGNALS=off` (this also turns off the other hook
-  signals), or set the plugin option `client_signals` to `off`.
-- Codex and Bob are not read yet.
+- **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.
+- A hosted proxy reads nothing. Codex and Bob are not read.
 
 ## Bob: prefer lossless components
 

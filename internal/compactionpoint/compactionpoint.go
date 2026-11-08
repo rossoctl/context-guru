@@ -111,8 +111,8 @@ const (
 	Measured Source = "measured"
 	// Assumed: reported behaviour or a reasoned bound, not observed.
 	Assumed Source = "assumed"
-	// Configured: the user changed the client's own auto-compact setting, and the host reported it
-	// (see ClaudeCode below). The number is the client's own threshold, taken as billed tokens by
+	// Configured: the user changed the client's own auto-compact setting, and the local proxy read it at start-up
+	// (see ClaudeCode). The number is the client's own threshold, taken as billed tokens by
 	// ClientToBilled. It beats the table.
 	Configured Source = "configured"
 	// WindowFallback: case 3 and case 4 together -- C == W, because either nothing compacts here

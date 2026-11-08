@@ -2,146 +2,133 @@ package proxy
 
 import (
 	"encoding/json"
-	"mime"
-	"net/http"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/tidwall/gjson"
 
-	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
-	"github.com/rossoctl/context-guru/session"
-	"github.com/rossoctl/context-guru/store"
 )
 
 // The user's own Claude Code auto-compact settings (#948).
 //
-// WHY A SIGNAL PER SESSION and not a header per request. The plugin's session-start hook reads the
-// settings once, where Claude Code runs, and posts them here with the session id, the way it posts
-// ENABLE_TOOL_SEARCH to /tool-search. A header on every request would need the plugin to put the
-// values into ANTHROPIC_CUSTOM_HEADERS at install time. That variable is fixed at the start of the
-// session and is shared with the user's own headers, so a setting changed with /autocompact would
-// never reach us. The hook runs at every session start (startup, resume, fork, clear), so it sees
-// the setting that session will use.
+// WHEN IT IS READ: ONCE, when the proxy starts, in local mode only (cmd/context-guru-proxy calls
+// ReadClaudeCompact and hands the result to Options.ClaudeCompact). It is held in memory for the
+// life of the proxy. A setting changed while the proxy runs takes effect at the next proxy restart.
+// No per-session or per-request report, no stored copy: nothing to purge.
 //
-// WHERE IT LIVES: the session's own tenant store, under store.CompactionPointPrefix, like the tool
-// search opt-out. It is a few short strings (metadata), so the disk store keeps it at every storage
-// level. With storage off (the Nop store) nothing is kept and C stays at the table value.
+// WHERE: the host, because only the host can read the user's files and env. The rule that turns the
+// raw values into C stays in internal/compactionpoint (ClaudeCode.Resolve), which never imports
+// proxy.
 //
-// A session the hook never reported (no plugin, another client, a request with no session id of its
-// own) has no record, and C is the table value: the behavior before #948.
+// WHICH ENV. The plugin starts the proxy from the SessionStart hook (start-proxy.sh, `setsid` or
+// `nohup`, no `env -i`), so the proxy inherits the env of the hook, which is the env of the Claude
+// Code session that started it. That is the env of ONE session: a later session with other values
+// does not change a running proxy. A proxy started by hand reads the env of that shell.
+//
+// WHICH FILES (the sources the client reads, verified on claude 2.1.319): the user settings file
+// ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json, and the legacy global config
+// ${CLAUDE_CONFIG_DIR:-~}/.claude.json for autoCompactEnabled. Project settings files depend on the
+// directory the client runs in, which the proxy does not know, so they are NOT read.
 
-// maxCompactionCfgField bounds each reported value. The longest real one is "1000000" or "1m".
-const maxCompactionCfgField = 32
+// ClaudeCompactOffEnv turns the start-up read off ("off", "0" or "false"). C then comes from the
+// table.
+const ClaudeCompactOffEnv = "CONTEXT_GURU_CLIENT_COMPACT_CONFIG"
 
-// compactionCfg is the wire and stored shape: the raw text of each setting, so the parsing rules
-// live in one place (internal/compactionpoint.ClaudeCode).
-type compactionCfg struct {
-	Session         string            `json:"session,omitempty"`
-	Harness         string            `json:"harness"`
-	EnvWindow       string            `json:"env_window,omitempty"`
-	EnvPct          string            `json:"env_pct,omitempty"`
-	EnvDisableAuto  string            `json:"env_disable_auto,omitempty"`
-	EnvDisable      string            `json:"env_disable,omitempty"`
-	SettingsWindow  string            `json:"settings_window,omitempty"`
-	SettingsEnabled string            `json:"settings_enabled,omitempty"`
-	ModelWindows    map[string]string `json:"model_windows,omitempty"`
-}
-
-func (c compactionCfg) valid() bool {
-	if c.Harness != "claude-code" {
-		return false // only Claude Code is verified; see compactionpoint.ClaudeCode
+// ReadClaudeCompact reads the settings from env and the user's settings files. getenv and home are
+// injected for tests. It never fails: an unreadable or odd file is skipped (fail open).
+func ReadClaudeCompact(getenv func(string) string, home string) compactionpoint.ClaudeCode {
+	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
+	case "off", "0", "false":
+		return compactionpoint.ClaudeCode{}
 	}
-	for _, v := range []string{c.EnvWindow, c.EnvPct, c.EnvDisableAuto, c.EnvDisable, c.SettingsWindow, c.SettingsEnabled} {
-		if len(v) > maxCompactionCfgField {
-			return false
+	c := compactionpoint.ClaudeCode{
+		EnvWindow:      short(getenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW")),
+		EnvPct:         short(getenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")),
+		EnvDisableAuto: short(getenv("DISABLE_AUTO_COMPACT")),
+		EnvDisable:     short(getenv("DISABLE_COMPACT")),
+	}
+	dir := strings.TrimSpace(getenv("CLAUDE_CONFIG_DIR"))
+	globalCfg := filepath.Join(home, ".claude.json")
+	settings := filepath.Join(home, ".claude", "settings.json")
+	if dir != "" {
+		globalCfg = filepath.Join(dir, ".claude.json")
+		settings = filepath.Join(dir, "settings.json")
+	}
+	// ~/.claude.json first, then settings.json: the settings file wins (the client's own order puts
+	// userSettings above the legacy global config).
+	if b := readSmall(globalCfg); b != nil {
+		if v := gjson.GetBytes(b, "autoCompactEnabled"); v.Type == gjson.True || v.Type == gjson.False {
+			c.SettingsEnabled = fmt.Sprint(v.Bool())
 		}
 	}
-	if len(c.ModelWindows) > 16 {
-		return false
-	}
-	for k, v := range c.ModelWindows {
-		if len(k) > 64 || len(v) > maxCompactionCfgField {
-			return false
+	if b := readSmall(settings); b != nil {
+		if v := gjson.GetBytes(b, "autoCompactWindow"); v.Type == gjson.Number || v.Type == gjson.String {
+			c.SettingsWindow = short(v.String())
+		}
+		if v := gjson.GetBytes(b, "autoCompactEnabled"); v.Type == gjson.True || v.Type == gjson.False {
+			c.SettingsEnabled = fmt.Sprint(v.Bool())
+		}
+		if ms := gjson.GetBytes(b, "modelSettings"); ms.IsObject() {
+			n := 0
+			ms.ForEach(func(name, val gjson.Result) bool {
+				if n >= 16 {
+					return false
+				}
+				w := val.Get("autoCompactWindow")
+				if len(name.String()) <= 64 && (w.Type == gjson.Number || w.Type == gjson.String) {
+					if c.ModelWindows == nil {
+						c.ModelWindows = map[string]string{}
+					}
+					c.ModelWindows[name.String()] = short(w.String())
+					n++
+				}
+				return true
+			})
 		}
 	}
-	return true
+	return c
 }
 
-func (c compactionCfg) claudeCode() compactionpoint.ClaudeCode {
-	return compactionpoint.ClaudeCode{
-		EnvWindow: c.EnvWindow, EnvPct: c.EnvPct, EnvDisableAuto: c.EnvDisableAuto, EnvDisable: c.EnvDisable,
-		SettingsWindow: c.SettingsWindow, SettingsEnabled: c.SettingsEnabled, ModelWindows: c.ModelWindows,
-	}
-}
-
-// compactionConfigSignal receives one session's Claude Code auto-compact settings from the
-// plugin's session-start hook. The same checks as /tool-search: the operator's
-// CONTEXT_GURU_CLIENT_SIGNALS switch, JSON only, the same authentication, the same tenant-scoped
-// session id. 204 on accept.
-func (h *Handler) compactionConfigSignal(w http.ResponseWriter, r *http.Request) {
-	if !clientSignalsSwitchOn() {
-		http.NotFound(w, r)
-		return
-	}
-	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
-		http.Error(w, "compaction-config signals are application/json", http.StatusUnsupportedMediaType)
-		return
-	}
-	tn, err := h.authenticate(r)
+// readSmall reads a settings file of at most 4 MiB, or nil. A missing file is the normal case.
+func readSmall(path string) []byte {
+	f, err := os.Open(path)
 	if err != nil {
-		h.refuse(w, r, err)
-		return
+		return nil
 	}
-	release, ok := h.meter(w, r, tn)
-	defer release()
-	if !ok {
-		return
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || st.Size() > 4<<20 {
+		return nil
 	}
-	var in compactionCfg
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil || !in.valid() {
-		http.Error(w, "bad compaction-config signal", http.StatusBadRequest)
-		return
+	var b []byte
+	dec := json.NewDecoder(f)
+	var raw json.RawMessage
+	if dec.Decode(&raw) != nil {
+		return nil
 	}
-	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
-	if !ok {
-		http.Error(w, "bad compaction-config signal", http.StatusBadRequest)
-		return
-	}
-	in.Session = ""
-	if b, err := json.Marshal(in); err == nil && tn.Store != nil {
-		tn.Store.Put(store.CompactionPointPrefix+scoped, b)
-	}
-	w.WriteHeader(http.StatusNoContent)
+	b = raw
+	return b
 }
 
-// compactionPointFor is C for this request: the user's own setting when the session's hook
-// reported one that changes it, else the bootstrap table. Fail open: no record, an unreadable
-// record or an odd value all give the table value, which is what the proxy did before #948.
-func (h *Handler) compactionPointFor(tn *Tenancy, r *http.Request, body []byte, window int) compactionpoint.Point {
+func short(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 32 {
+		return ""
+	}
+	return s
+}
+
+// compactionPointFor is C for this request: the user's own setting, read at start-up, when it
+// changes C for the request's model; else the bootstrap table. A hosted proxy (Options.Tenants)
+// never has a user setting. Fail open: any odd value gives the table.
+func (h *Handler) compactionPointFor(body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
-	table := compactionpoint.For(model)
-	if tn == nil || tn.Store == nil {
-		return table
+	if h.opts.Tenants == nil {
+		if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
+			return p
+		}
 	}
-	explicit := apply.ExplicitSession(r.Header.Get("x-context-guru-session"), body)
-	if explicit == "" {
-		return table // a session with no id of its own cannot be matched to the hook's report
-	}
-	scoped := session.Scoped(tn.ID, explicit, "", "")
-	if l, ok := tn.Store.(store.SessionLoader); ok {
-		l.LoadSession(scoped) // the disk copy after a restart; a no-op once loaded
-	}
-	raw, ok := tn.Store.Get(store.CompactionPointPrefix + scoped)
-	if !ok {
-		return table
-	}
-	var cfg compactionCfg
-	if json.Unmarshal(raw, &cfg) != nil || !cfg.valid() {
-		return table
-	}
-	if p, ok := cfg.claudeCode().Resolve(model, window); ok {
-		return p
-	}
-	return table
+	return compactionpoint.For(model)
 }

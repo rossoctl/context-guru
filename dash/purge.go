@@ -203,7 +203,7 @@ type tdQuery struct {
 func toolDeferPurge(tenantID string) []tdQuery {
 	var out []tdQuery
 	out = append(out, tdQuery{"tool_defer_history", `DELETE FROM tool_defer_history WHERE tenant_id = ?`, []any{tenantID}})
-	for _, p := range []string{store.ToolDeferPrefix, store.ToolSearchOffPrefix, store.CompactionPointPrefix} {
+	for _, p := range []string{store.ToolDeferPrefix, store.ToolSearchOffPrefix} {
 		lo := p + tenantID + ":"
 		hi := lo[:len(lo)-1] + ";" // ':' + 1
 		out = append(out, tdQuery{"session_state", `DELETE FROM session_state WHERE key >= ? AND key < ?`, []any{[]byte(lo), []byte(hi)}})

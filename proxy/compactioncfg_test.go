@@ -1,101 +1,84 @@
 package proxy
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
-	"github.com/rossoctl/context-guru/store"
 )
 
-func cptHandler(t *testing.T) (*Handler, *httptest.Server) {
-	t.Helper()
-	h := tdHandler(t, "ultrahigh", "http://127.0.0.1:1")
-	srv := httptest.NewServer(h.Mux())
-	t.Cleanup(srv.Close)
-	return h, srv
-}
+func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-func cptPost(t *testing.T, srv *httptest.Server, body string) int {
+func writeCfg(t *testing.T, path, body string) {
 	t.Helper()
-	r, err := http.Post(srv.URL+"/compaction-config", "application/json", strings.NewReader(body))
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r.Body.Close()
-	return r.StatusCode
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func cptReq(session string) *http.Request {
-	r := httptest.NewRequest("POST", "/anthropic/v1/messages", nil)
-	r.Header.Set("x-context-guru-session", session)
-	return r
+// The start-up read takes the env and the user's files, and nothing else of the files.
+func TestReadClaudeCompactReadsEnvAndUserFiles(t *testing.T) {
+	home := t.TempDir()
+	writeCfg(t, filepath.Join(home, ".claude", "settings.json"), `{
+		"autoCompactWindow": 300000, "autoCompactEnabled": true, "apiKeyHelper": "secret-helper",
+		"modelSettings": {"claude-opus-5": {"autoCompactWindow": "250k", "effort": "high"}, "x": {"effort": "low"}}}`)
+	writeCfg(t, filepath.Join(home, ".claude.json"), `{"autoCompactEnabled": false}`)
+	c := ReadClaudeCompact(envOf(map[string]string{
+		"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60", "DISABLE_AUTO_COMPACT": "1"}), home)
+	if c.EnvPct != "60" || c.EnvDisableAuto != "1" || c.SettingsWindow != "300000" ||
+		c.SettingsEnabled != "true" /* settings.json beats ~/.claude.json */ ||
+		len(c.ModelWindows) != 1 || c.ModelWindows["claude-opus-5"] != "250k" {
+		t.Errorf("got %+v", c)
+	}
 }
 
-// The route stores a session's settings, and compactionPointFor turns them into C.
-func TestCompactionConfigRouteSetsC(t *testing.T) {
-	h, srv := cptHandler(t)
-	tn, _ := h.authenticate(cptReq(""))
+func TestReadClaudeCompactHonoursClaudeConfigDir(t *testing.T) {
+	home, dir := t.TempDir(), t.TempDir()
+	writeCfg(t, filepath.Join(home, ".claude", "settings.json"), `{"autoCompactWindow": 111111}`)
+	writeCfg(t, filepath.Join(dir, "settings.json"), `{"autoCompactWindow": 222222}`)
+	c := ReadClaudeCompact(envOf(map[string]string{"CLAUDE_CONFIG_DIR": dir}), home)
+	if c.SettingsWindow != "222222" {
+		t.Errorf("window = %q, want the CLAUDE_CONFIG_DIR file", c.SettingsWindow)
+	}
+}
+
+// Fail open: no files, bad JSON, wrong types and the switch all give the zero value.
+func TestReadClaudeCompactFailsOpen(t *testing.T) {
+	home := t.TempDir()
+	if c := ReadClaudeCompact(envOf(nil), home); c.SettingsWindow != "" || c.ModelWindows != nil {
+		t.Errorf("no files: %+v", c)
+	}
+	writeCfg(t, filepath.Join(home, ".claude", "settings.json"), `not json {`)
+	if c := ReadClaudeCompact(envOf(nil), home); c.SettingsWindow != "" {
+		t.Errorf("bad json: %+v", c)
+	}
+	writeCfg(t, filepath.Join(home, ".claude", "settings.json"), `{"autoCompactWindow": {"a":1}, "autoCompactEnabled": "no", "modelSettings": 5}`)
+	if c := ReadClaudeCompact(envOf(nil), home); c.SettingsWindow != "" || c.SettingsEnabled != "" || c.ModelWindows != nil {
+		t.Errorf("wrong types: %+v", c)
+	}
+	writeCfg(t, filepath.Join(home, ".claude", "settings.json"), `{"autoCompactWindow": 300000}`)
+	if c := ReadClaudeCompact(envOf(map[string]string{ClaudeCompactOffEnv: "off", "DISABLE_AUTO_COMPACT": "1"}), home); c.SettingsWindow != "" || c.EnvDisableAuto != "" {
+		t.Errorf("switch off: %+v", c)
+	}
+}
+
+func TestCompactionPointForUsesTheStartupReadInLocalModeOnly(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5"}`)
-
-	// No record: the table.
-	if p := h.compactionPointFor(tn, cptReq("sess-1"), body, 1_000_000); p.Source != compactionpoint.Assumed {
-		t.Fatalf("no record: %+v", p)
+	h := &Handler{opts: Options{ClaudeCompact: compactionpoint.ClaudeCode{EnvWindow: "200k"}}}
+	if p := h.compactionPointFor(body, 1_000_000); p.Source != compactionpoint.Configured || p.Tokens(1_000_000) != 167_000 {
+		t.Errorf("local: %+v", p)
 	}
-	if c := cptPost(t, srv, `{"session":"sess-1","harness":"claude-code","env_window":"200k"}`); c != http.StatusNoContent {
-		t.Fatalf("status %d", c)
+	// Another harness's model is not special: the setting is Claude Code's, and it applies to
+	// the model name the request carries.
+	hosted := &Handler{opts: Options{ClaudeCompact: compactionpoint.ClaudeCode{EnvWindow: "200k"}, Tenants: &TenantSource{}}}
+	if p := hosted.compactionPointFor(body, 1_000_000); p.Source != compactionpoint.Assumed {
+		t.Errorf("hosted: %+v", p)
 	}
-	p := h.compactionPointFor(tn, cptReq("sess-1"), body, 1_000_000)
-	if p.Source != compactionpoint.Configured || p.Tokens(1_000_000) != 167_000 {
-		t.Errorf("sess-1: %+v", p)
-	}
-	// Another session is not touched.
-	if p := h.compactionPointFor(tn, cptReq("sess-2"), body, 1_000_000); p.Source != compactionpoint.Assumed {
-		t.Errorf("sess-2 inherited: %+v", p)
-	}
-	// A request with no id of its own cannot be matched.
-	if p := h.compactionPointFor(tn, httptest.NewRequest("POST", "/", nil), body, 1_000_000); p.Source != compactionpoint.Assumed {
-		t.Errorf("no session id: %+v", p)
-	}
-	// The setting changes: the new report replaces the old one.
-	cptPost(t, srv, `{"session":"sess-1","harness":"claude-code","env_disable_auto":"1"}`)
-	if p := h.compactionPointFor(tn, cptReq("sess-1"), body, 1_000_000); p.Tokens(1_000_000) != 1_000_000 {
-		t.Errorf("after disable: %+v", p)
-	}
-	// An empty report (setting removed) goes back to the table.
-	cptPost(t, srv, `{"session":"sess-1","harness":"claude-code"}`)
-	if p := h.compactionPointFor(tn, cptReq("sess-1"), body, 1_000_000); p.Source != compactionpoint.Assumed {
-		t.Errorf("after clear: %+v", p)
-	}
-}
-
-// Fail open: an odd request or an odd stored value never changes C and never errors.
-func TestCompactionConfigRouteFailsOpen(t *testing.T) {
-	h, srv := cptHandler(t)
-	tn, _ := h.authenticate(cptReq(""))
-	for _, b := range []string{
-		`not json`,
-		`{"session":"s","harness":"bob","env_window":"200k"}`,                                    // not a verified harness
-		`{"session":"s","harness":"claude-code","env_window":"` + strings.Repeat("9", 40) + `"}`, // too long
-		`{"session":"../x","harness":"claude-code","env_window":"200k"}`,                         // unusable session id
-		`{"harness":"claude-code","env_window":"200k"}`,                                          // no session id
-	} {
-		if c := cptPost(t, srv, b); c != http.StatusBadRequest {
-			t.Errorf("%q -> %d, want 400", b, c)
-		}
-	}
-	body := []byte(`{"model":"claude-opus-5"}`)
-	for _, stored := range []string{`garbage`, `{"harness":"claude-code","env_window":"lots"}`, `{"harness":"claude-code","env_pct":"-3"}`} {
-		tn.Store.Put(store.CompactionPointPrefix+"sess-x", []byte(stored))
-		if p := h.compactionPointFor(tn, cptReq("sess-x"), body, 1_000_000); p.Source != compactionpoint.Assumed {
-			t.Errorf("stored %q gave %+v, want the table", stored, p)
-		}
-	}
-	// The operator's switch turns the route off.
-	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "off")
-	if c := cptPost(t, srv, `{"session":"s","harness":"claude-code","env_window":"200k"}`); c != http.StatusNotFound {
-		t.Errorf("switch off -> %d", c)
+	if p := (&Handler{}).compactionPointFor(body, 1_000_000); p.Source != compactionpoint.Assumed {
+		t.Errorf("nothing set: %+v", p)
 	}
 }
