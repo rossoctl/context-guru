@@ -42,14 +42,12 @@ type Gate struct {
 	MixedSearches atomic.Int64 // searches in the same response as a client tool call
 	// Client-search mode (#898): disables by reason. The production monitor reads these.
 	DisabledUnknown atomic.Int64 // reason unknown_description
-	DisabledNonSel  atomic.Int64 // reason non_select_query_for_our_tool
 	DisabledBreak   atomic.Int64 // reason break
 }
 
 // The reasons ClientDisabled is set, as logged and exported.
 const (
 	ReasonUnknownDescription = "unknown_description"
-	ReasonNonSelectQuery     = "non_select_query_for_our_tool"
 	ReasonBreak              = "break"
 )
 
@@ -232,8 +230,6 @@ func (g *Gate) DisableClient(tenant, hash, reason string) bool {
 	switch reason {
 	case ReasonUnknownDescription:
 		g.DisabledUnknown.Add(1)
-	case ReasonNonSelectQuery:
-		g.DisabledNonSel.Add(1)
 	default:
 		g.DisabledBreak.Add(1)
 	}

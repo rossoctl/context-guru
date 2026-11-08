@@ -180,6 +180,10 @@ Limits:
 - The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
   every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
   changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.
+  The file carries a proxy version (`cgStateVersion`) around the library snapshot. A file with another version is
+  ignored, because the hash of a body changed between versions. The save syncs the file before the rename, skips the
+  write when nothing changed, and the start removes temp files a crash left. The hash leaves out every `cache_control`
+  mark, nested ones too.
   A file older than one hour is ignored (no cache entry lives longer), and so is a missing or unreadable
   one: the proxy then starts empty, as before. A crash (kill -9) loses up to one minute of state. A
   request that follows a lost state is priced as a first request and carries the estimate flag. The

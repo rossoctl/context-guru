@@ -50,32 +50,69 @@ func accBodies(raw []byte) accountant.Body {
 	return accountant.Body{Start: built.Start, Pos: built.Pos}
 }
 
-// withoutCacheMarks is one element's JSON without any cache_control: the element's own, and the ones on
-// its content blocks. An element with none is returned as it is, byte for byte, so the common case costs
-// no allocation. The result is only hashed. It is never sent anywhere.
+// withoutCacheMarks is one element's JSON without any cache_control: the element's own, the ones on its content
+// blocks, and the ones nested deeper, such as a mark inside a tool_result block's own content array (issue #917).
+// An element with none is returned as it is, byte for byte, so the common case costs no allocation. The result is
+// only hashed. It is never sent anywhere.
 func withoutCacheMarks(raw string) []byte {
 	if !strings.Contains(raw, "cache_control") {
 		return []byte(raw)
 	}
 	out := raw
-	if gjson.Get(out, "cache_control").Exists() {
-		if next, err := sjson.Delete(out, "cache_control"); err == nil {
-			out = next
+	// Each delete removes one mark and the walk starts again, so the paths stay right after the edit. A body has
+	// at most four marks on the wire, so the loop is short.
+	for n := 0; n < 64; n++ {
+		path := findCacheMark(gjson.Parse(out), "")
+		if path == "" {
+			break
 		}
+		next, err := sjson.Delete(out, path)
+		if err != nil {
+			break
+		}
+		out = next
 	}
-	if content := gjson.Get(out, "content"); content.IsArray() {
+	return []byte(out)
+}
+
+// findCacheMark returns the gjson path of the first cache_control key under v, or "" when there is none. It looks
+// at objects and arrays only, and does not look inside a string.
+func findCacheMark(v gjson.Result, prefix string) string {
+	var found string
+	join := func(k string) string {
+		if prefix == "" {
+			return k
+		}
+		return prefix + "." + k
+	}
+	switch {
+	case v.IsObject():
+		v.ForEach(func(k, c gjson.Result) bool {
+			if k.String() == "cache_control" {
+				found = join(strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?").Replace(k.String()))
+				return false
+			}
+			if c.IsObject() || c.IsArray() {
+				ek := strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?", "|", "\\|", "#", "\\#", "@", "\\@").Replace(k.String())
+				if found = findCacheMark(c, join(ek)); found != "" {
+					return false
+				}
+			}
+			return true
+		})
+	case v.IsArray():
 		i := 0
-		content.ForEach(func(_, blk gjson.Result) bool {
-			if blk.Get("cache_control").Exists() {
-				if next, err := sjson.Delete(out, "content."+strconv.Itoa(i)+".cache_control"); err == nil {
-					out = next
+		v.ForEach(func(_, c gjson.Result) bool {
+			if c.IsObject() || c.IsArray() {
+				if found = findCacheMark(c, join(strconv.Itoa(i))); found != "" {
+					return false
 				}
 			}
 			i++
 			return true
 		})
 	}
-	return []byte(out)
+	return found
 }
 
 // accBreakpoints lists the cache_control marks, as positions in the same space as accBodies, one per
