@@ -600,6 +600,21 @@ class SetupTest(TempHome):
         self.assertEqual(zshrc.read_bytes(), b"alias ll='ls -l'\n",
                          "the user's own .zshrc was deleted or changed")
 
+    def test_a_failed_shell_change_keeps_the_old_rc_block(self):
+        # Bash setup, then a zsh re-run that fails after the new block is in. The old block must
+        # stay: after the rollback it is the only route that still sends Bob to the proxy.
+        with FakeProxy() as proxy, \
+             mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}), \
+                 mock.patch.object(PLUGIN.bob_route, "probe", return_value=self.good_probe(proxy.port)), \
+                 mock.patch.object(PLUGIN.bob_hooks, "install", side_effect=OSError("disk full")):
+                code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 1, out)
+        self.assertIn("result=setup_failed", out)
+        self.assertTrue(ROUTE.is_routed(self.rc), "the old .bash_profile block was removed")
+
     def test_a_shell_change_removes_the_bash_profile_setup_had_created(self):
         # Setup created ~/.bash_profile with only our block in it. After a move to zsh, that file
         # is ours and empty again, so it goes, as uninstall would remove it.

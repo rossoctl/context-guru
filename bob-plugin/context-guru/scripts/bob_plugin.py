@@ -650,8 +650,6 @@ def _setup_changes(args, shell, rc_file, advice):
             bob_route.backup_once(rc_file, private_dir(state_dir() / "backup"))
             undo.add("rc")
             bob_route.install(rc_file, port)
-            if old_rc and not same_rc:
-                _remove_old_rc_block(Path(old_rc), bool(existing.get("rc_created")))
         undo.add("hooks")
         bob_hooks.install(bob_settings(), hooks_state(), _hook_groups())
         reset = install_escape_hatch()
@@ -663,6 +661,9 @@ def _setup_changes(args, shell, rc_file, advice):
         record["statusbar"] = installed or existing.get("statusbar") is True
         record["complete"] = True
         write_record(record)
+        # Last, so a failed run leaves the old block in place: Bob stays routed through it.
+        if rc_file is not None and old_rc and not same_rc:
+            _remove_old_rc_block(Path(old_rc), bool(existing.get("rc_created")))
     except (Exception, KeyboardInterrupt) as error:
         ok, failed = undo.run()
         facts(result="setup_failed", detail=str(error) or type(error).__name__,
