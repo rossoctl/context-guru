@@ -936,10 +936,28 @@ class BootstrapTest(Release):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(self.files(), before)
 
-    def test_the_download_folder_is_removed_after_the_run(self):
-        self.pipe("n\n")
+    def test_the_download_folder_is_removed_after_a_no(self):
+        done = self.pipe("n\n")
 
-        self.assertEqual(list(self.root.glob("tmp/cg-bob-install.*")), [])
+        # TMPDIR is self.root, so the folder would be self.root/cg-bob-install.*.
+        self.assertEqual(list(self.root.glob("cg-bob-install.*")), [])
+        self.assertNotIn("unbound variable", done.stderr)
+
+    def test_the_download_folder_is_removed_after_a_full_install(self):
+        done = self.pipe("y\n")
+
+        self.assert_installed(done)
+        self.assertEqual(list(self.root.glob("cg-bob-install.*")), [])
+        self.assertNotIn("unbound variable", done.stderr)
+
+    def test_the_installer_exit_code_comes_through(self):
+        # A failed install (here: Bob is not installed) must still fail the one-command run.
+        shutil.rmtree(self.bob_app)
+
+        done = self.pipe("y\n")
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(list(self.root.glob("cg-bob-install.*")), [])
 
     def test_a_truncated_script_runs_nothing(self):
         # A download cut short must not run half the script: everything sits in one function

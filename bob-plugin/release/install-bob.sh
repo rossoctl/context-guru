@@ -34,7 +34,9 @@ main() {
 
   local work
   work=$(mktemp -d "${TMPDIR:-/tmp}/cg-bob-install.XXXXXX") || stop "cannot make a temp folder."
-  trap 'rm -rf "$work"' EXIT
+  # The path is expanded now: the trap runs after main returns, when the local is gone. mktemp
+  # makes the name, so it holds no quote.
+  trap "rm -rf '$work'" EXIT
 
   printf 'Downloading context-guru for IBM Bob…\n'
   curl -fsSL "$base/$sums" -o "$work/$sums" || stop "cannot download $base/$sums."
@@ -58,8 +60,11 @@ main() {
   found=$(find "$work/unzipped" -mindepth 2 -maxdepth 2 -name "$script" -type f)
   [ -n "$found" ] || stop "the zip has no $script."
 
-  # Not exec: the EXIT trap must still remove the temp folder.
-  /bin/bash "$found" < "$tty"
+  local code=0
+  /bin/bash "$found" < "$tty" || code=$?
+  rm -rf "$work"
+  trap - EXIT
+  return "$code"
 }
 
 main "$@"
