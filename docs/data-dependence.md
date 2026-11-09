@@ -135,13 +135,18 @@ These are the presets in the Claude Code plugin picker.
 
 ### Cache strategies
 
-| Strategy | Off | Metadata only | Everything |
-|---|---|---|---|
-| `none` | ✅ Works | ✅ Works | ✅ Works |
-| `5-min-ping` | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works |
-| `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works |
+| Strategy | Off | Metadata only | Everything | Decided by |
+|---|---|---|---|---|
+| `none` | ✅ Works | ✅ Works | ✅ Works | David Amid, #569 |
+| `auto` (was `5-min-ping`; `5-min-ping` is now an alias) | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works | David Amid, #569 |
+| `1-ping`, `2-ping`, `30-min-ping` (the same ping mechanism as `auto`; they differ only in how many pings and when) | ❌ The same as `auto` | ❌ The same as `auto` | ✅ Works | David Amid, #569 |
+| `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works | David Amid, #569 |
 
-**Why `5-min-ping` needs storage and `1-hour-head` does not:** a ping is a **new** request that
+The named strategies are one table in the proxy (`config/strategy.go`, #980). That change only gives
+the existing strategies one home and a `cache.strategy` key. It does not change what any strategy
+keeps.
+
+**Why `auto` (and the other ping strategies) needs storage and `1-hour-head` does not:** a ping is a **new** request that
 Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
 exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
 that the client sends anyway. The client supplies the bytes, so Context Guru keeps nothing.
@@ -150,7 +155,7 @@ that the client sends anyway. The client supplies the bytes, so Context Guru kee
 runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
 Dispatcher keeps the credential in memory, masked, until the hold ends.
 
-`medium` makes its summary in the idle time that `5-min-ping` keeps warm. Without `5-min-ping`,
+`medium` makes its summary in the idle time that `auto` keeps warm. Without a ping strategy,
 `medium` almost never makes a summary, at any level.
 
 ### Other presets
@@ -231,6 +236,7 @@ One row for each registered component. The test `components/all/datadep_test.go`
 | Wait-cause and lifecycle signals | metadata | ❌ Off (it needs the dashboard) | 🟡 Works, metadata | 🟡 Works, metadata | To tell why the agent paused, it reads the request once. It keeps only counts and ids. Since #857 it also reads the **tool name** of the last tool call, to tell that an agent has finished (`done`). The keep-alive then sends no pings for that thread. A tool name is metadata, and the rule works at every storage level. Since #858 the keep-alive also uses the **wait cause** (from the stop reason, the tool names and the open-task counts), whether the thread id starts with `a:`, the token count of the prefix and the time of day, to pick the ping count, to ignore a strategy's time windows for a wait that is not for a person, and to skip the sweep question during a tool wait. It also keeps one flag per thread: "has a tool call been seen". All of it is metadata, and it works at every storage level. |
 | Costly settings check (`/context-guru:save-more settings`, `GET /api/adapt/settings`) | metadata | ❌ Off (the cost needs the dashboard). The plugin still finds the settings and says "cost not measured yet". | 🟡 Works, metadata | 🟡 Works, metadata | It counts and prices dashboard rows by request shape: model name, tool count, `max_tokens` and the stream flag. One check also uses the upstream status (400) of a Haiku row in the same session. It reads no request text and keeps nothing new. The plugin reads only the named keys of the user's own settings files (the betas setting, the recap setting, `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL`) on the user's machine, and sends none of them to the proxy (#615). |
 | Beep (`beep.sh`, the `beep` plugin option) | none | 🟡 Works, no data | 🟡 Works, no data | 🟡 Works, no data | It plays a sound when Claude finishes or waits for you. It reads no stored data and never reads the hook payload. It sends nothing to the proxy or anywhere else. The level changes nothing. |
+| Bob plugin (`bob-plugin/context-guru`: routing block, hooks, `status`, `doctor`, status bar) | metadata | 🟡 Works, but `status` and `doctor` cannot see Bob traffic, and the status bar shows `—` | 🟡 Works, metadata | 🟡 Works, metadata | It routes Bob with one block in the shell startup file and adds two hooks to Bob's settings. The hooks read only the session id, the event name and the `SessionStart` source. They never read the prompt, and they send nothing for events that carry model text. `status` and `doctor` read only the time of the newest Bob request from the dashboard. The status bar reads the newest Bob session id and its saved-token count, and that session's cache times, prefix size and context window. All of these are counts, times and ids. With the dashboard off, those reads find nothing: `status` and `doctor` cannot see Bob traffic, and the status bar shows `saved —` and `cache —`, never `saved 0`. Everything else still works. The level changes nothing in the plugin. |
 | **Subscription limit headers** (#984, `GET /api/me/limits`) | metadata | ❌ Off (it needs the dashboard). The proxy reads the headers and keeps nothing. | 🟡 Works, metadata | 🟡 Works, metadata | To show how much of the 5-hour limit a session used, and later to learn how the limit counts each token kind, the proxy stores the used share, the reset time and the status word from the provider's response headers on each request row. It also stores one yes or no: did the client send a subscription (OAuth) token. It tests only the token's fixed prefix and never stores the token. These are numbers, short status words and a flag, not content. |
 | Metrics (`/stats`, `/metrics`) | metadata | 🟡 Works, metadata | 🟡 Works, metadata | 🟡 Works, metadata | Totals and rates need only numbers. |
 | Accounts (hosted) | account data | ✅ Works | ✅ Works | ✅ Works | This is the account system: who you are, your settings and your consent flag. It holds no transcripts. |

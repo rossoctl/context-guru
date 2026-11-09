@@ -198,3 +198,6 @@ CLAUDE.local.md
 *.db
 *.db-wal
 *.db-shm
+
+# The Bob release zip, built by the release workflow before GoReleaser (make bob-release BOB_DIST=bob-dist).
+/bob-dist/
