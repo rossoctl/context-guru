@@ -19,7 +19,7 @@ entry in that project's `opencode.json`.
 
 Restart OpenCode after changing the config. On the first startup, the plugin:
 
-1. Reuses `context-guru-proxy` from `PATH`, or downloads the current release and verifies its SHA-256 checksum.
+1. Reuses `context-guru-proxy` from `PATH`, or downloads release **v0.7.1** and verifies its SHA-256 checksum. Set `CONTEXT_GURU_VERSION` to pick another release.
 2. Starts one loopback proxy for the project, using a free port beginning at `8787`.
 3. Routes Anthropic requests to `/anthropic/v1` and OpenAI requests to `/openai/v1`.
 4. Preserves any configured provider gateway host and path prefix as the proxy's upstream, avoiding a duplicate trailing `/v1`.
@@ -49,8 +49,12 @@ credential while you are away. Set other values with the tuple form:
 ```
 
 - Presets: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`.
-- Cache strategies: `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`.
-- The old name `5-min-ping` still works. It means `auto`.
+- Cache strategies: the proxy owns the list. The plugin reads it with `context-guru-proxy strategies`. It keeps no copy.
+- The plugin offers only the strategies that fit a provider it routes. An OpenAI-only setup does not see `auto`.
+- The default is the proxy default, `auto`. If `auto` does not fit the routed providers, the plugin runs `none` and logs why.
+- The old name `5-min-ping` still works. The proxy reads it as `auto`.
+- The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
+- **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy.
 - `none` sends no keep-alive requests.
 
 ## Change the preset or strategy in a session

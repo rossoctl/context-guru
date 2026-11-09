@@ -116,7 +116,7 @@ test("cancelling the first confirm saves nothing, and cancelling the restart sav
 
     select.props.onSelect({ value: "2-ping" })
     const first = shown.at(-1)
-    assert.match(first.props.message, /spend your own credential/)
+    assert.match(first.props.message, /spends your own credential/)
     first.props.onCancel()
     assert.equal(shown.at(-1).kind, "cleared")
     await settle()
@@ -124,7 +124,7 @@ test("cancelling the first confirm saves nothing, and cancelling the restart sav
 
     select.props.onSelect({ value: "none" })
     const second = shown.at(-1)
-    assert.ok(!second.props.message.includes("spend your own credential"))
+    assert.ok(!second.props.message.includes("spends your own credential"))
     await second.props.onConfirm()
     shown.at(-1).props.onCancel()
     await settle()

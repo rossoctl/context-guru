@@ -7,39 +7,57 @@ import { createServer } from "node:net"
 
 const REPOSITORY = "rossoctl/context-guru"
 const DEFAULT_PRESET = "off"
-// These names and numbers come from the Claude Code plugin, which owns them:
-// context-guru-plugin/scripts/settings.py (STRATEGIES, STRATEGY_ALIASES, DEFAULT_STRATEGY) and
-// context-guru-plugin/skills/preset-picker. Change them there first, then here.
+// The picker ladder is a plugin choice. The proxy lists every preset it registers, not this ladder.
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
-const DEFAULT_CACHE_STRATEGY = "auto"
-const STRATEGY_ALIASES = { "5-min-ping": "auto" }
-const KEEPALIVE = { keepalive: true, keepalive_idle_seconds: 240, keepalive_max_usd_per_ping: 0.5, keepalive_min_prefix_tokens: 80000 }
-// What the proxy does for a 1-hour cache when a "_1h" key is absent. settings.py leaves a key out
-// when it equals the default, so an older proxy binary (strict YAML) still loads the file.
-const ONE_HOUR_DEFAULTS = { keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 }
-const STRATEGIES = {
-  none: {},
-  auto: { ...KEEPALIVE, keepalive_max_pings: 2, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 },
-  "1-ping": { ...KEEPALIVE, keepalive_max_pings: 1, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 },
-  "2-ping": { ...KEEPALIVE, keepalive_max_pings: 2, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 2 },
-  "1-hour-head": { head_ttl_1h: true, head_ttl_min_tokens: 50000 },
-}
-const CACHE_STRATEGIES = Object.keys(STRATEGIES)
+// The plugin downloads this release unless CONTEXT_GURU_VERSION says otherwise. `strategies` exists
+// from v0.7.1. An older binary cannot give the plugin its strategy table, so there is no fallback.
+const PINNED_VERSION = "v0.7.1"
 
-export function canonicalStrategy(name) {
-  const canonical = STRATEGY_ALIASES[name] ?? name
-  return Object.hasOwn(STRATEGIES, canonical) ? canonical : undefined
+// The strategy table has one owner: the proxy. `context-guru-proxy strategies` prints it as JSON.
+// The plugin keeps no copy. It runs the command with a short time limit. A binary that does not know
+// the word would start serving, so the command gets a loopback port 0 and is killed at the limit.
+export function loadStrategyTable(binaryPath) {
+  const update = `update the proxy to ${PINNED_VERSION} or later (/context-guru-update, or remove the binary so the plugin downloads ${PINNED_VERSION})`
+  const run = spawnSync(binaryPath, ["strategies"], {
+    encoding: "utf8",
+    timeout: 5000,
+    killSignal: "SIGKILL",
+    env: { ...process.env, LISTEN_ADDR: "127.0.0.1:0", CONFIG: "" },
+  })
+  let table
+  try { table = JSON.parse(run.stdout) } catch {}
+  const valid = table && typeof table.default === "string" && Array.isArray(table.strategies) && table.strategies.length &&
+    table.strategies.every((row) => row && typeof row.name === "string" && Array.isArray(row.providers))
+  if (run.status !== 0 || !valid) throw new Error(`${binaryPath} cannot list cache strategies; ${update}`)
+  return { default: table.default, aliases: table.aliases ?? {}, strategies: table.strategies, presets: table.presets ?? [] }
 }
 
-// The "cache:" block for a strategy, or "" for none (none is the absence of a config file).
-export function cacheFragment(strategy) {
-  const entries = Object.entries(STRATEGIES[strategy] ?? {}).filter(([key, value]) => ONE_HOUR_DEFAULTS[key] !== value)
-  return entries.length ? `cache:\n${entries.map(([key, value]) => `  ${key}: ${JSON.stringify(value)}`).join("\n")}\n` : ""
+// Strategies that fit a provider this plugin routes. "any" fits all.
+export function offeredStrategies(table, dialects) {
+  return table.strategies.filter((row) => row.providers.includes("any") || row.providers.some((provider) => dialects.includes(provider)))
+}
+
+// The strategy to run: the requested name (alias read as its new name), else the proxy default.
+// A name that is unknown, or not offered for the routed providers, gives "none" and a reason.
+export function resolveStrategy(table, requested, dialects) {
+  const offered = new Set(offeredStrategies(table, dialects).map((row) => row.name))
+  const wanted = requested ? (table.aliases[requested] ?? requested) : table.default
+  if (offered.has(wanted)) return { name: wanted }
+  return { name: "none", reason: `cache strategy "${wanted}" is not offered for ${dialects.join(" + ") || "these providers"}; using none` }
 }
 
 export function renderProxyConfig(preset, strategy) {
-  const fragment = cacheFragment(strategy)
-  return fragment ? `# context-guru: strategy=${strategy} written by opencode-context-guru\npreset: ${preset}\n${fragment}` : ""
+  return `# context-guru: written by opencode-context-guru; the proxy fills the cache keys of the strategy\npreset: ${preset}\ncache:\n  strategy: ${strategy}\n`
+}
+
+// Files the picker script reads. Tab-separated, so no JSON parser is needed in sh.
+function strategyFiles(table, dialects) {
+  const clean = (text) => String(text).replace(/[\t\r\n]+/g, " ")
+  return {
+    list: table.strategies.length ? offeredStrategies(table, dialects).map((row) => [row.name, row.spends ? "yes" : "no", clean(row.desc)].join("\t")).join("\n") + "\n" : "",
+    aliases: Object.entries(table.aliases).map(([from, to]) => `${from}\t${to}`).join("\n") + "\n",
+    default: `${table.default}\n`,
+  }
 }
 
 export function stateDirectory(directory) {
@@ -87,14 +105,7 @@ function releasesBase() {
 }
 
 async function downloadBinary(state) {
-  const requested = process.env.CONTEXT_GURU_VERSION
-  let version = requested
-  if (!version) {
-    const response = await fetch(`${releasesBase()}/latest`)
-    if (!response.ok) throw new Error(`release lookup failed: HTTP ${response.status}`)
-    version = new URL(response.url).pathname.split("/").filter(Boolean).pop()
-  }
-  if (!version || version === "latest") throw new Error("could not resolve the latest context-guru release")
+  let version = process.env.CONTEXT_GURU_VERSION || PINNED_VERSION
   if (!version.startsWith("v")) version = `v${version}`
 
   const { platform, architecture } = releasePlatform()
@@ -464,20 +475,8 @@ const PRESET_HELP = {
   xhigh: "high plus a deep-adjudication sweep over turns whose cache has already gone cold, the deepest cut",
   ultrahigh: "EXPERIMENTAL. xhigh plus tool deferral: tools your last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in",
 }
-const STRATEGY_HELP = {
-  none: "no keep-alive pings, nothing extra happens (free)",
-  auto: "pings the cache so it does not go cold while you are away. A 5-minute cache gets up to 2 pings (first at 240 s). A 1-hour cache gets 1 ping at 59 minutes. Spends a little of your own credential between turns",
-  "1-ping": "at most 1 ping per idle span, on either cache lifetime. Spends your credential, fewer pings",
-  "2-ping": "at most 2 pings per idle span, on either cache lifetime (a 1-hour cache: 59 minutes, then 59 more). Spends your credential, more pings",
-  "1-hour-head": "asks the provider for a longer-lived cache instead of pinging, only on prefixes of 50k tokens or more (free, but on today's models it usually buys nothing)",
-}
-
 function pickerScript(state, kind) {
   const isPreset = kind === "preset"
-  const names = isPreset ? PRESETS : CACHE_STRATEGIES
-  const help = isPreset ? PRESET_HELP : STRATEGY_HELP
-  const configs = CACHE_STRATEGIES.map((name) => `  ${shQuote(name)}) cat <<'CGEOF'\n${proxyConfigText("__PRESET__", name)}CGEOF\n  ;;`).join("\n")
-  const aliases = Object.entries(STRATEGY_ALIASES).map(([from, to]) => `${shQuote(from)}) name=${shQuote(to)} ;;`).join(" ")
   return `#!/bin/sh
 # context-guru: show and switch the ${isPreset ? "preset" : "cache strategy"}.
 #   (no args)          show what runs now and the choices
@@ -486,12 +485,19 @@ function pickerScript(state, kind) {
 set -u
 STATE=${shQuote(state)}
 KIND=${kind}
-VALID=${shQuote(names.join(" "))}
-DEFAULT=${shQuote(isPreset ? DEFAULT_PRESET : DEFAULT_CACHE_STRATEGY)}
+if [ "$KIND" = preset ]; then
+  VALID=${shQuote(PRESETS.join(" "))}
+  DEFAULT=${shQuote(DEFAULT_PRESET)}
+else
+  # The proxy owns the table. The plugin wrote the offered rows when it started the proxy.
+  [ -f "$STATE/strategies.tsv" ] || { printf '%s\\n' "result=error" "reason=no-strategy-table" "note=restart OpenCode so the plugin reads the table from the proxy"; exit 1; }
+  VALID=$(cut -f1 "$STATE/strategies.tsv" | tr '\\n' ' ')
+  DEFAULT=$(head -1 "$STATE/strategies.default" 2>/dev/null)
+fi
 [ -f "$STATE/install.env" ] && . "$STATE/install.env"
 saved_value() { sed -n "s/^$1=//p" "$STATE/settings.env" 2>/dev/null | head -1; }
 cur_preset=$(saved_value preset); [ -n "$cur_preset" ] || cur_preset=\${preset:-${DEFAULT_PRESET}}
-cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=\${strategy:-${DEFAULT_CACHE_STRATEGY}}
+cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=\${strategy:-$DEFAULT}
 running_preset=
 if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ]; then
   running_preset=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/stats" 2>/dev/null | tr ',' '\\n' | sed -n 's/.*"preset": *"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -1)
@@ -506,20 +512,27 @@ show() {
     printf '%s\\n' "running_note=the proxy reads the strategy at start; the saved one runs after the last restart"
   fi
   printf '%s\\n' "default=$DEFAULT"
-  printf '%s\\n' ${names.map((name) => shQuote(`choice ${name}: ${help[name]}`)).join(" ")}
+  if [ "$KIND" = preset ]; then
+${PRESETS.map((name) => `    printf '%s\\n' ${shQuote(`choice ${name}: ${PRESET_HELP[name]}`)}`).join("\n")}
+  else
+    while IFS="$(printf '\\t')" read -r n spends desc; do printf '%s\\n' "choice $n: $desc"; done < "$STATE/strategies.tsv"
+    spending=$(awk -F '\\t' '$2 == "yes" {printf "%s%s", sep, $1; sep=","}' "$STATE/strategies.tsv")
+    printf '%s\\n' "spends=$spending"
+  fi
   printf '%s\\n' "set=sh $STATE/context-guru-${kind} set NAME"
 }
 valid() { for v in $VALID; do [ "$v" = "$1" ] && return 0; done; return 1; }
 render() {
-  case "$1" in
-${configs}
-  esac | sed "s/__PRESET__/$2/"
+  printf '%s\\n' "# context-guru: written by opencode-context-guru; the proxy fills the cache keys of the strategy" "preset: $2" "cache:" "  strategy: $1"
 }
 case "\${1:-}" in
   "") show ;;
   set)
     name=\${2:-}
-    case "$name" in ${aliases} esac
+    if [ "$KIND" = strategy ] && [ -f "$STATE/strategies.aliases" ]; then
+      mapped=$(awk -F '\\t' -v n="$name" '$1 == n {print $2; exit}' "$STATE/strategies.aliases")
+      [ -n "$mapped" ] && name=$mapped
+    fi
     if ! valid "$name"; then printf '%s\\n' "result=error" "reason=unknown_${kind}" "known=$VALID"; exit 2; fi
     restart=0; [ "\${3:-}" = "--restart" ] && restart=1
     mkdir -p "$STATE"
@@ -527,7 +540,7 @@ case "\${1:-}" in
     umask 077
     printf 'preset=%s\\nstrategy=%s\\n' "$new_preset" "$new_strategy" > "$STATE/settings.env.new" && mv "$STATE/settings.env.new" "$STATE/settings.env"
     printf '%s\\n' "result=saved" "$KIND=$name"
-    if [ "$KIND" = strategy ] && [ "$name" != none ] && [ "$name" != 1-hour-head ]; then printf '%s\\n' "cost=this spends a little of your own credential on pings while nobody is at the keyboard, on every session routed through this proxy"; fi
+    if [ "$KIND" = strategy ] && [ "$(awk -F '\\t' -v n="$name" '$1 == n {print $2; exit}' "$STATE/strategies.tsv")" = yes ]; then printf '%s\\n' "cost=this spends a little of your own credential on pings while nobody is at the keyboard, on every session routed through this proxy"; fi
     if [ "$restart" -ne 1 ]; then
       printf '%s\\n' "restart_needed=true" "note=the running proxy keeps its old setting until it restarts; a restart costs one cache rewrite in every open session of this project; it also happens at the next OpenCode start"
       exit 0
@@ -622,7 +635,7 @@ const COMMAND_SPECS = [
     description: "Show the context-guru cache strategy and switch it",
     script: "context-guru-strategy",
     intro: "Show and switch this project's context-guru cache strategy.",
-    outro: (path) => "That block ran just now and only SHOWED the cache strategy. Tell the user which strategy is saved. List the choices, one line each, from the block. Before switching TO auto, 1-ping or 2-ping, say once in one line that pings spend the user's own credential while nobody is at the keyboard, on every session routed through this proxy. Be honest about 1-hour-head: on Sonnet and Opus the 1-hour tier is usually silently downgraded, so expect no benefit, and it only acts on prefixes of 50k tokens or more. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the strategy is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, it applies at the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a strategy name.",
+    outro: (path) => "That block ran just now and only SHOWED the cache strategy. Tell the user which strategy is saved. List the choices, one line each, from the block. Before switching TO a strategy whose line says it spends the caller's credential (the spends= line names them), say once in one line that it spends the user's own credential while nobody is at the keyboard, on every session routed through this proxy. Be honest about 1-hour-head: on Sonnet and Opus the 1-hour tier is usually silently downgraded, so expect no benefit, and it only acts on prefixes of 50k tokens or more. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the strategy is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, it applies at the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a strategy name.",
   },
 ]
 
@@ -830,23 +843,30 @@ function savedSettings(state) {
   return saved
 }
 
+// The names the user asked for. The proxy table decides later whether a strategy name is valid.
 export function effectiveSettings(state, options = {}) {
   const saved = savedSettings(state)
-  const configuredStrategy = options.cacheStrategy ?? options.cache_strategy
   const preset = [saved.preset, options.preset].find((name) => PRESETS.includes(name)) ?? DEFAULT_PRESET
-  const cacheStrategy = [saved.strategy, configuredStrategy].map((name) => canonicalStrategy(name)).find(Boolean) ?? DEFAULT_CACHE_STRATEGY
-  return { preset, cacheStrategy }
+  const requestedStrategy = saved.strategy ?? options.cacheStrategy ?? options.cache_strategy
+  return { preset, requestedStrategy }
 }
 
-function proxyConfigText(preset, cacheStrategy) {
-  return renderProxyConfig(preset, cacheStrategy) || `# context-guru: strategy=none written by opencode-context-guru\npreset: ${preset}\n`
-}
-
-async function startProxy({ directory, preset, cacheStrategy, routes, client }) {
+async function startProxy({ directory, preset, requestedStrategy, routes, client }) {
   const state = stateDirectory(directory)
   mkdirSync(state, { recursive: true, mode: 0o700 })
   return withLock(dirname(state), async () => {
-    const configText = proxyConfigText(preset, cacheStrategy)
+    let binary = findBinary(state)
+    if (!binary) binary = await downloadBinary(state)
+    const dialects = [...new Set(routes.map((route) => route.dialect))]
+    const table = loadStrategyTable(binary.path)
+    const resolved = resolveStrategy(table, requestedStrategy, dialects)
+    if (resolved.reason) await safeLog(client, "warn", resolved.reason)
+    const cacheStrategy = resolved.name
+    const files = strategyFiles(table, dialects)
+    writeAtomic(join(state, "strategies.tsv"), files.list)
+    writeAtomic(join(state, "strategies.aliases"), files.aliases)
+    writeAtomic(join(state, "strategies.default"), files.default)
+    const configText = renderProxyConfig(preset, cacheStrategy)
     const fingerprint = JSON.stringify({ routes: routes.map((route) => [route.dialect, route.upstream]) })
     const recordPath = join(state, "install.json")
     const existing = readJSON(recordPath)
@@ -857,8 +877,6 @@ async function startProxy({ directory, preset, cacheStrategy, routes, client }) 
     // Another setting is wanted: stop this project's old proxy and reuse its port.
     if (running) await stopRecordedProxy(state, existing.port)
 
-    let binary = findBinary(state)
-    if (!binary) binary = await downloadBinary(state)
     const port = await freePort(existing?.port || Number(process.env.CONTEXT_GURU_PORT_START) || 8787)
     const configPath = join(state, "proxy.yaml")
     writeAtomic(configPath, configText, 0o600)
@@ -937,7 +955,7 @@ async function recoverProxy(state, record, client) {
 }
 
 async function ContextGuruPlugin({ directory, client }, options = {}) {
-  const { preset, cacheStrategy } = effectiveSettings(stateDirectory(directory), options)
+  const { preset, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
   let routedIds = new Set()
   return {
     config: async (config) => {
@@ -959,7 +977,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
           await safeLog(client, "debug", "no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
           return
         }
-        const proxy = await startProxy({ directory, preset, cacheStrategy, routes, client })
+        const proxy = await startProxy({ directory, preset, requestedStrategy, routes, client })
         routeProviders(config, proxy.port, own)
         routedIds = new Set(routes.map((route) => route.id))
       } catch (error) {
@@ -990,7 +1008,7 @@ async function setupV2(ctx) {
   if (!directory) throw new Error("no project directory in the plugin context")
   const options = ctx.options ?? {}
   const state = stateDirectory(directory)
-  const { preset, cacheStrategy } = effectiveSettings(state, options)
+  const { preset, requestedStrategy } = effectiveSettings(state, options)
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
@@ -1034,7 +1052,7 @@ async function setupV2(ctx) {
         if (upstreams.size > 1) throw new Error(`multiple ${dialect} upstreams are configured; route them through one gateway first`)
       }
       if (!routes.length) return
-      const proxy = await startProxy({ directory, preset, cacheStrategy, routes, client: log })
+      const proxy = await startProxy({ directory, preset, requestedStrategy, routes, client: log })
       for (const target of targets) {
         editor.update(target.id, (provider) => {
           provider.settings = { ...provider.settings, baseURL: `http://127.0.0.1:${proxy.port}/${target.dialect}/v1` }

@@ -36,6 +36,8 @@ export async function pickAndSwitch(api, directory, kind) {
     return
   }
   const current = facts.saved
+  // The proxy table says which strategies spend the caller's credential. The script prints them.
+  const spending = new Set((facts.spends ?? "").split(",").filter(Boolean))
   const options = choices.map((choice) => ({
     title: choice.name === current ? `${choice.name} (current)` : choice.name,
     value: choice.name,
@@ -52,15 +54,14 @@ export async function pickAndSwitch(api, directory, kind) {
         toast(api, "info", `${option.value} is already saved.`)
         return
       }
-      confirmSwitch(api, state, kind, option.value)
+      confirmSwitch(api, state, kind, option.value, spending.has(option.value))
     },
   }))
 }
 
-function confirmSwitch(api, state, kind, name) {
+function confirmSwitch(api, state, kind, name, spends) {
   const spec = KINDS[kind]
-  const spends = kind === "strategy" && ["auto", "1-ping", "2-ping"].includes(name)
-  const message = `Save ${spec.what} "${name}" for this project?` + (spends ? " Pings spend your own credential while nobody is at the keyboard, on every session routed through this proxy." : "")
+  const message = `Save ${spec.what} "${name}" for this project?` + (spends ? " This strategy spends your own credential while nobody is at the keyboard, on every session routed through this proxy." : "")
   api.ui.dialog.replace(() => api.ui.DialogConfirm({
     title: `Switch ${spec.what}?`,
     message,

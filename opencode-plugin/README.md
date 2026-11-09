@@ -30,7 +30,7 @@ On OpenCode 2 the config key is `plugins` (plural); the same local path works:
 ```
 
 For a project-only install, put the same local path in the project's `opencode.json` instead. The
-first startup downloads the release binary when `context-guru-proxy` is not already on `PATH`,
+first startup downloads release v0.7.1 when `context-guru-proxy` is not already on `PATH`,
 verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.
@@ -51,7 +51,11 @@ On OpenCode 2, options use the entry-object form:
 ```
 
 Presets: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`.
-Cache strategies: `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`. The old name `5-min-ping` still works. It means `auto`.
+Cache strategies: the proxy owns the list. The plugin reads it with `context-guru-proxy strategies` and keeps no copy.
+The plugin offers only the strategies that fit a provider it routes. The default is the proxy default, `auto`.
+The old name `5-min-ping` still works. The proxy reads it as `auto`.
+The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
+**The proxy must be v0.7.1 or later.** An older binary cannot list strategies, so the plugin does not start it and logs an error.
 Pings spend your own credential while you are away. `none` sends no pings.
 
 A choice saved by `/context-guru-preset` or `/context-guru-strategy` wins over these options.
