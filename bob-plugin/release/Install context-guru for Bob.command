@@ -183,7 +183,13 @@ rollback() {
     say "Something failed. Undoing the install…"
   fi
   if /bin/bash "$UNINSTALLER" --yes > "$PLAN" 2>&1; then
-    say "Undone. Your files are as they were before."
+    if [ "$REINSTALL" = 1 ]; then
+      # The old install was removed before this one started, so there is nothing older to restore.
+      say "Undone. The old install was removed first, so context-guru is not installed now."
+      say "Bob talks to IBM directly. Run this file again to install it."
+    else
+      say "Undone. Your files are as they were before."
+    fi
     log "rollback=ok"
   else
     sed 's/^/  /' "$PLAN"

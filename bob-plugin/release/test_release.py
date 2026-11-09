@@ -722,6 +722,18 @@ class UninstallTest(Release):
 
         self.assertEqual(history.read_bytes(), b"history")
 
+    def test_a_failed_reinstall_says_the_old_install_is_gone(self):
+        # The old install is removed before the new one starts. A rollback then undoes only the new
+        # one, so "as they were before" would be false.
+        self.assert_installed(self.install("y\n"))
+        self.make_bundle(arm64=fake_proxy("arm64", dies=True))
+
+        done = self.install("r\ny\n")
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn("as they were before", done.stdout)
+        self.assertIn("The old install was removed", done.stdout)
+
     def test_failed_install_keeps_a_state_folder_that_was_there_before(self):
         self.state().mkdir(parents=True)
         old = self.state() / "dashboard-8891.db"
