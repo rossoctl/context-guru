@@ -103,15 +103,18 @@ models:
   # touch is the before/after RATIO, where a uniform rate error cancels: "68% of the tokens
   # removed" is exact whatever the rate is.
   #
+  # Bob bills a 1-hour cache write at the input rate (measured 2026-11-04), so each tier sets
+  # `cache_write_1h_frac: 1.0`.
+  #
   # Enumerated, NOT `premium*` / `standard*` / `fast*`. These are ordinary English words, and
   # as family prefixes they claimed every id that merely began with one — `standard-diffusion-xl`
   # would have been priced as a Bob tier, and priced CONFIDENTLY, so the public map was never
   # consulted for it. Add a variant here if Bob starts sending one.
-  - {match: "premium",      in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
-  - {match: "premium-ide",  in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
-  - {match: "standard",     in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
-  - {match: "standard-ide", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
-  - {match: "fast",         in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
-  - {match: "fast-ide",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
+  - {match: "premium",      in: 3.00, out: 15.00, cache_write_1h_frac: 1.0, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "premium-ide",  in: 3.00, out: 15.00, cache_write_1h_frac: 1.0, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "standard",     in: 0.76, out: 3.80, cache_write_1h_frac: 1.0, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "standard-ide", in: 0.76, out: 3.80, cache_write_1h_frac: 1.0, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "fast",         in: 0.15, out: 0.60, cache_write_1h_frac: 1.0, note: "estimate: gpt-oss-120b class"}
+  - {match: "fast-ide",     in: 0.15, out: 0.60, cache_write_1h_frac: 1.0, note: "estimate: gpt-oss-120b class"}
   # Bob's own auxiliary calls (title generation, classification) name a real model.
   - {match: "openai/gpt-oss-20b", in: 0.10, out: 0.40, note: "estimate: gpt-oss class"}

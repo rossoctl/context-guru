@@ -99,16 +99,27 @@ func TestClaudeEntryWithoutTheKeyKeepsTheTwoXRate(t *testing.T) {
 	}
 }
 
-// No row of the shipped list sets the key, so every row keeps the 2.0x default.
-func TestShippedPriceListSetsNoCacheWrite1hFrac(t *testing.T) {
+// The shipped price list sets the 1-hour rate on the 6 Bob tiers only. Bob bills a 1-hour write
+// at the input rate; every other entry keeps the 2.0x default.
+func TestShippedPriceListSetsTheOneHourRateOnTheBobTiersOnly(t *testing.T) {
 	tb, err := LoadTable("../../deploy/service/prices.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
+	bob := map[string]bool{"premium": true, "premium-ide": true, "standard": true,
+		"standard-ide": true, "fast": true, "fast-ide": true}
+	seen := 0
 	for _, e := range tb.entries {
-		if e.price.Write1hFrac != 0 {
-			t.Errorf("%s: Write1hFrac = %v, want 0", e.match, e.price.Write1hFrac)
+		want := 0.0
+		if bob[e.match] {
+			want, seen = 1.0, seen+1
 		}
+		if e.price.Write1hFrac != want {
+			t.Errorf("%s: Write1hFrac = %v, want %v", e.match, e.price.Write1hFrac, want)
+		}
+	}
+	if seen != len(bob) {
+		t.Fatalf("found %d of the %d Bob tiers", seen, len(bob))
 	}
 }
 
