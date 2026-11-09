@@ -586,6 +586,19 @@ def setup(args):
         return _busy()
 
 
+def _remove_old_rc_block(old_rc, created):
+    """After a change of shell, remove our block from the startup file the last setup used.
+
+    Run only once the new block is in place, so Bob is routed throughout. Only an exact block of
+    ours is removed (bob_route.remove); a block the user edited is left, and said so. A failure here
+    does not fail setup: the new route works, and uninstall still names the old file in old_rc."""
+    try:
+        result = bob_route.remove(old_rc, created=created)
+        facts(old_rc_file=old_rc, old_rc_block=result)
+    except (bob_route.RouteRefused, OSError) as error:
+        facts(old_rc_file=old_rc, old_rc_block="left_alone", old_rc_detail=str(error))
+
+
 def _setup_changes(args, shell, rc_file, advice):
     """The part of setup that changes files. Runs under the state lock."""
     skipped = []
@@ -602,7 +615,11 @@ def _setup_changes(args, shell, rc_file, advice):
 
     existing = read_record()
     port = record_port(existing) or first_free_port()
-    rc_created = bool(existing.get("rc_created")) or (
+    old_rc = existing.get("rc_file")
+    same_rc = old_rc is not None and rc_file is not None and str(rc_file) == old_rc
+    # rc_created is about one file. Keep the old value only for the same file: after a change of
+    # shell, the new file is a different file, which the user may own.
+    rc_created = (bool(existing.get("rc_created")) and same_rc) or (
         rc_file is not None and not os.path.lexists(rc_file))
     # What was already in place before this run. A failed re-run must not undo it.
     had = {"service": plist_is_ours() and healthy(port),
@@ -633,6 +650,8 @@ def _setup_changes(args, shell, rc_file, advice):
             bob_route.backup_once(rc_file, private_dir(state_dir() / "backup"))
             undo.add("rc")
             bob_route.install(rc_file, port)
+            if old_rc and not same_rc:
+                _remove_old_rc_block(Path(old_rc), bool(existing.get("rc_created")))
         undo.add("hooks")
         bob_hooks.install(bob_settings(), hooks_state(), _hook_groups())
         reset = install_escape_hatch()

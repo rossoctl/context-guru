@@ -572,6 +572,56 @@ class SetupTest(TempHome):
         self.assertEqual(self.tree(), before)
         self.assertEqual(self.launchctl_calls(), [])
 
+    def test_a_shell_change_between_setups_leaves_no_block_and_keeps_the_users_file(self):
+        # Setup under bash created ~/.bash_profile. The user then switched to zsh (macOS asks for
+        # it) and ran setup again; their own ~/.zshrc was already there. Uninstall must remove the
+        # block from both files, and must not delete the user's .zshrc.
+        zshrc = self.home / ".zshrc"
+        self.assertFalse(self.rc.exists())
+        with FakeProxy() as proxy, \
+             mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+            self.assertTrue(ROUTE.is_routed(self.rc))
+            zshrc.write_bytes(b"alias ll='ls -l'\n")
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+                self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+                code, out, _ = self.run_main("uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=removed", out)
+        self.assertFalse(self.rc.exists() and ROUTE.is_routed(self.rc),
+                         "the old .bash_profile still routes Bob after uninstall")
+        self.assertEqual(zshrc.read_bytes(), b"alias ll='ls -l'\n",
+                         "the user's own .zshrc was deleted or changed")
+
+    def test_a_shell_change_removes_the_bash_profile_setup_had_created(self):
+        # Setup created ~/.bash_profile with only our block in it. After a move to zsh, that file
+        # is ours and empty again, so it goes, as uninstall would remove it.
+        with FakeProxy() as proxy, \
+             mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            self.run_main("setup", "--i-consent-to-traffic-interception")
+            self.assertTrue(self.rc.exists())
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+                code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 0, out)
+        self.assertIn("old_rc_block=removed", out)
+        self.assertFalse(self.rc.exists())
+        self.assertTrue(ROUTE.is_routed(self.home / ".zshrc"))
+
+    def test_a_shell_change_leaves_an_edited_old_block_and_says_so(self):
+        with FakeProxy() as proxy, \
+             mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            self.run_main("setup", "--i-consent-to-traffic-interception")
+            self.rc.write_bytes(self.rc.read_bytes().replace(b"fi\n", b"fi\n# my edit\n"))
+            edited = self.rc.read_bytes()
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+                code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 0, out)
+        self.assertIn("old_rc_block=left_alone", out)
+        self.assertEqual(self.rc.read_bytes(), edited)
+
     def test_setup_starts_the_service_then_routes_and_verifies(self):
         self.rc.write_bytes(b"alias g=git\n")
         with FakeProxy() as proxy, \
