@@ -139,6 +139,9 @@ type capture struct {
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
+	// accPreDefer is the body tool deferral read, set only on a request it changed (#908). It splits
+	// the envelope diff in two, so deferral's edits to `tools` are reported under its own operator.
+	accPreDefer []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
 	accThread string
 	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a

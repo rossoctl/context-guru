@@ -196,6 +196,10 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
+// DeferComponent is the row of tool deferral's edits. Its dollars come from the deferral ledger, not
+// from the accountant (see accOverride).
+const DeferComponent = "tooldefer"
+
 // KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
 // the ended-change break, neither of which is a pipeline component.
 const KindEnvelope = "envelope"
@@ -288,6 +292,15 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		}
 	}
 	fig := e.AccountantFigure(p)
+	// Tool deferral is priced by its own ledger (tooldefer.Price: the definitions it kept out, less the
+	// names list and every search), which Overview adds as a lever of its own (DeferNetUSD, #908). The
+	// library sees deferral only as added bytes, a cost, and that cost is already inside the ledger's
+	// net: booking it here too would count it twice and turn the lever negative. The row stays, at 0.
+	if v, ok := fig.ByComponent[DeferComponent]; ok {
+		fig.DeltaUSD -= v
+		fig.ByComponent[DeferComponent] = 0
+		fig.ByComponentFirst[DeferComponent], fig.ByComponentReplay[DeferComponent] = 0, 0
+	}
 	// penalty_unknown is not a missing price: the library priced every operation and could not
 	// rule out a break, because the thread has no history or a setting has no position. The design
 	// says to show such a figure and mark it estimated (accountant design §6.4), so it does not gate.

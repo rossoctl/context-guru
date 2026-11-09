@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -53,10 +54,32 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// The envelope changes report no operation of their own: envelopeOps finds them from the two
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
-	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
+	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(forwarded)...)
 	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
 	c.accPingWindow = facts.PingWindow
 	c.savings.end(c.accReq, t, forwarded, ops, facts)
+}
+
+// envelopeOpsFor is envelopeOps with tool deferral's own edits to `tools` attributed to the tooldefer
+// operator (#908). Deferral runs last, on the pipeline's final body, so the client-to-forwarded diff is
+// taken in two steps: client to the body deferral read (the other operators), then that body to the
+// forwarded one (deferral: defer_loading marks, the search tool). Without the split, deferral's bytes
+// land on toolschema, and the accountant's cost for them is booked on top of the deferral ledger's.
+func (c *capture) envelopeOpsFor(forwarded []byte) []accountant.Operation {
+	pre := c.accPreDefer
+	if pre == nil {
+		return envelopeOps(c.accClient, forwarded)
+	}
+	ops := envelopeOps(c.accClient, pre)
+	for _, o := range envelopeOps(pre, forwarded) {
+		switch o.Operator {
+		case "context-guru.toolschema", "context-guru.toolfilter":
+			from := "cg:" + strings.TrimPrefix(o.Operator, "context-guru.") + ":"
+			o.Operator, o.ChangeID = "context-guru.tooldefer", "cg:tooldefer:"+strings.TrimPrefix(o.ChangeID, from)
+		}
+		ops = append(ops, o)
+	}
+	return ops
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive

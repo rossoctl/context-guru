@@ -519,3 +519,36 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 		})
 	}
 }
+
+// #908: the accountant sees tool deferral only as added bytes, a cost. The deferral ledger prices the
+// deferral (gross less the names list and the searches), and Overview adds that ledger as its own
+// lever. The library's figure for the tooldefer row is held out, so the cost is not booked twice.
+func TestPriceMode_DeferralFigureIsHeldOutForTheLedger(t *testing.T) {
+	e := switchEvent()
+	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
+		{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
+		{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Caused: accountant.TierTokens{CacheRead: 5000}},
+	}})
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	var sum float64
+	var found bool
+	for _, c := range e.Components {
+		sum += c.SavedUSD
+		if c.Component == "tooldefer" {
+			found = true
+			if c.SavedUSD != 0 {
+				t.Errorf("tooldefer row books %v, want 0", c.SavedUSD)
+			}
+		}
+	}
+	if !found {
+		t.Error("no tooldefer row")
+	}
+	want := 1000 * 0.3e-6
+	if !accNear(e.BaselineCostUSD-e.CostUSD, want) || !accNear(sum, want) {
+		t.Errorf("baseline delta %v, rows %v, want %v", e.BaselineCostUSD-e.CostUSD, sum, want)
+	}
+}
