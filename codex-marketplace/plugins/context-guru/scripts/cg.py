@@ -267,10 +267,19 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
         if isinstance(stats, dict) and isinstance(stats.get("manual_pings"), dict):
             doc["manual_pings"] = stats["manual_pings"]
         if window_start_ms:
+            # The 5-hour limit is the account's, so the window's spend is every session's. The saving is this
+            # session's alone: the band says what THIS session gave back. The mod turns both into a share of the limit.
             win, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}", f"win-{window_start_ms // 1000}", sl.WINDOW_TTL_SECONDS)
-            saved = sl._saved_tokens_text(win)
+            mine, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}&session={sid}", f"win-{window_start_ms // 1000}-{sid}", sl.WINDOW_TTL_SECONDS)
+            saved = sl._saved_tokens_text(mine)
             if saved:
                 doc["window_saved"] = saved
+            cost, mine_usd = sl._num(win, "cost_usd"), sl._num(mine, "total_saved_usd")
+            if cost is not None:
+                doc["window_cost_usd"] = cost
+                doc["window_start_ms"] = window_start_ms
+            if mine_usd is not None:
+                doc["window_session_saved_usd"] = mine_usd
     except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
         pass
 

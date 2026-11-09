@@ -289,10 +289,56 @@ test('on a Claude subscription the money gives way to the 5-hour limit and the t
   usage = docOverride = null
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
   const row = (await dump(ui)).split('\n')[1]
-  expect(row).toMatch(/^5h 34% · saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
-  expect(row).not.toMatch(/\$/)
+  // no window spend yet: the session's saved tokens stand in, and row 1 shows no dollars
+  expect(row).toMatch(/^5h 34% · this session saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ cache warm /)
   // the window's start (its reset less five hours) reaches the helper, which reads that window's totals
   expect(calls.some(c => c.join(' ').includes(`--window-start-ms ${NOW + 3_600_000 - 5 * 3_600_000}`))).toBe(true)
+  await ui.unmount()
+})
+
+// The window began 4 h ago (it resets in 1 h). Every session spent $8.50 in it and Claude Code says 34% is used: 4% per
+// dollar. This session saved $0.75: 3.0% of the limit, and 240 min × 0.75 / 8.50 = 21 min at this window's pace.
+const subscription = (d: any, extra = {}) => ({ ...d, window_saved: 'saved 1.2M rd / 85.0k wr', window_start_ms: NOW - 4 * 3_600_000, window_cost_usd: 8.5, window_session_saved_usd: 0.75, ...extra })
+const fiveHour = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+
+test('on a subscription the band says what this session saved as a share of the 5-hour limit and in minutes', async ($, on) => {
+  usage = fiveHour
+  docOverride = d => subscription(d)
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const [row1, row2] = (await dump(ui)).split('\n')
+  expect(row2).toMatch(/^5h 34% · this session saved 3\.0% \(\+21 min\) │ cache ● /)
+  // the next message in the same unit: $0.06 warm and $0.78 cold at 4% per dollar
+  expect(row1).toMatch(/^◆ next message 0\.2% · 3\.1% if cold/)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  await ui.unmount()
+})
+
+test('on a subscription a narrow band keeps the saved share and drops the minutes', async ($, on) => {
+  usage = fiveHour
+  docOverride = d => subscription(d)
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 72 }, surface: 'terminal' })
+  const row2 = (await dump(ui)).split('\n')[1]
+  expect(row2).toMatch(/^5h 34% · saved 3\.0% │ cache ● /)
+  expect(row2).not.toMatch(/min/)
+  await ui.unmount()
+})
+
+test('on a subscription a window with too little spend shows no share and no dollars', async ($, on) => {
+  usage = fiveHour
+  docOverride = d => subscription(d, { window_cost_usd: 0.2 })
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const [row1, row2] = (await dump(ui)).split('\n')
+  expect(row1).toMatch(/^◆ cache warm /)
+  expect(row2).toMatch(/^5h 34% · this session saved 1\.2M rd \/ 85\.0k wr │/)
+  expect(await dump(ui)).not.toMatch(/\$/)
   await ui.unmount()
 })
 

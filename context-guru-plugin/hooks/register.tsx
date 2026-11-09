@@ -20,7 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { PaneData, Snapshot, ThreadView, View } from '../types'
-import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, nextPingWords, pingReason, pingToast, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
+import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, limitRate, limitSaved, moneyPair, nextPingWords, pingReason, pingToast, price, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -198,9 +198,11 @@ function engineFigures(c: { tokens?: number; window: number }, limits: readonly 
 
 /** The status line's row, from the same figures and with the same rules, shortened to fit `cols` in the status line's
  * order: the subagents phrase, then the `session` label, then the bars (the clock and the percentages stay). */
-function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour?: number } | null, cols: number) {
-  // A subscription pays in limit, not dollars: the 5-hour window's share and saved tokens replace the money.
-  const limit = engine?.fiveHour !== undefined ? { pct: `${Math.round(engine.fiveHour)}%`, saved: v.windowSaved } : undefined
+function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour?: number } | null, cols: number, now: number) {
+  // A subscription pays in limit, not dollars: the 5-hour window's share and what THIS session saved of it replace the
+  // money. `long` is `this session saved 3% (+14 min)`, `short` is `saved 3%`. While the window's spend is too small to
+  // measure a share, the session's saved tokens stand in, in the long form only.
+  const limit = engine?.fiveHour !== undefined ? limitWords(v, engine.fiveHour, now) : undefined
   const save = limit ? undefined : moneyPair(v.mainSaved, v.mainBaseline) ?? (v.mainSaved === undefined ? moneyPair(v.saved, v.baseline) : undefined)
   const subs = v.others > 0 ? moneyPair(v.othersSaved, v.othersBaseline) : undefined
   const pings = v.pingsSaved !== undefined && v.pingsSaved >= 0.005 ? usd(v.pingsSaved) : undefined
@@ -215,7 +217,7 @@ function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour
     (cache ? 3 + (cache.isCold ? 13 + cache.time.length : 8 + (o.wide ? cache.bar.length + 1 : 0) + cache.time.length + (cache.ping ? 2 : 0)) : 0) +
     (ctx ? 3 + 4 + (o.wide ? ctx.bar.length + 1 : 0) + ctx.pct.length + (o.wide && ctx.isNear ? 15 : 0) : 0) +
     (v.isStale ? 2 : 0) +
-    (limit ? 3 + limit.pct.length + (o.label && limit.saved ? 3 + limit.saved.length : 0) : 0) +
+    (limit ? 3 + limit.pct.length + (limitPart(limit, o) ? 3 + limitPart(limit, o)!.length : 0) : 0) +
     (update && o.label ? update.length + 3 : 0)
   for (const o of [
     { label: true, subs: true, wide: true },
@@ -223,10 +225,19 @@ function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour
     { label: false, subs: false, wide: true },
     { label: false, subs: false, wide: false },
   ]) {
-    if (len(o) <= room) return { save, subs: o.subs ? subs : undefined, label: o.label, pings, cache, ctx, wide: o.wide, update: o.label ? update : undefined, limit: limit && { pct: limit.pct, saved: o.label ? limit.saved : undefined } }
+    if (len(o) <= room) return { save, subs: o.subs ? subs : undefined, label: o.label, pings, cache, ctx, wide: o.wide, update: o.label ? update : undefined, limit: limit && { pct: limit.pct, saved: limitPart(limit, o) } }
   }
   return { save, subs: undefined, label: false, pings: undefined, cache, ctx, wide: false, update: undefined, limit: limit && { pct: limit.pct, saved: undefined } }
 }
+
+function limitWords(v: View, fiveHour: number, now: number): { pct: string; long?: string; short?: string } {
+  const s = limitSaved(v.limitWindow, fiveHour, now)
+  if (s) return { pct: `${Math.round(fiveHour)}%`, long: `this session saved ${s.pct} (+${s.mins})`, short: `saved ${s.pct}` }
+  return { pct: `${Math.round(fiveHour)}%`, long: v.windowSaved && `this session ${v.windowSaved}` }
+}
+
+const limitPart = (l: { long?: string; short?: string }, o: { label: boolean; wide: boolean }): string | undefined =>
+  o.label ? l.long : o.wide ? l.short : undefined
 
 export const register: Register = on => {
   // The envelope of the classic hooks carries the transcript path; sub-agent names live beside it.
@@ -320,7 +331,13 @@ export const register: Register = on => {
     const narrow = cols < 80 // row 1 must fit one line with `hide` at 60 columns
     const tip = weeklyTip(v.tip)
     const chips = v.subs.slice(0, AGENT_CHIPS)
-    const status = statusRow(v, await read($, context), cols)
+    const figures = await read($, context)
+    const status = statusRow(v, figures, cols, now)
+    // On a subscription the next-message price is a share of the 5-hour limit, the unit the saving is in.
+    const rate = limitRate(v.limitWindow, figures?.fiveHour)
+    const isSub = figures?.fiveHour !== undefined
+    const warm = price(m.warmUsd, rate, isSub)
+    const cold = price(m.coldUsd, rate, isSub)
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -332,18 +349,19 @@ export const register: Register = on => {
       <Box flexDirection="column" paddingX={1} marginTop={1}>
         <Box flexWrap="wrap">
           <Text bold color="claude">{'◆'} </Text>
-          {m.isWarm && (
+          {m.isWarm && (warm !== undefined || cold !== undefined) && (
             <Text>
               <Text dimColor>{narrow ? 'next ' : 'next message '}</Text>
-              {m.warmUsd !== undefined && <Text color="success">{usd(m.warmUsd)}</Text>}
-              {m.coldUsd !== undefined && <Text dimColor>{m.warmUsd !== undefined ? ' · ' : ''}{usd(m.coldUsd)}{narrow ? ' cold' : ' if cold'}</Text>}
+              {warm !== undefined && <Text color="success">{warm}</Text>}
+              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
+          {m.isWarm && warm === undefined && cold === undefined && <Text dimColor>cache warm</Text>}
           {!m.isWarm && (
             <Text>
               <Text dimColor>○ cache cold</Text>
-              {m.coldUsd !== undefined && <Text dimColor> · next message </Text>}
-              {m.coldUsd !== undefined && <Text color="warning">{usd(m.coldUsd)}</Text>}
+              {cold !== undefined && <Text dimColor> · next message </Text>}
+              {cold !== undefined && <Text color="warning">{cold}</Text>}
             </Text>
           )}
           {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
@@ -485,6 +503,12 @@ export const register: Register = on => {
     const tip = weeklyTip(v.tip)
     const head = (label: string) => <Text dimColor bold>{label}</Text>
     const nameWidth = Math.max(8, Math.min(20, cols - 34))
+    const figures = await read($, context)
+    const rate = limitRate(v.limitWindow, figures?.fiveHour)
+    const isSub = figures?.fiveHour !== undefined
+    const unit = rate !== undefined ? ' of the 5h limit' : ''
+    const warm = price(m.warmUsd, rate, isSub)
+    const cold = price(m.coldUsd, rate, isSub)
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -503,11 +527,11 @@ export const register: Register = on => {
           {head('NEXT MESSAGE')}
           <Text>
             <Text dimColor>if the cache is warm </Text>
-            {m.warmUsd !== undefined ? <Text color="success">{usd(m.warmUsd)}</Text> : <Text dimColor>unknown</Text>}
+            {warm !== undefined ? <Text color="success">{warm}<Text dimColor>{unit}</Text></Text> : <Text dimColor>{isSub && m.warmUsd !== undefined ? 'not measured yet' : 'unknown'}</Text>}
           </Text>
           <Text>
             <Text dimColor>if it is cold      </Text>
-            {m.coldUsd !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{usd(m.coldUsd)}</Text> : <Text dimColor>unknown</Text>}
+            {cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{cold}<Text dimColor>{unit}</Text></Text> : <Text dimColor>{isSub && m.coldUsd !== undefined ? 'not measured yet' : 'unknown'}</Text>}
             {m.tokens !== undefined && <Text dimColor>  ({Math.round(m.tokens / 1000)}k tokens in the cached prefix)</Text>}
           </Text>
           {m.isWarm ? (

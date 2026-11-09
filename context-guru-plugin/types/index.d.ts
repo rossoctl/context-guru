@@ -55,8 +55,12 @@ export type View = {
   window?: number
   /** `▲ update v0.6.1` (or `▲ v0.6.1 auto`): a release the user has not declined, from the update-check record. */
   update?: string
-  /** On a Claude subscription: `saved 1.2M rd / 85.0k wr`, the tokens compaction kept out of this 5-hour window. */
+  /** On a Claude subscription: `saved 1.2M rd / 85.0k wr`, the tokens compaction kept out of this 5-hour window, this
+   * session only. The band shows it only while the window has too little spend to measure a share of the limit. */
   windowSaved?: string
+  /** On a Claude subscription: the current 5-hour window's start, what every session spent in it at API prices, and what
+   * this session saved in it. With Claude Code's used share they give the limit's share per dollar (see `limitRate`). */
+  limitWindow?: { startMs: number; costUsd: number; savedUsd?: number }
   /** The server's answer for a manual ping: true or false, undefined when it did not say (older server). */
   pingable?: boolean
   pingReason?: string
@@ -83,9 +87,13 @@ export type Snapshot = {
     /** Set when nothing was ever read and the server's answer explains why (token refused, unreachable). */
     notice?: string
     money?: { main?: { saved_usd?: number; baseline_usd?: number }; others?: { saved_usd?: number; baseline_usd?: number; threads?: number } }
-    /** From `cg.py cachestate`: the status line's update marker and, on a subscription, this window's saved tokens. */
+    /** From `cg.py cachestate`: the status line's update marker and, on a subscription, this window's figures: this
+     * session's saved tokens and dollars, and every session's spend. */
     update?: string
     window_saved?: string
+    window_start_ms?: number
+    window_cost_usd?: number
+    window_session_saved_usd?: number
     [key: string]: unknown
   }
 }
