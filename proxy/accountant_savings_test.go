@@ -428,3 +428,79 @@ func TestSavings_ASplitBooksItsEffectOnAShortConversationWhenTheTailMoves(t *tes
 		}
 	}
 }
+
+// R53 (issue 702): two overlapping requests of ONE thread, each reporting its own operation on different content
+// (message 1 and message 3). Both are begun and ended before either is computed, so both hold the same ThreadState
+// version. Both forwarded bodies carry both masks: the library ends a change that the forwarded body does not hold, so a
+// body without the other request's mask would end that change in whichever Compute ran second (library rule, not a
+// proxy bug). The second Compute must notice the overlap (Recomputed), and no operation may be lost or priced
+// twice: each ChangeID is priced once in the result of the request that reported it, the sum check (R51) must not
+// fire, and the thread keeps both changes. The Computes run in goroutines so -race sees the Tracker's locking.
+func TestSavings_TwoParallelRequestsOfOneThreadLoseNoOperation(t *testing.T) {
+	big1, nBig1 := msg("user", strings.Repeat("tool result one ", 400))
+	big3, nBig3 := msg("user", strings.Repeat("tool result three ", 400))
+	small, nSmall := msg("user", "[masked]")
+	m0, m2, m4 := mustMsg("user", "first"), mustMsg("assistant", "answer"), mustMsg("user", "last")
+	client := body(m0, big1, m2, big3, m4)
+	// usage is about 1 token per 4 bytes of the forwarded body, which the ratio_range check expects.
+	usageFor := func(fwd []byte) Usage { return Usage{FreshInput: 10, CacheRead: int64(len(fwd)/4 - 10)} }
+	const idA, idB = "cg:mask:A", "cg:mask:B"
+
+	for round := 0; round < 50; round++ {
+		s := newSavingsTracker()
+		th := accountant.Thread{ID: "main"}
+		meta := func(id string, sec int64) accountant.RequestMeta {
+			return accountant.RequestMeta{RequestID: id, Session: "s", At: time.Unix(1000+sec, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
+		}
+		rA := s.begin(meta("A", 0), client)
+		rB := s.begin(meta("B", 1), client)
+		fwdA, fwdB := body(m0, small, m2, small, m4), body(m0, small, m2, small, m4)
+		s.end(rA, th, fwdA, []accountant.Operation{rewriteOp(idA, 1, nBig1, nSmall)}, accFacts)
+		s.end(rB, th, fwdB, []accountant.Operation{rewriteOp(idB, 3, nBig3, nSmall)}, accFacts)
+
+		var resA, resB accountant.Result
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); resA = s.compute(rA, usageFor(fwdA)) }()
+		go func() { defer wg.Done(); resB = s.compute(rB, usageFor(fwdB)) }()
+		wg.Wait()
+
+		// Each Compute follows the other's EndRequest or Compute, so each sees a moved version.
+		if !resA.Recomputed && !resB.Recomputed {
+			t.Fatalf("round %d: neither result is Recomputed; the overlap was not detected", round)
+		}
+		for name, r := range map[string]accountant.Result{"A": resA, "B": resB} {
+			for _, c := range r.Checks {
+				if c.Check == "sum" || c.Check == "conservation" || c.Check == "unique_change" {
+					t.Fatalf("round %d request %s: check %+v (the sum over operators must hold)", round, name, c)
+				}
+			}
+			for _, id := range []string{idA, idB} {
+				if n, _ := countChange(r, id); n > 1 {
+					t.Fatalf("round %d request %s: %s priced %d times", round, name, id, n)
+				}
+			}
+		}
+		// No operation is lost: each request prices the one it reported, with a saving.
+		if n, saved := countChange(resA, idA); n != 1 || saved <= 0 {
+			t.Fatalf("round %d: request A prices %s %d times, saved %d", round, idA, n, saved)
+		}
+		if n, saved := countChange(resB, idB); n != 1 || saved <= 0 {
+			t.Fatalf("round %d: request B prices %s %d times, saved %d; B=%+v A=%+v", round, idB, n, saved, resB, resA)
+		}
+		// The thread keeps both changes: a later request that reports nothing carries both, once each.
+		rC := s.begin(meta("C", 100), client)
+		s.end(rC, th, fwdB, nil, accFacts)
+		resC := s.compute(rC, usageFor(fwdB))
+		for _, id := range []string{idA, idB} {
+			if n, _ := countChange(resC, id); n != 1 {
+				t.Fatalf("round %d: follow-up lost or doubled %s (priced %d times); checks=%+v", round, id, n, resC.Checks)
+			}
+		}
+		for _, c := range resC.Checks {
+			if c.Check == "sum" || c.Check == "unique_change" {
+				t.Fatalf("round %d: follow-up check %+v", round, c)
+			}
+		}
+	}
+}

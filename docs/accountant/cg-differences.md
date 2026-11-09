@@ -323,6 +323,22 @@ visible.
 - **No production traffic was used.** How often any of these situations occurs is not known.
 - **The line numbers in this report** match `dash/event.go` on this branch's last commit. They move when `event.go` changes.
 
+### What the shadow report covers (issue 702)
+
+The report lists every difference found in the **63 hand-written cases**, each with a cause. It is
+not a report on live traffic.
+
+- **Covered:** the 63 cases of the `rossoctl/accountant` case library. Each of the 27 differences
+  has a reason in sections 3 to 8, or is marked `notCovered` or "cases not yet traced"
+  (`cg-differences-root-causes.md`, cause 14).
+- **Not covered:** requests that went through a running proxy. No log of live requests was compared
+  with `Compute`. The proxy does run `Compute` on every request in shadow mode
+  (`proxy/accountant_shadow.go`), but no report of those runs exists here. So the claim "every
+  difference from the current figure has a reason" holds for the cases only.
+- **Consequence:** the old calculation stays. The rule "remove it only when no difference is
+  unexplained" is not met, because live differences are unknown and some case differences have no
+  fix yet.
+
 ## 12. Earlier independent review (not repeated)
 
 For the previous version of this report, four models on the LiteLLM proxy each checked the first
@@ -341,3 +357,28 @@ opinions, not measurements.
 All four confirmed the arithmetic of the earlier totals. They also agreed on the B\* reading in
 section 5. Two errors they found in the earlier text (the tail is 3,000 tokens, and `coref` repays in
 about 10 more turns, not 11) are corrected here.
+
+## 13. Hot-path overhead of the accountant
+
+**Result:** about **2.8 ms and 683 KB per request** on a 609 KB body that is forwarded unchanged. This
+is the cost of `begin` plus `end` and nothing else.
+
+- **Benchmark:** `BenchmarkBeginEndUnchanged` in `proxy/accountant_bench_test.go`. It parses the
+  client body, hashes it into blocks, and runs `BeginRequest` and `EndRequest`. The forwarded body
+  is the client body, so the second parse is skipped.
+- **Command:** `go test ./proxy -run xxx -bench BeginEndUnchanged -benchtime=3s -count=3`
+- **Machine:** Apple M1 Max (darwin/arm64), `go1.27.2`.
+- **Body:** 608,955 bytes, 150 messages, one cache mark (`benchBody()`).
+- **Date:** 2026-11-09, on `origin/main` at `b49cbeb6`.
+
+| Run | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| 1 | 2,836,518 | 682,925 | 84 |
+| 2 | 2,812,893 | 683,020 | 84 |
+| 3 | 2,839,236 | 682,863 | 84 |
+
+- An earlier audit note gave about 5.2 ms, 979 KB and 130 allocations on the same benchmark. This
+  re-run gives lower figures. The cause of the difference was not investigated.
+- **Not measured:** `Compute`, which runs after the response, off the forwarding path. Requests with
+  reported operations. Bodies of other sizes. Other machines. One machine and one run date: treat the
+  figures as an order of magnitude.
