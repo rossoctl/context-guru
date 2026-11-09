@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -115,6 +116,12 @@ type Options struct {
 	// (dash/lifecycle.go). The zero value is off, but --dashboard-lifecycle-signals defaults
 	// to on: the rows hold only counts and sizes, never content.
 	LifecycleSignals bool
+	// Prices, when set, lets the recorder price a request it booked at $0 because the host's price
+	// map had not loaded yet (issue #920). Rows this process wrote with billed tokens and no price
+	// are priced once Prices knows the model. nil turns the pass off.
+	Prices modelinfo.Pricer
+	// RepriceInterval is how often that pass runs. 0 = defaultRepriceInterval.
+	RepriceInterval time.Duration
 }
 
 const (
@@ -231,6 +238,10 @@ type Recorder struct {
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
 	tenantQuota atomic.Pointer[func(tenantID string) int64]
+	// unpriced holds the rows this process wrote partial at $0 with billed tokens, waiting for a
+	// price (see reprice.go). Touched by the writer and the reprice goroutine, under unpricedMu.
+	unpricedMu sync.Mutex
+	unpriced   []*Event
 }
 
 // NewRecorder opens the store and starts the writer goroutine. It never returns a
@@ -286,6 +297,10 @@ func NewRecorder(opts Options) (*Recorder, error) {
 	// backgroundMigrations for why they share ONE goroutine rather than one each.
 	r.wg.Add(1)
 	go r.backgroundMigrations()
+	if opts.Prices != nil {
+		r.wg.Add(1)
+		go r.repriceLoop()
+	}
 	return r, nil
 }
 
@@ -535,6 +550,7 @@ func (r *Recorder) run() {
 			slog.Debug("dash: wrote a batch of captured requests", "n", len(batch),
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
+				r.noteUnpriced(e)
 				if r.opts.Tap != nil {
 					r.opts.Tap(e)
 				}
