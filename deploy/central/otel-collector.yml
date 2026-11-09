@@ -1,0 +1,105 @@
+# OpenTelemetry Collector for the central metrics stack (contrib build; the core build has no
+# remote-write exporter).
+#
+# Each proxy pushes OTLP/JSON over HTTPS. Two things are decided HERE and never taken from the
+# sender:
+#   1. which proxy sent the data. One receiver for each proxy, each with its own token file, so a
+#      Cortex token does not work on the context-guru port. The `proxy` label is set per pipeline.
+#   2. which labels exist. Only machine, preset, service_version and proxy are kept (metrics spec
+#      5.6). A sender cannot add a label.
+#
+# What a token does NOT do: it does not bind a sender to one machine. A holder of a Cortex token can
+# still write under another machine's name inside Cortex. The token proves "a Cortex install", not
+# "this Cortex install".
+#
+# TLS is terminated in front of this (the receivers listen on plain HTTP inside the private
+# network). See README.md.
+#
+# Revoking a token: edit the token file and restart the collector (`install.sh central-reload`).
+# The collector reads the file once, at start. The restart takes about 1.5 seconds. A push that lands
+# in that gap fails and the next push repairs it, because proxies send cumulative totals.
+
+extensions:
+  bearertokenauth/cortex:
+    scheme: Bearer
+    filename: /etc/otelcol/tokens/cortex.txt
+  bearertokenauth/contextguru:
+    scheme: Bearer
+    filename: /etc/otelcol/tokens/context-guru.txt
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp/cortex:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth/cortex
+  otlp/contextguru:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4319
+        auth:
+          authenticator: bearertokenauth/contextguru
+
+processors:
+  # First in the chain: a burst from many machines must not stop the collector.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  transform/cortex:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["machine"], attributes["service.instance.id"])
+          - keep_keys(attributes, ["machine", "preset", "service.version"])
+          - set(attributes["proxy"], "cortex")
+      # The scope name and version would become labels. They carry no information here.
+      - context: scope
+        statements:
+          - set(name, "")
+          - set(version, "")
+  transform/contextguru:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["machine"], attributes["service.instance.id"])
+          - keep_keys(attributes, ["machine", "preset", "service.version"])
+          - set(attributes["proxy"], "context-guru")
+      - context: scope
+        statements:
+          - set(name, "")
+          - set(version, "")
+  batch:
+    timeout: 5s
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    # Resource attributes become labels. Do not add a unit suffix: the metric names already carry
+    # `usd`, `tokens` and `seconds` (spec 5.1).
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  extensions: [health_check, bearertokenauth/cortex, bearertokenauth/contextguru]
+  pipelines:
+    metrics/cortex:
+      receivers: [otlp/cortex]
+      processors: [memory_limiter, transform/cortex, batch]
+      exporters: [prometheusremotewrite]
+    metrics/contextguru:
+      receivers: [otlp/contextguru]
+      processors: [memory_limiter, transform/contextguru, batch]
+      exporters: [prometheusremotewrite]
+  telemetry:
+    # The collector's own metrics, for the pipeline alerts. Prometheus scrapes this port.
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

@@ -1,0 +1,90 @@
+# Recording rules for the central metrics stack (metrics spec, section 8).
+#
+# They pre-compute the sums that dashboards and alerts read over and over. Each name follows the
+# convention level:metric:operations. `proxy` and `machine` are kept where a dashboard splits by
+# them; `machine` is dropped where the question is about the fleet.
+#
+# The sums use rate() over the cumulative counters the proxies push. A counter that restarts (a
+# proxy restart) resets to zero; rate() and increase() handle that.
+
+groups:
+  - name: savings
+    interval: 1m
+    rules:
+      # Net saving in dollars per second, by proxy and component. saved - added, and nothing else:
+      # the cache-effect counter is a breakdown and is never part of this (spec 5.2).
+      - record: proxy_component:llm_savings_net_usd:rate5m
+        expr: |
+          sum by (proxy, component) (rate(llm_savings_saved_usd_total[5m]))
+          -
+          sum by (proxy, component) (rate(llm_savings_added_usd_total[5m]))
+
+      - record: proxy:llm_savings_saved_usd:rate5m
+        expr: sum by (proxy) (rate(llm_savings_saved_usd_total[5m]))
+
+      - record: proxy:llm_savings_added_usd:rate5m
+        expr: sum by (proxy) (rate(llm_savings_added_usd_total[5m]))
+
+      # Share of requests the accountant could not price (alert: many unpriced).
+      - record: proxy:llm_savings_unpriced_ratio:rate5m
+        expr: |
+          sum by (proxy) (rate(llm_savings_requests_total{result="unpriced"}[5m]))
+          /
+          clamp_min(sum by (proxy) (rate(llm_savings_requests_total[5m])), 1e-9)
+
+      # Share of the savings figure that came from a fallback rate (question A7).
+      - record: proxy:llm_savings_estimated_ratio:rate5m
+        expr: |
+          sum by (proxy) (rate(llm_savings_estimated_total[5m]))
+          /
+          clamp_min(sum by (proxy) (rate(llm_savings_requests_total[5m])), 1e-9)
+
+  - name: inference
+    interval: 1m
+    rules:
+      - record: proxy_model:llm_inference_requests:rate5m
+        expr: sum by (proxy, model) (rate(llm_inference_requests_total[5m]))
+
+      # Server errors only. A 4xx is often the client's own bad request or a rate limit, and it must
+      # not page anyone. Status class 5xx is the provider or the proxy failing.
+      - record: proxy:llm_inference_5xx_ratio:rate5m
+        expr: |
+          sum by (proxy) (rate(llm_inference_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum by (proxy) (rate(llm_inference_requests_total[5m])), 1e-9)
+
+      # Cache read ratio: cache_read / (cache_read + cache_write_* + input). Not exported by the
+      # proxies; computed here (spec 5.1). Output tokens are not part of the prompt.
+      - record: proxy_model:llm_cache_read_ratio:rate1h
+        expr: |
+          sum by (proxy, model) (rate(llm_inference_tokens_total{tier="cache_read"}[1h]))
+          /
+          clamp_min(
+            sum by (proxy, model) (rate(llm_inference_tokens_total{tier=~"cache_read|cache_write_5m|cache_write_1h|input"}[1h])),
+            1e-9)
+
+      # Requests per second by model over the last hour, used to say "a model with traffic".
+      - record: proxy_model:llm_inference_requests:rate1h
+        expr: sum by (proxy, model) (rate(llm_inference_requests_total[1h]))
+
+  - name: cache_and_keepalive
+    interval: 1m
+    rules:
+      - record: proxy_cause:llm_cache_miss_cost_usd:rate1h
+        expr: sum by (proxy, cause) (rate(llm_cache_miss_cost_usd_total[1h]))
+
+      # Keep-alive value: the net of the rescue effect, minus what the pings cost (spec 5.3).
+      #
+      # A rescue books the WRITE it avoided as `saved` and the READ it paid instead as `added`
+      # (accountant: a ping kept an entry alive, so a write became a read). Its value is the
+      # difference, not `saved` alone: counting only `saved` would overstate the value by the cost
+      # of the reads. The rescue value is an effect of the savings counter, not a counter of its own.
+      - record: proxy:llm_keepalive_net_usd:rate1h
+        expr: |
+          (
+            sum by (proxy) (rate(llm_savings_cache_effect_usd_total{effect="rescue", direction="saved"}[1h]))
+            -
+            sum by (proxy) (rate(llm_savings_cache_effect_usd_total{effect="rescue", direction="added"}[1h]))
+          )
+          -
+          sum by (proxy) (rate(llm_keepalive_cost_usd_total[1h]))

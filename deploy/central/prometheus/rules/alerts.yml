@@ -1,0 +1,105 @@
+# Alert rules for the central metrics stack (metrics spec, section 8, "Alerts").
+#
+# The thresholds are the spec's proposals. Change them here after you have seen real data.
+# Severities: critical pages someone, warning goes to the channel, info is for the weekly review.
+
+groups:
+  - name: central-metrics
+    rules:
+      - alert: NetSavingNegative
+        # Fleet net below zero for 24 hours: the proxy costs more than it saves.
+        expr: sum by (proxy) (proxy_component:llm_savings_net_usd:rate5m) < 0
+        for: 24h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.proxy }} saves less than it costs"
+          description: "Net saving (saved - added) has been below zero for 24 hours."
+
+      - alert: ComponentLosingMoney
+        # A component whose net is below -$5 over 7 days is a candidate to turn off (#670).
+        expr: sum by (proxy, component) (increase(llm_savings_saved_usd_total[7d])) - sum by (proxy, component) (increase(llm_savings_added_usd_total[7d])) < -5
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.component }} ({{ $labels.proxy }}) lost money over 7 days"
+          description: "Net saving of this component over 7 days is below -$5."
+
+      - alert: ManyUnpricedRequests
+        expr: proxy:llm_savings_unpriced_ratio:rate5m > 0.10
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.proxy }}: more than 10% of requests are unpriced"
+          description: "The savings figure leaves these requests out."
+
+      - alert: AccountantCheckFailure
+        # A failed sum or conservation check means the savings arithmetic is wrong for that request.
+        expr: sum by (proxy, check) (increase(llm_savings_check_failures_total{check=~"sum|conservation"}[15m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.proxy }}: accountant check '{{ $labels.check }}' failed"
+          description: "The savings figure of those requests is not reliable."
+
+      - alert: ExportFailuresRising
+        # Failed pushes to this collector, counted by the proxy. The next push carries the totals,
+        # so a short run of failures loses nothing. A run of one hour is a real problem.
+        expr: sum by (proxy, machine) (increase(llm_proxy_export_failures_total[1h])) > 0
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.proxy }} {{ $labels.machine }}: pushes keep failing"
+          description: "Check the token, the URL and the network from this machine."
+
+      - alert: MachineSilent
+        # A machine that pushed in the last day and has pushed nothing for 15 minutes. The
+        # llm_proxy_info gauge is pushed every interval, so a missing sample means no push.
+        expr: |
+          (
+            max by (proxy, machine) (max_over_time(llm_proxy_info[1d]))
+            unless
+            max by (proxy, machine) (llm_proxy_info)
+          )
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.proxy }} {{ $labels.machine }} stopped reporting"
+          description: "No llm_proxy_info for 15 minutes. The machine may be off, or its push may be."
+
+      - alert: ErrorRateHigh
+        # Server errors (5xx) only. A 4xx is usually the client's own request and must not page.
+        expr: proxy:llm_inference_5xx_ratio:rate5m > 0.05
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.proxy }}: more than 5% of requests fail with 5xx"
+          description: "The provider or the proxy is failing."
+
+      - alert: CacheReadRatioLow
+        # Only for a model with traffic, so an idle model does not alert.
+        expr: |
+          proxy_model:llm_cache_read_ratio:rate1h < 0.5
+          and on (proxy, model)
+          proxy_model:llm_inference_requests:rate1h > 0.001
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.proxy }}: cache read ratio below 0.5 on {{ $labels.model }}"
+          description: "Prompts are mostly re-written, not read from the cache."
+
+      # The pipeline watches itself. If these fire, the numbers above cannot be trusted.
+      - alert: CollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "The OpenTelemetry Collector is down"
+          description: "No proxy can push. Nothing is stored until it is back; proxies resend totals."
+
+      - alert: CollectorRefusingData
+        # The collector accepted data it could not hand to Prometheus.
+        expr: sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "The collector fails to write to Prometheus"
+          description: "Check Prometheus and the remote-write receiver."

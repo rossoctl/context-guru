@@ -1,0 +1,29 @@
+# Alertmanager for the central metrics stack.
+#
+# Every alert goes to one receiver. A receiver with no delivery method only keeps the alert in
+# Alertmanager's own list (http://127.0.0.1:9093). To get a message, add a webhook, e-mail or Slack
+# block to the receiver below. The URL or the address is the operator's; this file ships none.
+
+route:
+  receiver: default
+  group_by: [alertname, proxy]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    # Critical alerts repeat more often.
+    - matchers: ['severity="critical"']
+      receiver: default
+      repeat_interval: 2h
+
+receivers:
+  - name: default
+    # webhook_configs:
+    #   - url: https://example.invalid/hook     # replace; keep it private
+    #     send_resolved: true
+
+inhibit_rules:
+  # If the collector is down, the "machine silent" and "export failures" alerts are only symptoms.
+  - source_matchers: ['alertname="CollectorDown"']
+    target_matchers: ['alertname=~"MachineSilent|ExportFailuresRising"']
+    equal: []
