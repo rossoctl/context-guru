@@ -55,7 +55,8 @@ cover: ## Run all tests with race + cross-package coverage; write coverage.out a
 NPM_REGISTRY ?=
 .PHONY: bob-statusbar
 bob-statusbar: ## Build the Bob status bar extension into bob-plugin/context-guru/statusbar/context-guru-bob.vsix
-	cd bob-plugin/statusbar && npm ci --no-audit --no-fund $(if $(NPM_REGISTRY),--registry=$(NPM_REGISTRY)) \
+	# --ignore-scripts: no dependency's install script runs; the build and the .vsix do not need one.
+	cd bob-plugin/statusbar && npm ci --ignore-scripts --no-audit --no-fund $(if $(NPM_REGISTRY),--registry=$(NPM_REGISTRY)) \
 		&& npm run build && npm run package
 
 .PHONY: fmt

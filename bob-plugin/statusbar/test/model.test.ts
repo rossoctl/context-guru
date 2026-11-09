@@ -66,10 +66,11 @@ test('ctx falls back to Bob window when window is 0 or missing', () => {
   assert.equal(formatCtx(21_000, undefined), 'ctx 21k/270k')
 })
 
-test('saved shows tokens, and 0 when nothing was saved', () => {
+test('saved shows tokens, 0 when nothing was saved, and — when there is no data', () => {
   assert.equal(formatSaved(3_100, cache()), 'saved 3.1k tok')
   assert.equal(formatSaved(0, cache()), 'saved 0')
-  assert.equal(formatSaved(undefined, undefined), 'saved 0')
+  // No session row: the bar must not say "saved 0", which reads as "nothing saved".
+  assert.equal(formatSaved(undefined, undefined), 'saved —')
 })
 
 test('saved never shows $ when priced is false, even with money present', () => {
@@ -139,7 +140,7 @@ test('a failed healthz renders CG ✗ with the fix', () => {
 })
 
 test('no Bob session renders CG ✓ with —', () => {
-  assert.equal(render(snap({}), 0).text, 'CG ✓ ctx —/270k · cache — · saved 0')
+  assert.equal(render(snap({}), 0).text, 'CG ✓ ctx —/270k · cache — · saved —')
 })
 
 test('a session with no cache touch renders cache —', () => {
@@ -159,7 +160,7 @@ test('the clock counts down locally between polls', () => {
 })
 
 test('an expired cache renders cold', () => {
-  const view = render(snap({ session: 's1', cache: cache({ end_ts: NOW - 3_700_000 }) }), 0)
+  const view = render(snap({ session: 's1', saved: 0, cache: cache({ end_ts: NOW - 3_700_000 }) }), 0)
   assert.equal(view.text, 'CG ✓ ctx 21k/270k · cache cold · saved 0')
 })
 

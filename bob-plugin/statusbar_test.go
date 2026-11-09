@@ -21,7 +21,7 @@ func TestBobStatusbarSuite(t *testing.T) {
 	}
 	dir := "statusbar"
 	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
-		if out, err := command(dir, npm, "ci", "--no-audit", "--no-fund"); err != nil {
+		if out, err := command(dir, npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"); err != nil {
 			// Offline on a laptop is not a failure. In CI it is: a skip there looks like a pass.
 			if os.Getenv("CI") == "" {
 				t.Skipf("npm ci failed (offline?); set CI to make this fail: %v\n%s", err, out)

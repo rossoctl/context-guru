@@ -35,12 +35,23 @@ export function getJson(host: string, port: number, urlPath: string, timeoutMs =
       reject(error)
       return
     }
-    // A total deadline: the socket timeout alone never fires on a server that drips bytes.
-    const deadline = setTimeout(() => request.destroy(new Error('timeout')), timeoutMs)
-    const fail = (error: Error) => { clearTimeout(deadline); reject(error) }
+    // Settle once. The deadline rejects by itself: destroy() on a socket that is already closed
+    // emits nothing, and the socket timeout never fires on a server that drips bytes.
+    let settled = false
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      request.destroy()
+      reject(error)
+    }
+    const deadline = setTimeout(() => fail(new Error('timeout')), timeoutMs)
     const request = http.get(url, response => {
+      // A reply cut off mid-body emits aborted and close, but no end and no error.
+      response.on('aborted', () => fail(new Error('reply cut off')))
+      response.on('error', fail)
+      response.on('close', () => { if (!response.complete) fail(new Error('reply cut off')) })
       if (response.statusCode !== 200) {
-        request.destroy()
         fail(new Error(`status ${response.statusCode}`))
         return
       }
@@ -49,12 +60,14 @@ export function getJson(host: string, port: number, urlPath: string, timeoutMs =
       response.on('data', (chunk: Buffer) => {
         size += chunk.length
         if (size > MAX_BODY_BYTES) {
-          request.destroy(new Error('reply too large'))
+          fail(new Error('reply too large'))
           return
         }
         chunks.push(chunk)
       })
       response.on('end', () => {
+        if (settled) return
+        settled = true
         clearTimeout(deadline)
         const text = Buffer.concat(chunks).toString('utf8')
         try {
@@ -86,7 +99,7 @@ export async function poll(dir: string, clock: () => number = Date.now): Promise
     if (!session) return snap
     snap.session = session
     const saved = (sessions as { sessions: { saved?: unknown }[] }).sessions[0].saved
-    snap.saved = typeof saved === 'number' && Number.isFinite(saved) ? saved : 0
+    if (typeof saved === 'number' && Number.isFinite(saved)) snap.saved = saved
     const cache = await getJson(LOOPBACK, port,
       `/api/cachestate?session=${encodeURIComponent(session)}`)
     if (cache && typeof cache === 'object') snap.cache = cache as CacheState

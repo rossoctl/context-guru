@@ -123,7 +123,7 @@ test('no Bob session: renders CG ✓ with — and asks for no cache state', asyn
   const state = tempState({ port: proxy.port })
   t.after(async () => { state.cleanup(); await proxy.close() })
   const snap = await poll(state.dir, () => 0)
-  assert.equal(render(snap, 0).text, 'CG ✓ ctx —/270k · cache — · saved 0')
+  assert.equal(render(snap, 0).text, 'CG ✓ ctx —/270k · cache — · saved —')
   assert.equal(proxy.seen.some(p => p.startsWith('/api/cachestate')), false)
 })
 
@@ -146,7 +146,7 @@ test('a session id is sent URL-encoded', async (t) => {
   const state = tempState({ port: proxy.port })
   t.after(async () => { state.cleanup(); await proxy.close() })
   const snap = await poll(state.dir, () => 0)
-  assert.equal(render(snap, 0).text, 'CG ✓ ctx —/270k · cache — · saved 0')
+  assert.equal(render(snap, 0).text, 'CG ✓ ctx —/270k · cache — · saved —')
   assert.ok(proxy.seen.includes('/api/cachestate?session=bob%3Aa.b'), proxy.seen.join(','))
 })
 
@@ -155,7 +155,7 @@ test('a broken API reply after a good healthz keeps CG ✓ and shows —', async
     '/api/sessions': { status: 500, body: 'boom' } })
   const state = tempState({ port: proxy.port })
   t.after(async () => { state.cleanup(); await proxy.close() })
-  assert.equal(render(await poll(state.dir, () => 0), 0).text, 'CG ✓ ctx —/270k · cache — · saved 0')
+  assert.equal(render(await poll(state.dir, () => 0), 0).text, 'CG ✓ ctx —/270k · cache — · saved —')
 })
 
 // A raw server for replies the route table cannot make: redirects, drips, huge bodies.
@@ -187,6 +187,24 @@ test('a server that drips bytes fails within the total deadline', async (t) => {
   t.after(() => proxy.close())
   const start = Date.now()
   await assert.rejects(getJson('127.0.0.1', proxy.port, '/healthz', 300), /timeout/)
+  assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
+})
+
+// A proxy restart can close the socket after the headers and part of the body. Node then emits
+// aborted and close on the reply, but no end and no error, so a promise that waits for one of
+// those never settles, and the status bar stops polling while it shows CG ✓.
+test('a reply cut off mid-body fails within the total deadline', { timeout: 3000 }, async (t) => {
+  const proxy = net.createServer(socket => {
+    socket.once('data', () => {
+      socket.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"a":')
+      setTimeout(() => socket.destroy(), 20)
+    })
+  })
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve))
+  t.after(() => proxy.close())
+  const port = (proxy.address() as net.AddressInfo).port
+  const start = Date.now()
+  await assert.rejects(getJson('127.0.0.1', port, '/healthz', 300))
   assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
 })
 

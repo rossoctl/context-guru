@@ -93,7 +93,9 @@ export function formatClock(remaining: number, ttlS: number): string {
 }
 
 export function formatSaved(saved: number | undefined, cache: CacheState | undefined): string {
-  const tokens = saved && saved > 0 ? `saved ${formatTokens(saved)} tok` : 'saved 0'
+  // undefined is "no data" (no session row, or a failed read), not zero.
+  if (saved === undefined) return 'saved —'
+  const tokens = saved > 0 ? `saved ${formatTokens(saved)} tok` : 'saved 0'
   // Money only when the proxy has a price. Bob has none, so it never shows `$` today.
   if (cache?.priced !== true || !cache.money) return tokens
   const usd = (num(cache.money.main?.saved_usd) ?? 0) + (num(cache.money.others?.saved_usd) ?? 0)

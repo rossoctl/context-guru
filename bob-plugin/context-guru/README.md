@@ -26,7 +26,8 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
 
 - **Two hooks** in `~/.bob/settings/settings.json` (a Bob plugin cannot carry hooks):
   - `SessionStart`: `ensure` starts the agent if the proxy is down. `signal` tells the proxy about
-    the task (after a compaction, the proxy drops the old cache entries).
+    the task. The proxy records it. It changes nothing else on Bob today: the keep-alive keeper,
+    which uses it to retire a compacted session, does not track Bob's OpenAI route.
   - `UserPromptSubmit`: `check` adds one line to the model context when the proxy is down. Else it
     prints nothing.
 - **State** in `~/.local/state/context-guru-bob/`: `install.json`, the proxy config
@@ -245,7 +246,6 @@ The proxy log is `~/.local/state/context-guru-bob/proxy.log`. In Bob's own exten
 - **The plugin sends only `SessionStart` to the proxy.** The proxy's `/signal` route accepts
   `SessionStart` and `SessionEnd`. Bob's other events carry model text (`Stop`, `PostCompact`) or
   your prompt (`UserPromptSubmit`). The plugin never sends, writes or prints them.
-- No status bar yet.
 
 ## Privacy
 
