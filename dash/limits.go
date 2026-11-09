@@ -57,6 +57,28 @@ func limitArgs(l *Limits) []any {
 	return append(append([]any{1}, win(l.FiveHour)...), win(l.SevenDay)...)
 }
 
+// LatestAuthSubscription reports the auth kind of the account's newest Anthropic request: true
+// when the client sent a Claude subscription (OAuth) token. Keep-alive pings are left out: the
+// proxy sends them, so they carry no client auth kind. false when there is no such request.
+func (d *DB) LatestAuthSubscription(f Filter) (bool, error) {
+	q := `SELECT auth_subscription FROM requests
+		WHERE tenant_id = ? AND provider = 'anthropic' AND keepalive = 0
+		ORDER BY ts DESC, id DESC LIMIT 1`
+	args := []any{f.Tenant}
+	if f.TenantAll {
+		q = `SELECT auth_subscription FROM requests
+		WHERE provider = 'anthropic' AND keepalive = 0
+		ORDER BY ts DESC, id DESC LIMIT 1`
+		args = nil
+	}
+	var sub int
+	err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&sub)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return sub != 0, err
+}
+
 // LatestLimits is the newest row's limit values for the filter's tenant (or every tenant when
 // f.TenantAll), and the row's time in epoch ms. nil when no row has any.
 func (d *DB) LatestLimits(f Filter) (*Limits, int64, error) {
@@ -106,7 +128,13 @@ func (a *API) limitsRoutes() []route {
 }
 
 // meLimits is GET /api/me/limits: the latest subscription limit values the proxy saw for the
-// caller's own account. {} when it never saw any (an API key, Bedrock, Vertex).
+// caller's own account. {} when the account's newest Anthropic request did not use a Claude
+// subscription token (an API key, Bedrock, Vertex), even when older rows carry limit values: an
+// account that moved from a subscription to an API key stops showing the old share at once.
+//
+// "subscription" comes from the AUTH KIND, not from the limit headers: the owner's rule, because
+// the headers may change with the plan. The five_hour and seven_day blocks come from the newest
+// row that carried the headers; they and at_ms are left out when no row did.
 //
 // Always the caller's OWN account, a manager's too: "me" is in the path, so the manager's
 // service-wide default of the other routes does not apply here. A single-tenant proxy has one
@@ -120,21 +148,30 @@ func (a *API) meLimits(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		f.Tenant, f.TenantAll = p.TenantID, false
 	}
-	l, at, err := a.db(r).LatestLimits(f)
+	db := a.db(r)
+	sub, err := db.LatestAuthSubscription(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if l == nil {
+	if !sub {
 		writeJSON(w, struct{}{})
 		return
 	}
-	body := map[string]any{"subscription": true, "at_ms": at}
-	if !l.FiveHour.Empty() {
-		body["five_hour"] = l.FiveHour
+	body := map[string]any{"subscription": true}
+	l, at, err := db.LatestLimits(f)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	if !l.SevenDay.Empty() {
-		body["seven_day"] = l.SevenDay
+	if l != nil {
+		body["at_ms"] = at
+		if !l.FiveHour.Empty() {
+			body["five_hour"] = l.FiveHour
+		}
+		if !l.SevenDay.Empty() {
+			body["seven_day"] = l.SevenDay
+		}
 	}
 	writeJSON(w, body)
 }

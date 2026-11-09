@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -84,11 +87,14 @@ func canonical(h http.Header) http.Header {
 	return out
 }
 
-// The proxy stores the limit headers on the request's row, forwards the answer unchanged, and
-// GET /api/me/limits returns them. An answer without the headers leaves the row without them.
-func TestLimitHeadersReachTheRowAndTheEndpoint(t *testing.T) {
-	var noHeaders atomic.Bool
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// oauthToken is shaped like a Claude subscription token. Its tail must never reach the database.
+const oauthToken = "sk-ant-oat01-NEVERSTORED-7f3a9c"
+
+// limitsUpstream answers like Anthropic on a subscription: with the limit headers (one bad), unless
+// noHeaders is set.
+func limitsUpstream(t *testing.T, noHeaders *atomic.Bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		if !noHeaders.Load() {
@@ -104,45 +110,69 @@ func TestLimitHeadersReachTheRowAndTheEndpoint(t *testing.T) {
 		  "usage":{"input_tokens":12,"output_tokens":34,
 		           "cache_read_input_tokens":9000,"cache_creation_input_tokens":1500}}`)
 	}))
-	defer up.Close()
-	h, rec := dashHandler(t, up.URL, dash.Options{})
-	srv := httptest.NewServer(h.Mux())
-	defer srv.Close()
+}
 
-	limits := func() map[string]any {
-		t.Helper()
-		resp, err := srv.Client().Get(srv.URL + "/api/me/limits")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /api/me/limits = %d", resp.StatusCode)
-		}
-		var out map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			t.Fatal(err)
-		}
-		return out
+// limitsClient drives one proxy: send makes an Anthropic request with the given auth header,
+// limits reads GET /api/me/limits.
+type limitsClient struct {
+	t   *testing.T
+	srv *httptest.Server
+}
+
+func (c limitsClient) send(header, value string) *http.Response {
+	c.t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, c.srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(header, value)
+	resp, err := c.srv.Client().Do(req)
+	if err != nil {
+		c.t.Fatal(err)
 	}
-	if got := limits(); len(got) != 0 {
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp
+}
+
+func (c limitsClient) limits() map[string]any {
+	c.t.Helper()
+	resp, err := c.srv.Client().Get(c.srv.URL + "/api/me/limits")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.t.Fatalf("GET /api/me/limits = %d", resp.StatusCode)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		c.t.Fatal(err)
+	}
+	return out
+}
+
+func newLimitsClient(t *testing.T, noHeaders *atomic.Bool) (limitsClient, *dash.Recorder, string) {
+	t.Helper()
+	up := limitsUpstream(t, noHeaders)
+	t.Cleanup(up.Close)
+	dir := t.TempDir()
+	h, rec := dashHandler(t, up.URL, dash.Options{DBPath: filepath.Join(dir, "d.db")})
+	srv := httptest.NewServer(h.Mux())
+	t.Cleanup(srv.Close)
+	return limitsClient{t: t, srv: srv}, rec, dir
+}
+
+// On a subscription (an OAuth bearer token) the proxy stores the limit headers and the auth kind on
+// the row, forwards the answer unchanged, and GET /api/me/limits returns them. The token itself
+// never reaches the database. A later answer without the headers leaves its row without them.
+func TestLimitHeadersReachTheRowAndTheEndpoint(t *testing.T) {
+	var noHeaders atomic.Bool
+	c, rec, dir := newLimitsClient(t, &noHeaders)
+	if got := c.limits(); len(got) != 0 {
 		t.Fatalf("before any request: %v, want {}", got)
 	}
 
-	send := func() *http.Response {
-		t.Helper()
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
-			strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return resp
-	}
-	resp := send()
+	resp := c.send("Authorization", "Bearer "+oauthToken)
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("anthropic-ratelimit-unified-7d-reset") != "garbage" {
 		t.Errorf("the answer changed on the way: %d %v", resp.StatusCode, resp.Header)
 	}
@@ -151,13 +181,14 @@ func TestLimitHeadersReachTheRowAndTheEndpoint(t *testing.T) {
 	if err != nil || len(page.Requests) != 1 {
 		t.Fatalf("rows: %v %v", page, err)
 	}
-	l := page.Requests[0].Limits
-	if l == nil || l.FiveHour.Utilization == nil || *l.FiveHour.Utilization != 0.54 ||
+	row := page.Requests[0]
+	l := row.Limits
+	if !row.AuthSubscription || l == nil || l.FiveHour.Utilization == nil || *l.FiveHour.Utilization != 0.54 ||
 		l.FiveHour.ResetS == nil || *l.FiveHour.ResetS != 1794249600 || l.FiveHour.Status != "allowed" ||
 		l.SevenDay.Utilization == nil || *l.SevenDay.Utilization != 0.08 || l.SevenDay.ResetS != nil {
-		t.Fatalf("stored limits = %+v", l)
+		t.Fatalf("stored row: auth_subscription=%v limits=%+v", row.AuthSubscription, l)
 	}
-	got := limits()
+	got := c.limits()
 	five, _ := got["five_hour"].(map[string]any)
 	seven, _ := got["seven_day"].(map[string]any)
 	if got["subscription"] != true || got["at_ms"] == nil || five["utilization"] != 0.54 ||
@@ -169,13 +200,87 @@ func TestLimitHeadersReachTheRowAndTheEndpoint(t *testing.T) {
 	// A later answer without the headers: its row has none, and the endpoint still shows the
 	// latest values the proxy saw.
 	noHeaders.Store(true)
-	send()
+	c.send("Authorization", "Bearer "+oauthToken)
 	waitForRows(t, rec, 2)
 	page, _ = rec.DB().Requests(dash.Filter{}, 0, 10)
-	if page.Requests[0].Limits != nil {
-		t.Errorf("row without headers stored %+v", page.Requests[0].Limits)
+	if page.Requests[0].Limits != nil || !page.Requests[0].AuthSubscription {
+		t.Errorf("row without headers: %+v sub=%v", page.Requests[0].Limits, page.Requests[0].AuthSubscription)
 	}
-	if got := limits(); got["subscription"] != true {
+	if got := c.limits(); got["subscription"] != true || got["five_hour"] == nil {
 		t.Errorf("after a row without headers: %v", got)
+	}
+
+	// The token never reaches the row: not in the row as read back, not anywhere in the files.
+	b, _ := json.Marshal(page.Requests)
+	if strings.Contains(string(b), "NEVERSTORED") {
+		t.Errorf("the token reached the row: %s", b)
+	}
+	// The database and its write-ahead log, read while open: the rows are written by now.
+	files, _ := filepath.Glob(filepath.Join(dir, "d.db*"))
+	if len(files) == 0 {
+		t.Fatal("no database files to check")
+	}
+	for _, f := range files {
+		if raw, _ := os.ReadFile(f); bytes.Contains(raw, []byte("NEVERSTORED")) {
+			t.Errorf("the token is in %s", f)
+		}
+	}
+}
+
+// An API key is not a subscription: {} even when the answer carries the limit headers.
+func TestLimitsAreEmptyForAnAPIKey(t *testing.T) {
+	var noHeaders atomic.Bool
+	c, rec, _ := newLimitsClient(t, &noHeaders)
+	c.send("x-api-key", "sk-ant-api03-somekey")
+	waitForRows(t, rec, 1)
+	page, _ := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if page.Requests[0].AuthSubscription || page.Requests[0].Limits == nil {
+		t.Errorf("API-key row: sub=%v limits=%+v", page.Requests[0].AuthSubscription, page.Requests[0].Limits)
+	}
+	if got := c.limits(); len(got) != 0 {
+		t.Errorf("API key: %v, want {}", got)
+	}
+	// A bearer token that is not a subscription token is not one either.
+	c.send("Authorization", "Bearer sk-ant-api03-somekey")
+	waitForRows(t, rec, 2)
+	if got := c.limits(); len(got) != 0 {
+		t.Errorf("bearer API key: %v, want {}", got)
+	}
+}
+
+// An account that moves from a subscription to an API key stops showing the old share at once.
+func TestLimitsStopAfterASwitchToAnAPIKey(t *testing.T) {
+	var noHeaders atomic.Bool
+	c, rec, _ := newLimitsClient(t, &noHeaders)
+	c.send("Authorization", "Bearer "+oauthToken)
+	waitForRows(t, rec, 1)
+	if got := c.limits(); got["subscription"] != true {
+		t.Fatalf("on the subscription: %v", got)
+	}
+	noHeaders.Store(true) // an API-key answer has no limit headers
+	c.send("x-api-key", "sk-ant-api03-somekey")
+	waitForRows(t, rec, 2)
+	if got := c.limits(); len(got) != 0 {
+		t.Errorf("after the switch: %v, want {}", got)
+	}
+}
+
+func TestCallerIsSubscription(t *testing.T) {
+	for _, tc := range []struct {
+		header, value string
+		want          bool
+	}{
+		{"Authorization", "Bearer " + oauthToken, true},
+		{"authorization", "bearer " + oauthToken, true},
+		{"Authorization", "Bearer sk-ant-api03-x", false},
+		{"x-api-key", oauthToken, false},
+		{"x-api-key", "sk-ant-api03-x", false},
+		{"Authorization", "Bearer", false},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+		r.Header.Set(tc.header, tc.value)
+		if got := callerIsSubscription(r); got != tc.want {
+			t.Errorf("%s: %q = %v, want %v", tc.header, tc.value, got, tc.want)
+		}
 	}
 }

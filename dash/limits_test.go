@@ -15,7 +15,7 @@ func limI(v int64) *int64     { return &v }
 // not 0. A row with no values stores none.
 func TestLimitsRoundTrip(t *testing.T) {
 	db := openTestDB(t)
-	full := &Event{TS: 1000, SessionID: "s", Model: "m", Limits: &Limits{
+	full := &Event{TS: 1000, SessionID: "s", Model: "m", AuthSubscription: true, Limits: &Limits{
 		FiveHour: LimitWindow{Utilization: limF(0.54), ResetS: limI(1794249600), Status: "allowed"},
 		SevenDay: LimitWindow{Utilization: limF(0), Status: "allowed"},
 	}}
@@ -28,6 +28,9 @@ func TestLimitsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !got.AuthSubscription {
+		t.Error("auth_subscription did not survive the round trip")
+	}
 	l := got.Limits
 	if l == nil || *l.FiveHour.Utilization != 0.54 || *l.FiveHour.ResetS != 1794249600 ||
 		l.FiveHour.Status != "allowed" || l.SevenDay.Utilization == nil || *l.SevenDay.Utilization != 0 ||
@@ -39,7 +42,7 @@ func TestLimitsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Limits != nil {
+		if got.Limits != nil || got.AuthSubscription {
 			t.Errorf("row %d without values read back %+v", e.ID, got.Limits)
 		}
 	}
@@ -78,15 +81,24 @@ func TestMeLimitsEndpoint(t *testing.T) {
 	win := func(u float64, r int64) LimitWindow {
 		return LimitWindow{Utilization: limF(u), ResetS: limI(r), Status: "allowed"}
 	}
+	// Rows as the proxy writes them: Anthropic requests, with the auth kind the client used.
+	row := func(ts int64, tenant string, sub bool, l *Limits) *Event {
+		return &Event{TS: ts, TenantID: tenant, SessionID: "s", Model: "m", Provider: "anthropic",
+			AuthSubscription: sub, Limits: l}
+	}
+	ping := row(3500, "a", false, nil)
+	ping.KeepAlive = true // the proxy's own ping: no client auth kind
 	if err := db.insertBatch([]*Event{
-		{TS: 1000, TenantID: "a", SessionID: "s", Model: "m",
-			Limits: &Limits{FiveHour: win(0.10, 100), SevenDay: win(0.01, 200)}},
-		{TS: 2000, TenantID: "a", SessionID: "s", Model: "m",
-			Limits: &Limits{FiveHour: win(0.54, 1794249600)}},
-		{TS: 3000, TenantID: "a", SessionID: "s", Model: "m"}, // an answer without the headers
-		{TS: 4000, TenantID: "b", SessionID: "s", Model: "m",
-			Limits: &Limits{FiveHour: win(0.99, 999)}},
-		{TS: 5000, TenantID: "c", SessionID: "s", Model: "m"}, // an API key: never any headers
+		row(1000, "a", true, &Limits{FiveHour: win(0.10, 100), SevenDay: win(0.01, 200)}),
+		row(2000, "a", true, &Limits{FiveHour: win(0.54, 1794249600)}),
+		row(3000, "a", true, nil), // an answer without the headers
+		ping,
+		{TS: 3600, TenantID: "a", SessionID: "s", Model: "m", Provider: "openai"}, // another agent
+		row(4000, "b", true, &Limits{FiveHour: win(0.99, 999)}),
+		// A subscription whose answers never had the headers.
+		row(4500, "d", true, nil),
+		// An API key: its headers do not count.
+		row(5000, "c", false, &Limits{FiveHour: win(0.30, 300)}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -100,24 +112,38 @@ func TestMeLimitsEndpoint(t *testing.T) {
 		t.Errorf("the newest row had no 7d values, but the answer has them: %v", got)
 	}
 	if got := get("c", false); len(got) != 0 {
-		t.Errorf("tenant c (no headers) = %v, want {}", got)
+		t.Errorf("tenant c (API key, with headers) = %v, want {}", got)
+	}
+	if got := get("d", false); len(got) != 1 || got["subscription"] != true {
+		t.Errorf("tenant d (subscription, no headers) = %v, want only subscription", got)
 	}
 	// A manager reads their own account, never the service-wide newest (tenant b's 0.99).
 	if got := get("c", true); len(got) != 0 {
 		t.Errorf("manager c = %v, want {}", got)
 	}
 
-	// Single-tenant: one account, every row.
-	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
-	t.Cleanup(func() { rec.Close() })
-	mux := http.NewServeMux()
-	NewAPI(rec).Mount(mux)
-	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/me/limits", nil))
-	var out map[string]any
-	json.Unmarshal(rr.Body.Bytes(), &out)
-	if out["at_ms"] != float64(4000) {
-		t.Errorf("single-tenant = %v, want the newest row (4000)", out)
+	// Single-tenant: one account, every row. The newest Anthropic request (5000) used an API key,
+	// so the account moved off its subscription: {} at once, although older rows carry values.
+	single := func() map[string]any {
+		t.Helper()
+		rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+		t.Cleanup(func() { rec.Close() })
+		mux := http.NewServeMux()
+		NewAPI(rec).Mount(mux)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/me/limits", nil))
+		var out map[string]any
+		json.Unmarshal(rr.Body.Bytes(), &out)
+		return out
+	}
+	if out := single(); len(out) != 0 {
+		t.Errorf("single-tenant after a switch to an API key = %v, want {}", out)
+	}
+	if err := db.insertBatch([]*Event{row(6000, "", true, nil)}); err != nil {
+		t.Fatal(err)
+	}
+	if out := single(); out["subscription"] != true || out["at_ms"] != float64(5000) {
+		t.Errorf("single-tenant back on a subscription = %v, want the newest values (5000)", out)
 	}
 }
 

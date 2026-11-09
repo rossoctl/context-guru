@@ -77,3 +77,15 @@ func (c *capture) noteLimits(h http.Header) {
 		c.limits = l
 	}
 }
+
+// subscriptionTokenPrefix is the fixed prefix of a Claude subscription (OAuth) access token.
+const subscriptionTokenPrefix = "sk-ant-oat"
+
+// callerIsSubscription reports whether the client authenticated with a Claude subscription token:
+// `Authorization: Bearer sk-ant-oat...`, as Claude Code sends after a claude.ai sign-in. An
+// x-api-key, any other credential, and one of our own tokens are not. It reads the same slot
+// CallerKey and CallerAuthScheme pick. Only the fixed prefix is tested; the token is never kept,
+// logged or returned.
+func callerIsSubscription(r *http.Request) bool {
+	return CallerAuthScheme(r) == "bearer" && strings.HasPrefix(CallerKey(r), subscriptionTokenPrefix)
+}

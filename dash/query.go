@@ -198,7 +198,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
 	r.compaction_point, r.compaction_point_source,
 	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
-	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status`
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -209,6 +209,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var u5, u7 sql.NullFloat64
 	var r5, r7 sql.NullInt64
 	var s5, s7 sql.NullString
+	var authSub int
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
@@ -229,7 +230,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
 		&e.CompactionPoint, &e.CompactionPointSource,
-		&u5, &r5, &s5, &u7, &r7, &s7)
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub)
+	e.AuthSubscription = authSub != 0
 	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
 		e.Limits = &l
 	}

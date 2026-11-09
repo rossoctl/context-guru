@@ -253,6 +253,10 @@ CREATE TABLE IF NOT EXISTS requests (
   limit_7d_utilization REAL,
   limit_7d_reset       INTEGER,
   limit_7d_status      TEXT,
+  -- 1 when the client authenticated this Anthropic request with a Claude subscription token (an
+  -- OAuth bearer token, sk-ant-oat...), 0 for an API key or any other credential. Only the kind:
+  -- the token itself is never stored. GET /api/me/limits reads it off the account's newest request.
+  auth_subscription    INTEGER NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -893,6 +897,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "limit_7d_utilization", "REAL"},
 	{"requests", "limit_7d_reset", "INTEGER"},
 	{"requests", "limit_7d_status", "TEXT"},
+	// The auth kind (#984): 1 for a subscription (OAuth) token. 0 on an earlier row, which reads as
+	// "not known to be a subscription" until the account's next request.
+	{"requests", "auth_subscription", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

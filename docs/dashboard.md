@@ -382,7 +382,12 @@ still works; only the text is withheld.
   time (`reset_s`, unix seconds) and the status word of each window.
 - **Where they go:** the proxy stores them on the request's row, beside its token counts. A missing
   or bad value is left out. The proxy never changes the answer it forwards.
-- **`{}`** when the account never got these headers: an API key, Bedrock or Vertex.
+- **Subscription or not:** the proxy also stores the auth kind on each Anthropic request. It is a
+  subscription when the client sent `Authorization: Bearer sk-ant-oat…` (a Claude sign-in token).
+  The proxy tests only that fixed prefix and stores only the yes or no, never the token.
+- **`{}`** when the account's newest Anthropic request did not use a subscription token: an API key,
+  Bedrock or Vertex. This holds even when older rows carry limit values, so an account that moves to
+  an API key stops showing the old share at once. Keep-alive pings do not count.
 
 ```json
 {
@@ -393,8 +398,10 @@ still works; only the text is withheld.
 }
 ```
 
-- `utilization` is a fraction 0..1, in whole percents (`0.54`).
-- `at_ms` is the time of the request that carried the values.
+- `subscription` comes from the auth kind, not from the headers.
+- `utilization` is a fraction 0..1, in steps of 0.01 (`0.54`).
+- `at_ms` is the time of the request that carried the values. On a subscription whose answers never
+  had the headers, the answer is `{"subscription": true}` alone.
 - A window whose `reset_s` is in the past is over. Treat it as absent.
 - A window, or a field, is left out when the newest answer did not carry it.
 - In hosted mode it is always the caller's own account, a manager's too. A single-tenant proxy has
