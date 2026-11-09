@@ -42,7 +42,7 @@ func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float
 
 // NewMetricsSink returns the accountant sink for the savings counters, priced from prices. A nil
 // prices gives zero money and marks every figure estimated.
-func NewMetricsSink(m metric.Meter, prices modelinfo.Pricer, components ...string) (accountant.Sink, error) {
+func NewMetricsSink(m metric.Meter, prices modelinfo.Pricer, components ...string) (acmetrics.Observer, error) {
 	var opts []acmetrics.Option
 	if len(components) > 0 {
 		opts = append(opts, acmetrics.WithComponents(components...))
@@ -61,5 +61,5 @@ func (c *capture) observeMetrics(res accountant.Result, usage accountant.Usage) 
 			slog.Error("metrics: Observe panicked; this request books no metric", "panic", p)
 		}
 	}()
-	c.metrics.Observe(accountant.Observation{Meta: c.accReq.Meta, Usage: usage, Result: res})
+	c.metrics.Observe(acmetrics.Observation{Meta: c.accReq.Meta, Usage: usage, Result: res})
 }

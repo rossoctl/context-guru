@@ -29,6 +29,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
@@ -76,7 +77,7 @@ type Options struct {
 	CodexCompact compactionpoint.Codex
 	// MetricsSink, when set, receives each priced request for the push metrics (R46: it must only
 	// add to in-memory counters). Nil means no metrics. Build it with NewMetricsSink.
-	MetricsSink       accountant.Sink
+	MetricsSink       acmetrics.Observer
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's

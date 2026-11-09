@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -30,11 +29,11 @@ func usageUpstream(t *testing.T) *httptest.Server {
 
 // counted wraps a sink and counts the requests it saw.
 type counted struct {
-	accountant.Sink
+	acmetrics.Observer
 	n atomic.Int32
 }
 
-func (c *counted) Observe(o accountant.Observation) { c.n.Add(1); c.Sink.Observe(o) }
+func (c *counted) Observe(o acmetrics.Observation) { c.n.Add(1); c.Observer.Observe(o) }
 
 func metricNames(t *testing.T, r *sdk.ManualReader) map[string]bool {
 	t.Helper()
@@ -60,7 +59,7 @@ func TestMetricsSinkSeesEachPricedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sink := &counted{Sink: inner}
+	sink := &counted{Observer: inner}
 	h, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.MetricsSink = sink })
 	accPost(t, h, "sess-metrics")
 	accPost(t, h, "sess-metrics")
@@ -84,7 +83,7 @@ func TestNoMetricsSinkIsFine(t *testing.T) {
 
 type panicSink struct{}
 
-func (panicSink) Observe(accountant.Observation) { panic("boom") }
+func (panicSink) Observe(acmetrics.Observation) { panic("boom") }
 
 // A panic in the sink costs the metric only. The request is answered and recorded (R46, R20).
 func TestPanickingMetricsSinkDoesNotHurtTheRequest(t *testing.T) {

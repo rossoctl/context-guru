@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -162,7 +163,7 @@ type capture struct {
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
 	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
-	metrics accountant.Sink
+	metrics acmetrics.Observer
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the accountant figure must not be booked.
 	observe bool
