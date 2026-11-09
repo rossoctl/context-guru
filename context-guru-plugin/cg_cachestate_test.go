@@ -13,8 +13,8 @@ import (
 )
 
 // What `cg.py cachestate` adds beside the raw cachestate since the mod's band draws the status line (0.6.1): the
-// `▲ update` marker, the session's manual pings and, on a subscription, this session's saving (tokens and dollars) and
-// every session's spend in the 5-hour window. Each
+// `▲ update` marker, the session's manual pings and, on a subscription, the tokens this session saved in the 5-hour
+// window. Each
 // comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank a field in
 // silence. This test is what catches it.
 func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
@@ -32,12 +32,12 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 		q := r.URL.Query()
 		switch {
 		case q.Get("session") != "" && q.Get("since") != "": // this session in the window: the band's saving
-			w.Write([]byte(`{"saved_unique":85000,"replay_tokens":1200000,"total_saved_usd":0.75}`)) //nolint:errcheck
+			windowAsked = q.Get("since")
+			w.Write([]byte(`{"saved_unique":85000,"replay_tokens":1200000}`)) //nolint:errcheck
 		case q.Get("session") != "":
 			w.Write([]byte(`{"total_saved_usd":0.31,"manual_pings":{"count":2,"ping_usd":0.08,"saved_usd":0.27}}`)) //nolint:errcheck
-		default: // every session in the window: the spend the limit's rate is measured on
-			windowAsked = q.Get("since")
-			w.Write([]byte(`{"saved_unique":999000,"replay_tokens":9990000,"total_saved_usd":4.1,"cost_usd":8.5}`)) //nolint:errcheck
+		default: // every session in the window: the band must not show these
+			w.Write([]byte(`{"saved_unique":999000,"replay_tokens":9990000}`)) //nolint:errcheck
 		}
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -61,16 +61,9 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	if mp, _ := doc["manual_pings"].(map[string]any); mp["saved_usd"] != 0.27 {
 		t.Errorf("manual_pings = %v, want the session stats' figure", doc["manual_pings"])
 	}
-	// The tokens and the dollars saved are this session's, not every session's in the window.
+	// The tokens are this session's, not every session's in the window.
 	if doc["window_saved"] != "saved 1.2M rd / 85.0k wr" {
 		t.Errorf("window_saved = %v, want this session's tokens (window asked since=%q, want %d)", doc["window_saved"], windowAsked, start)
-	}
-	if doc["window_session_saved_usd"] != 0.75 {
-		t.Errorf("window_session_saved_usd = %v, want this session's 0.75", doc["window_session_saved_usd"])
-	}
-	// The spend is every session's: the 5-hour limit is the account's.
-	if doc["window_cost_usd"] != 8.5 || doc["window_start_ms"] != float64(start) {
-		t.Errorf("window_cost_usd = %v, window_start_ms = %v, want 8.5 and %d", doc["window_cost_usd"], doc["window_start_ms"], start)
 	}
 }
 

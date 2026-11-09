@@ -34,45 +34,16 @@ export const usd = (x: number): string => {
   return `${sign}$${a >= 100 ? a.toFixed(0) : a.toFixed(2)}`
 }
 
-/** On a Claude subscription the limit, not money, is what runs out. These turn the proxy's API-price dollars into a
- * share of the 5-hour limit. The rate is measured: Claude Code's used share over what every session spent in the same
- * window at API prices. So it weights each token kind as the API prices do; Anthropic does not publish the limit's own
- * weights. Use outside the proxy (claude.ai, another machine) is not in the spend, so then the rate reads high. */
-export const LIMIT_MIN_USD = 0.5 // below this spend the rate is noise
-export const LIMIT_MIN_PCT = 2 // Claude Code gives whole percents: at 1% the rate could be off by half
+/** A token count as the status line writes it (statusline.py `_human`): `85.0k`, `1.2M`, `593`. */
+export const tokens = (n: number): string => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${Math.round(n)}`)
 
-function limitWindow(doc: Record<string, unknown>): View['limitWindow'] {
-  const startMs = num(doc.window_start_ms)
-  const costUsd = num(doc.window_cost_usd)
-  if (startMs === undefined || costUsd === undefined) return undefined
-  return { startMs, costUsd, savedUsd: num(doc.window_session_saved_usd) }
-}
-
-/** The 5-hour limit's percent per API dollar in this window, or undefined while there is too little to measure. */
-export function limitRate(w: View['limitWindow'], fiveHour: number | undefined): number | undefined {
-  if (!w || fiveHour === undefined || w.costUsd < LIMIT_MIN_USD || fiveHour < LIMIT_MIN_PCT) return undefined
-  return fiveHour / w.costUsd
-}
-
-/** A share of the 5-hour limit: `<0.1%`, `2.4%`, `34%`. */
-export const share = (pct: number): string => (pct < 0.05 ? '<0.1%' : pct < 9.95 ? `${pct.toFixed(1)}%` : `${Math.round(pct)}%`)
-
-/** What this session saved in the window, as a share of the limit and as minutes at this window's pace: the saving
- * over the spend, times the window's elapsed time. A saving never reads below zero. */
-export function limitSaved(w: View['limitWindow'], fiveHour: number | undefined, now: number): { pct: string; mins: string } | undefined {
-  const rate = limitRate(w, fiveHour)
-  if (rate === undefined || !w || w.savedUsd === undefined || w.savedUsd <= 0) return undefined
-  const elapsed = Math.max(0, Math.min(now - w.startMs, 5 * 3_600_000)) / 60_000
-  const m = Math.round((elapsed * w.savedUsd) / w.costUsd)
-  return { pct: share(w.savedUsd * rate), mins: m < 1 ? '<1 min' : m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${m % 60}m` }
-}
-
-/** A next-message price in the unit the user pays in: a share of the 5-hour limit on a subscription, else dollars.
- * Undefined on a subscription while the rate cannot be measured: a dollar figure there means nothing. */
-export function price(x: number | undefined, rate: number | undefined, isSubscription: boolean): string | undefined {
-  if (x === undefined) return undefined
-  if (rate !== undefined) return share(x * rate)
-  return isSubscription ? undefined : usd(x)
+/** The next message's price in the unit the user pays in. With an API key: dollars. On a Claude subscription: tokens,
+ * the same unit as the band's saving. A warm cache reads the cached prefix (`rd`); a cold one writes it again (`wr`).
+ * Anthropic does not publish how the 5-hour limit weights the two, so the band shows counts and does not convert. */
+export function nextPrice(m: ThreadView, isSubscription: boolean): { warm?: string; cold?: string } {
+  if (!isSubscription) return { warm: m.warmUsd === undefined ? undefined : usd(m.warmUsd), cold: m.coldUsd === undefined ? undefined : usd(m.coldUsd) }
+  if (m.tokens === undefined || m.tokens < 1) return {}
+  return { warm: m.warmUsd === undefined ? undefined : `${tokens(m.tokens)} rd`, cold: m.coldUsd === undefined ? undefined : `${tokens(m.tokens)} wr` }
 }
 
 /** "4m", "<1m", "1h05m": coarse on purpose, so the band redraws when the words change, not every poll. */
@@ -330,7 +301,6 @@ export function view(snap: Snapshot | null, nowLocal: number): View | null {
     window,
     update: typeof doc.update === 'string' && doc.update !== '' ? doc.update : undefined,
     windowSaved: typeof doc.window_saved === 'string' && doc.window_saved !== '' ? doc.window_saved : undefined,
-    limitWindow: limitWindow(doc),
     pingable,
     pingReason: pingable === false && typeof reason === 'string' && reason !== '' ? reason : undefined,
     tip: [...(snap.tip ?? [])],
@@ -363,8 +333,6 @@ export const signature = (v: View | null): string =>
         v.window,
         v.update,
         v.windowSaved,
-        v.limitWindow?.costUsd,
-        v.limitWindow?.savedUsd,
         v.pingable,
         v.pingReason,
         v.tip,
