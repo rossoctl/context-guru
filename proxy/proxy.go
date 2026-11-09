@@ -642,9 +642,9 @@ func (h *Handler) Mux() *http.ServeMux {
 	// it only receives what nothing else matched. Enabled only when BobUpstream is
 	// set, so default proxy behavior (unknown path => 404) is unchanged.
 	if h.opts.BobUpstream != "" || h.opts.Tenants != nil {
-		m.HandleFunc("POST /inference/v1/chat/completions", h.chat(bschemas.OpenAI, upstream{
+		m.HandleFunc("POST "+bobModelPath, h.chat(bschemas.OpenAI, upstream{
 			base: h.opts.BobUpstream,
-			path: "/inference/v1/chat/completions",
+			path: bobModelPath,
 			// setKey nil in single-tenant mode: pass Bob's own auth (BOBSHELL key)
 			// straight through. In hosted mode upstreamFor always injects, because the
 			// client's header holds OUR token, which must not leave the box.
@@ -727,6 +727,25 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // bobProfilePath is the profile route Bob's CLI calls before anything else, and the
 // one response the catch-all does not forward verbatim. See forwardBobProfile.
 const bobProfilePath = "/admin/v1/profile"
+
+// bobModelPath is Bob's model route. Only a request on it may take its session from
+// X-Task-Id (see explicitSessionOf).
+const bobModelPath = "/inference/v1/chat/completions"
+
+// explicitSessionOf is the explicit session id a chat request gives to apply. Every place that
+// derives this request's session calls it. So the pipeline, the expand repair, the observe
+// record and the wire recorder use the same id.
+//
+// The Bob IDE sends its task id only in the X-Task-Id header. The header has no vendor prefix,
+// so any client can send it. So only the Bob model route reads it. It comes after every other
+// id (session.Explicit). Other routes get the session header unchanged.
+func explicitSessionOf(r *http.Request, upPath string, body []byte) string {
+	sess := r.Header.Get("x-context-guru-session")
+	if upPath != bobModelPath {
+		return sess
+	}
+	return apply.ExplicitSession(sess, body, r.Header.Get("X-Task-Id"))
+}
 
 func isBobProfile(r *http.Request) bool {
 	return r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, bobProfilePath)
@@ -1300,6 +1319,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// external evaluator can REPLAY the exact traffic through any pipeline via
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
+		// Once, so the pipeline, the expand repair and the wire recorder use one id.
+		explicitSess := explicitSessionOf(r, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -1411,7 +1432,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				var repaired int
 				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
 					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
-					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"), api, provider, bypassed, b)
+					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSess, api, provider, bypassed, b)
 				})
 				if repaired > 0 {
 					// A rewrite of the client's own transcript must never be silent: this is
@@ -1470,7 +1491,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				provider:    provider,
 				api:         api,
 				body:        body,
-				session:     r.Header.Get("x-context-guru-session"),
+				session:     explicitSess,
 				bypassed:    bypassed,
 				models:      models,
 				window:      window,
@@ -1650,7 +1671,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(r, provider, orig, tn), di, tr.TouchAlias)
+			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
 	}
 }
 
@@ -1850,6 +1871,9 @@ var errNoUpstream = errors.New("no upstream configured")
 // next request would otherwise carry the content.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
 	wire := schema.WireFor(string(provider), up.path)
+	// Only Bob's model route reads the cache writes Bob adds to its OpenAI chat usage block
+	// (bobUsage). Every other route keeps the shared parser's reading unchanged.
+	bob := up.path == bobModelPath
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -2027,7 +2051,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, r.Header.Get("x-context-guru-session"),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSessionOf(r, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
@@ -2220,7 +2244,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRec(w, resp, tee)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2318,7 +2342,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRec(w, resp, tee)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2345,6 +2369,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
+			if bob {
+				u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u)
+			}
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
@@ -2701,6 +2728,12 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+	return h.streamRecOn(w, resp, tee, false)
+}
+
+// streamRecOn is streamRec for a chat route. bob is true only on Bob's model route, where the
+// usage block also carries the cache writes (bobUsage).
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, bob bool) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2733,6 +2766,9 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
+	if bob && ok {
+		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u)
+	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
 	// It counts events, so it reads the window with no byte twice (#866, N5).

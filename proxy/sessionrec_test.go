@@ -431,8 +431,7 @@ func TestRecordSessionIDInObserveMode(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	// A Tenancy with no session id, as observe mode leaves it.
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
-	rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("hello"), &Tenancy{})
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("hello"), &Tenancy{}, "")
 
 	if rc.traceID != testSessionUUID {
 		t.Fatalf("trace id = %q, want Claude Code's own session UUID %q\n"+
@@ -451,8 +450,7 @@ func TestRecordSessionIDFallbackIsNeverEmptyAndIsMarked(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	body := []byte(`{"model":"aws/claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`)
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
-	rc := h.newRecCtx(req, bschemas.Anthropic, body, &Tenancy{})
+	rc := h.newRecCtx(bschemas.Anthropic, body, &Tenancy{}, "")
 
 	if rc.traceID == "" {
 		t.Fatal("trace id is empty: the file would be named .otel.json and merge unrelated sessions")
@@ -463,11 +461,70 @@ func TestRecordSessionIDFallbackIsNeverEmptyAndIsMarked(t *testing.T) {
 	}
 }
 
+// The Bob IDE sends no metadata. Its id is the explicit id the chat handler passes in, so the
+// file is keyed on the X-Task-Id, as the pipeline's session is.
+func TestRecordSessionIDUsesTheExplicitID(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	defer r.Close()
+	h := &Handler{recorder: r}
+
+	body := []byte(`{"model":"gpt-x","messages":[{"role":"system","content":"You are Bob."},{"role":"user","content":"hi"}]}`)
+	rc := h.newRecCtx(bschemas.OpenAI, body, &Tenancy{}, bobIDETask)
+
+	if want := "cg-derived-" + bobIDETask; rc.traceID != want {
+		t.Fatalf("trace id = %q, want %q", rc.traceID, want)
+	}
+}
+
+// The same, end to end: a Bob IDE call through the Mux writes its wire file under the
+// X-Task-Id. This catches a chat handler that passes the wrong id to newRecCtx.
+func TestRecordBobIDECallIsKeyedOnXTaskID(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}`))
+	}))
+	defer up.Close()
+	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, dir := newTestRecorder(t)
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{BobUpstream: up.URL, Preset: cfg.Preset, Record: r})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+bobRoute, strings.NewReader(bobBody("fix it", "")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Task-Id", bobIDETask)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var got []string
+	for f := range wireLines(t, dir) {
+		got = append(got, filepath.Base(f))
+	}
+	if want := "cg-derived-" + bobIDETask + ".wire.jsonl"; len(got) != 1 || got[0] != want {
+		t.Fatalf("wire files = %v, want [%s]", got, want)
+	}
+}
+
 // Recording off: no recorder, no clone, no work.
 func TestRecCtxIsZeroWhenRecordingOff(t *testing.T) {
 	h := &Handler{} // recorder nil
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
-	rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), &Tenancy{})
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{}, "")
 	if rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recording off must yield the zero recCtx, got %+v", rc)
 	}
@@ -528,15 +585,14 @@ func TestRecordNeedsTheTenantsConsentInHostedMode(t *testing.T) {
 	r, _ := newTestRecorder(t)
 	defer r.Close()
 	h := &Handler{recorder: r, opts: Options{Tenants: &TenantSource{}}}
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 
-	if rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}); rc.traceID != "" || rc.pristine != nil {
+	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}, ""); rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recorded a tenant who never opted in: %+v", rc)
 	}
-	if rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), nil); rc.traceID != "" {
+	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), nil, ""); rc.traceID != "" {
 		t.Fatalf("recorded an unauthenticated request in hosted mode: %+v", rc)
 	}
-	rc := h.newRecCtx(req, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true})
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true}, "")
 	if rc.traceID != testSessionUUID || rc.tenantID != "t1" {
 		t.Fatalf("opted-in tenant: got trace %q tenant %q, want %q and t1", rc.traceID, rc.tenantID, testSessionUUID)
 	}

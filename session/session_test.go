@@ -140,6 +140,32 @@ func TestExplicitOrder(t *testing.T) {
 	}
 }
 
+// A host-only id (the Bob IDE's X-Task-Id header) comes after every metadata field, so a
+// request that resolved an id before still resolves the same one.
+func TestExplicitHostIDsComeLast(t *testing.T) {
+	const ide = "009431a32bc317f3dae92fe48c7cdc96"
+	for _, tc := range []struct {
+		name, header string
+		meta         map[string]string
+		host         []string
+		want         string
+	}{
+		{"host id alone", "", nil, []string{ide}, ide},
+		{"taskId wins", "", map[string]string{"taskId": "t"}, []string{ide}, "t"},
+		{"user_id wins", "", map[string]string{"user_id": `{"session_id":"s1"}`}, []string{ide}, "s1"},
+		{"header wins", "h", map[string]string{"taskId": "t"}, []string{ide}, "h"},
+		{"unsafe host id skipped", "", nil, []string{"../../x"}, ""},
+		{"too long host id skipped", "", nil, []string{strings.Repeat("a", 200)}, ""},
+		{"empty host id skipped", "", nil, []string{""}, ""},
+		{"no host id: unchanged", "", map[string]string{"taskId": "t"}, nil, "t"},
+	} {
+		get := func(k string) (string, bool) { v, ok := tc.meta[k]; return v, ok }
+		if got := Explicit(tc.header, get, tc.host...); got != tc.want {
+			t.Errorf("%s: Explicit = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestExplicitStrictSkipsPlainUserID(t *testing.T) {
 	m := map[string]string{"user_id": "user_42"}
 	get := func(k string) (string, bool) { v, ok := m[k]; return v, ok }

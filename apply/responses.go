@@ -490,7 +490,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		return res
 	}
 	sys, first := schema.SessionHead(norm)
-	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	res.Session = session.Scoped(o.Tenant, ExplicitSession(o.Session, o.Body), sys, first)
 	// The cold clock's key (the bare content hash), derived once. It is also the Trace's TouchAlias,
 	// so a keep-alive ping touches the key this request reads even when our own tool search puts
 	// the names list at the head afterwards (#902).
