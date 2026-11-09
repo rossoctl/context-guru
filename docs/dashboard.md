@@ -307,7 +307,9 @@ beside the dollars. A subscription is limited in tokens, so a screen can show to
 - **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
   `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
   (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
-  ended). A feature with no tokens has no entry.
+  ended). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
+  any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
+  plus the `cachesplit` component's `saved_usd`.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
   `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
   not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is

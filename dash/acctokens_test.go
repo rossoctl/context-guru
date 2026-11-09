@@ -357,3 +357,40 @@ func TestAccTokenColumnsAreAddedToAnOldDatabase(t *testing.T) {
 		t.Fatalf("requests %d unmeasured %d, want 1 and 1", o.Requests, o.TokensUnmeasuredRequests)
 	}
 }
+
+// A stored request reads back the tokens the live event showed: by id (/api/requests/{id}) with
+// each component's tokens, and in the list (/api/requests).
+func TestAccTokens_RoundTripThroughTheStore(t *testing.T) {
+	db := openTestDB(t)
+	e := tokEvent(1000, "s1")
+	e.PriceMode(accTestPrice, true)
+	if e.AccTokens == (AccEffectTokens{}) {
+		t.Fatal("fixture: no effect tokens")
+	}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Request(e.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccTokens != e.AccTokens {
+		t.Errorf("acc_tokens read back %+v, wrote %+v", got.AccTokens, e.AccTokens)
+	}
+	if len(got.Components) != len(e.Components) {
+		t.Fatalf("components read back %d, wrote %d", len(got.Components), len(e.Components))
+	}
+	for i, c := range e.Components {
+		if got.Components[i].Component != c.Component || got.Components[i].Tokens != c.Tokens {
+			t.Errorf("component %d: read back %s %+v, wrote %s %+v", i, got.Components[i].Component,
+				got.Components[i].Tokens, c.Component, c.Tokens)
+		}
+	}
+	page, err := db.Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Requests) != 1 || page.Requests[0].AccTokens != e.AccTokens {
+		t.Errorf("list read back %+v, wrote %+v", page.Requests, e.AccTokens)
+	}
+}

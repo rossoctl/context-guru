@@ -100,6 +100,12 @@ func (f TokenFlow) args() []any {
 		f.Caused.Input, f.Caused.CacheRead, f.Caused.CacheWrite5m, f.Caused.CacheWrite1h}
 }
 
+// dest is the figure's eight scan targets, in flowColumns order: the read side of args.
+func (f *TokenFlow) dest() []any {
+	return []any{&f.Saved.Input, &f.Saved.CacheRead, &f.Saved.CacheWrite5m, &f.Saved.CacheWrite1h,
+		&f.Caused.Input, &f.Caused.CacheRead, &f.Caused.CacheWrite5m, &f.Caused.CacheWrite1h}
+}
+
 // compTokenColumns are request_components' token columns: the component's own figure.
 var compTokenColumns = flowColumns("tok")
 
@@ -119,6 +125,19 @@ func requestTokenColumns() []string {
 		cols = append(cols, flowColumns(x.prefix)...)
 	}
 	return cols
+}
+
+// requestTokenSelect is the request token columns for requestCols (alias r), so a stored row reads
+// back what the live event showed.
+var requestTokenSelect = "r." + strings.Join(requestTokenColumns(), ", r.")
+
+// requestTokenDest is the scan targets of requestTokenSelect, in the same order.
+func requestTokenDest(a *AccEffectTokens) []any {
+	var out []any
+	for _, f := range []*TokenFlow{&a.KeepAlive, &a.Split, &a.TTL, &a.EndedBreak} {
+		out = append(out, f.dest()...)
+	}
+	return out
 }
 
 func requestTokenArgs(a AccEffectTokens) []any {

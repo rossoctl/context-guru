@@ -429,7 +429,9 @@ type Overview struct {
 	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
 	EstimatedRequests int64 `json:"estimated_requests"`
 	// Tokens is the accountant library's figures in tokens by tier, in total and by feature (#998).
-	// Every dollar saving above has its token form here; the tiers are never added into one number.
+	// Every accountant-measured saving has its token form here. The read-time credits (the declaration
+	// filter, the split's historical credit), defer_net_usd and the manual pings' savings do not.
+	// The tiers are never added into one number.
 	// TokensUnmeasuredRequests counts the agent requests in the period the library did not price
 	// (acc_priced = 0: rows from before the library, and rows it could not price): they have no
 	// token figure, which is not a zero saving. A held estimate (EstimatedRequests) is measured
