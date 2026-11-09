@@ -14,9 +14,8 @@ import (
 
 // What `cg.py cachestate` adds beside the raw cachestate since the mod's band draws the status line (0.6.1): the
 // `▲ update` marker, the session's manual pings and, on a subscription, the tokens this session saved in the 5-hour
-// window. Each
-// comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank a field in
-// silence. This test is what catches it.
+// window. Each comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank
+// a field in silence. This test is what catches it.
 func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	const now = 1_800_000_000_000
 	const start = now - 3_600_000
