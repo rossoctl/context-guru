@@ -47,8 +47,9 @@ func TestStartMetricsPushReachesTheCollector(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sink, stop := startMetricsPush(settings(t, srv.URL, false), onePrice{}, "codesafe")
-	if sink == nil {
+	got, stop := startMetricsPush(settings(t, srv.URL, false), onePrice{}, "codesafe")
+	sink := got.savings
+	if sink == nil || got.inference == nil {
 		t.Fatal("no sink")
 	}
 	sink.Observe(observation())
@@ -66,9 +67,9 @@ func TestStartMetricsPushOffMakesNoConnection(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	defer srv.Close()
-	sink, stop := startMetricsPush(settings(t, srv.URL, true), onePrice{}, "codesafe")
-	if sink != nil {
-		sink.Observe(observation())
+	got, stop := startMetricsPush(settings(t, srv.URL, true), onePrice{}, "codesafe")
+	if got.savings != nil {
+		got.savings.Observe(observation())
 	}
 	stop()
 	if hits.Load() != 0 {
@@ -80,16 +81,16 @@ func TestStartMetricsPushOffMakesNoConnection(t *testing.T) {
 func TestStartMetricsPushWithoutDashboardIsOff(t *testing.T) {
 	s := settings(t, "http://127.0.0.1:1", false)
 	s.dashboard = false
-	if sink, _ := startMetricsPush(s, onePrice{}, "x"); sink != nil {
+	if got, _ := startMetricsPush(s, onePrice{}, "x"); got.savings != nil || got.inference != nil {
 		t.Fatal("a run with no dashboard built a sink")
 	}
 }
 
 // A bad URL must not stop the proxy: no sink, one log line (R20).
 func TestStartMetricsPushBadURLFailsOpen(t *testing.T) {
-	sink, stop := startMetricsPush(settings(t, "http://collector.example.com", false), onePrice{}, "x")
+	got, stop := startMetricsPush(settings(t, "http://collector.example.com", false), onePrice{}, "x")
 	defer stop()
-	if sink != nil {
+	if got.savings != nil {
 		t.Fatal("a plain http URL to a remote host was accepted")
 	}
 }
@@ -116,9 +117,9 @@ func TestStartMetricsPushWithoutURLReportsNothing(t *testing.T) {
 	defer slog.SetDefault(prev)
 
 	s := settings(t, "", false)
-	sink, stop := startMetricsPush(s, onePrice{}, "x")
+	got, stop := startMetricsPush(s, onePrice{}, "x")
 	defer stop()
-	if sink != nil {
+	if got.savings != nil || got.inference != nil {
 		t.Fatal("a sink was built with no collector URL")
 	}
 	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "no collector URL") {
@@ -130,7 +131,7 @@ func TestStartMetricsPushWithoutURLReportsNothing(t *testing.T) {
 }
 
 func TestStartMetricsPushWhitespaceURLIsNoURL(t *testing.T) {
-	if sink, _ := startMetricsPush(settings(t, "   ", false), onePrice{}, "x"); sink != nil {
+	if got, _ := startMetricsPush(settings(t, "   ", false), onePrice{}, "x"); got.savings != nil {
 		t.Fatal("a blank URL built a sink")
 	}
 }

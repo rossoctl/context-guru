@@ -164,6 +164,8 @@ type capture struct {
 	savings *savingsTracker
 	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
 	metrics acmetrics.Observer
+	// inference is the common inference set (Options.InferenceMetrics; nil = off).
+	inference *InferenceMetrics
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the accountant figure must not be booked.
 	observe bool
@@ -219,7 +221,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		unique:   map[string]int{},
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
-		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink,
+		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
 		observe: tn.Mode == components.ModeObserve,
 		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
 	}
@@ -924,6 +926,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
 	// e.Project rides along: invocations are recorded per folder, because one session works in
 	// several and a per-session folder cannot scope a per-project report.
+	// After the response, on the handler's defer: counter adds only (R46). A panic costs the metric.
+	c.inference.Observe(e, time.Since(c.start))
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }

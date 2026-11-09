@@ -25,20 +25,20 @@ import (
 // There is no default collector URL. With no URL, or with the push off, it logs one line and returns
 // a nil sink: no machine-ID file is made, no provider starts, and no request pays for a sink. The
 // push needs the accountant, which needs the dashboard, so a run with no dashboard has no sink.
-func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset string) (acmetrics.Observer, func()) {
+func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset string) (metricsSinks, func()) {
 	nop := func() {}
 	switch {
 	case cfg.off:
 		slog.Info("context-guru: metrics push is off (--metrics-push=false); no connection is made")
-		return nil, nop
+		return metricsSinks{}, nop
 	case strings.TrimSpace(cfg.url) == "":
 		// No default URL: nothing is sent unless the operator names a collector.
 		slog.Warn("context-guru: no collector URL is set (--metrics-push-url or METRICS_PUSH_URL); " +
 			"no metrics are reported")
-		return nil, nop
+		return metricsSinks{}, nop
 	case !cfg.dashboard:
 		slog.Warn("context-guru: metrics need --dashboard, which is off; no metrics are reported")
-		return nil, nop
+		return metricsSinks{}, nop
 	}
 	// The flags already read the environment (METRICS_PUSH_*), so there is one reader, and an explicit
 	// flag wins over the environment.
@@ -55,15 +55,21 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 	provider, shutdown, err := metricspush.Start(context.Background(), push)
 	if err != nil {
 		slog.Warn("context-guru: metrics push is off; the proxy runs without it", "err", err)
-		return nil, nop
+		return metricsSinks{}, nop
 	}
 	sink, err := proxy.NewMetricsSink(provider.Meter("context-guru"), prices, components.Names()...)
 	if err != nil {
 		slog.Warn("context-guru: metrics are off; could not build the sink", "err", err)
 		_ = shutdown(context.Background())
-		return nil, nop
+		return metricsSinks{}, nop
 	}
-	return sink, func() {
+	inf, err := proxy.NewInferenceMetrics(provider.Meter("context-guru"))
+	if err != nil {
+		slog.Warn("context-guru: metrics are off; could not build the inference set", "err", err)
+		_ = shutdown(context.Background())
+		return metricsSinks{}, nop
+	}
+	return metricsSinks{savings: sink, inference: inf}, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = shutdown(ctx) // a hung collector delays the exit by 3 seconds at most
@@ -86,4 +92,11 @@ func machineIDPath(dashDB string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(dashDB), "machine-id")
+}
+
+// metricsSinks are the two things the proxy books a finished request into. Both are nil when the
+// push is off.
+type metricsSinks struct {
+	savings   acmetrics.Observer
+	inference *proxy.InferenceMetrics
 }

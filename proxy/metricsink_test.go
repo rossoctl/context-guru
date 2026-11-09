@@ -10,6 +10,7 @@ import (
 	"time"
 
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"go.opentelemetry.io/otel/attribute"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -110,5 +111,33 @@ func TestPricerAdapterNeverBlocks(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Price blocked")
+	}
+}
+
+func attrKey(k string) attribute.Key { return attribute.Key(k) }
+
+// A real request through the handler books into the inference set, with the tokens the upstream stated.
+func TestInferenceMetricsSeeARealRequest(t *testing.T) {
+	up := usageUpstream(t)
+	reader := sdk.NewManualReader()
+	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(reader)).Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.InferenceMetrics = im })
+	accPost(t, h, "sess-inference")
+	waitForRows(t, rec, 1)
+
+	all := collectAll(t, reader)
+	reqs := intByLabel(all["llm.inference.requests"], "status_class")
+	if reqs["2xx"] != 1 {
+		t.Fatalf("requests by class = %v, want one 2xx", reqs)
+	}
+	tok := intByLabel(all["llm.inference.tokens"], "tier")
+	if tok["output"] != 34 || tok["cache_write_5m"] != 50 {
+		t.Errorf("tokens by tier = %v, want output 34 and cache_write_5m 50 (from the upstream's usage)", tok)
+	}
+	if _, ok := all["llm.inference.duration"]; !ok {
+		t.Error("no duration was recorded")
 	}
 }
