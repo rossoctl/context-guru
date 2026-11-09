@@ -1,12 +1,15 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-plugin-test-"))
 
-import plugin, { routeProviders } from "../index.js"
+process.env.CONTEXT_GURU_PORT_START = "9300"
+
+import plugin, { routeProviders, stateDirectory } from "../index.js"
+import { stubProxyBinary } from "./helpers.mjs"
 
 function context() {
   return {
@@ -29,12 +32,24 @@ test("exposes the OpenCode hooks", async () => {
 })
 
 test("adds the OpenCode session header", async () => {
-  const hooks = await plugin.server(context())
-  const output = { headers: {} }
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  try {
+    const hooks = await plugin.server({ directory: "/tmp/context-guru-header-test", client: context().client })
+    await hooks.config({ provider: { anthropic: { options: { baseURL: "https://api.anthropic.com" } }, custom: { options: { baseURL: "https://example.test" } } } })
 
-  await hooks["chat.headers"]({ sessionID: "session-test" }, output)
+    const routed = { headers: {} }
+    await hooks["chat.headers"]({ sessionID: "session-test", provider: { info: { id: "anthropic" } } }, routed)
+    assert.equal(routed.headers["x-context-guru-session"], "session-test")
 
-  assert.equal(output.headers["x-context-guru-session"], "session-test")
+    // A provider the plugin did not route does not send traffic to the proxy: no header.
+    const other = { headers: {} }
+    await hooks["chat.headers"]({ sessionID: "session-test", provider: { info: { id: "custom" } } }, other)
+    assert.equal(other.headers["x-context-guru-session"], undefined)
+  } finally {
+    const record = JSON.parse(readFileSync(join(stateDirectory("/tmp/context-guru-header-test"), "install.json"), "utf8"))
+    process.kill(record.pid, "SIGTERM")
+    delete process.env.CONTEXT_GURU_BIN
+  }
 })
 
 test("leaves unsupported providers unchanged", async () => {
@@ -58,7 +73,9 @@ test("registers the context-guru commands", async () => {
 
   assert.deepEqual(Object.keys(config.command).sort(), [
     "context-guru-install",
+    "context-guru-preset",
     "context-guru-status",
+    "context-guru-strategy",
     "context-guru-uninstall",
     "context-guru-update",
   ])
