@@ -1,4 +1,4 @@
-// Package metricspush starts the OpenTelemetry SDK and the OTLP exporter that send a proxy's metrics to the
+// Package metricspush starts the OpenTelemetry SDK and an OTLP/JSON exporter that send a proxy's metrics to the
 // central collector (R15). It is the only package that imports the SDK, so the metrics package
 // stays API-only. Each proxy holds its own copy of this setup: the URL, the token and the exporter are
 // settings of the host, not of the accountant.
@@ -15,12 +15,10 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
 	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
@@ -83,17 +81,7 @@ func Start(ctx context.Context, cfg Config) (metric.MeterProvider, Shutdown, err
 		return nil, nil, err
 	}
 
-	opts := []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpointURL(strings.TrimRight(endpoint, "/") + "/v1/metrics"),
-		otlpmetrichttp.WithTimeout(exportTimeout),
-	}
-	if cfg.Token != "" {
-		opts = append(opts, otlpmetrichttp.WithHeaders(map[string]string{"Authorization": "Bearer " + cfg.Token}))
-	}
-	inner, err := otlpmetrichttp.New(ctx, opts...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("push: build exporter: %w", err)
-	}
+	inner := newJSONExporter(strings.TrimRight(endpoint, "/")+"/v1/metrics", cfg.Token, exportTimeout)
 
 	fails := &failureCounter{log: log}
 	exp := &countingExporter{Exporter: inner, fails: fails}
@@ -173,16 +161,15 @@ func (f *failureCounter) record(err error) {
 
 // reasonOf maps an export error to a small fixed set of label values.
 func reasonOf(err error) string {
+	var se *statusError
 	var ne net.Error
 	switch {
+	case errors.As(err, &se):
+		return statusReason(se.code)
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.As(err, &ne) && ne.Timeout():
 		return "timeout"
-	case strings.Contains(err.Error(), "401"), strings.Contains(err.Error(), "403"):
-		return "unauthorized"
-	case strings.Contains(err.Error(), "status 5"), strings.Contains(err.Error(), "503"):
-		return "collector_error"
 	case errors.As(err, new(*net.OpError)), strings.Contains(err.Error(), "connection"):
 		return "connect"
 	}
@@ -201,24 +188,4 @@ func (e *countingExporter) Export(ctx context.Context, rm *metricdata.ResourceMe
 		e.fails.record(err)
 	}
 	return err
-}
-
-// FromEnv fills Config from the environment for a proxy that wants no flag of its own. The names
-// are a proposal; the PR may rename them.
-func FromEnv(c Config) Config {
-	if v, ok := os.LookupEnv("METRICS_PUSH_URL"); ok {
-		c.URL = v
-	}
-	if v := os.Getenv("METRICS_PUSH_TOKEN"); v != "" {
-		c.Token = v
-	}
-	if v := os.Getenv("METRICS_PUSH"); v == "off" || v == "0" || v == "false" {
-		c.Disabled = true
-	}
-	if v := os.Getenv("METRICS_PUSH_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Interval = d
-		}
-	}
-	return c
 }

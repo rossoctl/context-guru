@@ -137,14 +137,3 @@ func TestHangingCollectorDoesNotBlockRecording(t *testing.T) {
 	defer cancel()
 	_ = shutdown(ctx)
 }
-
-func TestFromEnv(t *testing.T) {
-	t.Setenv("METRICS_PUSH_URL", "https://c.example.com")
-	t.Setenv("METRICS_PUSH_TOKEN", "tok")
-	t.Setenv("METRICS_PUSH", "off")
-	t.Setenv("METRICS_PUSH_INTERVAL", "5s")
-	got := FromEnv(Config{Proxy: "cortex"})
-	if got.URL != "https://c.example.com" || got.Token != "tok" || !got.Disabled || got.Interval != 5*time.Second || got.Proxy != "cortex" {
-		t.Fatalf("FromEnv = %+v", got)
-	}
-}
