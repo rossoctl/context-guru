@@ -91,6 +91,16 @@ const SourceImported = "imported"
 // covers. Anything but the known marker records as measured, which is the safe direction — it
 // claims LESS about what the row can support, so a mistake here under-reports rather than
 // inventing a finding.
+// backendOf keeps only a known Bob backend label (proxy/bobusage.go bobBackend). Anything else is
+// stored as "", so a bug upstream can never put an id or other text in the column.
+func backendOf(s string) string {
+	switch s {
+	case "A", "B", "other":
+		return s
+	}
+	return ""
+}
+
 func sourceOf(s string) string {
 	if s == SourceImported {
 		return SourceImported

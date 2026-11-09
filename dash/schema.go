@@ -226,6 +226,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- the table. A number from a config file.
   compaction_point        INTEGER NOT NULL DEFAULT 0,
   compaction_point_source TEXT    NOT NULL DEFAULT '',
+  -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
+  -- reply id.
+  backend                 TEXT    NOT NULL DEFAULT '',
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -831,6 +834,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The user's own compaction point (#948). Additive: an earlier row has none.
 	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
+	// Bob's backend label. Additive: an earlier row has none.
+	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

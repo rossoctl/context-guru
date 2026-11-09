@@ -34,6 +34,9 @@ var statsGoldenTopLevel = []string{
 	// can show a "do not call this yourself" description having stopped working.
 	"adjudicate_stray",
 	"adjusted_saved",
+	// Replies on Bob's model route by backend label (A, B, other, none). A preset comparison is
+	// valid only on one backend, and "other" says IBM changed the marks.
+	"bob_backend",
 	// agentdiet_* are the same three fail-open figures for the `agentdiet` baseline,
 	// which owns its own per-call budget (a window of steps sits between extract_llm's
 	// single tool output and summarize's whole span). Separate keys because it runs in

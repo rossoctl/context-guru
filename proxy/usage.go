@@ -66,6 +66,8 @@ type Usage struct {
 	// ToolUseIncomplete is true when ToolUseNames may miss the true last call, because the bytes
 	// read were a spliced head+tail sniff window. The terminal-tool rule never applies then (#857).
 	ToolUseIncomplete bool
+	// Backend is which of Bob's backends answered (bobBackend). Set on Bob's model route only.
+	Backend string
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things

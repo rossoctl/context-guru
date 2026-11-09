@@ -429,12 +429,16 @@ type Event struct {
 	// ONLY when the client set it: the user's own setting or the client's own default (#948, #963; compactionpoint.Configured, ClientDefault). 0 and ""
 	// on every other row: the table value is read back from the table. A number from a config
 	// file, never content.
-	CompactionPoint       int     `json:"compaction_point,omitempty"`
-	CompactionPointSource string  `json:"compaction_point_source,omitempty"`
-	DeferLoaded           int     `json:"defer_loaded,omitempty"`
-	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
-	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
-	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
+	CompactionPoint       int    `json:"compaction_point,omitempty"`
+	CompactionPointSource string `json:"compaction_point_source,omitempty"`
+	// Backend is which of Bob's backends answered: "A", "B", "other" (the reply's marks match
+	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
+	// reply's id shape and usage fields. The id itself is never stored.
+	Backend           string  `json:"backend,omitempty"`
+	DeferLoaded       int     `json:"defer_loaded,omitempty"`
+	DeferWrongGuesses int     `json:"defer_wrong_guesses,omitempty"`
+	DeferGrossUSD     float64 `json:"defer_gross_usd,omitempty"`
+	DeferNetUSD       float64 `json:"defer_net_usd,omitempty"`
 
 	TokenAccounting    string `json:"token_accounting"`
 	CacheMissReason    string `json:"cache_miss_reason"`

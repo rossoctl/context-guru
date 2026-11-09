@@ -591,6 +591,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
+	e.Backend = usage.Backend
 
 	// context-guru's own model spend attributable to THIS request: what this request's
 	// OWN sink recorded, never a delta of the process-wide counters. The delta was

@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 )
@@ -62,21 +66,191 @@ func bobCount(v gjson.Result) (int64, bool) {
 	return int64(v.Num), true
 }
 
-// bobResponseUsage applies bobUsage to a whole response: the top-level `usage` of a JSON body,
-// or the last `usage` chunk of an OpenAI chat event stream.
-func bobResponseUsage(contentType string, body []byte, base Usage) Usage {
+// Bob's model route is served by at least 2 backends that count tokens differently (about 20,300
+// against 12,440 for the same request), so a comparison is valid only on one backend. Two marks
+// that do not depend on each other tell them apart (seen on 9 replies, 2026-11-09):
+//
+//	A: the id starts with "chatcmpl-", and usage.prompt_tokens_details has cache_write_tokens.
+//	B: the id is 23 characters of [A-Za-z0-9] with no "chatcmpl-", and the block has neither
+//	   cache_write_tokens nor cache_creation_token_details.
+//
+// IBM can change either mark at any time. So a reply where the marks disagree, or that matches
+// neither, is "other" and never A or B. A reply with no id or no usage block (Bob's router helper
+// calls) is "" and is no alarm.
+const (
+	bobIDPrefixA = "chatcmpl-"
+	bobIDLenB    = 23
+)
+
+// bobMarks are the facts about one reply that tell Bob's backends apart. The id stays in memory
+// for one call only: only the label from bobBackend is kept.
+type bobMarks struct {
+	id              string
+	mixedIDs        bool // the chunks of one stream did not all carry the same id
+	usage           bool
+	cacheWrite      bool // usage.prompt_tokens_details.cache_write_tokens is present
+	creationDetails bool // usage.prompt_tokens_details.cache_creation_token_details is present
+	providerFields  bool // the top-level provider_specific_fields is present
+}
+
+// bobBackend is the backend label for a reply's marks: "A", "B", "other" or "".
+func bobBackend(m bobMarks) string {
+	if m.id == "" || !m.usage {
+		return ""
+	}
+	if m.mixedIDs {
+		return "other"
+	}
+	if strings.HasPrefix(m.id, bobIDPrefixA) {
+		if m.cacheWrite {
+			return "A"
+		}
+		return "other"
+	}
+	if len(m.id) == bobIDLenB && bobAlnum(m.id) && !m.cacheWrite && !m.creationDetails {
+		return "B"
+	}
+	return "other"
+}
+
+func bobAlnum(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// bobMarksOf reads a reply's usage block and its marks in one pass: the top level of a JSON body,
+// or the `data:` chunks of an OpenAI chat event stream (the id of the first chunk that has one,
+// and the last usage block). Anything it cannot read gives no marks (fail open).
+func bobMarksOf(contentType string, body []byte) (gjson.Result, bobMarks) {
+	var m bobMarks
+	var usage gjson.Result
+	note := func(doc gjson.Result) {
+		if id := doc.Get("id"); id.Type == gjson.String && id.Str != "" {
+			if m.id == "" {
+				m.id = id.Str
+			} else if id.Str != m.id {
+				m.mixedIDs = true
+			}
+		}
+		if doc.Get("provider_specific_fields").Exists() {
+			m.providerFields = true
+		}
+		if u := doc.Get("usage"); usagePresent(u) {
+			usage = u
+		}
+	}
 	if !strings.Contains(contentType, "event-stream") {
-		return bobUsage(gjson.GetBytes(body, "usage"), base)
-	}
-	var last gjson.Result
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		if doc := gjson.ParseBytes(body); doc.IsObject() {
+			note(doc)
 		}
-		if u := gjson.Get(strings.TrimSpace(strings.TrimPrefix(line, "data:")), "usage"); usagePresent(u) {
-			last = u
+	} else {
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			if doc := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:"))); doc.IsObject() {
+				note(doc)
+			}
 		}
 	}
-	return bobUsage(last, base)
+	if usage.Exists() {
+		m.usage = true
+		m.cacheWrite = usage.Get("prompt_tokens_details.cache_write_tokens").Exists()
+		m.creationDetails = usage.Get("prompt_tokens_details.cache_creation_token_details").Exists()
+	}
+	return usage, m
+}
+
+// The /stats counts of each label, process-wide like UsageGaps. "none" is the "" label.
+var bobBackendA, bobBackendB, bobBackendOther, bobBackendNone atomic.Int64
+
+// bobBackendIDNoUsage counts the replies that have an id but no usage block. They get the "" label,
+// as router calls do, and log no WARN. The count is kept apart only to measure how often it happens
+// before deciding how to label them: a backend that stopped sending usage would show here.
+var bobBackendIDNoUsage atomic.Int64
+
+// BobBackendCounts is /stats' bob_backend: how many replies on Bob's model route got each label.
+func BobBackendCounts() map[string]int64 {
+	return map[string]int64{"A": bobBackendA.Load(), "B": bobBackendB.Load(),
+		"other": bobBackendOther.Load(), "none": bobBackendNone.Load(),
+		"id_no_usage": bobBackendIDNoUsage.Load()}
+}
+
+// One WARN per new "other" shape, at most bobShapeMax shapes per process, so a backend that
+// changed its marks gives a few lines and not one per request.
+const bobShapeMax = 8
+
+var (
+	bobShapeMu   sync.Mutex
+	bobShapeSeen = map[string]struct{}{}
+)
+
+// ResetBobBackendForTest forgets the shapes logged so far. For TESTS only.
+func ResetBobBackendForTest() {
+	bobShapeMu.Lock()
+	defer bobShapeMu.Unlock()
+	bobShapeSeen = map[string]struct{}{}
+}
+
+// bobNoteBackend counts the reply's label and returns it. On "other" it logs the shape once:
+// the first 4 characters of the id, its length and 2 flags. Never the whole id.
+func bobNoteBackend(m bobMarks) string {
+	label := bobBackend(m)
+	switch label {
+	case "A":
+		bobBackendA.Add(1)
+	case "B":
+		bobBackendB.Add(1)
+	case "":
+		bobBackendNone.Add(1)
+		if m.id != "" && !m.usage {
+			bobBackendIDNoUsage.Add(1)
+		}
+	default:
+		bobBackendOther.Add(1)
+		prefix := bobWarnPrefix(m.id)
+		key := prefix + "|" + strconv.Itoa(len(m.id)) + "|" + strconv.FormatBool(m.cacheWrite)
+		bobShapeMu.Lock()
+		_, dup := bobShapeSeen[key]
+		fresh := !dup && len(bobShapeSeen) < bobShapeMax
+		if fresh {
+			bobShapeSeen[key] = struct{}{}
+		}
+		bobShapeMu.Unlock()
+		if fresh {
+			slog.Default().Warn("cg.bob_backend_unknown", "prefix", prefix, "len", len(m.id),
+				"cache_write", m.cacheWrite, "provider_fields", m.providerFields)
+		}
+	}
+	return label
+}
+
+// bobResponseUsage applies bobUsage to a whole response: the top-level `usage` of a JSON body,
+// or the last `usage` chunk of an OpenAI chat event stream. ok is whether the shared parser read
+// the usage; with ok false, base is returned unchanged. It also sets base.Backend (bobBackend),
+// with or without usage.
+func bobResponseUsage(contentType string, body []byte, base Usage, ok bool) Usage {
+	usage, m := bobMarksOf(contentType, body)
+	base.Backend = bobNoteBackend(m)
+	if !ok {
+		return base
+	}
+	return bobUsage(usage, base)
+}
+
+// bobWarnPrefix is the part of an id a WARN may log: at most 4 bytes, and always fewer than the whole
+// id, so a short id is never logged in full. A non-ASCII byte is shown escaped, never raw.
+func bobWarnPrefix(id string) string {
+	n := min(4, len(id)-1)
+	if n <= 0 {
+		return ""
+	}
+	q := strconv.QuoteToASCII(id[:n])
+	return q[1 : len(q)-1]
 }

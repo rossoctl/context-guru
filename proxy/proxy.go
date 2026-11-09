@@ -2197,6 +2197,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// two facts are independent (see Usage.StopReason), and dropping the reason
 				// here would blank stop_reason for exactly the rows already marked partial.
 				usage.StopReason = u.StopReason
+				usage.Backend = u.Backend // as StopReason: a label needs no usage
 			}
 			return
 		}
@@ -2288,6 +2289,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				usage, usageOK = u, true
 			} else {
 				usage.StopReason = u.StopReason // as on the other stream path
+				usage.Backend = u.Backend
 			}
 			return
 		default:
@@ -2302,13 +2304,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
-			if bob {
-				u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u)
-			}
+		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		if bob {
+			u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u, ok)
+		}
+		if ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
+			usage.Backend = u.Backend       // a reply with no usage still has a backend label
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
@@ -2700,8 +2704,8 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if bob && ok {
-		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u)
+	if bob {
+		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u, ok)
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
@@ -2971,6 +2975,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.Savings = s
 	}
 	snap.ToolDefer = h.deferStats()
+	snap.BobBackend = BobBackendCounts()
 	json.NewEncoder(w).Encode(snap)
 }
 
