@@ -936,6 +936,9 @@ indistinguishable from "every model is free".
     "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
     rate error cancels.
 
+    The Bob tiers set `cache_write_1h_frac: 1.0`: Bob bills a 1-hour cache write at the input
+    rate (measured 2026-11-04).
+
 #### Extraction-model pricing
 
 [`extract_llm`](../components/extract_llm.md)'s economic gate only calls the LLM when the

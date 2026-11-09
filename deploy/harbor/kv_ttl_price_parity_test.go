@@ -29,14 +29,15 @@ func TestPythonPriceReaderMatchesGoTable(t *testing.T) {
   - {match: "claude-haiku*", in: 1.0, out: 5.0, cache_write: 1.4}
   - {match: "gemini*", in: 2.0, out: 12.0}
   - {match: "azure/gpt-5.5", in: 2.5, out: 15.0}
-  - {match: "premium", in: 4.0, out: 20.0}
+  - {match: "premium", in: 4.0, out: 20.0, cache_write_1h_frac: 1.0}
+  - {match: "claude-sonnet-4*", in: 3.0, out: 15.0, cache_write_1h_frac: 1.0}
   - {match: "mythos*", in: 8.0, out: 40.0, cache_read: 0.4, cache_write: 9.5}
 `
 	ids := []string{
 		"claude-opus-5-5", "claude-opus-5", "claude-opus-5-5[1m]", "claude-opus-5-50",
 		"aws/claude-sonnet-5", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
 		"aws/claude-fable-5-1[1m]", "claude-haiku-4-5", "claude-mythos-5-1", "gemini-3-flash-preview",
-		"azure/gpt-5.5", "premium", "nobody-knows-this-one", "",
+		"azure/gpt-5.5", "premium", "claude-sonnet-4-6", "nobody-knows-this-one", "",
 	}
 	idJSON, _ := json.Marshal(ids)
 	script := `

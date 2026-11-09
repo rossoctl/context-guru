@@ -537,7 +537,9 @@ class PriceBook:
             match = match.rstrip("*")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
             cr, cw = float(m.get("cache_read") or 0.0), float(m.get("cache_write") or 0.0)
-            if min(in_r, out_r, cr, cw) < 0:
+            # The entry's 1-hour write as a multiple of `in` (table.go cache_write_1h_frac).
+            w1h_frac = float(m.get("cache_write_1h_frac") or 0.0)
+            if min(in_r, out_r, cr, cw, w1h_frac) < 0:
                 raise ValueError(f"{path}: {match!r} has a negative rate")
             if in_r == 0 and out_r == 0:
                 raise ValueError(
@@ -552,7 +554,7 @@ class PriceBook:
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
                 source=SOURCE_PRICE_LIST, known=True)
-            price = replace(price, write_1h=book._derive_write_1h(price))
+            price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
         # Longest match first: specificity is a property of the match, not of the file's
@@ -561,13 +563,17 @@ class PriceBook:
         book._entries = entries
         return book
 
-    def _derive_write_1h(self, p: ModelPricing) -> float:
+    def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
         """The 1-hour creation rate, the one rate no price list publishes.
 
         Derived from the multiplier against base INPUT, because that is how the provider
         documents it, and never allowed below the 5-minute rate: a list that implied
         otherwise would be a typo, and honouring it would make every 1h arm look free.
+        An entry's own cache_write_1h_frac wins over the book's multiple, as in Go's
+        Price.CacheWrite1hFor.
         """
+        if entry_frac > 0:
+            return max(p.input * entry_frac, p.write_5m)
         if p.input > 0:
             w = p.input * self.write_1h_multiple
         elif p.write_5m > 0:
