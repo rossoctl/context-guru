@@ -811,6 +811,8 @@ func (a *API) routes() []route {
 	rs = append(rs, a.adaptRoutes()...)
 	rs = append(rs, a.compactEpisodeRoutes()...)
 	rs = append(rs, a.insightsRoutes()...)
+	// The subscription limit values (#984), declared beside their handler in limits.go.
+	rs = append(rs, a.limitsRoutes()...)
 	return rs
 }
 

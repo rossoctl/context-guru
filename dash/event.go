@@ -447,6 +447,12 @@ type Event struct {
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
 	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 
+	// Limits are the subscription limit values the provider's answer carried in its
+	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
+	// nil when it carried none (an API key, Bedrock, Vertex) and on every earlier row. Numbers and
+	// status words only.
+	Limits *Limits `json:"limits,omitempty"`
+
 	TokenAccounting string `json:"token_accounting"`
 	// PriceEstimated is true when the accountant library priced this request without knowing whether a
 	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too

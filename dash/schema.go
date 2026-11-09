@@ -241,6 +241,18 @@ CREATE TABLE IF NOT EXISTS requests (
   -- the table. A number from a config file.
   compaction_point        INTEGER NOT NULL DEFAULT 0,
   compaction_point_source TEXT    NOT NULL DEFAULT '',
+  -- The subscription limit values of the provider's answer (#984), from its
+  -- anthropic-ratelimit-unified-5h-* and -7d-* response headers: the used share (0..1), the reset
+  -- time (unix seconds) and the status word. NULLABLE: NULL is "the header was missing or did not
+  -- parse", which must stay apart from a share of 0. limit_seen is 1 when at least one value is
+  -- set, for the partial indexes behind GET /api/me/limits. Numbers and status words only.
+  limit_seen           INTEGER NOT NULL DEFAULT 0,
+  limit_5h_utilization REAL,
+  limit_5h_reset       INTEGER,
+  limit_5h_status      TEXT,
+  limit_7d_utilization REAL,
+  limit_7d_reset       INTEGER,
+  limit_7d_status      TEXT,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -712,6 +724,14 @@ CREATE INDEX IF NOT EXISTS idx_requests_session_alias ON requests(session_alias)
 -- addColumns adds.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
   ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
+-- GET /api/me/limits reads the newest row with limit values (#984). Partial, so only rows that
+-- carried the subscription headers are in them and a database without them pays nothing. One per
+-- read shape: a tenant's own rows, and every row on a single-tenant proxy. Here for the same reason
+-- as idx_requests_project: they name columns addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_requests_limits_tenant
+  ON requests(tenant_id, ts DESC) WHERE limit_seen = 1;
+CREATE INDEX IF NOT EXISTS idx_requests_limits_ts
+  ON requests(ts DESC) WHERE limit_seen = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -864,6 +884,15 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The user's own compaction point (#948). Additive: an earlier row has none.
 	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
+	// The subscription limit headers (#984). Nullable, no default: an earlier row read no headers,
+	// and NULL says so. limit_seen 0 on an earlier row is true for the same reason.
+	{"requests", "limit_seen", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "limit_5h_utilization", "REAL"},
+	{"requests", "limit_5h_reset", "INTEGER"},
+	{"requests", "limit_5h_status", "TEXT"},
+	{"requests", "limit_7d_utilization", "REAL"},
+	{"requests", "limit_7d_reset", "INTEGER"},
+	{"requests", "limit_7d_status", "TEXT"},
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.

@@ -373,6 +373,33 @@ transcript-class data and needs the same operator + tenant consent that gates an
 captured content — see [Access](#access) above. Without that consent the measurement
 still works; only the text is withheld.
 
+## Subscription limits
+
+`GET /api/me/limits` returns the newest subscription limit values the proxy saw for your account.
+
+- **Where they come from:** Anthropic sends `anthropic-ratelimit-unified-5h-*` and `-7d-*` headers
+  on each answer to a Claude subscription. The proxy reads the used share (`utilization`), the reset
+  time (`reset_s`, unix seconds) and the status word of each window.
+- **Where they go:** the proxy stores them on the request's row, beside its token counts. A missing
+  or bad value is left out. The proxy never changes the answer it forwards.
+- **`{}`** when the account never got these headers: an API key, Bedrock or Vertex.
+
+```json
+{
+  "subscription": true,
+  "at_ms": 1794233089000,
+  "five_hour": {"utilization": 0.54, "reset_s": 1794249600, "status": "allowed"},
+  "seven_day": {"utilization": 0.08, "reset_s": 1794348000, "status": "allowed"}
+}
+```
+
+- `utilization` is a fraction 0..1, in whole percents (`0.54`).
+- `at_ms` is the time of the request that carried the values.
+- A window whose `reset_s` is in the past is over. Treat it as absent.
+- A window, or a field, is left out when the newest answer did not carry it.
+- In hosted mode it is always the caller's own account, a manager's too. A single-tenant proxy has
+  one account.
+
 ## KV-cache panel
 
 *How long your conversations actually stay idle, what the prompt cache is costing you
