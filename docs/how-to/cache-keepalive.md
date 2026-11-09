@@ -71,6 +71,22 @@ cache:
   keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
 
+### A named strategy
+
+`cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
+`2-ping`, `1-hour-head`. The alias `5-min-ping` means `auto`.
+
+```yaml
+cache:
+  strategy: 2-ping
+  keepalive_max_usd_per_ping: 0.25   # a key you set yourself wins over the strategy
+```
+
+- A key in your file always wins. The strategy fills only the keys you left out.
+- No `strategy` key: nothing changes.
+- An unknown name stops the proxy with a config error.
+- `context-guru-proxy strategies` prints the table as JSON. Plugins read it from there.
+
 ### The ping count follows what the thread waits for
 
 When a turn ends, the proxy picks the ping count from what the thread waits for (#858). "K" is

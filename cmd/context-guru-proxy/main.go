@@ -73,6 +73,17 @@ func main() {
 		fmt.Fprintln(os.Stdout, "import-history was removed; it does nothing now")
 		os.Exit(0)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "strategies" {
+		// Read-only: print the named cache strategy table as JSON, so a plugin keeps no copy.
+		// `--json` is accepted and changes nothing: JSON is the only output.
+		b, err := config.StrategiesJSON()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "strategies:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, string(b))
+		os.Exit(0)
+	}
 	var (
 		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
 		// could not tell which port an instance held (the address reached it only through the
