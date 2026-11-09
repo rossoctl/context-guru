@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -49,8 +50,10 @@ func TestStrategyTableMatchesPlugin(t *testing.T) {
 	if !reflect.DeepEqual(py.Aliases, StrategyAliases) {
 		t.Errorf("aliases: py %v, go %v", py.Aliases, StrategyAliases)
 	}
-	if len(py.Strategies) != len(Strategies) {
-		t.Fatalf("py has %d strategies, go has %d", len(py.Strategies), len(Strategies))
+	// The Python table has the Anthropic and "any" rows. The Go table adds the Codex rows after
+	// them, checked in TestStrategyTableMatchesCodexPlugin.
+	if len(py.Strategies)+1 != len(Strategies) {
+		t.Fatalf("py has %d strategies, go has %d (expect py + the Codex row)", len(py.Strategies), len(Strategies))
 	}
 	for i, p := range py.Strategies {
 		g := Strategies[i]
@@ -153,7 +156,73 @@ func TestStrategiesJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Default != "auto" || len(v.Strategies) != 5 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
+	if v.Default != "auto" || len(v.Strategies) != 6 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
 		t.Fatalf("bad json: %s", b)
+	}
+}
+
+// The Codex plugin keeps its names in Python code, not in a dict. This test reads the source text:
+// the names, the config it writes for 30-min-ping, the preset list, and the picker wording.
+func TestStrategyTableMatchesCodexPlugin(t *testing.T) {
+	read := func(p string) string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	dir := "../codex-marketplace/plugins/context-guru/"
+	py := read(dir + "scripts/codex_plugin.py")
+	skill := strings.Join(strings.Fields(read(dir+"skills/cache-strategy-picker/SKILL.md")), " ")
+
+	if !strings.Contains(py, `choices=("none", "30-min-ping")`) {
+		t.Error("codex_plugin.py strategy choices changed")
+	}
+	// 30-min-ping writes "cache:\n  keepalive: true\n" and nothing else under cache.
+	if !strings.Contains(py, `"cache:\n"`+"\n"+`        "  keepalive: true\n"`) {
+		t.Error("codex_plugin.py no longer writes exactly `cache: keepalive: true` for 30-min-ping")
+	}
+	s, ok := LookupStrategy("30-min-ping")
+	if !ok || len(s.Cache) != 1 || s.Cache[0].Key != "keepalive" || s.Cache[0].Value != true ||
+		!reflect.DeepEqual(s.Providers, []string{"openai"}) {
+		t.Fatalf("30-min-ping row wrong: %+v", s)
+	}
+	if !strings.Contains(skill, s.Desc) {
+		t.Errorf("picker SKILL.md does not contain the desc %q", s.Desc)
+	}
+	// The preset list the Codex plugin hard-codes must be known to the proxy.
+	known := map[string]bool{}
+	for _, n := range PresetNames() {
+		known[n] = true
+	}
+	for _, n := range []string{"off", "conservative", "medium", "high", "xhigh", "ultrahigh"} {
+		if !known[n] {
+			t.Errorf("preset %q is in the plugins but not registered in the proxy", n)
+		}
+		if !strings.Contains(py, `"`+n+`"`) {
+			t.Errorf("codex_plugin.py no longer lists preset %q", n)
+		}
+	}
+}
+
+func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
+	b, _ := StrategiesJSON()
+	var v struct {
+		Presets    []string `json:"presets"`
+		Strategies []struct {
+			Name      string   `json:"name"`
+			Providers []string `json:"providers"`
+		} `json:"strategies"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 6 {
+		t.Fatalf("bad json: %s", b)
+	}
+	for _, s := range v.Strategies {
+		if len(s.Providers) != 1 {
+			t.Errorf("%s: providers %v", s.Name, s.Providers)
+		}
 	}
 }

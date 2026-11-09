@@ -46,22 +46,27 @@ type Strategy struct {
 	// Spends is true when the strategy sends model calls on the caller's credential.
 	Spends bool
 	// Desc is the one-line text for a picker.
-	Desc  string
-	Cache []StrategyKey
+	Desc string
+	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" or "any".
+	// The proxy does not enforce it. A picker uses it to hide a name that does not fit.
+	Providers []string
+	Cache     []StrategyKey
 }
 
 // Strategies is the table, in picker order.
 var Strategies = []Strategy{
 	{
-		Name:   "none",
-		Spends: false,
-		Desc:   "no cache strategy: the preset runs and nothing else. No pings, no model calls, no spend. Written as the ABSENCE of a config file.",
-		Cache:  []StrategyKey{},
+		Name:      "none",
+		Spends:    false,
+		Desc:      "no cache strategy: the preset runs and nothing else. No pings, no model calls, no spend. Written as the ABSENCE of a config file.",
+		Providers: []string{"any"},
+		Cache:     []StrategyKey{},
 	},
 	{
-		Name:   "auto",
-		Spends: true,
-		Desc:   "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. >=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Name:      "auto",
+		Spends:    true,
+		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. >=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
@@ -73,9 +78,10 @@ var Strategies = []Strategy{
 		},
 	},
 	{
-		Name:   "1-ping",
-		Spends: true,
-		Desc:   "at most 1 idle ping per idle span, whichever cache lifetime the session was billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Name:      "1-ping",
+		Spends:    true,
+		Desc:      "at most 1 idle ping per idle span, whichever cache lifetime the session was billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
@@ -87,9 +93,10 @@ var Strategies = []Strategy{
 		},
 	},
 	{
-		Name:   "2-ping",
-		Spends: true,
-		Desc:   "at most 2 idle pings per idle span, whichever cache lifetime the session was billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Name:      "2-ping",
+		Spends:    true,
+		Desc:      "at most 2 idle pings per idle span, whichever cache lifetime the session was billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
@@ -101,12 +108,22 @@ var Strategies = []Strategy{
 		},
 	},
 	{
-		Name:   "1-hour-head",
-		Spends: false,
-		Desc:   "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero 1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both of those measurements were on prefixes UNDER the 50k gate this ships with.",
+		Name:      "1-hour-head",
+		Spends:    false,
+		Desc:      "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero 1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both of those measurements were on prefixes UNDER the 50k gate this ships with.",
+		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"head_ttl_1h", true},
 			{"head_ttl_min_tokens", 50000},
+		},
+	},
+	{
+		Name:      "30-min-ping",
+		Spends:    true,
+		Desc:      "refreshes eligible OpenAI Responses caches shortly before their 30-minute lifetime and spends a small amount of the user's own quota",
+		Providers: []string{"openai"},
+		Cache: []StrategyKey{
+			{"keepalive", true},
 		},
 	},
 }
@@ -177,22 +194,26 @@ func (c *Config) applyStrategy(raw []byte) error {
 	return nil
 }
 
-// StrategiesJSON renders the table for a plugin: the default name, the aliases, and every row
-// with its keys as an object.
+// StrategiesJSON renders the table for a plugin: the default name, the aliases, every row with its
+// keys as an object, and "presets": every preset the proxy registers (PresetNames). That is the
+// full list. The short picker ladder (off ... ultrahigh) is a plugin choice and is not defined in
+// the proxy, so it is not listed here.
 func StrategiesJSON() ([]byte, error) {
 	type row struct {
-		Name   string         `json:"name"`
-		Spends bool           `json:"spends"`
-		Desc   string         `json:"desc"`
-		Cache  map[string]any `json:"cache"`
+		Name      string         `json:"name"`
+		Spends    bool           `json:"spends"`
+		Desc      string         `json:"desc"`
+		Providers []string       `json:"providers"`
+		Cache     map[string]any `json:"cache"`
 	}
 	out := struct {
 		Default    string            `json:"default"`
 		Aliases    map[string]string `json:"aliases"`
 		Strategies []row             `json:"strategies"`
-	}{Default: DefaultStrategy, Aliases: StrategyAliases}
+		Presets    []string          `json:"presets"`
+	}{Default: DefaultStrategy, Aliases: StrategyAliases, Presets: PresetNames()}
 	for _, s := range Strategies {
-		r := row{Name: s.Name, Spends: s.Spends, Desc: s.Desc, Cache: map[string]any{}}
+		r := row{Name: s.Name, Spends: s.Spends, Desc: s.Desc, Providers: s.Providers, Cache: map[string]any{}}
 		for _, k := range s.Cache {
 			r.Cache[k.Key] = k.Value
 		}
