@@ -1587,6 +1587,7 @@ async function loadOverview(opts = {}) {
     loadOverviewKeepAlive();
     loadOverviewTools();
     loadOverviewIdentity();
+    loadOverviewLimits();
     const o = await api('stats');
     state.overview = o;
     state.overviewFull = true;
@@ -1742,10 +1743,30 @@ function renderSavedLedger(o, ka, partial) {
 
   // ── The total ──
   const totalTok = presetTok + filterTok;
+  // A Claude subscription does not bill per token: the headline is saved tokens, with the 5-hour
+  // share as an estimate below. null keeps the dollar view.
+  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact) : null;
+  const heroMain = sub
+    ? el('div', { class: 'ov-hero-money' },
+      el('div', { class: 'ov-hero-v ov-hero-sub', 'data-testid': 'saved-total-subscription', text: sub.main }),
+      el('div', { class: 'ov-hero-of', text: 'tokens context-guru kept out of your requests in this period' }),
+      sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null)
+    : el('div', { class: 'ov-hero-money' },
+      el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
+      el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
+        ' without context-guru'),
+      el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
+      el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' }));
+  const subInfo = [
+    'On a Claude subscription the total is in tokens, not dollars. A subscription does not bill per token.',
+    'wr is the tokens context-guru removed, each removal counted once. rd is the same removals again on each later turn that did not re-send them.',
+    'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
+    'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
+  ];
   const hero = el('section', { class: 'ov-hero', 'data-testid': 'saved-total' },
     el('div', { class: 'ov-hero-head' },
       el('h3', { text: 'Total saved by context-guru' }),
-      infoButton('total', 'Total saved', [
+      infoButton('total', 'Total saved', sub ? subInfo : [
         'Total saved is the sum of the parts below: the cache, your preset, the tools and skills filter, and tool deferral.',
         'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
         'The cache part is the most it could have saved: another session can keep the same cache warm. The preset and filter parts are estimates.',
@@ -1755,12 +1776,7 @@ function renderSavedLedger(o, ka, partial) {
     !ready
       ? el('p', { class: 'ov-none', text: partial ? 'Loading…' : 'Nothing priced yet in this period.' })
       : el('div', { class: 'ov-hero-body' },
-        el('div', { class: 'ov-hero-money' },
-          el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
-          el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
-            ' without context-guru'),
-          el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
-          el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' })),
+        heroMain,
         el('div', { class: 'ov-hero-tok' },
           ovFigure('saved-total-tokens', 'Input tokens removed', compact(totalTok),
             'of ' + compact(inputWithout) + ' tokens', share(totalTok, inputWithout)))));
@@ -1867,6 +1883,29 @@ function keepAliveLedger() {
   }
   return state.kaLedgerP;
 }
+/**
+ * The Claude subscription's 5-hour window (GET /api/me/limits), and that window's own stats for the
+ * estimate under the headline. On a subscription the headline shows saved tokens. Any failure, `{}`
+ * (an API key, Bedrock, Vertex) or a window that is over leaves state.sub null: the dollar view.
+ * A manager's Overview spans other accounts, so it keeps the dollar view.
+ */
+async function loadOverviewLimits() {
+  const tn = account && account.tenant;
+  let sub = null;
+  try {
+    if (tn && tn.role === 'manager') throw new Error('manager');
+    const limits = await ctl('/api/me/limits');
+    const f = liveFiveHour(limits, Date.now());
+    if (f) {
+      sub = { limits, win: null };
+      // The estimate needs the window's spend and saving. Without them the tokens still show.
+      try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+    }
+  } catch (e) { /* no subscription signal: the dollar view */ }
+  state.sub = sub;
+  if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+}
+
 async function loadOverviewKeepAlive() {
   try {
     state.keepAliveLedger = await keepAliveLedger();

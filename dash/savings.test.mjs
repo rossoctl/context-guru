@@ -83,3 +83,43 @@ test('tool deferral is its own part, and the parts still add up to total_saved_u
   assert.ok(Math.abs(p.total - p.serverTotal) < 1e-9, `${p.total} vs ${p.serverTotal}`);
   assert.equal(savedParts({ net_saved_usd: 5, total_saved_usd: 5 }).defer, 0); // no deferral: zero, not NaN
 });
+
+// A Claude subscription: GET /api/me/limits is mocked here as data, the shape of its contract.
+test('a live 5-hour window turns the headline into saved tokens, with the estimate below', () => {
+  const { subscriptionHeadline, fiveHourStartMs } = createRequire(import.meta.url)('./ui/savings.js');
+  const fmt = (v) => (v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? Math.round(v / 1e3) + 'k' : String(v));
+  const now = 1794233089000;
+  const limits = { subscription: true, at_ms: now, five_hour: { utilization: 0.54, reset_s: 1794249600, status: 'allowed' } };
+  const o = { replay_tokens: 1200000, saved_unique: 85000, total_saved_usd: 40 };
+  const win = { cost_usd: 90, total_saved_usd: 5 }; // 54% x 5 / 90 = 3%
+  const h = subscriptionHeadline(limits, o, win, now, fmt);
+  assert.equal(h.main, 'saved 1.2M rd / 85k wr');
+  assert.equal(h.estimate, '≈ 3% of the 5-hour limit (estimate at API-price weights)');
+  assert.ok(!/\$/.test(h.main + h.estimate), 'no dollars on a subscription');
+  assert.equal(fiveHourStartMs(limits.five_hour), (1794249600 - 18000) * 1000);
+});
+
+test('the estimate waits for $0.50 of spend and 2% used; the tokens show without it', () => {
+  const { subscriptionHeadline, fiveHourSavedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const f = (u) => ({ five_hour: { utilization: u, reset_s: 2000 } });
+  const o = { replay_tokens: 10, saved_unique: 2 };
+  assert.equal(subscriptionHeadline(f(0.54), o, { cost_usd: 0.49, total_saved_usd: 1 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.01), o, { cost_usd: 9, total_saved_usd: 1 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).estimate, ''); // the window stats failed
+  assert.equal(subscriptionHeadline(f(0.54), o, { cost_usd: 9, total_saved_usd: 0 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).main, 'saved 10 rd / 2 wr');
+  assert.equal(fiveHourSavedPct({ utilization: 0.02 }, { cost_usd: 0.5, total_saved_usd: 0.5 }), 2);
+  assert.match(subscriptionHeadline(f(0.02), o, { cost_usd: 100, total_saved_usd: 1 }, now, String).estimate, /^≈ < 1% /);
+});
+
+test('{}, no answer, or a window that is over keeps the dollar view', () => {
+  const { subscriptionHeadline, liveFiveHour } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1794233089000;
+  const o = { replay_tokens: 5, saved_unique: 1 };
+  assert.equal(subscriptionHeadline({}, o, null, now, String), null);
+  assert.equal(subscriptionHeadline(null, o, null, now, String), null);
+  assert.equal(subscriptionHeadline({ seven_day: { utilization: 0.1, reset_s: 1794348000 } }, o, null, now, String), null);
+  assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, now), null); // reset in the past
+  assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 } }, now), null); // resets this moment
+});

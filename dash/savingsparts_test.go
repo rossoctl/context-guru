@@ -31,3 +31,22 @@ func TestSharedKeepAliveLedgerIsKeyedByTheQuery(t *testing.T) {
 		}
 	}
 }
+
+// On a Claude subscription the Overview headline is saved tokens, from GET /api/me/limits (#985).
+// The decision itself is tested in savings.test.mjs (subscriptionHeadline). This checks the wiring:
+// the page asks for the limits, the headline uses the decision, and the dollar view stays for the
+// rest (`{}`, a failed call, a window that is over).
+func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
+	app := stripComments(readUI(t, "ui/app.js"))
+	for _, want := range []string{
+		"ctl('/api/me/limits')",
+		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
+		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact)",
+		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
+		"loadOverviewLimits();",
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+}

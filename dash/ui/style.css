@@ -1565,6 +1565,8 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .ov-hero-v { font-family: var(--serif); font-size: 56px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.05;
   font-variant-numeric: tabular-nums; color: var(--good); }
 .ov-hero-v.neg { color: var(--bad); }
+/* A subscription's headline is a token line (saved 1.2M rd / 85k wr), longer than a dollar figure. */
+.ov-hero-v.ov-hero-sub { font-size: 40px; }
 .ov-hero-of { font-size: 16px; color: var(--fg); margin-top: var(--sp-1); }
 .ov-hero-pct { font-family: var(--serif); font-size: 28px; font-weight: 600; color: var(--good); margin-top: var(--sp-2); font-variant-numeric: tabular-nums; }
 .ov-hero-spent { font-size: 13px; color: var(--fg-muted); margin-top: var(--sp-1); }
@@ -1635,6 +1637,7 @@ details.diag[open] > summary::before { content: "\2212"; }
 @media (max-width: 860px) {
   .ov-cards { grid-template-columns: 1fr; }
   .ov-hero-v { font-size: 44px; }
+  .ov-hero-v.ov-hero-sub { font-size: 30px; }
   .reco-row { grid-template-columns: 1fr auto; }
   .reco-kind { grid-column: 1 / -1; }
   .reco-note { grid-column: 1 / -1; }

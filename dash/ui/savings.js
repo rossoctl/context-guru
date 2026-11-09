@@ -71,4 +71,45 @@ function capNote(o, fmt) {
   return '';
 }
 
-if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName };
+// ── Claude subscription (GET /api/me/limits) ──
+//
+// A subscription does not bill per token, so its Overview headline is saved tokens, not dollars.
+// /api/me/limits holds the latest anthropic-ratelimit-unified-* headers the proxy saw for the
+// account: `{}` for an API key, Bedrock or Vertex. Only a 5-hour window that is still open counts.
+
+// The open 5-hour window, or null: no answer, `{}`, or a window whose reset is in the past.
+function liveFiveHour(limits, nowMs) {
+  const f = limits && limits.five_hour;
+  if (!f || !(f.reset_s > 0) || f.reset_s * 1000 <= nowMs) return null;
+  return f;
+}
+
+// When the 5-hour window started, in unix ms: its reset less 5 hours.
+function fiveHourStartMs(f) { return (f.reset_s - 5 * 3600) * 1000; }
+
+// The share of the 5-hour limit context-guru saved in the window, in percent, or null when the
+// window has too little data to say (under $0.50 of spend, or under 2% used). Anthropic does not
+// publish how the limit weights token kinds, so this weights them at API prices: an estimate.
+// `w` is /api/stats?lean=1&since=<window start>.
+function fiveHourSavedPct(f, w) {
+  const used = 100 * ((f && f.utilization) || 0);
+  const cost = (w && w.cost_usd) || 0;
+  const saved = (w && w.total_saved_usd) || 0;
+  if (cost < 0.5 || used < 2 || !(saved > 0)) return null;
+  return (used * saved) / cost;
+}
+
+// The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
+// stats (rd = replay_tokens, wr = saved_unique), `w` the 5-hour window's, `fmt` formats a count.
+function subscriptionHeadline(limits, o, w, nowMs, fmt) {
+  const f = liveFiveHour(limits, nowMs);
+  if (!f) return null;
+  const main = 'saved ' + fmt((o && o.replay_tokens) || 0) + ' rd / ' + fmt((o && o.saved_unique) || 0) + ' wr';
+  const p = fiveHourSavedPct(f, w);
+  const estimate = p === null ? ''
+    : '≈ ' + (p < 1 ? '< 1' : String(Math.round(p))) + '% of the 5-hour limit (estimate at API-price weights)';
+  return { main, estimate };
+}
+
+if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
+  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, subscriptionHeadline };
