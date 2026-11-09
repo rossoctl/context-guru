@@ -109,7 +109,7 @@ test('the estimate waits for $0.50 of spend and 2% used; the tokens show without
   assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).estimate, ''); // the window stats failed
   assert.equal(subscriptionHeadline(f(0.54), o, { cost_usd: 9, total_saved_usd: 0 }, now, String).estimate, '');
   assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).main, 'saved 10 rd / 2 wr');
-  assert.equal(fiveHourSavedPct({ utilization: 0.02 }, { cost_usd: 0.5, total_saved_usd: 0.5 }), 2);
+  assert.deepEqual(fiveHourSavedPct({ utilization: 0.02 }, { cost_usd: 0.5, total_saved_usd: 0.5 }), { pct: 2, hit: false });
   assert.match(subscriptionHeadline(f(0.02), o, { cost_usd: 100, total_saved_usd: 1 }, now, String).estimate, /^≈ < 1% /);
 });
 
@@ -122,4 +122,29 @@ test('{}, no answer, or a window that is over keeps the dollar view', () => {
   assert.equal(subscriptionHeadline({ seven_day: { utilization: 0.1, reset_s: 1794348000 } }, o, null, now, String), null);
   assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, now), null); // reset in the past
   assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 } }, now), null); // resets this moment
+});
+
+test('the share saved is capped at 100 - used: past it, the line says the limit would have been hit', () => {
+  const { subscriptionHeadline, fiveHourSavedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.45, reset_s: 2000 } };
+  const o = { replay_tokens: 10, saved_unique: 2 };
+  // used 45, cost $15, saved $45: raw 135%, but only 55% was left.
+  assert.deepEqual(fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 45 }), { pct: 55, hit: true });
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 15, total_saved_usd: 45 }, now, String).estimate,
+    '≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)');
+  // Just below the cap: used 45, cost $15, saved $18 is 54%, under the 55% left.
+  const below = fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 18 });
+  assert.equal(below.hit, false); assert.ok(Math.abs(below.pct - 54) < 1e-9);
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 15, total_saved_usd: 18 }, now, String).estimate,
+    '≈ 54% of the 5-hour limit (estimate at API-price weights)');
+  // Exactly at the cap counts as a hit.
+  assert.equal(fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 15 * 55 / 45 }).hit, true);
+});
+
+test('a manager keeps the dollar view and the page does not ask for the limits; everyone else asks', () => {
+  const { readsLimits } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(readsLimits({ role: 'manager' }), false);
+  assert.equal(readsLimits({ role: 'member' }), true);
+  assert.equal(readsLimits(null), true); // a local proxy has no tenant
 });

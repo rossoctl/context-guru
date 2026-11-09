@@ -1887,13 +1887,19 @@ function keepAliveLedger() {
  * The Claude subscription's 5-hour window (GET /api/me/limits), and that window's own stats for the
  * estimate under the headline. On a subscription the headline shows saved tokens. Any failure, `{}`
  * (an API key, Bedrock, Vertex) or a window that is over leaves state.sub null: the dollar view.
- * A manager's Overview spans other accounts, so it keeps the dollar view.
+ * A manager's Overview spans other accounts, so it keeps the dollar view (readsLimits).
  */
 async function loadOverviewLimits() {
-  const tn = account && account.tenant;
+  // Each call takes a number. An older answer that lands after a newer call must not overwrite it.
+  const seq = (state.subSeq = (state.subSeq || 0) + 1);
+  const done = (sub) => {
+    if (seq !== state.subSeq) return;
+    state.sub = sub;
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  };
+  if (!readsLimits(account && account.tenant)) { done(null); return; }
   let sub = null;
   try {
-    if (tn && tn.role === 'manager') throw new Error('manager');
     const limits = await ctl('/api/me/limits');
     const f = liveFiveHour(limits, Date.now());
     if (f) {
@@ -1902,8 +1908,7 @@ async function loadOverviewLimits() {
       try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
     }
   } catch (e) { /* no subscription signal: the dollar view */ }
-  state.sub = sub;
-  if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  done(sub);
 }
 
 async function loadOverviewKeepAlive() {

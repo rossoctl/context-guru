@@ -91,13 +91,22 @@ function fiveHourStartMs(f) { return (f.reset_s - 5 * 3600) * 1000; }
 // window has too little data to say (under $0.50 of spend, or under 2% used). Anthropic does not
 // publish how the limit weights token kinds, so this weights them at API prices: an estimate.
 // `w` is /api/stats?lean=1&since=<window start>.
+//
+// The provider stops a user at 100%, so the share saved can never be more than 100 - used. At that
+// cap, `hit` is true: without context-guru the user would have hit the limit.
 function fiveHourSavedPct(f, w) {
   const used = 100 * ((f && f.utilization) || 0);
   const cost = (w && w.cost_usd) || 0;
   const saved = (w && w.total_saved_usd) || 0;
   if (cost < 0.5 || used < 2 || !(saved > 0)) return null;
-  return (used * saved) / cost;
+  const raw = (used * saved) / cost;
+  const room = Math.max(0, 100 - used);
+  return { pct: Math.min(raw, room), hit: raw >= room };
 }
+
+// A manager's Overview spans other accounts, and the limits are the signed-in account's own, so a
+// manager keeps the dollar view and the page does not ask. A local proxy has no tenant: it asks.
+function readsLimits(tenant) { return !(tenant && tenant.role === 'manager'); }
 
 // The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
 // stats (rd = replay_tokens, wr = saved_unique), `w` the 5-hour window's, `fmt` formats a count.
@@ -106,10 +115,12 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
   if (!f) return null;
   const main = 'saved ' + fmt((o && o.replay_tokens) || 0) + ' rd / ' + fmt((o && o.saved_unique) || 0) + ' wr';
   const p = fiveHourSavedPct(f, w);
+  const tail = ' (estimate at API-price weights)';
   const estimate = p === null ? ''
-    : '≈ ' + (p < 1 ? '< 1' : String(Math.round(p))) + '% of the 5-hour limit (estimate at API-price weights)';
+    : p.hit ? '≈ without context-guru you would have hit the 5-hour limit' + tail
+      : '≈ ' + (p.pct < 1 ? '< 1' : String(Math.round(p.pct))) + '% of the 5-hour limit' + tail;
   return { main, estimate };
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
-  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, subscriptionHeadline };
+  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, subscriptionHeadline };

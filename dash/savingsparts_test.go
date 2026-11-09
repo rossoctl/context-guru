@@ -44,6 +44,8 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact)",
 		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
 		"loadOverviewLimits();",
+		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
+		"if (seq !== state.subSeq) return;",                                    // an older answer is dropped
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)
