@@ -59,6 +59,20 @@ bob-statusbar: ## Build the Bob status bar extension into bob-plugin/context-gur
 	cd bob-plugin/statusbar && npm ci --ignore-scripts --no-audit --no-fund $(if $(NPM_REGISTRY),--registry=$(NPM_REGISTRY)) \
 		&& npm run build && npm run package
 
+# Both Mac binaries are pure Go, so one machine builds both.
+# BOB_DIST: where the zip goes. The release workflow builds it outside dist/, before GoReleaser,
+# whose --clean empties dist/.
+BOB_DIST ?= dist
+BOB_RELEASE_BUILD := $(BOB_DIST)/bob-build
+.PHONY: bob-release
+bob-release: bob-statusbar ## Build the Bob release zip into $(BOB_DIST) (both Mac binaries, plugin, status bar)
+	@for arch in arm64 amd64; do \
+		CGO_ENABLED=0 GOOS=darwin GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o $(BOB_RELEASE_BUILD)/darwin-$$arch/$(BINARY) ./cmd/context-guru-proxy || exit 1; \
+	done
+	sh bob-plugin/release/package.sh $(VERSION) $(BOB_DIST) $(BOB_RELEASE_BUILD)/darwin-arm64/$(BINARY) \
+		$(BOB_RELEASE_BUILD)/darwin-amd64/$(BINARY) bob-plugin/context-guru
+
 .PHONY: fmt
 fmt: ## Format all Go source
 	gofmt -w .
