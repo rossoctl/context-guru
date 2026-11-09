@@ -62,23 +62,19 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 	sink, err := proxy.NewMetricsSink(provider.Meter("context-guru"), prices, components.Names()...)
 	if err != nil {
 		slog.Warn("context-guru: metrics are off; could not build the sink", "err", err)
-		_ = shutdown(context.Background())
+		stopProvider(shutdown)
 		return metricsSinks{}, nop
 	}
 	inf, err := proxy.NewInferenceMetrics(provider.Meter("context-guru"), prices, components.Names()...)
 	if err != nil {
 		slog.Warn("context-guru: metrics are off; could not build the inference set", "err", err)
-		_ = shutdown(context.Background())
+		stopProvider(shutdown)
 		return metricsSinks{}, nop
 	}
 	if err := registerProxyInfo(provider.Meter("context-guru"), buildinfo.Version, preset); err != nil {
 		slog.Warn("context-guru: the llm_proxy_info gauge is off", "err", err)
 	}
-	return metricsSinks{savings: sink, inference: inf}, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = shutdown(ctx) // a hung collector delays the exit by 3 seconds at most
-	}
+	return metricsSinks{savings: sink, inference: inf}, func() { stopProvider(shutdown) }
 }
 
 // metricsPushSettings are the flag values that control the push.
@@ -119,4 +115,12 @@ func registerProxyInfo(m metric.Meter, version, preset string) error {
 		return nil
 	}, g)
 	return err
+}
+
+// stopProvider flushes the last totals and stops the push. A hung collector delays it by 3 seconds
+// at most, on every path that stops the provider.
+func stopProvider(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = shutdown(ctx)
 }

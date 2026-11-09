@@ -83,6 +83,7 @@ func (e *jsonExporter) Export(ctx context.Context, rm *metricdata.ResourceMetric
 		return nil
 	}
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)) // drain a little so the connection can be reused
 	return &statusError{code: resp.StatusCode, body: string(snippet)}
 }
 

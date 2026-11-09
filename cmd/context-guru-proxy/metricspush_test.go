@@ -15,7 +15,10 @@ import (
 
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/proxy"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -157,5 +160,90 @@ func TestProxyInfoGauge(t *testing.T) {
 	p, _ := g.DataPoints[0].Attributes.Value("preset")
 	if v.AsString() != "v9.9" || p.AsString() != "codesafe" {
 		t.Errorf("labels = %v, %v", v.AsString(), p.AsString())
+	}
+}
+
+func pingRecorder(t *testing.T) *dash.Recorder {
+	t.Helper()
+	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "dash.db"), BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	return rec
+}
+
+func counterNames(t *testing.T, r *sdk.ManualReader) map[string]bool {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			out[m.Name] = true
+		}
+	}
+	return out
+}
+
+// The ping does not pass through the handler's finish. This drives one through the real emitter and
+// checks that the keep-alive metrics and the savings request counter appear. The first version of
+// the metrics booked pings only in unit tests: the production path never reached them.
+func TestKeepAlivePingReachesTheMetrics(t *testing.T) {
+	reader := sdk.NewManualReader()
+	provider := sdk.NewMeterProvider(sdk.WithReader(reader))
+	inf, err := proxy.NewInferenceMetrics(provider.Meter("t"), onePrice{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sav, err := proxy.NewMetricsSink(provider.Meter("t"), onePrice{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	em := &dashEmitter{rec: pingRecorder(t), pings: proxy.NewPingStore()}
+	em.metrics.Store(&metricsSinks{savings: sav, inference: inf})
+
+	em.KeepAlivePing(components.KeepAliveReport{
+		Tenant: "t1", Session: "s1", Thread: "main", Model: "aws/claude-sonnet-5", Provider: "anthropic",
+		Route: "/v1/messages", Pings: 1, CacheRead: 48576, Status: 200, DurationMs: 120,
+		TS: time.Now().UnixMilli(), CostUSD: 0.004,
+	})
+
+	names := counterNames(t, reader)
+	if !names["llm.keepalive.pings"] || !names["llm.keepalive.cost"] {
+		t.Fatalf("a ping reached the emitter and booked no keep-alive metric: %v", names)
+	}
+	if names["llm.inference.requests"] {
+		t.Error("a ping was counted as a request the user made")
+	}
+}
+
+// With the push off the emitter has no sinks, and the ping row is still recorded.
+func TestKeepAlivePingWithNoMetricsStillRecords(t *testing.T) {
+	rec := pingRecorder(t)
+	em := &dashEmitter{rec: rec}
+	em.KeepAlivePing(components.KeepAliveReport{Tenant: "t1", Session: "s1", Model: "m", Provider: "anthropic",
+		Pings: 1, CacheRead: 100, Status: 200, TS: time.Now().UnixMilli()})
+	page, err := waitForRow(t, rec)
+	if err != nil || len(page.Requests) != 1 || !page.Requests[0].KeepAlive {
+		t.Fatalf("the ping row was not recorded: %v %+v", err, page)
+	}
+}
+
+type panicObserver struct{}
+
+func (panicObserver) Observe(acmetrics.Observation) { panic("boom") }
+
+// A panic in a metrics sink must cost the metric only. The keeper's goroutine must live, and the row is recorded.
+func TestKeepAlivePingSurvivesAPanickingSink(t *testing.T) {
+	rec := pingRecorder(t)
+	em := &dashEmitter{rec: rec}
+	em.metrics.Store(&metricsSinks{savings: panicObserver{}})
+	em.KeepAlivePing(components.KeepAliveReport{Tenant: "t1", Session: "s1", Model: "m", Provider: "anthropic",
+		Pings: 1, CacheRead: 100, Status: 200, TS: time.Now().UnixMilli()})
+	if page, err := waitForRow(t, rec); err != nil || len(page.Requests) != 1 {
+		t.Fatalf("the ping row was lost to a panic in the sink: %v", err)
 	}
 }

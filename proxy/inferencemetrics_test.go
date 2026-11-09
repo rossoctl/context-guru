@@ -345,3 +345,18 @@ func TestHealthyRequestBooksNoFailure(t *testing.T) {
 		t.Error("a healthy request was counted as a fail-open")
 	}
 }
+
+// /compact reaches finish but calls no provider. It must not count as a request or add tokens.
+func TestCompactIsNotAnInferenceRequest(t *testing.T) {
+	im, r := newInferenceWith(t, nil)
+	e := goodEvent()
+	e.Route = "/compact"
+	im.Observe(e, time.Second)
+	if all := collectAll(t, r); len(all) != 0 {
+		t.Fatalf("a /compact row booked metrics: %v", all)
+	}
+	im.Observe(goodEvent(), time.Second) // an ordinary request still counts
+	if _, has := collectAll(t, r)["llm.inference.requests"]; !has {
+		t.Fatal("an ordinary request was not counted")
+	}
+}

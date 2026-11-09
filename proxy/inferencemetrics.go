@@ -41,6 +41,9 @@ type InferenceMetrics struct {
 	components map[string]bool
 }
 
+// compactRoute is the route of POST /compact. It reaches finish, but it never calls a provider.
+const compactRoute = "/compact"
+
 // Seconds buckets. The OpenTelemetry default bounds are tuned for milliseconds (0, 5, 10 ... 10000):
 // a request of 0.2 s and one of 3 s would share the first bucket.
 var secondsBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
@@ -114,6 +117,9 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 	if e.KeepAlive {
 		im.observePing(ctx, e, model)
 		return // a ping is the proxy's own traffic: it is not a request the user made
+	}
+	if e.Route == compactRoute {
+		return // /compact calls no provider: it is not an inference request and has no tokens to bill
 	}
 	class := statusClass(e.Status)
 
