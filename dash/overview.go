@@ -436,6 +436,9 @@ type Overview struct {
 	// what the library priced without knowing whether the cache was already warm, and that can be
 	// about 2x too high. Shown beside the totals, never added to them.
 	EstimatedSavedUSD float64 `json:"estimated_saved_usd"`
+	// EstimatedSavedLowUSD is the floor of EstimatedSavedUSD: the same removals priced at the read rate. The
+	// true held saving is between the two (#915). Shown beside the ceiling, never added to any total.
+	EstimatedSavedLowUSD float64 `json:"estimated_saved_low_usd"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -688,7 +691,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
 			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
 		`+deferNetSum+`,
-		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0)
+		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0),
+		COALESCE(SUM(r.estimated_saved_low_usd),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -706,7 +710,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
 		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
-		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD)
+		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD, &o.EstimatedSavedLowUSD)
 	if err != nil {
 		return nil, err
 	}

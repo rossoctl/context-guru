@@ -493,6 +493,11 @@ type Event struct {
 	// and the keep-alive tab agree without a filter. This field keeps the figure that was not booked.
 	// 0 on an exact request and on a row from before the column existed.
 	EstimatedSavedUSD float64 `json:"estimated_saved_usd,omitempty"`
+	// EstimatedSavedLowUSD is the floor of that held figure (#915): every removed token priced at the read
+	// rate instead of the write rate. A client token never costs less than a read, so the true saving lies
+	// in [EstimatedSavedLowUSD, EstimatedSavedUSD]. The size of the unseen warm prefix is not in the usage,
+	// so the proxy cannot narrow it further. Never booked. 0 when not held and on an older row.
+	EstimatedSavedLowUSD float64 `json:"estimated_saved_low_usd,omitempty"`
 	// EstimateHeld is true when the hold-out above applied to this row: the request is estimated AND its
 	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
 	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
@@ -914,7 +919,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
-	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
+	e.EstimatedSavedUSD, e.EstimatedSavedLowUSD, e.EstimateHeld = 0, 0, false
 	e.clearAccTokens()
 	e.priceCost(p, accountingComplete)
 }

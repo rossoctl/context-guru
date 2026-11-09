@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- the saving the accountant library priced on an estimated request, kept OUT of baseline_cost_usd
   -- and every total (#915). 0 on an exact request and on every row written before this column.
   estimated_saved_usd REAL   NOT NULL DEFAULT 0,
+  -- the floor of that held figure: every removed token priced at the read rate (#915). The true saving
+  -- lies between this and estimated_saved_usd. 0 on every row written before this column.
+  estimated_saved_low_usd REAL NOT NULL DEFAULT 0,
   -- 1 when the hold-out of #915 applied: the request is estimated and its figure was kept out of the books.
   -- 0 on every row written before this column existed, including an old estimated row that DID book its
   -- figure (price_estimated alone does not say which meaning a row has).
@@ -839,6 +842,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "acc_priced", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "estimated_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "estimated_saved_low_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "estimate_held", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},

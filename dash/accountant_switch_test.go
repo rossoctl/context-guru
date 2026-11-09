@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -520,6 +521,7 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 	}
 }
 
+<<<<<<< HEAD
 // #908, accountant R56, reviewer proposal on #1003: the library prices tool deferral from the bodies, and its
 // figure is the deferral's saving. It is booked on the tooldefer row, so the components still sum to the baseline
 // delta, but the lever Overview adds beside the baseline (DeferNetUSD) is where the deferral card reads it. So the
@@ -645,5 +647,73 @@ func TestPriceMode_AnUnpricedRequestKeepsTheLedgersNet(t *testing.T) {
 	}
 	if e.DeferNetUSD != 0.0007 {
 		t.Errorf("lever %v, want the ledger's net 0.0007", e.DeferNetUSD)
+	}
+}
+
+// Issue #915 with the issue's numbers. The first request on an unseen warm cache: the client's body
+// would have billed 8010 tokens read, 7966 written and 5 as input. The proxy removed 15976 tokens and
+// the forwarded request billed only 5 as input. The library prices every removed token as a write (the
+// ceiling). The warm size is not in the usage, so the true saving cannot be priced. It can be bounded:
+// a client token never costs less than a read, so the floor is every removed token at the read price.
+func TestPriceMode_HeldEstimateIsBoundedByReadAndWrite(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 15976, SavedUnique: 15976}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+			Saved: accountant.TierTokens{CacheWrite5m: 15976}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("the held request booked a delta of %v, want 0 (booking is the owner's decision)", e.BaselineCostUSD-e.CostUSD)
+	}
+	high, low := 15976*2.5e-6, 15976*0.2e-6
+	if !accNear(e.EstimatedSavedUSD, high) {
+		t.Errorf("ceiling %v, want %v", e.EstimatedSavedUSD, high)
+	}
+	if !accNear(e.EstimatedSavedLowUSD, low) {
+		t.Errorf("floor %v, want %v", e.EstimatedSavedLowUSD, low)
+	}
+	hand := 8010*0.2e-6 + 7966*2.5e-6 + 5*10e-6 + 1*2e-6 // the issue's hand baseline: 0.021569
+	if !accNear(hand, 0.021569) {
+		t.Fatalf("hand figure %v is not the issue's 0.021569", hand)
+	}
+	truth := hand - e.CostUSD
+	if truth < e.EstimatedSavedLowUSD || truth > e.EstimatedSavedUSD {
+		t.Errorf("true saving %v is outside the bounds [%v, %v]", truth, e.EstimatedSavedLowUSD, e.EstimatedSavedUSD)
+	}
+	e.Price(p, true)
+	if e.EstimatedSavedLowUSD != 0 {
+		t.Error("Price left the floor set")
+	}
+}
+
+// The floor and the ceiling are stored with the request and summed on both Overview paths.
+func TestOverviewSumsTheHeldFloor(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 2; i++ {
+		e := &Event{TS: now - int64(i)*1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 5000, TokensAfter: 4000, FreshInput: 5, OutputTokens: 1,
+			TokenAccounting: AccountingComplete, PriceEstimated: true, EstimateHeld: true,
+			EstimatedSavedUSD: 0.04, EstimatedSavedLowUSD: 0.003}
+		insertReq(t, db, e)
+	}
+	f := Filter{TenantAll: true, Since: now - 60_000}
+	full, err := db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean, err := db.OverviewLean(f, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, o := range map[string]*Overview{"full": full, "lean": lean} {
+		if !accNear(o.EstimatedSavedLowUSD, 0.006) || !accNear(o.EstimatedSavedUSD, 0.08) {
+			t.Errorf("%s: floor %v ceiling %v, want 0.006 and 0.08", name, o.EstimatedSavedLowUSD, o.EstimatedSavedUSD)
+		}
 	}
 }
