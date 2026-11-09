@@ -14,8 +14,9 @@ import (
 // scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
 // upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
 // waterfall rows keyed "compaction", "cachesplit_saved", "keepalive_saved", "keepalive_ping",
-// "decl_filter_saved", "self_removed", "cg_llm" — every one a plain SUM/AVG of a `requests`
-// column, bounded by the session or the time window, same index Overview()'s own main
+// "decl_filter_saved", "self_removed", "cg_llm", plus the saved token counts saved_unique,
+// saved_gross and replay_tokens (the status line's `rd / wr`, #990) — every one a plain SUM/AVG of a
+// `requests` column or arithmetic on them, bounded by the session or the time window, same index Overview()'s own main
 // aggregate already uses. The 7 goroutines Overview() runs beyond that aggregate (the replay
 // ceiling, its keep-alive correction, CompactionResets, the TTL/accounting breakdown, 2
 // invalid-config counts, the estimator-divergence query, the p95-latency query) feed none of
