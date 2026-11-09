@@ -16,6 +16,8 @@ import (
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	sdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 type onePrice struct{}
@@ -133,5 +135,27 @@ func TestStartMetricsPushWithoutURLReportsNothing(t *testing.T) {
 func TestStartMetricsPushWhitespaceURLIsNoURL(t *testing.T) {
 	if got, _ := startMetricsPush(settings(t, "   ", false), onePrice{}, "x"); got.savings != nil {
 		t.Fatal("a blank URL built a sink")
+	}
+}
+
+// llm_proxy_info is always 1 and carries the version and the preset.
+func TestProxyInfoGauge(t *testing.T) {
+	r := sdk.NewManualReader()
+	m := sdk.NewMeterProvider(sdk.WithReader(r)).Meter("t")
+	if err := registerProxyInfo(m, "v9.9", "codesafe"); err != nil {
+		t.Fatal(err)
+	}
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	g, ok := rm.ScopeMetrics[0].Metrics[0].Data.(metricdata.Gauge[int64])
+	if !ok || len(g.DataPoints) != 1 || g.DataPoints[0].Value != 1 {
+		t.Fatalf("gauge = %+v, want one point of value 1", rm.ScopeMetrics[0].Metrics[0].Data)
+	}
+	v, _ := g.DataPoints[0].Attributes.Value("version")
+	p, _ := g.DataPoints[0].Attributes.Value("preset")
+	if v.AsString() != "v9.9" || p.AsString() != "codesafe" {
+		t.Errorf("labels = %v, %v", v.AsString(), p.AsString())
 	}
 }

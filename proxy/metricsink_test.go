@@ -120,7 +120,7 @@ func attrKey(k string) attribute.Key { return attribute.Key(k) }
 func TestInferenceMetricsSeeARealRequest(t *testing.T) {
 	up := usageUpstream(t)
 	reader := sdk.NewManualReader()
-	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(reader)).Meter("test"))
+	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(reader)).Meter("test"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,12 +3,14 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // InferenceMetrics is the common inference set (metrics spec 5.1): requests, errors, tokens by tier,
@@ -23,7 +25,20 @@ type InferenceMetrics struct {
 	tokens              metric.Int64Counter
 	cost, estimatedCost metric.Float64Counter
 	duration, ttfb      metric.Float64Histogram
-	upstream, added     metric.Float64Histogram
+	added               metric.Float64Histogram
+
+	// Cache health (spec 5.4) and keep-alive (spec 5.3), read from the same finished event.
+	cacheMisses   metric.Int64Counter
+	cacheMissCost metric.Float64Counter
+	pings         metric.Int64Counter
+	pingCost      metric.Float64Counter
+	prices        modelinfo.Pricer // nil: no money for a miss
+	// Proxy health (spec 5.5). The info gauge and the export-failure counter live with the push.
+	compDuration metric.Float64Histogram
+	compFailures metric.Int64Counter
+	failOpen     metric.Int64Counter
+	// components bounds the `component` label to the shipped list. Nil keeps every name (a test).
+	components map[string]bool
 }
 
 // Seconds buckets. The OpenTelemetry default bounds are tuned for milliseconds (0, 5, 10 ... 10000):
@@ -34,8 +49,17 @@ var secondsBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
 var addedBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
 
 // NewInferenceMetrics builds every instrument once.
-func NewInferenceMetrics(m metric.Meter) (*InferenceMetrics, error) {
-	im := &InferenceMetrics{}
+//
+// prices gives the miss cost its model rates (R47). Nil, or a model with no rate, books the miss
+// count and no money: a blended rate in a cost is the defect this project has hit before.
+func NewInferenceMetrics(m metric.Meter, prices modelinfo.Pricer, components ...string) (*InferenceMetrics, error) {
+	im := &InferenceMetrics{prices: prices}
+	if len(components) > 0 {
+		im.components = make(map[string]bool, len(components))
+		for _, c := range components {
+			im.components[c] = true
+		}
+	}
 	var err error
 	i64 := func(dst *metric.Int64Counter, name, desc string) {
 		if err == nil {
@@ -60,8 +84,14 @@ func NewInferenceMetrics(m metric.Meter) (*InferenceMetrics, error) {
 	f64(&im.estimatedCost, "llm.inference.estimated_cost", "Part of the cost priced from a fallback rate.")
 	hist(&im.duration, "llm.inference.duration", "Total time, from request to last byte.", secondsBuckets)
 	hist(&im.ttfb, "llm.inference.ttfb", "Time to first byte, for streamed answers.", secondsBuckets)
-	hist(&im.upstream, "llm.inference.upstream", "Time the provider took.", secondsBuckets)
 	hist(&im.added, "llm.inference.added", "Time the proxy added on top of the upstream time.", addedBuckets)
+	i64(&im.cacheMisses, "llm.cache.misses", "Cache misses, by cause.")
+	f64(&im.cacheMissCost, "llm.cache.miss_cost", "Extra cost of those misses: the write premium on the re-written prefix.")
+	hist(&im.compDuration, "llm.proxy.component_duration", "Time spent in each component.", addedBuckets)
+	i64(&im.compFailures, "llm.proxy.component_failures", "A component error or panic, or a change the pipeline reverted.")
+	i64(&im.failOpen, "llm.proxy.fail_open", "Requests the proxy forwarded unchanged because its own work failed.")
+	i64(&im.pings, "llm.keepalive.pings", "Keep-alive pings the proxy sent, by outcome.")
+	f64(&im.pingCost, "llm.keepalive.cost", "What the pings cost.")
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +111,10 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 	}()
 	ctx := context.Background()
 	model, provider := label(e.Model), label(e.Provider)
+	if e.KeepAlive {
+		im.observePing(ctx, e, model)
+		return // a ping is the proxy's own traffic: it is not a request the user made
+	}
 	class := statusClass(e.Status)
 
 	im.requests.Add(ctx, 1, metric.WithAttributes(
@@ -113,12 +147,121 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 	if e.Stream && e.TTFBMs > 0 && !e.SSEBuffered {
 		im.ttfb.Record(ctx, e.TTFBMs/1000, mp)
 	}
-	if e.UpstreamMs > 0 {
-		im.upstream.Record(ctx, e.UpstreamMs/1000, mp)
-	}
 	if e.CGLatencyMs > 0 {
 		im.added.Record(ctx, e.CGLatencyMs/1000, metric.WithAttributes(attribute.String("model", model)))
 	}
+	im.observeCacheMiss(ctx, e, model)
+	im.observeComponents(ctx, e)
+}
+
+// observeComponents books the time and the failures of each component that ran on this request.
+// A request whose components acted but were all reverted was forwarded unchanged, which is the
+// fail-open (spec 5.5). A bypass is the user's choice and is not one.
+func (im *InferenceMetrics) observeComponents(ctx context.Context, e *dash.Event) {
+	for _, c := range e.Components {
+		name := im.component(c.Component)
+		if c.DurationMs > 0 {
+			im.compDuration.Record(ctx, c.DurationMs/1000, metric.WithAttributes(attribute.String("component", name)))
+		}
+		if reason := componentFailure(c); reason != "" {
+			im.compFailures.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("component", name), attribute.String("reason", reason)))
+		}
+	}
+	if e.UncompressedReason == dash.ReasonReverted {
+		im.failOpen.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "all_reverted")))
+	}
+}
+
+// componentFailure names why a component row counts as a failure, or "" when it does not.
+// A panic is told from an error by the text the pipeline gives it ("panic: ...").
+func componentFailure(c dash.CompRow) string {
+	switch {
+	case strings.HasPrefix(c.Err, "panic:"):
+		return "panic"
+	case c.Err != "":
+		return "error"
+	case c.Reverted:
+		return "reverted"
+	}
+	return ""
+}
+
+// component keeps the label inside the shipped list: any other name is "other".
+func (im *InferenceMetrics) component(name string) string {
+	if im.components == nil || im.components[name] {
+		return name
+	}
+	return "other"
+}
+
+// observePing books one keep-alive ping row. Only ok and failed are visible: a ping that timed out
+// or was skipped leaves no row, so those two outcomes are not reported here, and a count that
+// leaves them out says so in its help text rather than guessing.
+func (im *InferenceMetrics) observePing(ctx context.Context, e *dash.Event, model string) {
+	outcome := "ok"
+	if e.Status < 200 || e.Status > 299 {
+		outcome = "failed"
+	}
+	im.pings.Add(ctx, 1, metric.WithAttributes(attribute.String("model", model), attribute.String("outcome", outcome)))
+	if e.CostUSD > 0 {
+		im.pingCost.Add(ctx, e.CostUSD, metric.WithAttributes(attribute.String("model", model)))
+	}
+}
+
+// observeCacheMiss counts a real request that missed the cache, by cause, and prices the miss.
+func (im *InferenceMetrics) observeCacheMiss(ctx context.Context, e *dash.Event, model string) {
+	cause, miss := missCause(e)
+	if !miss {
+		return
+	}
+	attrs := metric.WithAttributes(attribute.String("model", model), attribute.String("cause", cause))
+	im.cacheMisses.Add(ctx, 1, attrs)
+	if usd := im.missCostUSD(e); usd > 0 {
+		im.cacheMissCost.Add(ctx, usd, attrs)
+	}
+}
+
+// missCostUSD is the avoidable write premium: the written prefix times (write rate minus read rate),
+// as dash/keepalive.go defines a lapse. It is zero for a model with no rate. It does not default.
+func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
+	if im.prices == nil || e.CacheWrite <= 0 {
+		return 0
+	}
+	p, ok := im.prices.Price(context.Background(), e.Model)
+	if !ok {
+		return 0
+	}
+	p = p.Resolved(e.Model)
+	if prem := p.CacheWrite - p.CacheRead; prem > 0 {
+		return float64(e.CacheWrite) * prem
+	}
+	return 0
+}
+
+// missCause maps the event's reason and cause to the spec's set: ttl_expiry, prefix_change,
+// model_changed, compaction_after_rewrite, bypass_flip, cold_start, other. A hit is not a miss.
+// tools, system and effort changes all change the cached prefix, so they are prefix_change.
+func missCause(e *dash.Event) (string, bool) {
+	switch e.CacheMissReason {
+	case dash.CacheHit, "":
+		return "", false
+	case dash.CacheColdStart:
+		return "cold_start", true
+	case dash.CacheTTLExpiry:
+		return "ttl_expiry", true
+	}
+	switch e.CacheMissCause {
+	case dash.CauseModelChanged:
+		return "model_changed", true
+	case dash.CauseCompactionAfterRewrite:
+		return "compaction_after_rewrite", true
+	case dash.CauseBypassFlip:
+		return "bypass_flip", true
+	case dash.CauseToolsChanged, dash.CauseSystemChanged, dash.CauseEffortChanged:
+		return "prefix_change", true
+	}
+	return "other", true
 }
 
 func withTier(model, provider, tier string) metric.AddOption {

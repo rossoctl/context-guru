@@ -9,12 +9,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 func newInference(t *testing.T) (*InferenceMetrics, *sdk.ManualReader) {
 	t.Helper()
 	r := sdk.NewManualReader()
-	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"))
+	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,4 +171,177 @@ func TestInferenceObserveSurvivesAPanic(t *testing.T) {
 	im, _ := newInference(t)
 	im.requests = nil // a nil instrument panics on Add
 	im.Observe(goodEvent(), time.Second)
+}
+
+type ratePricer map[string]modelinfo.Price
+
+func (r ratePricer) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	p, ok := r[model]
+	return p, ok
+}
+
+func newInferenceWith(t *testing.T, prices modelinfo.Pricer) (*InferenceMetrics, *sdk.ManualReader) {
+	t.Helper()
+	r := sdk.NewManualReader()
+	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), prices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return im, r
+}
+
+func missEvent(reason, cause string) *dash.Event {
+	e := goodEvent()
+	e.CacheRead, e.CacheWrite, e.CacheWrite1h = 0, 1000, 0
+	e.CacheMissReason, e.CacheMissCause = reason, cause
+	return e
+}
+
+// Every reason and cause the event can carry lands in the spec's set, and a hit is not a miss.
+func TestMissCauseMapsIntoTheSpecSet(t *testing.T) {
+	for _, tc := range []struct {
+		reason, cause, want string
+		miss                bool
+	}{
+		{dash.CacheHit, "", "", false},
+		{"", "", "", false},
+		{dash.CacheColdStart, "", "cold_start", true},
+		{dash.CacheTTLExpiry, "", "ttl_expiry", true},
+		{dash.CacheUnknown, dash.CauseModelChanged, "model_changed", true},
+		{dash.CacheUnknown, dash.CauseCompactionAfterRewrite, "compaction_after_rewrite", true},
+		{dash.CacheUnknown, dash.CauseBypassFlip, "bypass_flip", true},
+		{dash.CacheUnknown, dash.CauseToolsChanged, "prefix_change", true},
+		{dash.CacheUnknown, dash.CauseSystemChanged, "prefix_change", true},
+		{dash.CacheUnknown, dash.CauseEffortChanged, "prefix_change", true},
+		{dash.CacheUnknown, dash.CauseConcurrent, "other", true},
+		{dash.CacheUnknown, "", "other", true},
+	} {
+		got, miss := missCause(missEvent(tc.reason, tc.cause))
+		if got != tc.want || miss != tc.miss {
+			t.Errorf("(%q,%q) = (%q,%v), want (%q,%v)", tc.reason, tc.cause, got, miss, tc.want, tc.miss)
+		}
+	}
+}
+
+// The miss cost is the write premium on the written prefix, with the model's own rates.
+func TestMissCostIsTheWritePremium(t *testing.T) {
+	im, r := newInferenceWith(t, ratePricer{"claude-sonnet-5-5": {CacheWrite: 3.75e-6, CacheRead: 0.3e-6}})
+	im.Observe(missEvent(dash.CacheTTLExpiry, ""), time.Second)
+	all := collectAll(t, r)
+	if got := intByLabel(all["llm.cache.misses"], "cause"); got["ttl_expiry"] != 1 {
+		t.Errorf("misses = %v, want one ttl_expiry", got)
+	}
+	want := 1000 * (3.75e-6 - 0.3e-6) // 1000 written tokens
+	if got := sumFloat(all["llm.cache.miss_cost"]); got < want*0.999 || got > want*1.001 {
+		t.Errorf("miss cost = %v, want %v (1000 x (write - read))", got, want)
+	}
+}
+
+// A model with no rate counts the miss and books no money. It never falls back to another rate.
+func TestUnpricedMissBooksNoMoney(t *testing.T) {
+	im, r := newInferenceWith(t, ratePricer{})
+	im.Observe(missEvent(dash.CacheTTLExpiry, ""), time.Second)
+	all := collectAll(t, r)
+	if intByLabel(all["llm.cache.misses"], "cause")["ttl_expiry"] != 1 {
+		t.Error("the miss was not counted")
+	}
+	if _, has := all["llm.cache.miss_cost"]; has {
+		t.Error("a miss on an unpriced model booked money")
+	}
+}
+
+func TestHitIsNotAMiss(t *testing.T) {
+	im, r := newInferenceWith(t, ratePricer{})
+	e := goodEvent()
+	e.CacheMissReason = dash.CacheHit
+	im.Observe(e, time.Second)
+	if _, has := collectAll(t, r)["llm.cache.misses"]; has {
+		t.Fatal("a hit was counted as a miss")
+	}
+}
+
+// A ping is the proxy's own traffic: it books pings and cost, and nothing in the request metrics.
+func TestPingBooksKeepAliveAndNoRequest(t *testing.T) {
+	im, r := newInferenceWith(t, nil)
+	ok := goodEvent()
+	ok.KeepAlive, ok.CostUSD = true, 0.003
+	bad := goodEvent()
+	bad.KeepAlive, bad.Status, bad.CostUSD = true, 529, 0 // a refused ping costs nothing
+	im.Observe(ok, time.Second)
+	im.Observe(bad, time.Second)
+	all := collectAll(t, r)
+	got := intByLabel(all["llm.keepalive.pings"], "outcome")
+	if got["ok"] != 1 || got["failed"] != 1 {
+		t.Errorf("pings = %v, want one ok and one failed", got)
+	}
+	if c := sumFloat(all["llm.keepalive.cost"]); c < 0.0029 || c > 0.0031 {
+		t.Errorf("ping cost = %v, want 0.003", c)
+	}
+	for _, name := range []string{"llm.inference.requests", "llm.inference.tokens", "llm.inference.cost"} {
+		if _, has := all[name]; has {
+			t.Errorf("a ping reached %s: it is not a request the user made", name)
+		}
+	}
+}
+
+func healthEvent(rows ...dash.CompRow) *dash.Event {
+	e := goodEvent()
+	e.Components = rows
+	return e
+}
+
+func TestComponentTimeAndFailureReasons(t *testing.T) {
+	r := sdk.NewManualReader()
+	im, err := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), nil, "mask", "dedup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	im.Observe(healthEvent(
+		dash.CompRow{Component: "mask", DurationMs: 12},
+		dash.CompRow{Component: "dedup", Err: "panic: boom"},
+		dash.CompRow{Component: "mask", Err: "bad input"},
+		dash.CompRow{Component: "dedup", Reverted: true},
+		dash.CompRow{Component: "not-shipped", Err: "x"},
+	), time.Second)
+	all := collectAll(t, r)
+	got := intByLabel(all["llm.proxy.component_failures"], "reason")
+	if got["panic"] != 1 || got["error"] != 2 || got["reverted"] != 1 {
+		t.Errorf("failures by reason = %v, want panic 1, error 2 (one of them from a name outside the list), reverted 1", got)
+	}
+	comps := intByLabel(all["llm.proxy.component_failures"], "component")
+	if comps["other"] != 1 || comps["not-shipped"] != 0 {
+		t.Errorf("failures by component = %v, want the unlisted name folded into other", comps)
+	}
+	if _, ok := all["llm.proxy.component_duration"]; !ok {
+		t.Error("no component duration was recorded")
+	}
+}
+
+// All-reverted is a fail-open. A bypass is the user's choice and is not.
+func TestFailOpenIsAllRevertedNotBypass(t *testing.T) {
+	im, r := newInferenceWith(t, nil)
+	rev := healthEvent()
+	rev.UncompressedReason = dash.ReasonReverted
+	byp := healthEvent()
+	byp.UncompressedReason = dash.ReasonBypassed
+	none := healthEvent()
+	im.Observe(rev, time.Second)
+	im.Observe(byp, time.Second)
+	im.Observe(none, time.Second)
+	got := intByLabel(collectAll(t, r)["llm.proxy.fail_open"], "reason")
+	if got["all_reverted"] != 1 || len(got) != 1 {
+		t.Errorf("fail_open = %v, want only one all_reverted", got)
+	}
+}
+
+func TestHealthyRequestBooksNoFailure(t *testing.T) {
+	im, r := newInferenceWith(t, nil)
+	im.Observe(healthEvent(dash.CompRow{Component: "mask", DurationMs: 3, Acted: true}), time.Second)
+	all := collectAll(t, r)
+	if _, has := all["llm.proxy.component_failures"]; has {
+		t.Error("a healthy component was counted as a failure")
+	}
+	if _, has := all["llm.proxy.fail_open"]; has {
+		t.Error("a healthy request was counted as a fail-open")
+	}
 }

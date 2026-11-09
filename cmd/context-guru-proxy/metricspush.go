@@ -13,6 +13,8 @@ import (
 	"github.com/rossoctl/context-guru/internal/metricspush"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/proxy"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // startMetricsPush starts the push of metrics to the central collector and returns the sink the
@@ -63,11 +65,14 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 		_ = shutdown(context.Background())
 		return metricsSinks{}, nop
 	}
-	inf, err := proxy.NewInferenceMetrics(provider.Meter("context-guru"))
+	inf, err := proxy.NewInferenceMetrics(provider.Meter("context-guru"), prices, components.Names()...)
 	if err != nil {
 		slog.Warn("context-guru: metrics are off; could not build the inference set", "err", err)
 		_ = shutdown(context.Background())
 		return metricsSinks{}, nop
+	}
+	if err := registerProxyInfo(provider.Meter("context-guru"), buildinfo.Version, preset); err != nil {
+		slog.Warn("context-guru: the llm_proxy_info gauge is off", "err", err)
 	}
 	return metricsSinks{savings: sink, inference: inf}, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -99,4 +104,19 @@ func machineIDPath(dashDB string) string {
 type metricsSinks struct {
 	savings   acmetrics.Observer
 	inference *proxy.InferenceMetrics
+}
+
+// registerProxyInfo adds llm_proxy_info: a gauge that is always 1 and carries the build and the
+// preset as labels (metrics spec 5.5). Alerts and dashboards join on it to see which version runs.
+func registerProxyInfo(m metric.Meter, version, preset string) error {
+	g, err := m.Int64ObservableGauge("llm.proxy.info", metric.WithDescription("Always 1. Shows the build and the preset."))
+	if err != nil {
+		return err
+	}
+	attrs := metric.WithAttributes(attribute.String("version", version), attribute.String("preset", preset))
+	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(g, 1, attrs)
+		return nil
+	}, g)
+	return err
 }
