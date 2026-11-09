@@ -179,7 +179,6 @@
   "uncovered_requests": 88
  },
  "tokens": {
-  "by_feature": {},
   "caused": {
    "cache_read": 0,
    "cache_write_1h": 0,

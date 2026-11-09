@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS requests (
   tok_ttl_caused_in INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ended_saved_in INTEGER NOT NULL DEFAULT 0, tok_ended_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ended_caused_in INTEGER NOT NULL DEFAULT 0, tok_ended_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  -- The request's whole token figure: the sum of its request_components tok_* figures and the four
+  -- effects above, written with them, so the lean stats read takes the totals from its one scan (#502).
+  tok_total_saved_in INTEGER NOT NULL DEFAULT 0, tok_total_saved_rd INTEGER NOT NULL DEFAULT 0, tok_total_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_total_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_total_caused_in INTEGER NOT NULL DEFAULT 0, tok_total_caused_rd INTEGER NOT NULL DEFAULT 0, tok_total_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_total_caused_w1h INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',

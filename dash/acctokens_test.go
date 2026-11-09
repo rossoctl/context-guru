@@ -231,7 +231,10 @@ func TestAccTokens_StatsSumByFeatureAndCountTheUnmeasured(t *testing.T) {
 	}
 }
 
-// The full and the lean /api/stats report the same tokens, for a session and for a time window.
+// The full and the lean /api/stats report the same tokens, for a session and for a time window: the
+// same totals and unmeasured count. The lean totals come from the per-request copy
+// (tok_total_*), the full ones from the component rows and the effect columns, so this also holds
+// that copy to the figures it sums. Lean has no by_feature and no ping tokens.
 func TestAccTokens_LeanAgreesWithFull(t *testing.T) {
 	db := openTestDB(t)
 	now := time.Now().UnixMilli()
@@ -248,21 +251,26 @@ func TestAccTokens_LeanAgreesWithFull(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(full.Tokens.ByFeature) == 0 {
+		if full.Tokens.Saved == (TierTokens{}) || len(full.Tokens.ByFeature) == 0 {
 			t.Fatalf("%s: no tokens at all", name)
 		}
-		fj, _ := json.Marshal(full.Tokens)
-		lj, _ := json.Marshal(lean.Tokens)
-		if string(fj) != string(lj) || full.TokensUnmeasuredRequests != lean.TokensUnmeasuredRequests ||
-			full.KeepAlivePingTokens != lean.KeepAlivePingTokens || full.KeepAlivePingOutputTokens != lean.KeepAlivePingOutputTokens {
-			t.Errorf("%s: full %s (%d unmeasured)\nlean %s (%d unmeasured)", name, fj, full.TokensUnmeasuredRequests,
-				lj, lean.TokensUnmeasuredRequests)
+		if lean.Tokens.ByFeature != nil {
+			t.Errorf("%s: lean has by_feature %v, want none", name, lean.Tokens.ByFeature)
+		}
+		if full.Tokens.Saved != lean.Tokens.Saved || full.Tokens.Caused != lean.Tokens.Caused ||
+			full.TokensUnmeasuredRequests != lean.TokensUnmeasuredRequests {
+			t.Errorf("%s: full %+v %+v (%d unmeasured)\nlean %+v %+v (%d unmeasured)", name,
+				full.Tokens.Saved, full.Tokens.Caused, full.TokensUnmeasuredRequests,
+				lean.Tokens.Saved, lean.Tokens.Caused, lean.TokensUnmeasuredRequests)
+		}
+		if full.KeepAlivePingTokens == (TierTokens{}) || lean.KeepAlivePingTokens != (TierTokens{}) {
+			t.Errorf("%s: ping tokens full %+v lean %+v, want only full", name, full.KeepAlivePingTokens, lean.KeepAlivePingTokens)
 		}
 	}
 }
 
-// Rows written before the token columns read 0 and count as unmeasured; an empty period answers an
-// empty object, not null.
+// Rows written before the token columns read 0 and count as unmeasured; an empty period answers
+// zero totals and no by_feature, not null.
 func TestAccTokens_EmptyAndOldRows(t *testing.T) {
 	db := openTestDB(t)
 	o, err := db.Overview(Filter{Tenant: "t1"})
@@ -270,7 +278,7 @@ func TestAccTokens_EmptyAndOldRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := json.Marshal(o.Tokens)
-	if string(b) != `{"saved":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0},"caused":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0},"by_feature":{}}` {
+	if string(b) != `{"saved":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0},"caused":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0}}` {
 		t.Errorf("empty tokens = %s", b)
 	}
 	old := mkEvent(1000, "s", "m", 100, 90)
@@ -308,7 +316,7 @@ func TestAccTokenColumnsExistOnAFreshDatabase(t *testing.T) {
 		return out
 	}
 	req, comp := has("requests"), has("request_components")
-	for _, c := range requestTokenColumns() {
+	for _, c := range requestStoredTokenColumns() {
 		if !req[c] {
 			t.Errorf("requests has no %s", c)
 		}
@@ -318,8 +326,8 @@ func TestAccTokenColumnsExistOnAFreshDatabase(t *testing.T) {
 			t.Errorf("request_components has no %s", c)
 		}
 	}
-	if n := len(requestTokenColumns()); n != 32 || len(requestTokenArgs(AccEffectTokens{})) != n {
-		t.Errorf("request token columns %d, args %d, want 32", n, len(requestTokenArgs(AccEffectTokens{})))
+	if n := len(requestStoredTokenColumns()); n != 40 || len(requestStoredTokenArgs(&Event{})) != n {
+		t.Errorf("request token columns %d, args %d, want 40", n, len(requestStoredTokenArgs(&Event{})))
 	}
 }
 
@@ -333,7 +341,7 @@ func TestAccTokenColumnsAreAddedToAnOldDatabase(t *testing.T) {
 	if err := db.insertBatch([]*Event{mkEvent(1, "s", "m", 10, 5)}); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range requestTokenColumns() {
+	for _, c := range requestStoredTokenColumns() {
 		if _, err := db.sql.Exec(`ALTER TABLE requests DROP COLUMN ` + c); err != nil {
 			t.Fatal(err)
 		}

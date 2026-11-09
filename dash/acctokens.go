@@ -127,6 +127,34 @@ func requestTokenColumns() []string {
 	return cols
 }
 
+// totalColumns are requests' copy of the request's whole token figure: the sum of its component
+// rows' figures and its four effects, written with them. They let the lean stats read take the totals
+// from the one scan of requests it already makes, in 8 terms, with no join to request_components and
+// no sum of the 32 effect columns (#502's budget).
+var totalColumns = flowColumns("tok_total")
+
+// requestStoredTokenColumns is every token column of requests, in requestStoredTokenArgs order.
+func requestStoredTokenColumns() []string {
+	return append(requestTokenColumns(), totalColumns...)
+}
+
+// requestStoredTokenArgs is the values of requestStoredTokenColumns for one event. A keep-alive ping
+// stores zeros: it is not agent traffic, and the stats reads sum these columns over the pings' rows
+// too. The library never prices a ping, so this drops nothing.
+func requestStoredTokenArgs(e *Event) []any {
+	if e.KeepAlive {
+		return requestStoredTokenArgs(&Event{})
+	}
+	var total TokenFlow
+	for _, c := range e.Components {
+		total.add(c.Tokens)
+	}
+	for _, f := range []TokenFlow{e.AccTokens.KeepAlive, e.AccTokens.Split, e.AccTokens.TTL, e.AccTokens.EndedBreak} {
+		total.add(f)
+	}
+	return append(requestTokenArgs(e.AccTokens), total.args()...)
+}
+
 // requestTokenSelect is the request token columns for requestCols (alias r), so a stored row reads
 // back what the live event showed.
 var requestTokenSelect = "r." + strings.Join(requestTokenColumns(), ", r.")
@@ -155,7 +183,7 @@ func init() {
 	for _, c := range compTokenColumns {
 		additiveColumns = append(additiveColumns, struct{ table, column, ddl string }{"request_components", c, "INTEGER NOT NULL DEFAULT 0"})
 	}
-	for _, c := range requestTokenColumns() {
+	for _, c := range requestStoredTokenColumns() {
 		additiveColumns = append(additiveColumns, struct{ table, column, ddl string }{"requests", c, "INTEGER NOT NULL DEFAULT 0"})
 	}
 }
@@ -171,8 +199,9 @@ type AccTokenStats struct {
 	// request-level effects: keepalive (the rescue), cachesplit (the split; added to a cachesplit
 	// component row's own figure if one exists), ttl (the head-TTL legs) and ended_change (the break an
 	// ended change left behind). Tool filter and deferral are components (toolfilter, tooldefer)
-	// when the library prices them. Features with no tokens are left out.
-	ByFeature map[string]TokenFlow `json:"by_feature"`
+	// when the library prices them. Features with no tokens are left out. The lean read has no
+	// by_feature at all (absent, not empty): only the full read has the breakdown.
+	ByFeature map[string]TokenFlow `json:"by_feature,omitempty"`
 }
 
 // AccTokensRead is DB.AccTokens' answer: the tokens object and the facts beside it.
@@ -193,24 +222,92 @@ func (r *AccTokensRead) apply(o *Overview) {
 	o.KeepAlivePingTokens, o.KeepAlivePingOutputTokens = r.Ping, r.PingOutput
 }
 
-// accTokensRequestQuery is the effects half: one aggregate over requests, bounded by the same
-// conditions as the stats' main aggregate. It sums the four effect figures over the agent rows, the
-// pings' billed tokens, and counts the agent rows the library did not price (acc_priced = 0).
+// accTokensRequestQuery is the full read's effects half: one aggregate over requests, bounded by
+// the same conditions as the stats' main aggregate: the four effect figures, the pings' billed tokens
+// and the count of agent rows the library did not price.
 func accTokensRequestQuery(f Filter) (string, []any) {
 	cond, args := withKeepAlive(f).where()
-	const agent = "r.keepalive = 0"
-	var sel []string
-	for _, c := range requestTokenColumns() {
-		sel = append(sel, `COALESCE(SUM(CASE WHEN `+agent+` THEN r.`+c+` ELSE 0 END),0)`)
+	return `SELECT ` + tokenSumTerms(requestTokenColumns()) + `,
+			` + accTokenTailTerms + ` FROM requests r WHERE ` + cond, args
+}
+
+// accTokenLeanTerms is the lean read's 9 terms: the 8 totals and the unmeasured count, in
+// leanAgg's dest order. They go in leanWindowMainQuery's one scan. Each term costs about 1 ms on
+// the 20,000-request budget test (main: 53 ms; with all 40 token sums and the pings, 89 ms; with 14
+// terms, 69 ms), so lean carries only what a status line shows: the totals.
+var accTokenLeanTerms = tokenSumTerms(totalColumns) + `,
+			` + unmeasuredTerm
+
+// tokenSumTerms sums each column over requests r. No agent CASE: a ping row stores no token figure
+// (requestStoredTokenArgs), so the plain SUM over a scope that has the pings is the agent rows' sum.
+func tokenSumTerms(cols []string) string {
+	sel := make([]string, len(cols))
+	for i, c := range cols {
+		sel[i] = `COALESCE(SUM(r.` + c + `),0)`
 	}
+	return strings.Join(sel, ", ")
+}
+
+// accTokenTailTerms is the pings' billed tokens by tier, their output tokens, and the count of agent
+// rows the library did not price (acc_priced = 0), over requests r scoped by withKeepAlive.
+var accTokenTailTerms = func() string {
 	ping := func(expr string) string {
 		return `COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN ` + expr + ` ELSE 0 END),0)`
 	}
-	sel = append(sel,
+	return strings.Join([]string{
 		ping("r.fresh_input"), ping("r.cache_read"),
 		ping("MAX(r.cache_write - r.cache_write_1h, 0)"), ping("r.cache_write_1h"), ping("r.output_tokens"),
-		`COALESCE(SUM(CASE WHEN `+agent+` AND r.acc_priced = 0 THEN 1 ELSE 0 END),0)`)
-	return `SELECT ` + strings.Join(sel, ",\n\t\t") + ` FROM requests r WHERE ` + cond, args
+		unmeasuredTerm,
+	}, ", ")
+}()
+
+// unmeasuredTerm counts the agent rows the library did not price.
+const unmeasuredTerm = `COALESCE(SUM(CASE WHEN r.keepalive = 0 AND r.acc_priced = 0 THEN 1 ELSE 0 END),0)`
+
+// leanAgg is the scan target of accTokenLeanTerms.
+type leanAgg struct {
+	total      [8]int64
+	unmeasured int64
+}
+
+func (a *leanAgg) dest() []any {
+	out := make([]any, 0, 9)
+	for i := range a.total {
+		out = append(out, &a.total[i])
+	}
+	return append(out, &a.unmeasured)
+}
+
+// read is the lean read's tokens: the totals and the unmeasured count. No by_feature and no ping
+// tokens: the per-component entries need the join to request_components, and the effect entries and
+// the pings 37 more terms, which made the lean read 1.3x to 4x slower than #502's budget allows. The
+// pings' tokens are only useful against the keep-alive's own entry, which lean does not have. The
+// full read has all of them.
+func (a *leanAgg) read() *AccTokensRead {
+	t := flowOf(a.total[:])
+	return &AccTokensRead{Tokens: AccTokenStats{Saved: t.Saved, Caused: t.Caused}, Unmeasured: a.unmeasured}
+}
+
+// accTokensAgg is the scan target of the token sums (n columns) and accTokenTailTerms.
+type accTokensAgg struct {
+	sums       []int64
+	ping       TierTokens
+	pingOutput int64
+	unmeasured int64
+}
+
+func (a *accTokensAgg) dest(n int) []any {
+	a.sums = make([]int64, n)
+	out := make([]any, 0, n+6)
+	for i := range a.sums {
+		out = append(out, &a.sums[i])
+	}
+	return append(out, &a.ping.Input, &a.ping.CacheRead, &a.ping.CacheWrite5m, &a.ping.CacheWrite1h,
+		&a.pingOutput, &a.unmeasured)
+}
+
+func (a *accTokensAgg) tail(r *AccTokensRead) {
+	r.Ping, r.PingOutput, r.Unmeasured = a.ping, a.pingOutput, a.unmeasured
 }
 
 // accTokensComponentQuery is the components half: the component rows' figures, joined to the
@@ -229,24 +326,21 @@ func accTokensComponentQuery(f Filter) (string, []any) {
 		GROUP BY rc.component`, args
 }
 
-// AccTokens answers the `tokens` object, tokens_unmeasured_requests and the pings' tokens for the filter. The full and
-// the lean /api/stats both call it, so they agree by construction.
+// AccTokens answers the `tokens` object, tokens_unmeasured_requests and the pings' tokens for the
+// filter, for the FULL /api/stats. The lean read has the same totals and count from its one scan
+// (accTokenLeanTerms), and no by_feature and no ping tokens.
 func (d *DB) AccTokens(f Filter) (*AccTokensRead, error) {
 	r := &AccTokensRead{Tokens: AccTokenStats{ByFeature: map[string]TokenFlow{}}}
 	s := &r.Tokens
 	q, args := accTokensRequestQuery(f)
-	effects := make([]int64, len(requestTokenColumns()))
-	dest := make([]any, 0, len(effects)+6)
-	for i := range effects {
-		dest = append(dest, &effects[i])
-	}
-	dest = append(dest, &r.Ping.Input, &r.Ping.CacheRead, &r.Ping.CacheWrite5m,
-		&r.Ping.CacheWrite1h, &r.PingOutput, &r.Unmeasured)
-	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(dest...); err != nil {
+	var agg accTokensAgg
+	n := len(requestTokenColumns())
+	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(agg.dest(n)...); err != nil {
 		return nil, err
 	}
+	agg.tail(r)
 	for i, x := range requestTokenEffects {
-		s.addFeature(x.feature, flowOf(effects[i*8:i*8+8]))
+		s.addFeature(x.feature, flowOf(agg.sums[i*8:i*8+8]))
 	}
 	q, args = accTokensComponentQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
