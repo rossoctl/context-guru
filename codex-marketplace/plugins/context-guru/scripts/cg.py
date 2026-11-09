@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The /context-guru:* commands. Each answers ONE question: a bottom line, then a small picture, then (with
-`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked.
+`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked. On a Claude
+subscription, `home` and `insights savings` lead with the tokens saved instead, and the 5-hour share as an estimate.
 
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
@@ -462,6 +463,76 @@ def session_id(api: Api, a_session: str | None) -> tuple[str | None, str]:
 
 
 # ---------------------------------------------------------------------------------------------
+# a Claude subscription: saved tokens first, the 5-hour share only as an estimate (#986)
+
+FIVE_HOURS_MS = 5 * 3600 * 1000
+API_PRICES = "At API prices (a subscription does not pay these):"
+
+
+def _statusline():
+    """The status line module, for its token formatters; None in the Codex copy, which has no status line."""
+    try:
+        import statusline as sl  # noqa: PLC0415
+        return sl
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _real(doc: dict | None, key: str) -> float | None:
+    v = doc.get(key) if isinstance(doc, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def subscription(api: Api, o: dict) -> dict | None:
+    """The account's latest limit headers (GET /api/me/limits): {"used": percent, "start": ms} on a Claude
+    subscription, with both None when no 5-hour window is open now. None (today's dollar view) for an API key,
+    Bedrock, Vertex, an older proxy (404), no answer, or the Codex copy."""
+    if _statusline() is None:
+        return None
+    doc = api.get("/api/me/limits", timeout=3)
+    if not isinstance(doc, dict) or doc.get("subscription") is not True:
+        return None
+    five = doc.get("five_hour") if isinstance(doc.get("five_hour"), dict) else None
+    util, reset = _real(five, "utilization"), _real(five, "reset_s")
+    if util is None or reset is None or not 0 <= util <= 10 or reset * 1000 <= o["now"]:  # a window that is over is absent
+        return {"used": None, "start": None}
+    return {"used": util * 100, "start": int(reset * 1000) - FIVE_HOURS_MS}
+
+
+def limit_estimate(used: float | None, win: dict | None) -> str | None:
+    """`≈ 3% of the 5-hour limit (estimate at API-price weights)`: the share of the limit the savings are worth, if
+    the limit weighted tokens as the API prices them. Anthropic does not publish those weights, and the header has
+    whole percents only, so it is an estimate, and shown only with enough data."""
+    saved, cost = _real(win, "total_saved_usd"), _real(win, "cost_usd")
+    if used is None or used < 2 or cost is None or cost < 0.50 or saved is None or saved <= 0:
+        return None
+    pct = used * saved / cost
+    return f"≈ {f'{pct:.0f}%' if pct >= 0.5 else '<1%'} of the 5-hour limit (estimate at API-price weights)"
+
+
+def subscription_head(api: Api, o: dict) -> list[str]:
+    """On a subscription, the lines that lead a screen: the tokens saved in this session and in the current 5-hour
+    window, then the estimate. [] otherwise, and the screen is exactly as before."""
+    sub = subscription(api, o)
+    if sub is None:
+        return []
+    sl = _statusline()
+    rows, est = [], None
+    sid, how = session_id(api, o["session"])
+    if sid:
+        st = api.get("/api/stats", {"lean": 1, "session": sid})
+        rows.append((how.capitalize(), sl._saved_tokens_text(st) or "nothing saved yet"))
+    if sub["start"]:
+        win = api.get("/api/stats", {"lean": 1, "since": sub["start"]})
+        rows.append(("This 5-hour window", sl._saved_tokens_text(win) or "nothing saved yet"))
+        est = limit_estimate(sub["used"], win)
+    if not rows:
+        return []
+    w = max(len(n) for n, _ in rows) + 2
+    return [f"{n + ':':<{w}}{t}" for n, t in rows] + ([" " * w + est] if est else []) + ["", API_PRICES]
+
+
+# ---------------------------------------------------------------------------------------------
 # /context-guru:status
 
 def preset_gap_line(api: Api) -> str | None:
@@ -486,7 +557,7 @@ def cmd_home(api: Api, o: dict) -> list[str]:
     saved, bill = st.get("total_saved_usd", 0.0), st.get("cost_usd", 0.0)
     sp, (tools, last) = spend_doc(api, o, d), tools_doc(api, o, d)
     recs = C.recommendations(sp, tools, d) if sp else []
-    L = [f"Saved {dollars(saved)} in {d} days ({share(saved, st.get('baseline_cost_usd') or bill)} of what the same work would have cost)."]
+    L = subscription_head(api, o) + [f"Saved {dollars(saved)} in {d} days ({share(saved, st.get('baseline_cost_usd') or bill)} of what the same work would have cost)."]
     gap = preset_gap_line(api)
     if gap:
         L.append(gap + ". Run /context-guru:preset-picker to restart the proxy now, or start a new session.")
@@ -519,7 +590,7 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
     if not st:
         return ["No data yet. Run a few prompts through the proxy, then try again."]
     saved, bill = st["total_saved_usd"], st["cost_usd"]
-    L = [f"Saved {dollars(saved)} in {d} days, net of Context Guru's own spend "
+    L = subscription_head(api, o) + [f"Saved {dollars(saved)} in {d} days, net of Context Guru's own spend "
          f"({share(saved, st.get('baseline_cost_usd') or bill)} of the {dollars(st.get('baseline_cost_usd') or bill)} "
          f"the same work would have cost)."]
     lv = levers(st)
