@@ -102,6 +102,9 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 		prev, same = any(perModel(pk))
 		last, hadAny = any(pk)
 	}
+	// A restart forgets lastFacts but SeedSessions reloads the billed tier. Use it only while the
+	// thread has no facts at all.
+	seededTier := !same && !hadAny && r.seedTier[key]
 	// The thread's latest committed request was on this model, so a keep-alive ping after it
 	// refreshed THIS model's entry.
 	lastWasSame = hadAny && last.Model == cur.Model
@@ -116,6 +119,8 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 		// effect of an earlier rewrite.
 		if cur.NoWrite && same {
 			cur.OneHour = prev.OneHour
+		} else if cur.NoWrite && seededTier {
+			cur.OneHour = true
 		}
 		cur.RewroteEarlier = same && !cur.Bypassed && (prev.RewroteEarlier || prev.Rewrote)
 		r.lastFacts[key] = cur
@@ -130,7 +135,7 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	case hadAny:
 		return CauseModelChanged, -1, true, false, 0, false
 	}
-	return "", 0, false, false, 0, false
+	return "", 0, false, false, 0, seededTier
 }
 
 // shortFirstMessages is the largest message count of a request that counts as a short first

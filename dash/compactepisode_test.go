@@ -1446,3 +1446,26 @@ func TestEpisodeCeilingsAreReportedPerModelAndSource(t *testing.T) {
 		t.Fatalf("ceilings = %+v, want one per source", out.Assumptions.ClientCeilings)
 	}
 }
+
+// A client_default row (#963) gives the episode the same absolute C a configured row does.
+func TestEpisodeWalkUsesAClientDefaultCompactionPoint(t *testing.T) {
+	rows := []compactRow{
+		row(1, 1_000, fresh),
+		row(2, 50_000, saved(100_000)),
+		row(3, 50_000, saved(100_000)),
+	}
+	for i := range rows {
+		rows[i].CPoint, rows[i].CPointSource = 950_000, "client_default"
+	}
+	out := walkCompactEpisodes(rows, exactWindow, testPrice, 0, 0.90, 0)
+	if len(out.Assumptions.ClientCeilings) != 1 {
+		t.Fatalf("ceilings: %+v", out.Assumptions.ClientCeilings)
+	}
+	cc := out.Assumptions.ClientCeilings[0]
+	if cc.Provenance != "client_default" || offUSD(cc.Frac, 0.95) || offUSD(cc.SpanFrac, 0.05) {
+		t.Errorf("ceiling = %+v, want client_default, frac 0.95, span 0.05", cc)
+	}
+	if e := only(t, out); e.State != EpisodeClosed || e.Turns >= 3 {
+		t.Errorf("episode = %+v, want one that closes early", e)
+	}
+}

@@ -6,7 +6,7 @@
 
 **Provider-agnostic context engineering for LLM agents.**
 
-**[▶ Watch the demo](https://rossoctl.github.io/context-guru/#demo)**
+**[▶ Watch the demo](https://rossoctl.github.io/context-guru/#demo)** · **[📝 Read the blog](https://medium.com/@osherelhadad/contextguru-carry-less-pay-less-cutting-the-cost-of-ai-agents-770f099aedd2)**
 
 [![Docs](https://img.shields.io/badge/docs-online-009688.svg)](https://rossoctl.github.io/context-guru/)
 [![Go Reference](https://img.shields.io/badge/pkg.go.dev-reference-007d9c.svg)](https://pkg.go.dev/github.com/rossoctl/context-guru)
@@ -24,11 +24,12 @@ the system prompt so the rest stays cacheable). Paying less is the **default** �
 the box, before you opt into anything that trims content.
 
 Full docs: **[rossoctl.github.io/context-guru](https://rossoctl.github.io/context-guru/)**.
+How and why it works, with real numbers: **[ContextGuru: Carry Less, Pay Less](https://medium.com/@osherelhadad/contextguru-carry-less-pay-less-cutting-the-cost-of-ai-agents-770f099aedd2)**.
 
 <p align="center">
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="docs/img/readme/savings-dark.png">
-<img src="docs/img/readme/savings-light.png" alt="Context Guru saves 15–30% of your API cost in four ways: smaller tool outputs (~1%), tool search for MCP and skills (2–5%), compaction when it matters (5–10%), smart cache management (15–20%)" width="720" />
+<img src="docs/img/readme/savings-light.png" alt="Context Guru saves 15–35% of your API cost in four ways: smaller tool outputs (~1%), tool search for MCP and skills (2–5%), compaction when it matters (5–10%), smart cache management (15–20%)" width="720" />
 </picture>
 </p>
 
@@ -206,6 +207,23 @@ More:
 
 Codex does not have this project/user routing split: `$context-guru-setup` configures the user's
 default provider for ordinary Codex sessions.
+
+## Cite
+
+If you use context-guru in your work, please cite the blog post:
+
+> Osher Elhadad. *ContextGuru: Carry Less, Pay Less — Cutting the Cost of AI Agents.* Medium, 2026.
+> https://medium.com/@osherelhadad/contextguru-carry-less-pay-less-cutting-the-cost-of-ai-agents-770f099aedd2
+
+```bibtex
+@misc{elhadad2026contextguru,
+  author       = {Osher Elhadad},
+  title        = {ContextGuru: Carry Less, Pay Less --- Cutting the Cost of AI Agents},
+  year         = {2026},
+  howpublished = {Medium},
+  url          = {https://medium.com/@osherelhadad/contextguru-carry-less-pay-less-cutting-the-cost-of-ai-agents-770f099aedd2}
+}
+```
 
 ## License
 

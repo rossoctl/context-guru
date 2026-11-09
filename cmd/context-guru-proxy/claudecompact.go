@@ -21,3 +21,21 @@ func claudeCompactAtStart(local bool) compactionpoint.ClaudeCode {
 	}
 	return proxy.ReadClaudeCompact(os.Getenv, home)
 }
+
+// bobCompactAtStart and codexCompactAtStart read Bob's and Codex's settings once, in local mode
+// (#963). A hosted proxy reads nothing.
+func bobCompactAtStart(local bool) compactionpoint.Bob {
+	if !local {
+		return compactionpoint.Bob{}
+	}
+	home, _ := os.UserHomeDir()
+	return proxy.ReadBobCompact(os.Getenv, home)
+}
+
+func codexCompactAtStart(local bool) compactionpoint.Codex {
+	if !local {
+		return compactionpoint.Codex{}
+	}
+	home, _ := os.UserHomeDir()
+	return proxy.ReadCodexCompact(os.Getenv, home)
+}

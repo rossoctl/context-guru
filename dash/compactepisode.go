@@ -1106,7 +1106,7 @@ type ClientCeilingUsed struct {
 	Frac float64 `json:"frac"`
 	// SpanFrac is what that ceiling produced for this model: `frac - fill_frac`.
 	SpanFrac float64 `json:"span_frac"`
-	// Provenance is "measured", "assumed", "configured" or "window_fallback". A measured ceiling came
+	// Provenance is "measured", "assumed", "configured", "client_default" or "window_fallback". A measured ceiling came
 	// from watching a real client compact, in billed tokens. A configured one is the user's own client
 	// setting (#948), taken as billed tokens at a factor of 1.0 that is not measured. The others did not, and an assumed ceiling that is too high
 	// makes the span too wide and OVER-reports.
@@ -1119,7 +1119,7 @@ type ClientCeilingUsed struct {
 // one (the newest), else the table (#948). The fraction is C over the window, as spanFor wants it.
 func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
-		if conv[i].CPointSource == string(compactionpoint.Configured) && conv[i].CPoint > 0 && window > 0 {
+		if compactionpoint.IsClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 && window > 0 {
 			p := compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
 			p.Frac = float64(p.Abs) / float64(window)
 			return p

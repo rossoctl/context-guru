@@ -4,6 +4,7 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -523,5 +524,90 @@ func TestTTLTierIsInheritedFromTheParentThread(t *testing.T) {
 	next.TS, next.NoWrite = f.TS+120_000, true
 	if _, _, _, _, _, oneHour := r.ObservePrefix("s1", "p:fork", "", false, next, true); !oneHour {
 		t.Error("the fork's second request lost the inherited 1h tier")
+	}
+}
+
+// seedRow is one stored request of the restart tests.
+type seedRow struct {
+	ts, read, write, write1h int64
+	status                   int
+}
+
+// restartedWith stores the rows (one thread), restarts the recorder on the same database,
+// seeds it, and returns the new recorder.
+func restartedWith(t *testing.T, rows ...seedRow) *Recorder {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "d.db")
+	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range rows {
+		rec.Record(&Event{TS: w.ts, TenantID: "t1", SessionID: "s", ThreadID: "th", Model: "m", Status: w.status,
+			CacheRead: w.read, CacheWrite: w.write, CacheWrite1h: w.write1h})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
+		if int(n) == len(rows) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec.Close()
+	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec2.Close() })
+	if n, err := rec2.SeedSessions(rows[len(rows)-1].ts + 1_200_000); err != nil || n != 1 {
+		t.Fatalf("SeedSessions = %d, %v; want 1", n, err)
+	}
+	return rec2
+}
+
+// After a restart, a miss 20 minutes later with a changed prefix is labelled from the seeded tier.
+func TestSeededTierAfterARestart(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	changed := base()
+	changed.DeclDigest = "d2"
+	cases := []struct {
+		name       string
+		rows       []seedRow
+		readOnly   bool // the first post-restart turn is a full hit
+		wantExpiry bool
+	}{
+		{"1h thread is not an expiry", []seedRow{{t0, 0, 50_000, 50_000, 200}}, false, false},
+		{"5m thread is an expiry", []seedRow{{t0, 0, 50_000, 0, 200}}, false, true},
+		{"mixed write seeds 5m", []seedRow{{t0, 0, 50_000, 10_000, 200}}, false, true},
+		{"only read rows: tier unknown, 5m", []seedRow{{t0, 50_000, 0, 0, 200}}, false, true},
+		{"full-hit last row keeps the earlier 1h tier",
+			[]seedRow{{t0, 0, 50_000, 50_000, 200}, {t0 + 60_000, 50_000, 0, 0, 200}}, false, false},
+		{"failed last row keeps the earlier 1h tier",
+			[]seedRow{{t0, 0, 50_000, 50_000, 200}, {t0 + 60_000, 0, 0, 0, 500}}, false, false},
+		{"failed 1h write does not seed 1h",
+			[]seedRow{{t0, 0, 50_000, 0, 200}, {t0 + 60_000, 0, 50_000, 50_000, 500}}, false, true},
+		{"later 5m write replaces an earlier 1h write",
+			[]seedRow{{t0, 0, 50_000, 50_000, 200}, {t0 + 60_000, 0, 50_000, 0, 200}}, false, true},
+		{"read-only first turn keeps the seeded 1h tier",
+			[]seedRow{{t0, 0, 50_000, 50_000, 200}}, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := restartedWith(t, c.rows...)
+			// A restart forgets which models were seen, so the first request on a model reads
+			// cold_start. Another thread marks the model seen, as live traffic does within seconds.
+			r.ObserveThread("t1", "other", "", "m", t0+60_000, 0)
+			last := t0
+			if c.readOnly {
+				ttlTurn(r, t0+2*60_000, base(), 50_000, 0, 0)
+				last = t0 + 2*60_000
+			}
+			got := ttlTurn(r, last+20*60_000, changed, 0, 50_000, 50_000).CacheMissReason
+			if (got == CacheTTLExpiry) != c.wantExpiry {
+				t.Errorf("reason = %q, want ttl_expiry=%v", got, c.wantExpiry)
+			}
+		})
 	}
 }

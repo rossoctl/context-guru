@@ -162,9 +162,16 @@ func kaSavedSince(alias string, since int64) string {
 // session id rather than treating map presence as "credited". Narrowing the filter would move the
 // EXISTS into the WHERE, once per row IN SCOPE instead of once per credited row: the 61.9s one.
 //
-// The window follows the returning row's tier: a row that asked the one-hour tier (cache_ttl
-// ephemeral_1h) is reachable from a ping up to an hour earlier, not five minutes. A 1-hour thread
-// is pinged at 59 minutes, so with the 5-minute window every rescue of one was zeroed here while
+// The window follows the BILLED tier of the entry the returning row read, the rule of
+// keepalive.ResolveTier (#957): the row asked the one-hour tier (cache_ttl ephemeral_1h) AND the
+// provider billed everything its write made at one hour (cache_write_1h >= cache_write). A row
+// that wrote nothing inherits the tier of the latest earlier non-ping row of its thread that wrote.
+// An ask billed at five minutes (Sonnet on Bedrock), a mixed write, or no known write is a
+// five-minute entry: the unknown case gives the smaller window, so the smaller credit. The
+// inherit lookup runs inside the guarded EXISTS, so only for credited rows, and SQLite may run it
+// once per candidate ping (an index seek on idx_requests_tenant_session; 4.8 s to 5.3 s on 200k rows).
+// The ask half is "any breakpoint asked 1h", looser than ResolveTier's "every" (as factsCTE notes), and
+// a read-only row that asks 5m does not break the chain here: it inherits the last writer's tier. A 1-hour thread is pinged at 59 minutes, so with the 5-minute window every rescue of one was zeroed here while
 // the ping's cost still counted - and insights would then recommend switching the strategy off.
 //
 // Two deliberate looseness's, both stated rather than hidden. `kp.ts <= r.ts` rather than `<`,
@@ -179,8 +186,8 @@ func kaSavedGate(alias, pingFloor string) string {
 	}
 	col := alias + "keepalive_saved_usd"
 	// The mix below stays on purpose. The lifetime that matters is the one of the entry the
-	// RESCUED request r read. Its TIER is r.cache_ttl, what r asked for: kp.cache_ttl would give
-	// the tier of the ping, which can differ from r's. Its PROVIDER is read from the ping row kp,
+	// RESCUED request r read. Its TIER is the billed one of r's entry (billedHour): kp's own tier
+	// would be the ping's, which can differ from r's. Its PROVIDER is read from the ping row kp,
 	// because the ping is what refreshed the entry, and a ping and the request it rescued share
 	// a session and so a provider (r.provider would give the same value). The model gate is not
 	// repeated, as the next paragraph says.
@@ -195,6 +202,15 @@ func kaSavedGate(alias, pingFloor string) string {
 	// never credits older OpenAI models; SQL needs only the provider's coverage
 	// window for a successful ping. Duplicating Go's routed-model parser here
 	// would introduce the drift that the model-specific write gate prevents.
+	// billedHour is the BILLED tier of the entry r read (see the comment above kaSavedGate). The
+	// subquery (alias bw: dash/cachestate_test.go bans a `w` plan line, meant for a per-thread subquery) sits inside the EXISTS, behind the `> 0` guard, so it never runs for an uncredited row.
+	billedHour := "(" + alias + "cache_ttl = '" + apply.TTLEphemeral1h + "' AND CASE" +
+		" WHEN " + alias + "cache_write > 0 THEN " + alias + "cache_write_1h >= " + alias + "cache_write" +
+		" ELSE COALESCE((SELECT bw.cache_write_1h >= bw.cache_write FROM requests bw" +
+		" WHERE bw.tenant_id = " + alias + "tenant_id AND bw.session_id = " + alias + "session_id" +
+		" AND bw.thread_id = " + alias + "thread_id AND bw.keepalive = 0 AND bw.cache_write > 0" +
+		" AND bw.ts < " + alias + "ts" +
+		" ORDER BY bw.ts DESC, bw.id DESC LIMIT 1), 0) END)"
 	// The `> 0` FIRST is not style: it short-circuits the probe to the credited rows. Measured on
 	// a 2.1 GB database, a full-table SUM is 314 ms this way and 61.9 SECONDS with the EXISTS
 	// first, for the identical answer. Do not reorder.
@@ -205,7 +221,7 @@ func kaSavedGate(alias, pingFloor string) string {
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
 			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
-			alias+`cache_ttl = '`+apply.TTLEphemeral1h+`'`, time.Millisecond) + ` >= ` + alias + `ts)`
+			billedHour, time.Millisecond) + ` >= ` + alias + `ts)`
 	}
 	// A row the accountant library priced carries a credit the library gave from usage: it credits a rescue
 	// when the ping RE-CREATED an expired entry and the next request read what the ping wrote (accountant
