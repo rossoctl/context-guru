@@ -32,6 +32,25 @@ import (
 // A real client compaction (a drop in tokens_before, the same detector the episode walk uses)
 // ends it too, for the same reason.
 //
+// # Epochs (#940)
+//
+// A close ends the replay credit of the removals made before it. It does not end the credit for good.
+// The span between two closes is an epoch, and a removal first made inside an epoch earns credit until
+// the next close:
+//
+//   - A real compaction closes the epoch. Both worlds pay for the compaction, so there is no one-time
+//     credit. The baseline restarts from the real billed size.
+//   - A counterfactual compaction closes it too, and it is the one the world without context-guru
+//     would have paid for. The baseline restarts from a summary: cf = S + f * (tokens_before - the
+//     tokens_before at the close). The next counterfactual close is when cf reaches the ceiling again.
+//     Its one-time credit is the compaction request the baseline pays and we do not
+//     (ReplayLedger.AvoidedCompactionUSD). It is reported apart and is not a saving on any request.
+//
+// Inside an epoch that follows a close, the replay credit of a row counts up to the first-removal
+// tokens (saved_unique) seen since that close. The rest is past the cap. The first epoch of a
+// conversation counts its replay in full: a window that starts mid-session cannot know what was
+// first removed before it.
+//
 // The cap does not read the real compaction to decide the counterfactual one. A removal can only
 // make the real transcript smaller, so the real client compacts later than the counterfactual
 // one, and a rule that waited for it would credit exactly the turns the removals pushed past the
@@ -39,7 +58,9 @@ import (
 //
 // # What it deliberately does not do
 //
-//   - It does not reopen after a close. A later epoch could earn again; the cap is conservative.
+//   - It does not subtract the turns where our trimmed transcript is larger than the baseline's
+//     summary. It can over-count on those turns.
+//   - S is an estimate (assumedSummaryTokens), as is C. The ledger says so (SummaryAssumed).
 //   - It keeps the stored figure for turns it counts. The first-removal-as-read rule of summarize
 //     (Event.uniqueRate) does not apply here: extract_llm fires on cold turns, where the
 //     uncompacted prefix would have been re-written, so the write rate is the right one.
@@ -65,6 +86,13 @@ type ComponentLedger struct {
 	// known, capped against assumedWindow instead.
 	WindowAssumedUSD float64 `json:"window_assumed_usd"`
 }
+
+// assumedSummaryTokens is S: the size of the transcript right after a client compaction, which restarts
+// the baseline at a counterfactual close. It is an assumption. The first turn after 34 real
+// compactions in 14 Claude Code sessions billed a median of 78,554 tokens (41k to 123k): the summary plus
+// the system prompt, the tools and the last messages. 80,000 is that median rounded. Learning it from the
+// traffic of a tenant and a model is #239.
+const assumedSummaryTokens = 80_000
 
 // assumedWindow stands in for a model whose context window is not exactly known: 200k, the smallest
 // window of the Claude families seen here. A family with smaller windows has its own floor
@@ -111,6 +139,33 @@ type ReplayLedger struct {
 	// client's own default (#948, #963), gave, for the conversations that used it. When a setting changed between conversations, it
 	// holds the LAST one walked. A model absent here used only the table.
 	CeilingConfigured map[string]float64 `json:"ceiling_configured,omitempty"`
+	// ReopenedEpochs counts the epochs that started after a close (#940): every close of either cause.
+	ReopenedEpochs int64 `json:"reopened_epochs"`
+	// AvoidedCompactionUSD is the price of the compaction requests the baseline paid at its
+	// counterfactual closes and we did not: C input tokens at the cache-read rate plus the summary at the
+	// output rate. A separate figure: it is not a saving on any request, and no total includes it.
+	AvoidedCompactionUSD float64 `json:"avoided_compaction_usd"`
+	// SummaryAssumed is true when AvoidedCompactionUSD and the baseline after a close rest on the fixed
+	// summary size and not on a measured one.
+	SummaryAssumed bool `json:"summary_assumed"`
+	// avoided counts the counterfactual closes by model with the ceiling each used, in tokens. They
+	// are priced once, at the end, where the price table is.
+	avoided map[string]*avoidedCompactions
+}
+
+// avoidedCompactions is the counterfactual closes of one model, for pricing.
+type avoidedCompactions struct {
+	n        int64
+	ceilingT float64 // the ceiling in tokens, the sum over the closes
+	summaryT float64 // the summary each close wrote (summaryFor), in tokens, the sum over the closes
+}
+
+// summaryFor is S for a conversation whose compaction point is limit tokens: assumedSummaryTokens, but
+// never more than half of C. A client whose C is at or below 80,000 cannot keep an 80,000-token summary,
+// and a baseline restarted from it would reach C on the next row and close on every row after it
+// (#940, round 8). Half of C is a guess as well; it only keeps the restart below C.
+func summaryFor(limit float64) float64 {
+	return math.Min(assumedSummaryTokens, limit/2)
 }
 
 // DeltaUSD is the total correction across components.
@@ -141,6 +196,10 @@ type compCredit struct {
 	Unique    int64
 	USD       float64
 	FirstUSD  float64
+	// Accountant marks a credit the accountant library priced: storedFirst is its first-removal
+	// part as stored, and no read-time formula splits it again (firstShare).
+	Accountant  bool
+	storedFirst float64
 }
 
 // capRow is one request as the cap walk needs it.
@@ -277,20 +336,41 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 		out.CeilingFrac[model] = ceil
 	}
 	f, _ := tokens.BilledDeltaFactor(model)
-	state := capOpen
+
+	// The epoch. limited is false until the first close: the first epoch counts its replay in full.
+	// after a counterfactual close the baseline is a summary, so cf grows from S by what the transcript
+	// added since (closedAt, the tokens_before of the closing row).
+	var (
+		limited, summarized bool
+		cause               int // capCounterfactual or capClientCompaction: what closed the epoch
+		closedAt            int64
+		epochUnique         = map[string]int64{} // first-removal tokens by component since the close
+	)
+	closeEpoch := func(why int, before int64) {
+		limited, cause = true, why
+		epochUnique = map[string]int64{}
+		out.ReopenedEpochs++
+		summarized = why == capCounterfactual
+		closedAt = before
+	}
 	var prevBefore, prevTS int64
 	for i, r := range conv {
-		if state == capOpen {
-			if prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
-				compactionBetween(compactionTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
-				state = capClientCompaction
-				out.ClosedClientCompaction++
-			} else if r.Billed > 0 {
-				removed := math.Max(float64(r.TokensBefore-r.TokensAfter), 0)
-				if float64(r.Billed)+f*removed >= limit {
-					state = capCounterfactual
-					out.ClosedCounterfactual++
-				}
+		if prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
+			compactionBetween(compactionTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
+			// A real compaction, from any state: both worlds carry the summary from here.
+			closeEpoch(capClientCompaction, r.TokensBefore)
+			out.ClosedClientCompaction++
+		} else if r.Billed > 0 {
+			var cf float64
+			if summarized {
+				cf = summaryFor(limit) + f*float64(max(r.TokensBefore-closedAt, 0))
+			} else {
+				cf = float64(r.Billed) + f*math.Max(float64(r.TokensBefore-r.TokensAfter), 0)
+			}
+			if cf >= limit {
+				closeEpoch(capCounterfactual, r.TokensBefore)
+				out.ClosedCounterfactual++
+				out.addAvoided(model, limit)
 			}
 		}
 		prevBefore, prevTS = r.TokensBefore, r.TS
@@ -301,22 +381,61 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 			if assumed {
 				l.WindowAssumedUSD += c.USD
 			}
-			if state == capOpen {
-				l.CountedUSD += c.USD
-				l.FirstRemovalUSD += c.FirstUSD
-				l.ReplayUSD += c.USD - c.FirstUSD
+			// The cap closes the credit of a replay. It never erases a cost: a break or a TTL premium is money that
+			// was spent whether or not the cap is open. A negative row counts, so DeltaUSD cannot raise the net
+			// (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+			replayTok := max(c.Gross-c.Unique, 0)
+			counted := c.USD // the part of the credit that counts
+			countedFirst := c.FirstUSD
+			if limited && c.USD >= 0 {
+				// The first-removal part always counts. The replay part counts up to the first removals of
+				// this epoch seen before this row.
+				replayUSD := c.USD - c.FirstUSD
+				keep := 1.0
+				if replayTok > 0 {
+					keep = math.Min(float64(epochUnique[c.Component])/float64(replayTok), 1)
+				} else if replayUSD > 0 {
+					keep = 0
+				}
+				counted = c.FirstUSD + replayUSD*keep
+				// The cap only removes credit. A row whose first removal is worth more than its net (a negative
+				// replay part, the rest of it a cost) must not count more than it stored.
+				counted = math.Min(counted, c.USD)
+				countedFirst = math.Min(countedFirst, counted)
+			}
+			epochUnique[c.Component] += c.Unique
+			past := c.USD - counted
+			l.CountedUSD += counted
+			l.FirstRemovalUSD += countedFirst
+			l.ReplayUSD += counted - countedFirst
+			if past <= 0 {
 				continue
 			}
 			l.PastRows++
-			l.PastCapUSD += c.USD
-			l.PastCapFirstUSD += c.FirstUSD
-			if state == capCounterfactual {
-				l.PastCounterfactual += c.USD
+			l.PastCapUSD += past
+			if cause == capCounterfactual {
+				l.PastCounterfactual += past
 			} else {
-				l.PastClientCompact += c.USD
+				l.PastClientCompact += past
 			}
+			// The first-removal part is never past the cap, so PastCapFirstUSD stays 0 here.
 		}
 	}
+}
+
+// addAvoided records one counterfactual close of model at ceiling tokens, for pricing at the end.
+func (l *ReplayLedger) addAvoided(model string, ceiling float64) { // its summary is summaryFor(ceiling)
+	if l.avoided == nil {
+		l.avoided = map[string]*avoidedCompactions{}
+	}
+	a := l.avoided[model]
+	if a == nil {
+		a = &avoidedCompactions{}
+		l.avoided[model] = a
+	}
+	a.n++
+	a.ceilingT += ceiling
+	a.summaryT += summaryFor(ceiling)
 }
 
 // --- SQL ---------------------------------------------------------------------
@@ -328,7 +447,7 @@ const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypa
 		r.compaction_point, r.compaction_point_source,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
-		c.component, c.saved_gross, c.saved_unique, c.saved_usd
+		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
 	FROM requests r
 	LEFT JOIN request_components c ON c.request_id = r.id AND %c
 
@@ -408,6 +527,10 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			}
 			for j := range r.Credits {
 				c := &r.Credits[j]
+				if c.Accountant {
+					c.FirstUSD = c.storedFirst
+					continue
+				}
 				c.FirstUSD = c.USD * firstShare(&ev, pr, priced, c.Component, c.Gross, c.Unique)
 			}
 		}
@@ -420,10 +543,11 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		var bypassed, agentComp int
 		var comp sql.NullString
 		var gross, unique sql.NullInt64
-		var usd sql.NullFloat64
+		var usd, first sql.NullFloat64
+		var acc sql.NullBool
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
 			&r.CPoint, &r.CPointSource, &r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
-			&comp, &gross, &unique, &usd); err != nil {
+			&comp, &gross, &unique, &usd, &first, &acc); err != nil {
 			return nil, err
 		}
 		if id != lastID {
@@ -450,7 +574,8 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			continue
 		}
 		cur := &buf[len(buf)-1]
-		c := compCredit{Component: comp.String, Gross: gross.Int64, Unique: unique.Int64, USD: usd.Float64}
+		c := compCredit{Component: comp.String, Gross: gross.Int64, Unique: unique.Int64, USD: usd.Float64,
+			Accountant: acc.Bool, storedFirst: first.Float64}
 		dup := false
 		for i := range cur.Credits { // request_components has no UNIQUE: keep the larger of duplicates
 			if cur.Credits[i].Component == c.Component {
@@ -468,7 +593,25 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		return nil, err
 	}
 	flush()
+	out.priceAvoided(price)
 	return out, nil
+}
+
+// priceAvoided prices the compaction requests the baseline paid at its counterfactual closes. One request
+// reads C tokens from the cache (the transcript it summarizes) and writes S tokens of summary at the output
+// rate, with S from summaryFor. A model with no price adds nothing: the figure is a lower bound there, not a guess.
+func (l *ReplayLedger) priceAvoided(price rePriceFn) {
+	if len(l.avoided) == 0 || price == nil {
+		return
+	}
+	for model, a := range l.avoided {
+		pr, ok := price(model)
+		if !ok {
+			continue
+		}
+		l.AvoidedCompactionUSD += a.ceilingT*pr.CacheReadFor(model) + a.summaryT*pr.Output
+		l.SummaryAssumed = true
+	}
 }
 
 // ApplyReplayLedger corrects the headline for the capped components' credit.
@@ -478,6 +621,8 @@ func (o *Overview) ApplyReplayLedger(l *ReplayLedger) {
 	}
 	delta := l.DeltaUSD()
 	o.ReplayCapCorrectionUSD = delta
+	o.AvoidedCompactionUSD = l.AvoidedCompactionUSD
+	o.AvoidedCompactionAssumed = l.SummaryAssumed
 	o.BaselineCostUSD += delta
 	o.NetSavedUSD += delta
 	o.TotalSavedUSD += delta
@@ -505,12 +650,13 @@ func applyReplayLedgerToRow(c *ComponentRow, l *ReplayLedger) {
 	pastReplay := cl.PastCapUSD - cl.PastCapFirstUSD
 	c.SavedUSDFirstRemoval = math.Max(c.SavedUSDFirstRemoval-cl.PastCapFirstUSD, 0)
 	c.SavedUSDReplay = math.Max(c.SavedUSDReplay-pastReplay, 0)
-	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay
+	// The costs term (SavedUSDCosts) stays: the cap removes credit, never a cost (see walkCapConversation).
+	c.SavedUSDDecomposed = c.SavedUSDFirstRemoval + c.SavedUSDReplay + c.SavedUSDCosts
 	c.SavedUSDDecomposedStored = math.Max(c.SavedUSDDecomposedStored+delta, 0)
-	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval - c.LLMCostUSD
+	c.NetUSDFirstRemoval = c.SavedUSDFirstRemoval + c.SavedUSDCosts - c.LLMCostUSD
 	c.ReplayMultiple = 0
 	if c.SavedUSDFirstRemoval > 0 {
-		c.ReplayMultiple = c.SavedUSDDecomposed / c.SavedUSDFirstRemoval
+		c.ReplayMultiple = math.Max(c.SavedUSDDecomposed, 0) / c.SavedUSDFirstRemoval
 	}
 	c.ReplayCreditPastCapUSD = cl.PastCapUSD
 }

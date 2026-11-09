@@ -321,7 +321,7 @@ func main() {
 	// `windows` is resolved — rather than reordering boot around a Recorder nothing else here
 	// needs yet. A pointer, so the SAME object threaded into `emitter` right now keeps
 	// working once both fields are set.
-	kaKeepAlive := &dashEmitter{}
+	kaKeepAlive := &dashEmitter{pings: proxy.NewPingStore()}
 	// metrics.Slog is deliberately NOT wired in here any more. It emitted one line per
 	// component plus one per run, at INFO, with no tenant and no session on any of them —
 	// so a busy proxy buried its own request lifecycle, and none of it could be correlated
@@ -422,9 +422,8 @@ func main() {
 		// means no ping ever reaches this far without --dashboard on.
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
-		// in flight reports a cold start on its next turn — and that flag also decides whether
-		// a cache hit counts as our saving, so a restart handed out one bonus credit per live
-		// session (see dash.Event.cachesplitSavedUSD).
+		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
+		// that turn.
 		if n, err := rec.SeedSessions(time.Now().UnixMilli()); err != nil {
 			slog.Warn("dashboard: could not recover session recency; the first turn of each live "+
 				"session will be reported as a cold start", "err", err)
@@ -707,9 +706,12 @@ func main() {
 		Windows:       windows,                // dynamic context-window resolver (fraction triggers)
 		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
 		Preset:        cfg.Preset,
-		Dashboard:     rec,      // nil unless --dashboard
-		Record:        traceRec, // nil unless --record
-		Mode:          mode,     // sync (default) | observe — explicit, never inferred
+		Dashboard:     rec, // nil unless --dashboard
+		// The accountant's thread state survives a restart; it sits beside the dashboard database.
+		AccountantState: accountantStatePath(*dashDB, rec != nil),
+		Pings:           kaKeepAlive.pings,
+		Record:          traceRec, // nil unless --record
+		Mode:            mode,     // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,
@@ -959,6 +961,9 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer
+	// pings is the store shared with the Handler (proxy.Options.Pings). Each converted ping
+	// carries an accountant Result on its event.
+	pings *proxy.PingStore
 }
 
 // Component and Run are no-ops: dashEmitter exists only to be tee'd in for its
@@ -972,6 +977,13 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	if d.rec == nil {
 		return
 	}
+	// The keeper calls this from its own goroutine. A panic here (a price lookup, the row build) would end the
+	// whole process, so log it and carry on without this row (issue #918).
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("context-guru: keep-alive ping row panicked; the row is dropped", "panic", p)
+		}
+	}()
 	var price modelinfo.Price
 	priced := false
 	if d.prices != nil && r.Model != "" {
@@ -1009,6 +1021,9 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
+	if res, ok := proxy.PingSavings(r, d.pings); ok {
+		ev.SetAccountant(res)
+	}
 	d.rec.Record(ev)
 }
 
@@ -1532,4 +1547,13 @@ func envOr0(v, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// accountantStatePath is where the savings tracker saves its thread state: next to the dashboard database,
+// or empty when there is no dashboard (the tracker does not run then) or the database is in memory.
+func accountantStatePath(dashDB string, dashboard bool) string {
+	if !dashboard || dashDB == "" || strings.HasPrefix(dashDB, ":memory:") || strings.HasPrefix(dashDB, "file::memory:") {
+		return ""
+	}
+	return dashDB + ".accountant-state.json"
 }

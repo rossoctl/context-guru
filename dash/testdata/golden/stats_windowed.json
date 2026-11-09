@@ -84,6 +84,8 @@
    "percent": 2.3779447995901024
   }
  ],
+ "estimated_requests": 0,
+ "estimated_saved_usd": 0,
  "estimator_divergence": 1.0011168816663873,
  "estimator_divergence_compacted": 1.0012067457085105,
  "estimator_divergence_compacted_rows": 79,
@@ -117,6 +119,8 @@
  "prefix_change_requests": 0,
  "prefix_change_requests_all": 0,
  "replay_cap_correction_usd": 0,
+ "avoided_compaction_assumed": false,
+ "avoided_compaction_usd": 0,
  "replay_cap_not_applied": true,
  "replay_projected_tokens": 952685,
  "replay_realized_pct": 0,

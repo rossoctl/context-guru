@@ -101,6 +101,21 @@ CREATE TABLE IF NOT EXISTS requests (
   -- exactly this id. '' when there is no separate alias, and on every row written before this
   -- column existed. A hash, not content: the same kind of id session_id itself is.
   session_alias      TEXT    NOT NULL DEFAULT '',
+  -- 1 when the accountant library could not rule out a cache break (penalty_unknown), so the booked
+  -- net saving may be too high: the gross is right, the penalty is not known. 0 on an exact figure
+  -- and on every row written before this column existed, which is the claim those rows always made.
+  price_estimated    INTEGER NOT NULL DEFAULT 0,
+  -- 1 when the accountant override applied to the request, so keepalive_saved_usd is the library's own
+  -- rescue decision and the read-side gate trusts it. 0 on a request the library did not price and on
+  -- every row written before this column existed, which keep the SQL reachability gate.
+  acc_priced         INTEGER NOT NULL DEFAULT 0,
+  -- the saving the accountant library priced on an estimated request, kept OUT of baseline_cost_usd
+  -- and every total (#915). 0 on an exact request and on every row written before this column.
+  estimated_saved_usd REAL   NOT NULL DEFAULT 0,
+  -- 1 when the hold-out of #915 applied: the request is estimated and its figure was kept out of the books.
+  -- 0 on every row written before this column existed, including an old estimated row that DID book its
+  -- figure (price_estimated alone does not say which meaning a row has).
+  estimate_held      INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -129,8 +144,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- provider read at least that much from cache while writing less, and the snapshot had MOVED
   -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
   -- have missed. Priced against a cache MISS (creation rate), not fresh input.
-  -- See Event.cachesplitSavedUSD, which is the authority on the condition; the
-  -- session's-first-request test it once used was REPLACED because it reported ~$0, and three
+  -- Written from the accountant library's split effect. The legacy rule's
+  -- session's-first-request test was REPLACED because it reported ~$0, and three
   -- descriptions of this column went on stating it for a while after.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
@@ -341,6 +356,10 @@ CREATE TABLE IF NOT EXISTS request_components (
   -- that was in force, and because the UI was otherwise left improvising a dollar value
   -- from hardcoded rates.
   saved_usd    REAL    NOT NULL DEFAULT 0,
+  -- The accountant library's split of saved_usd and who priced the row (additiveColumns).
+  saved_first_usd  REAL NOT NULL DEFAULT 0,
+  saved_replay_usd REAL NOT NULL DEFAULT 0,
+  priced_by        TEXT NOT NULL DEFAULT '',
   duration_ms  REAL    NOT NULL DEFAULT 0,
   err          TEXT    NOT NULL DEFAULT '',
   -- Why this component turned candidates away, as {"gate_name":count} — the only answer
@@ -761,6 +780,10 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "acc_priced", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "estimated_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "estimate_held", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
@@ -809,6 +832,16 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// records having got wrong once already.
 	{"request_components", "events", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
+	// The accountant library's split of saved_usd, stored at write time because the library prices
+	// from the thread's history, which a stored row does not keep, so a read cannot re-price it.
+	// saved_first_usd is the saved tokens it priced at the write or input tier (content the provider
+	// had not cached), saved_replay_usd those at the read tier (content in the cached prefix), and
+	// saved_usd - first - replay is the costs (added tokens, breaks, the head-TTL legs). priced_by is
+	// 'accountant' on such a row; '' on a row from before the switch, which the read views still
+	// value with the legacy estimate (readvalue.go).
+	{"request_components", "saved_first_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "saved_replay_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "priced_by", "TEXT NOT NULL DEFAULT ''"},
 	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
 	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
 	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a

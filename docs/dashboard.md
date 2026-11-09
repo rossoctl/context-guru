@@ -92,6 +92,173 @@ SQLite (pure Go, no C toolchain), in WAL mode. Retention is bounded by both **ag
 blow past the limit and a quiet week can't erase itself. `--dashboard-db :memory:`
 runs with no persistence at all.
 
+## Savings source
+
+Every saving the dashboard stores comes from the accountant library
+([rossoctl/accountant](https://github.com/rossoctl/accountant)). It needs `--dashboard`: the
+library's result is attached to the recorded event, so without a recorder nothing runs. The proxy
+itself books no saving: `Event.Price` stores the cost, the provider's own cache saving and the
+accounting fields, and nothing else.
+
+What the library prices:
+
+- **Components.** Each component's saved dollars, net of the cache break it caused, and the baseline
+  cost. The component figures sum to baseline minus cost. Each row also stores the library's split:
+  `saved_first_usd` (saved tokens priced at the write or input tier: content the provider had not
+  cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
+  are `saved_usd` minus both. `priced_by` is `accountant`. On a request the library could not price (a
+  fallback) it is `none`: the row books no saving, and the read views do not value it.
+- **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
+  cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
+  from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
+  row of its own.
+- **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
+  and the library derives the extent the ping read from it. A prefix that another thread of the
+  session kept warm inside the TTL is not credited (`EntryFacts.SharedWarm`, accountant R54).
+  When the override applies, the request stores `requests.acc_priced = 1` (sent as `acc_priced`). The
+  keep-alive views trust the stored `keepalive_saved_usd` of such a request as the library's own
+  decision, with no ping probe and with no component row needed, so a keep-alive-only setup keeps its
+  rescue. A row with `acc_priced = 0` (older rows, and requests the library could not price) keeps the
+  read-side reachability test. The entry TTL given to the library follows the billed tier: if the
+  request asked for 1h and the response billed 5m, the library judges the next gap against 5 minutes.
+- **Tool-filter credit.** A request whose `toolfilter` row is `priced_by = accountant` adds no dollars
+  to the measured filter credit (the net saving has them). The exception is a request whose figure was held out
+  (`estimate_held = 1`): the net saving has nothing for it, so the measured credit keeps its dollars. It still counts in the request count, the
+  tokens not sent and the first date, so the Realized block and the item list stay.
+- **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
+- **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
+- **A break nobody owns.** A break that a change left behind when it ended is counted on the
+  `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
+
+When the library cannot price an event, the event books **no saving**, and the proxy logs one
+`acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
+`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+measured is not shown.
+
+For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
+`upstream_rounds=N` (an expand loop) or `compute_panicked`.
+
+For `unpriced` the line carries `why` too: `no_usage` (the request has no billed token counts), `no_price`
+(the model has no price), or the library's own cause for the first operation or effect it could not price,
+as `opID:reason` (or `reason` alone when the refusal is for the whole request, as `ratio_range` is). The
+cause is in the log line only. No stored column and no API field carries it.
+
+`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
+`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
+Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
+keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
+
+Limits:
+
+- A request with no history to classify a cache break against gets `penalty_unknown`. This is the
+  first request of a thread, and a request after a gap longer than the cache lifetime when the
+  provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
+  can be too high if a component broke the cache on that request (accountant design §6.4). The
+  event carries an estimate flag, stored in `requests.price_estimated` and sent as `price_estimated`
+  in the request JSON. The library prices each removal as a write the provider would have made. If the cache was
+  in fact already warm (a restart that lost the state file, or a session begun before the proxy), the figure is
+  about 2x too high, and the proxy cannot say by how much, because the size of the unseen warm prefix is what the
+  missing history held. So the proxy books no saving on such a request: `baseline_cost_usd` equals `cost_usd` and
+  every component `saved_usd` is 0. Net saved, total saved, the Components table and the keep-alive tab therefore
+  agree. The figure that was not booked is stored in `requests.estimated_saved_usd` and sent as `estimated_saved_usd`
+  (request JSON) and as `estimated_saved_usd` (Overview, summed over the window). The request detail shows it on its
+  own line, marked "≈". The Preset card says how many requests are not counted and shows the estimated figure beside
+  them (`estimated_requests`, on the full and the lean path). The count uses a separate marker,
+  `requests.estimate_held` (sent as `estimate_held`), set only when the hold-out applied. `price_estimated` alone is not
+  enough: it existed before the hold-out, and a row written then has `price_estimated = 1` and DID book its figure.
+  Such a row has `estimate_held = 0` (the column defaults to 0), keeps the figure it was booked with, and is not in
+  `estimated_requests`. The hold-out covers the whole figure: every component, the head-TTL premium and rescue legs
+  (so the 1h premium of a thread's first request shows as $0 there), the ended-change break and the filter's part.
+  The figure can be negative when the request's net effect is a cost (a tool-names list, an injected expand or
+  adjudicate declaration). The UI then shows "a cost of $x". The keep-alive rescue (`keepalive_saved_usd`) and the
+  split saving do not depend on a break and stay booked, each in its own column.
+  The filter's dollars on a held request are owned by the measured tool-filter credit, not by the held figure:
+  the credit keeps its dollars for such a request, so no total counts it twice and none leaves it out.
+- A request the provider rejected (any status that is not 2xx) books no saved tokens: `tokens_after` equals
+  `tokens_before`, `saved_unique` and `attempted_tokens` are 0, and each component row has `saved_gross` 0,
+  `saved_unique` 0 and `acted` false. The provider billed none of it, so tokens and dollars agree. This holds even when the
+  error body carries a `usage` object: the proxy then skips the accountant for that request (`acc_fallback`
+  reason `rejected_status`), so the row books 0 dollars too: `baseline_cost_usd` equals `cost_usd` and every
+  component `saved_usd` is 0. A status of 0
+  (the request never reached a provider, such as `/compact`) and any 2xx are not changed.
+- The library keeps each thread's state in memory. The proxy saves it to `<dashboard-db>.accountant-state.json`
+  every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
+  changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.
+  The file carries a proxy version (`cgStateVersion`) around the library snapshot. A file with another version is
+  ignored, because the hash of a body changed between versions. The save syncs the file before the rename, skips the
+  write when nothing changed, and the start removes temp files a crash left. The hash leaves out every `cache_control`
+  mark, nested ones too.
+  A file older than one hour is ignored (no cache entry lives longer), and so is a missing or unreadable
+  one: the proxy then starts empty, as before. A crash (kill -9) loses up to one minute of state. A
+  request that follows a lost state is priced as a first request and carries the estimate flag. The
+  library also drops the least recently used threads past its own bound; that is not saved or restored.
+  Two proxies must not share one dashboard database: they would write the same state file and the last writer wins.
+- A thread that continues another by content (a rewind, a fork) is priced as a first request. The
+  proxy passes the parent thread to the library, but the library does not read it, so the new thread
+  does not start from a copy of the parent's cache state (accountant design §4.1).
+- Every request is priced at the model's base rates. A model whose provider charges more above a prompt size
+  (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields) is under-priced on those requests: its
+  cost and its saving both use the base rate, so their ratio looks right and the dollars are low. Among Claude
+  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) on every listing, and Sonnet 4 and 4.5 carry a
+  200k tier (2x) on their Bedrock, Vertex and Azure listings but not on the Anthropic API ids; Sonnet 5, Opus and
+  Fable carry none. Models of other families carry tiers too.
+  `MODEL_PRICES` sets one flat rate for a model, so it does not fix a tiered price.
+- The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
+  exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
+  library does not credit a keep-alive rescue after a gap past the TTL.
+- The proxy measures the operations against the body it forwards, and starts the request record from
+  the body it received. When a repair runs before the pipeline (`repairExpandErrors`,
+  `AnswerStrayCalls`, a forced model), the two differ, the sum check fails (`check_sum`) and the
+  event books no saving. A request with no usage, or a model with no price, books no saving and logs
+  `unpriced`.
+- A change the pipeline made that no operation can describe drops every operation of the request
+  (`ops_dropped`): a cache anchor written after a count-changing splice, and a splice that moves the
+  later messages in a request the equal-count writeback handled. Such a request books no saving. A
+  message whose only change is an added `cache_control` mark is not in this list: the mark is written at
+  its path and reported as an operation, so a `cacheinject` mark is priced (#938). It used to be in this
+  list.
+- A request whose response called `context_guru_expand` (more than one upstream round) books no
+  saving (`no_result`): the usage is billed on the expanded body, which the library did not see.
+- The thread state lives in memory. After a restart, and for a thread dropped by the library's cap
+  of 10,000 threads (the oldest go first), the next request of the thread is a first request again.
+- The figures are estimates. The library converts removed bytes to tokens with the request's own
+  billed-token ratio. A figure that implies more removed tokens than the request had is rejected
+  (`implausible_size`). The bound counts message tokens, so it leaves out operations on the tool
+  section (removed or rewritten declarations).
+- The cost and the provider's cache saving are not the library's.
+- Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
+  the summarize ledger and the replay cap value those rows with the legacy rule at read time, and
+  sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
+- The replay cap works in epochs (#940). A close ends the replay credit of the removals made before it.
+  A removal first made after a close earns credit until the next close. There are two kinds of close:
+  - A real client compaction. Both worlds pay for it, so there is no one-time credit.
+  - A counterfactual compaction: the point where the baseline (the transcript that the provider billed
+    plus what we removed) reaches the compaction point. The baseline then restarts from a summary of
+    80,000 tokens. That size is an assumption: it is the median of the first turn after 34 real compactions.
+    When the compaction point is 160,000 tokens or less, the summary is half of the compaction point
+    instead. A smaller compaction point cannot keep an 80,000-token summary, and a restart at or above it
+    would close an epoch on every request.
+    The next close is when the summary plus the growth since the close reaches the compaction point again.
+
+  Inside an epoch after a close, the replay credit of a row counts up to the first-removal tokens seen
+  since that close. The first epoch of a conversation counts its replay in full, because a window that
+  starts mid-session cannot know what was removed before it.
+
+  `avoided_compaction_usd` is the price of the compaction request that the baseline pays at each
+  counterfactual close and we do not: the compaction point in tokens at the cache-read rate, plus the
+  summary at the output rate. It is a separate figure. It is not a saving on any request, and no total
+  includes it. `avoided_compaction_assumed` is true when it rests on the assumed summary size. The rule
+  does not subtract the turns where our trimmed transcript is larger than the baseline summary, so it can
+  over-count on those turns.
+- The savings tracker runs only when a dashboard is on. The pipeline records what each component
+  changed on every request, with or without a dashboard (a scan of the changed messages). That cost
+  is accepted.
+- A request that asks for the one-hour tier and is billed the five-minute tier (a gateway that
+  downgrades it) keeps the one-hour TTL in the facts, because the facts are written before the
+  response. The library can then credit a rescue after a gap of 5 to 60 minutes that the provider
+  did not honour. The keeper uses the billed tier.
+
 ## Tool inventory panel
 
 *How much of what your agent carries in every request does it actually use?*
@@ -169,8 +336,7 @@ per line when there are several headers). The proxy never forwards it upstream.
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, `saved_usd` net of the pings' cost, and `writes_avoided`: the pings that found the cache warm). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
-The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive, so with
-automatic pings on it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
+The figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
 `avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
 `saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
 `409 over budget` when one ping would cost more than the per-ping ceiling, and `?tenant=` is ignored:

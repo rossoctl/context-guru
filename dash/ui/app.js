@@ -102,6 +102,8 @@ function usd(v) {
   if (a < 1000) return (v < 0 ? '-' : '') + '$' + a.toFixed(2);
   return (v < 0 ? '-' : '') + '$' + nf.format(Math.round(a));
 }
+// estUsd renders a held-out estimate: a negative figure is a cost, so it reads as one.
+function estUsd(v) { return v < 0 ? 'a cost of ' + usd(-v) : usd(v); }
 function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.toFixed(digits) + '%'; }
 /**
  * usdOrNA renders a dollar figure, or `n/a` WITH ITS REASON when the figure is not a
@@ -274,7 +276,9 @@ function resolveTime(v, nowMs) {
   if (v === 'now') return nowMs;
   if (typeof v === 'string') {
     const m = /^now-(\d+)([smhdw])$/.exec(v);
-    if (m) return nowMs - Number(m[1]) * RANGE_UNIT_MS[m[2]];
+    // Round `now` down to 30 s so a relative range gives the same since for 30 s and the server cache can hit.
+    // The server keeps since exact (issue #916), so this rounding is the UI's own choice.
+    if (m) return Math.floor(nowMs / 30000) * 30000 - Number(m[1]) * RANGE_UNIT_MS[m[2]];
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : 0;
   }
@@ -1779,7 +1783,7 @@ function renderSavedLedger(o, ka, partial) {
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
   const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
-    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') }),
+    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
       el('strong', { text: usd(parts.manual) })),
     parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
   // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside
@@ -1811,7 +1815,7 @@ function renderSavedLedger(o, ka, partial) {
     ],
     infoButton('cache', 'Cache', [
       'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
-      'Manual pings: the same, when you press Ping.',
+      'Manual pings: the same, when you press Ping. This figure is an estimate. It is the write the ping avoided, taken from the cache lifetime and the size of the prefix. No request read it back. The other figures in this total are measured.',
       'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
     ])));
 
@@ -1824,6 +1828,10 @@ function renderSavedLedger(o, ka, partial) {
       o.requests > 0 && !partial ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
+      o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
+        text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm. '
+          + 'Estimated saving, not in any total: ' + estUsd(o.estimated_saved_usd || 0) + '.' }) : null,
     ]));
 
   // Tools and skills filter.
@@ -2514,7 +2522,8 @@ function savedNAReason(c) {
       + 'recorded per request instead, as the prefix-cache figure on Overview.';
   }
   return num(c.saved_usd_unpriced_rows) + ' of this component\u2019s acted rows ran on a model '
-    + 'with no entry in the operator\u2019s price list, so their saving could not be valued. '
+    + 'with no entry in the operator\u2019s price list, or on a request the accountant could not price '
+    + '(see acc_fallback in the proxy log), so their saving could not be valued. '
     + 'It is missing from this figure, not zero.';
 }
 
@@ -2533,8 +2542,9 @@ function savedTitle(c) {
     : usd(c.saved_usd) + ' recorded per request'];
   if (c.saved_usd_unpriced_rows) {
     parts.push(num(c.saved_usd_unpriced_rows) + ' row'
-      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no model '
-      + 'price for the model they ran on, so their saving is MISSING from this figure, not zero');
+      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no price for the model they '
+      + 'ran on, or the request fell back (see acc_fallback in the proxy log) — so their saving is MISSING from '
+      + 'this figure, not zero');
   }
   return parts.join(' · ');
 }
@@ -2570,8 +2580,9 @@ function renderUnpricedNote(components) {
     host.appendChild(el('div', {},
       el('strong', {}, num(rows) + ' acted rows across ' + unpriced.length + ' component'
         + (unpriced.length === 1 ? '' : 's') + ' could not be priced'),
-      ' — the model they ran on has no entry in the operator’s price list, so their saving is '
-      + 'absent from the dollar columns rather than zero. Set MODEL_PRICES to value them.'));
+      ' — the model they ran on has no entry in the operator’s price list (set MODEL_PRICES to value them), or the '
+      + 'accountant could not price the request (the proxy logs acc_fallback with the reason). Either way their '
+      + 'saving is absent from the dollar columns rather than zero.'));
     if (partial.length) {
       host.appendChild(el('div', {},
         'Partly unpriced, so the dollar figure shown is a ', el('strong', {}, 'lower bound'),
@@ -2717,8 +2728,9 @@ async function loadComponents() {
           class: 'num' + (savedKnown(c) && c.net_usd_first_removal < 0 ? ' warn-text' : ''),
           title: !savedKnown(c) ? '' : 'PER-TURN verdict: each piece of content credited ONCE at '
             + 'the rate it would have entered the prompt at ('
-            + usd(c.saved_usd_first_removal || 0) + ') − own LLM cost '
-            + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
+            + usd(c.saved_usd_first_removal || 0) + ')'
+            + (c.saved_usd_costs ? ' + the costs the component caused (breaks, added tokens) ' + usd(c.saved_usd_costs) : '')
+            + ' − own LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
         }, c.saved_gross
           ? usdOrNA(c.net_usd_first_removal, savedKnown(c),
             'the saving half of this net is not a number — ' + savedNAReason(c))
@@ -3696,8 +3708,14 @@ async function openRequest(id, fromURL) {
       // Directly beneath the cost, because the cost on its own is the figure that makes
       // readers conclude the product is worthless: baseline − actual − our own spend is
       // what this one turn was actually worth.
-      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'),
+      // price_estimated: the accountant could not rule out a cache break (no history for this
+      // thread yet), so the gross saving is right and the net may be too high. Marked "≈", the
+      // same way this page marks every other estimate.
+      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'
+          + (e.estimate_held ? ' Not counted: there was no history to tell whether the cache was already warm, so no saving is booked. The estimate is shown on the next line.' : '')),
         priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
+      e.estimate_held ? kv(term('Estimated saving (not counted)', 'What the accountant would have booked with no history. It can be about 2x too high when the cache was already warm, so it is in no total. A negative figure is a cost.'),
+        priced ? (e.estimated_saved_usd < 0 ? '' : '≈ ') + estUsd(e.estimated_saved_usd || 0) : '—') : null,
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.

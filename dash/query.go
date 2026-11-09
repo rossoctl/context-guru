@@ -193,14 +193,14 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
 	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
-	r.session_alias,
+	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held,
 	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
 	r.compaction_point, r.compaction_point_source`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive, agentComp, manual int
+	var byp, ca, stream, keepAlive, agentComp, manual, estimated, accPriced, held int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
@@ -220,10 +220,12 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
 		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
-		&e.SessionAlias,
+		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held,
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
 		&e.CompactionPoint, &e.CompactionPointSource)
+	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
+	e.EstimateHeld = held != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
@@ -310,7 +312,8 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events,
+		saved_first_usd, saved_replay_usd, priced_by FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -322,7 +325,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var gates, events string
 		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
 			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
-			&gates, &events); err != nil {
+			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -808,6 +811,10 @@ type ComponentRow struct {
 	// runs the identical formula, so agreement is arithmetic. The UI prints the covered
 	// fraction rather than presenting the whole comparison as evidence.
 	SavedUSDDecomposedStored float64 `json:"saved_usd_decomposed_stored"`
+	// SavedUSDCosts is the costs the accountant library netted into saved_usd on the rows it
+	// priced: added tokens and the breaks a component caused. Negative. It is the third term of
+	// SavedUSDDecomposed on those rows (first removal + replay + costs = saved_usd); 0 before them.
+	SavedUSDCosts float64 `json:"saved_usd_costs,omitempty"`
 	// UniqueUnkeyed marks a component whose saved_unique is not a dedup measurement, because
 	// it reports no content keys and MarkUnique therefore returns its saving in full every
 	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
@@ -1147,6 +1154,13 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 type compGroupKey struct {
 	comp, model, tier    string
 	usd, gross, complete bool
+	// acc is a group of rows the accountant library priced (priced_by): their dollar split is
+	// stored (firstUSD, replayUSD), and no read-time formula re-prices them.
+	acc bool
+	// fallback is a group of rows of a request the accountant path handled and could not price
+	// (priced_by 'none'). They are also acc: no read-time formula values them. They book no saving, and the
+	// reader must be told that, because a stored 0 here is not a measured 0 (context-guru#768 B8).
+	fallback bool
 }
 
 // compGroup is one cell of that pass. uClamp and rClamp are the decomposition's unique and replay
@@ -1157,6 +1171,7 @@ type compGroup struct {
 	runs, acted, mutated, reverted, skipped, gross, unique int64
 	errs, uClamp, rClamp, nDiff                            int64
 	usd, dur                                               float64
+	firstUSD, replayUSD                                    float64 // the stored split, on an acc group
 }
 
 func sortedCompKeys(groups map[compGroupKey]*compGroup) []compGroupKey {
@@ -1196,13 +1211,14 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
-		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete',
+		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '', c.priced_by = 'none',
 		MAX(c.kind), COUNT(*), SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
 		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END),
-		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
+		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END),
+		SUM(c.saved_first_usd), SUM(c.saved_replay_usd)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6`,
+		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`,
 			append(append([]any(nil), args...), bounds...)...)
 		if err != nil {
 			return err
@@ -1212,9 +1228,9 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 			var k compGroupKey
 			var g compGroup
 			var usd sql.NullFloat64
-			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete,
+			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc, &k.fallback,
 				&g.kind, &g.runs, &g.acted, &g.mutated, &g.reverted, &g.skipped, &g.gross, &g.unique,
-				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff); err != nil {
+				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff, &g.firstUSD, &g.replayUSD); err != nil {
 				return err
 			}
 			g.usd = usd.Float64
@@ -1238,6 +1254,8 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 				m.nDiff += g.nDiff
 				m.usd += g.usd
 				m.dur += g.dur
+				m.firstUSD += g.firstUSD
+				m.replayUSD += g.replayUSD
 			}
 			mu.Unlock()
 		}

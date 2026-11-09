@@ -153,8 +153,14 @@ type Overview struct {
 	SummarizeCorrectionUSD float64 `json:"summarize_correction_usd"`
 	// ReplayCapCorrectionUSD is what ApplyReplayLedger moved the baseline by: the credit of the
 	// replaying components (extract_llm, searchfold, ...) earned after the counterfactual client
-	// compaction, or after a real one. Zero or negative.
+	// compaction, or after a real one, for the removals made before that close. A removal first made
+	// after a close earns again until the next one (#940). Zero or negative.
 	ReplayCapCorrectionUSD float64 `json:"replay_cap_correction_usd"`
+	// AvoidedCompactionUSD is the price of the compaction requests the world without context-guru paid at
+	// its counterfactual closes and we did not. It is not a saving on any request and no total above
+	// includes it. AvoidedCompactionAssumed is true when it rests on the assumed summary size.
+	AvoidedCompactionUSD     float64 `json:"avoided_compaction_usd"`
+	AvoidedCompactionAssumed bool    `json:"avoided_compaction_assumed"`
 	// ReplayCapNotApplied is true when the cap could not be computed (it errored or timed out), so
 	// the figures above carry the stored, uncapped replay credit. The page says so.
 	ReplayCapNotApplied bool `json:"replay_cap_not_applied"`
@@ -167,7 +173,7 @@ type Overview struct {
 	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
 	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
 	// and the provider then read at least the stable half from cache while writing less than
-	// it. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
+	// it. Priced against a cache miss. A floor. The accountant library's split effect.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
 	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
@@ -177,7 +183,7 @@ type Overview struct {
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
 	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
 	// 1,105 of 1,127 session starts had no cache to hit, because the previous session's had
-	// expired. That gate is gone (it is TailChanged now, see Event.cachesplitSavedUSD); the
+	// expired. That gate is gone (the split is priced by the accountant library now); the
 	// counts stay, because the replacement gate also fires rarely and for its own reason.
 	//
 	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
@@ -385,8 +391,8 @@ type Overview struct {
 	//
 	// DOLLARS ARE NOT UNAFFECTED. This comment used to end "Dollars are unaffected: they come
 	// from the provider's own reported usage", which is true of cost_usd and false of every
-	// savings figure beside it: baseline_cost_usd is cost_usd + baselineDeltaUSD, and that
-	// delta prices OUR token counts (Saved(), SavedUnique) at the provider's rate. A reader
+	// savings figure beside it: baseline_cost_usd is cost_usd plus a delta that prices OUR
+	// token counts at the provider's rate (the accountant library's bytes-to-tokens ratio). A reader
 	// auditing exactly this was told not to look, which is how #240 survived. The correction
 	// factor is NOT this ratio — see tokens.BilledDeltaFactor, which is a factor on a
 	// DIFFERENCE, measured against real bills, where the fixed overhead above cancels.
@@ -417,6 +423,16 @@ type Overview struct {
 	PreCorrectionSavingRows int64   `json:"pre_correction_saving_rows"`
 	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
 	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
+	// EstimatedRequests counts the requests whose saving the accountant library priced without knowing whether
+	// a component broke the cache AND that the proxy held out of the books (requests.estimate_held): the first
+	// request of a thread, and the first one after a restart that lost the state. It does not count a row
+	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
+	EstimatedRequests int64 `json:"estimated_requests"`
+	// EstimatedSavedUSD is what those requests would have saved, held OUT of every total (#915):
+	// NetSavedUSD, TotalSavedUSD, the components and the keep-alive tab never include it. It is
+	// what the library priced without knowing whether the cache was already warm, and that can be
+	// about 2x too high. Shown beside the totals, never added to them.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -581,7 +597,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_saved_usd),0),
 		-- Our own cache saving. A plain SUM of a per-request column, because all three
 		-- conditions that qualify a request were settled at write time where the model's
-		-- rates and the session's history were both in hand (Event.cachesplitSavedUSD).
+		-- rates and the session's history were both in hand (the accountant library).
 		-- The predecessor did the component test here as a correlated EXISTS over
 		-- request_components, which was both slower and wrong: it credited every cache read
 		-- in a session, including the later turns that would have hit anyway.
@@ -668,7 +684,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
 			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
-		`+deferNetSum+`
+		`+deferNetSum+`,
+		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -686,7 +703,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
 		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
-		&o.DeferNetUSD)
+		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD)
 	if err != nil {
 		return nil, err
 	}
