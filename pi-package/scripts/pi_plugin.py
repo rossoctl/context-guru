@@ -434,9 +434,10 @@ def consent_question(port, strategy):
 
 
 def own_urls(record):
-    """The base URLs an earlier setup wrote, on any port. A clash with one of them is our own route."""
+    """{provider: url} an earlier setup wrote, on any port. A clash with a provider's own entry is our
+    own route; a clash with another provider's entry is not."""
     urls = record.get("base_urls")
-    return [url for url in urls.values() if isinstance(url, str)] if isinstance(urls, dict) else []
+    return {p: url for p, url in urls.items() if isinstance(url, str)} if isinstance(urls, dict) else {}
 
 
 def setup(args):

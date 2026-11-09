@@ -72,15 +72,16 @@ def is_routed(models_path, port, provider="anthropic"):
 
 
 def _ours(url, port, provider, ours):
-    """True for the URL this port gives the provider, or one of the URLs an earlier setup wrote
-    (`ours`, from the install record): a route on an old port is still ours to move."""
-    return _same(url, base_url(port, provider)) or any(_same(url, mine) for mine in ours)
+    """True for the URL this port gives the provider, or the URL an earlier setup wrote FOR THIS
+    provider (`ours`: {provider: url}, from the install record). A route on an old port is still ours
+    to move. Another provider's URL is not: a user who copied it here set this key, and it is theirs."""
+    return _same(url, base_url(port, provider)) or _same(url, ours.get(provider))
 
 
-def conflicts(models_path, port, providers, ours=()):
+def conflicts(models_path, port, providers, ours=None):
     """{provider: url} for every provider whose baseUrl is already set to something that is not ours.
     Setup refuses on any: that URL may be a company gateway, and replacing it breaks its auth."""
-    ours = tuple(ours)
+    ours = dict(ours or {})
     found = {}
     for provider in providers:
         url = current(models_path, provider)
@@ -89,11 +90,12 @@ def conflicts(models_path, port, providers, ours=()):
     return found
 
 
-def install(models_path, state_path, port, providers, ours=()):
+def install(models_path, state_path, port, providers, ours=None):
     """Set each provider's baseUrl to the proxy on `port`. A provider already in the routing record
     keeps its first `previous`, so a re-run (on the same or a new port) never records our own URL as
-    the user's value. `ours` names URLs an earlier setup wrote, for the case the record is gone."""
-    ours = tuple(ours)
+    the user's value. `ours` ({provider: url}) names the URL an earlier setup wrote for each provider,
+    for the case the record is gone."""
+    ours = dict(ours or {})
     models_path, state_path = Path(models_path), Path(state_path)
     existed = models_path.exists()
     document = _load(models_path)

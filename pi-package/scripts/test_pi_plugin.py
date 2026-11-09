@@ -132,7 +132,7 @@ class ModelsRoute(Sandbox):
 
     def test_an_old_port_url_we_wrote_is_ours_not_a_conflict(self):
         models_route.install(self.models, self.state, 8800, ["anthropic"])
-        old = [models_route.base_url(8800, "anthropic")]
+        old = {"anthropic": models_route.base_url(8800, "anthropic")}
         self.assertEqual(models_route.conflicts(self.models, 8801, ["anthropic"]),
                          {"anthropic": "http://127.0.0.1:8800/anthropic"})
         self.assertEqual(models_route.conflicts(self.models, 8801, ["anthropic"], old), {})
@@ -142,10 +142,25 @@ class ModelsRoute(Sandbox):
         self.assertEqual(models_route.restore(self.state), "restored")
         self.assertFalse(self.models.exists())
 
+    def test_our_url_for_one_provider_is_not_ours_for_another(self):
+        """A user who put our Anthropic URL into the OpenAI key set that key. It is a conflict, and
+        it is never recorded as ours, so uninstall would not delete it."""
+        self.models.parent.mkdir(parents=True)
+        self.models.write_text(json.dumps({"providers": {"openai": {"baseUrl": "http://127.0.0.1:8800/anthropic"}}}))
+        old = {"anthropic": "http://127.0.0.1:8800/anthropic"}
+        self.assertEqual(models_route.conflicts(self.models, 8801, ["anthropic", "openai"], old),
+                         {"openai": "http://127.0.0.1:8800/anthropic"})
+        models_route.install(self.models, self.state, 8801, ["openai"], old)
+        record = json.loads(self.state.read_text())
+        self.assertEqual(record["keys"]["openai"]["previous"], "http://127.0.0.1:8800/anthropic")
+        self.assertEqual(models_route.restore(self.state), "restored")
+        self.assertEqual(json.loads(self.models.read_text())["providers"]["openai"]["baseUrl"],
+                         "http://127.0.0.1:8800/anthropic")
+
     def test_without_a_record_our_old_url_is_never_saved_as_the_users_value(self):
         self.models.parent.mkdir(parents=True)
         self.models.write_text(json.dumps({"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:8800/anthropic"}}}))
-        models_route.install(self.models, self.state, 8801, ["anthropic"], ["http://127.0.0.1:8800/anthropic"])
+        models_route.install(self.models, self.state, 8801, ["anthropic"], {"anthropic": "http://127.0.0.1:8800/anthropic"})
         self.assertIsNone(json.loads(self.state.read_text())["keys"]["anthropic"]["previous"])
 
 
