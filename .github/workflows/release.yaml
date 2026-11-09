@@ -98,7 +98,10 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/context-guru-bob-*.zip dist/context-guru-bob-SHA256SUMS
+        # install-bob.sh keeps its name, so releases/latest/download/install-bob.sh always works.
+        run: >-
+          gh release upload "$GITHUB_REF_NAME" dist/context-guru-bob-*.zip
+          dist/context-guru-bob-SHA256SUMS bob-plugin/release/install-bob.sh
 
       - name: Upload snapshot artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -110,4 +113,5 @@ jobs:
             dist/checksums.txt
             dist/context-guru-bob-*.zip
             dist/context-guru-bob-SHA256SUMS
+            bob-plugin/release/install-bob.sh
           retention-days: 7

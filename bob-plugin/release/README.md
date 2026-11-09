@@ -13,6 +13,26 @@ proxy cuts token cost. Everything it needs is in this folder. The install works 
 - The Command Line Tools, for Python 3. If you do not have them, the installer tells you. Then
   open Terminal, run `xcode-select --install`, and run the installer again.
 
+## Install with one command (recommended)
+
+Open Terminal and run:
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-bob.sh | bash
+```
+
+It downloads the zip, checks its SHA-256, and runs the same installer as below: the same plan,
+the same one question, the same ✓ table. macOS does not block it, because a file `curl`
+downloads has no quarantine mark. If the SHA-256 does not match, it stops and installs nothing.
+
+To uninstall, run the same command with `-s uninstall`:
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-bob.sh | bash -s uninstall
+```
+
+## Or: download the zip
+
 ## Check the download
 
 The release page lists the SHA-256 of the zip. Before you unzip it, open Terminal and run:

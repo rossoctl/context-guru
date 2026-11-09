@@ -9,7 +9,9 @@ bobide, pgrep, osascript (for the Bob quit step only) and uname. The installer a
 run as subprocesses with an environment built from scratch, so no real path leaks in.
 """
 
+import functools
 import hashlib
+import http.server
 import os
 from pathlib import Path
 import plistlib
@@ -19,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -29,6 +32,7 @@ PLUGIN_SRC = HERE.parent / "context-guru"
 INSTALLER_NAME = "Install context-guru for Bob.command"
 UNINSTALLER_NAME = "Uninstall context-guru for Bob.command"
 PACKAGER = HERE / "package.sh"
+BOOTSTRAP = HERE / "install-bob.sh"
 PY = sys.executable
 CANARY = "CANARY-7f3a9c-user-content-do-not-log"
 LOG_REL = "Library/Logs/context-guru-bob-install.log"
@@ -836,6 +840,119 @@ class UninstallTest(Release):
         self.assertIn("rc_block=removed", done.stdout)
         self.assertNotIn("✗", done.stdout)
         self.assert_clean(before)
+
+
+class QuietFiles(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+class BootstrapTest(Release):
+    """install-bob.sh, piped into bash the way `curl -fsSL …/install-bob.sh | bash` runs it."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = self.root / "release"
+        self.release.mkdir()
+        # The real packager builds the zip from the test bundle, as the release workflow does.
+        zipped = subprocess.run(
+            ["/bin/sh", str(PACKAGER), "v9.9.9-test", str(self.release),
+             str(self.bundle / "bin/darwin-arm64/context-guru-proxy"),
+             str(self.bundle / "bin/darwin-amd64/context-guru-proxy"), str(self.bundle / "plugin")],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(zipped.returncode, 0, zipped.stderr)
+        self.zip = self.release / "context-guru-bob-v9.9.9-test.zip"
+        self.write_release_sums()
+        handler = functools.partial(QuietFiles, directory=str(self.release))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.url = f"http://127.0.0.1:{server.server_address[1]}"
+        self.tty = self.root / "tty"
+
+    def write_release_sums(self, digest=None):
+        digest = digest or hashlib.sha256(self.zip.read_bytes()).hexdigest()
+        (self.release / "context-guru-bob-SHA256SUMS").write_text(f"{digest}  {self.zip.name}\n")
+
+    def pipe(self, answers, *args):
+        """bash reads the script on stdin, and the user's answers come from the terminal."""
+        self.tty.write_text(answers)
+        env = dict(self.env, CG_BOB_RELEASE_URL=self.url, CG_BOB_TTY=str(self.tty))
+        argv = ["/bin/bash", "-s", *args] if args else ["/bin/bash"]
+        return subprocess.run(argv, input=BOOTSTRAP.read_text(), text=True,
+                              capture_output=True, env=env, cwd=str(self.root), timeout=180)
+
+    def test_piped_uninstall_restores_every_byte(self):
+        before = self.files()
+        self.assert_installed(self.pipe("y\n"))
+
+        done = self.pipe("y\ny\n", "uninstall")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assert_clean(before)
+
+    def test_an_unknown_command_runs_nothing(self):
+        before = self.files()
+
+        done = self.pipe("y\n", "remove-everything")
+
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("usage:", done.stderr)
+        self.assertEqual(self.files(), before)
+
+    def test_piped_install_downloads_checks_and_installs(self):
+        done = self.pipe("y\n")
+
+        self.assert_installed(done)
+        self.assertIn("✓ download matches SHA-256", done.stdout)
+        self.assertTrue((self.plugin_dest() / "scripts/bob_plugin.py").is_file())
+        self.assertTrue(healthz(self.port()))
+
+    def test_piped_install_reads_the_answer_from_the_terminal_not_the_pipe(self):
+        # The answer file says No. The script on stdin must not be read as an answer.
+        done = self.pipe("n\n")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Nothing changed.", done.stdout)
+        self.assertFalse(self.plugin_dest().exists())
+
+    def test_a_zip_that_does_not_match_its_sum_runs_nothing(self):
+        before = self.files()
+        self.write_release_sums("0" * 64)
+
+        done = self.pipe("y\n")
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("does not match", done.stdout + done.stderr)
+        self.assertEqual(self.files(), before)
+
+    def test_a_missing_sums_file_runs_nothing(self):
+        before = self.files()
+        (self.release / "context-guru-bob-SHA256SUMS").unlink()
+
+        done = self.pipe("y\n")
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.files(), before)
+
+    def test_the_download_folder_is_removed_after_the_run(self):
+        self.pipe("n\n")
+
+        self.assertEqual(list(self.root.glob("tmp/cg-bob-install.*")), [])
+
+    def test_a_truncated_script_runs_nothing(self):
+        # A download cut short must not run half the script: everything sits in one function
+        # that is called on the last line.
+        before = self.files()
+        script = BOOTSTRAP.read_text()
+        self.tty.write_text("y\n")
+        env = dict(self.env, CG_BOB_RELEASE_URL=self.url, CG_BOB_TTY=str(self.tty))
+        done = subprocess.run(["/bin/bash"], input=script[: len(script) // 2], text=True,
+                              capture_output=True, env=env, cwd=str(self.root), timeout=60)
+
+        self.assertEqual(self.files(), before)
+        self.assertNotIn("Downloading", done.stdout)
 
 
 class SpacedHomeTest(Release):
