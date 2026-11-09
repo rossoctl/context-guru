@@ -75,7 +75,7 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "strategies" {
 		// Read-only: print the named cache strategy table as JSON, so a plugin keeps no copy.
-		// `--json` is accepted and changes nothing: JSON is the only output.
+		// All further arguments (`--json` too) are ignored: JSON is the only output.
 		b, err := config.StrategiesJSON()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "strategies:", err)

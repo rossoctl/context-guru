@@ -74,7 +74,7 @@ cache:
 ### A named strategy
 
 `cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
-`2-ping`, `1-hour-head`. The alias `5-min-ping` means `auto`.
+`2-ping`, `1-hour-head`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
 
 ```yaml
 cache:
@@ -82,7 +82,7 @@ cache:
   keepalive_max_usd_per_ping: 0.25   # a key you set yourself wins over the strategy
 ```
 
-- A key in your file always wins. The strategy fills only the keys you left out.
+- A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.
 - An unknown name stops the proxy with a config error.
 - `context-guru-proxy strategies` prints the table as JSON. Plugins read it from there.

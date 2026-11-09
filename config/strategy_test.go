@@ -187,8 +187,14 @@ func TestStrategyTableMatchesCodexPlugin(t *testing.T) {
 		!reflect.DeepEqual(s.Providers, []string{"openai"}) {
 		t.Fatalf("30-min-ping row wrong: %+v", s)
 	}
-	if !strings.Contains(skill, s.Desc) {
-		t.Errorf("picker SKILL.md does not contain the desc %q", s.Desc)
+	// The desc starts with the picker wording and adds one sentence about Anthropic. Only the
+	// picker part is compared with SKILL.md.
+	picker, extra, _ := strings.Cut(s.Desc, ". ")
+	if !strings.Contains(skill, picker) {
+		t.Errorf("picker SKILL.md does not contain the desc start %q", picker)
+	}
+	if !strings.Contains(extra, "Anthropic keep-alive") {
+		t.Errorf("30-min-ping desc must say that keepalive: true also turns on the Anthropic keep-alive: %q", extra)
 	}
 	// The preset list the Codex plugin hard-codes must be known to the proxy.
 	known := map[string]bool{}

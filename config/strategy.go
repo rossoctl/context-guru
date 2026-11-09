@@ -13,9 +13,13 @@ import (
 // keys. The Claude Code plugin and the OpenCode plugin used to keep their own copy of this table;
 // they read it from `context-guru-proxy strategies --json` instead.
 //
+// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 30-min-ping (the Codex name).
+//
 // RULES
 //   - `cache.strategy: <name>` fills the keys of the table row.
 //   - A key the file sets itself ALWAYS wins over the row. A hand-tuned file keeps working.
+//     A key with a null value (`keepalive_max_pings:` and nothing after it) counts as set,
+//     so the row does not fill it and the library default applies.
 //   - No `strategy` key: nothing here runs, and the config is the same as before.
 //   - An unknown name is a config error. The alias in StrategyAliases is read as its new name.
 //   - `none` has no keys: it sets nothing. (The plugin writes no file for it; the proxy only
@@ -120,7 +124,7 @@ var Strategies = []Strategy{
 	{
 		Name:      "30-min-ping",
 		Spends:    true,
-		Desc:      "refreshes eligible OpenAI Responses caches shortly before their 30-minute lifetime and spends a small amount of the user's own quota",
+		Desc:      "refreshes eligible OpenAI Responses caches shortly before their 30-minute lifetime and spends a small amount of the user's own quota. On a proxy that also serves Anthropic, keepalive: true also turns on the Anthropic keep-alive with the proxy defaults.",
 		Providers: []string{"openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
@@ -173,6 +177,7 @@ func (c *Config) applyStrategy(raw []byte) error {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	// A key present in the document is "set", also when its value is zero, false or null.
 	missing := map[string]any{}
 	for _, k := range s.Cache {
 		if _, set := doc.Cache[k.Key]; !set {

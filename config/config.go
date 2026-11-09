@@ -89,7 +89,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
