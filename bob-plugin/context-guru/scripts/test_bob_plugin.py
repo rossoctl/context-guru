@@ -572,6 +572,11 @@ class SetupTest(TempHome):
         self.assertEqual(self.tree(), before)
         self.assertEqual(self.launchctl_calls(), [])
 
+    @staticmethod
+    def good_probe(port):
+        # The zsh rc probe needs a macOS home. These tests are about the old rc block, not the probe.
+        return {"ide": f"http://127.0.0.1:{port}", "terminal_ide": "", "terminal_shell": ""}
+
     def test_a_shell_change_between_setups_leaves_no_block_and_keeps_the_users_file(self):
         # Setup under bash created ~/.bash_profile. The user then switched to zsh (macOS asks for
         # it) and ran setup again; their own ~/.zshrc was already there. Uninstall must remove the
@@ -584,7 +589,8 @@ class SetupTest(TempHome):
             self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
             self.assertTrue(ROUTE.is_routed(self.rc))
             zshrc.write_bytes(b"alias ll='ls -l'\n")
-            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}), \
+                 mock.patch.object(PLUGIN.bob_route, "probe", return_value=self.good_probe(proxy.port)):
                 self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
                 code, out, _ = self.run_main("uninstall")
         self.assertEqual(code, 0, out)
@@ -602,7 +608,8 @@ class SetupTest(TempHome):
              mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
             self.run_main("setup", "--i-consent-to-traffic-interception")
             self.assertTrue(self.rc.exists())
-            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}), \
+                 mock.patch.object(PLUGIN.bob_route, "probe", return_value=self.good_probe(proxy.port)):
                 code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
         self.assertEqual(code, 0, out)
         self.assertIn("old_rc_block=removed", out)
@@ -616,7 +623,8 @@ class SetupTest(TempHome):
             self.run_main("setup", "--i-consent-to-traffic-interception")
             self.rc.write_bytes(self.rc.read_bytes().replace(b"fi\n", b"fi\n# my edit\n"))
             edited = self.rc.read_bytes()
-            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}), \
+                 mock.patch.object(PLUGIN.bob_route, "probe", return_value=self.good_probe(proxy.port)):
                 code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
         self.assertEqual(code, 0, out)
         self.assertIn("old_rc_block=left_alone", out)
