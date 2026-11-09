@@ -212,7 +212,7 @@ func TestKeepAlivePingReachesTheMetrics(t *testing.T) {
 	})
 
 	names := counterNames(t, reader)
-	if !names["llm.keepalive.pings"] || !names["llm.keepalive.cost"] {
+	if !names["llm.keepalive.pings"] || !names["llm.keepalive.cost.usd"] {
 		t.Fatalf("a ping reached the emitter and booked no keep-alive metric: %v", names)
 	}
 	if names["llm.inference.requests"] {

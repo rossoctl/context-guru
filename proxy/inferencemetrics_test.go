@@ -107,10 +107,10 @@ func TestCostAndEstimatedCost(t *testing.T) {
 	e.PriceEstimated = true
 	im.Observe(e, time.Second)
 	all := collectAll(t, r)
-	if c := sumFloat(all["llm.inference.cost"]); c < 0.0399 || c > 0.0401 {
+	if c := sumFloat(all["llm.inference.cost.usd"]); c < 0.0399 || c > 0.0401 {
 		t.Errorf("cost = %v, want 0.04", c)
 	}
-	if c := sumFloat(all["llm.inference.estimated_cost"]); c < 0.0199 || c > 0.0201 {
+	if c := sumFloat(all["llm.inference.estimated_cost.usd"]); c < 0.0199 || c > 0.0201 {
 		t.Errorf("estimated cost = %v, want 0.02 (a subset of cost)", c)
 	}
 }
@@ -232,7 +232,7 @@ func TestMissCostIsTheWritePremium(t *testing.T) {
 		t.Errorf("misses = %v, want one ttl_expiry", got)
 	}
 	want := 1000 * (3.75e-6 - 0.3e-6) // 1000 written tokens
-	if got := sumFloat(all["llm.cache.miss_cost"]); got < want*0.999 || got > want*1.001 {
+	if got := sumFloat(all["llm.cache.miss_cost.usd"]); got < want*0.999 || got > want*1.001 {
 		t.Errorf("miss cost = %v, want %v (1000 x (write - read))", got, want)
 	}
 }
@@ -245,7 +245,7 @@ func TestUnpricedMissBooksNoMoney(t *testing.T) {
 	if intByLabel(all["llm.cache.misses"], "cause")["ttl_expiry"] != 1 {
 		t.Error("the miss was not counted")
 	}
-	if _, has := all["llm.cache.miss_cost"]; has {
+	if _, has := all["llm.cache.miss_cost.usd"]; has {
 		t.Error("a miss on an unpriced model booked money")
 	}
 }
@@ -274,10 +274,10 @@ func TestPingBooksKeepAliveAndNoRequest(t *testing.T) {
 	if got["ok"] != 1 || got["failed"] != 1 {
 		t.Errorf("pings = %v, want one ok and one failed", got)
 	}
-	if c := sumFloat(all["llm.keepalive.cost"]); c < 0.0029 || c > 0.0031 {
+	if c := sumFloat(all["llm.keepalive.cost.usd"]); c < 0.0029 || c > 0.0031 {
 		t.Errorf("ping cost = %v, want 0.003", c)
 	}
-	for _, name := range []string{"llm.inference.requests", "llm.inference.tokens", "llm.inference.cost"} {
+	for _, name := range []string{"llm.inference.requests", "llm.inference.tokens", "llm.inference.cost.usd"} {
 		if _, has := all[name]; has {
 			t.Errorf("a ping reached %s: it is not a request the user made", name)
 		}

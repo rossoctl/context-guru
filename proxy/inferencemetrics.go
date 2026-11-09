@@ -71,7 +71,9 @@ func NewInferenceMetrics(m metric.Meter, prices modelinfo.Pricer, components ...
 	}
 	f64 := func(dst *metric.Float64Counter, name, desc string) {
 		if err == nil {
-			*dst, err = m.Float64Counter(name, metric.WithDescription(desc), metric.WithUnit("USD"))
+			// No unit: the exporter appends a unit as written, and "USD" would give a name ending _USD_total.
+			// The unit is part of the name instead ("usd"), as the spec spells it.
+			*dst, err = m.Float64Counter(name, metric.WithDescription(desc))
 		}
 	}
 	hist := func(dst *metric.Float64Histogram, name, desc string, b []float64) {
@@ -83,18 +85,18 @@ func NewInferenceMetrics(m metric.Meter, prices modelinfo.Pricer, components ...
 	i64(&im.requests, "llm.inference.requests", "Requests that reached the proxy.")
 	i64(&im.errors, "llm.inference.errors", "Requests that failed, by who caused it.")
 	i64(&im.tokens, "llm.inference.tokens", "Provider-billed tokens, by tier.")
-	f64(&im.cost, "llm.inference.cost", "Provider cost at request time.")
-	f64(&im.estimatedCost, "llm.inference.estimated_cost", "Part of the cost priced from a fallback rate.")
+	f64(&im.cost, "llm.inference.cost.usd", "Provider cost at request time.")
+	f64(&im.estimatedCost, "llm.inference.estimated_cost.usd", "Part of the cost priced from a fallback rate.")
 	hist(&im.duration, "llm.inference.duration", "Total time, from request to last byte.", secondsBuckets)
 	hist(&im.ttfb, "llm.inference.ttfb", "Time to first byte, for streamed answers.", secondsBuckets)
 	hist(&im.added, "llm.inference.added", "Time the proxy added on top of the upstream time.", addedBuckets)
 	i64(&im.cacheMisses, "llm.cache.misses", "Cache misses, by cause.")
-	f64(&im.cacheMissCost, "llm.cache.miss_cost", "Extra cost of those misses: the write premium on the re-written prefix.")
+	f64(&im.cacheMissCost, "llm.cache.miss_cost.usd", "Extra cost of those misses: the write premium on the re-written prefix.")
 	hist(&im.compDuration, "llm.proxy.component_duration", "Time spent in each component.", addedBuckets)
 	i64(&im.compFailures, "llm.proxy.component_failures", "A component error or panic, or a change the pipeline reverted.")
 	i64(&im.failOpen, "llm.proxy.fail_open", "Requests the proxy forwarded unchanged because its own work failed.")
 	i64(&im.pings, "llm.keepalive.pings", "Keep-alive pings the proxy sent, by outcome.")
-	f64(&im.pingCost, "llm.keepalive.cost", "What the pings cost.")
+	f64(&im.pingCost, "llm.keepalive.cost.usd", "What the pings cost.")
 	if err != nil {
 		return nil, err
 	}
