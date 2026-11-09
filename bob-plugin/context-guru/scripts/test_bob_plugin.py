@@ -784,6 +784,26 @@ class LoopbackNeverUsesTheUserProxyTest(TempHome):
         self.assertIn("/api/requests?limit=1&agent=bob", proxy.paths)
         self.assert_nothing_reached_the_user_proxy()
 
+    def test_the_tool_defer_counts_reach_the_local_proxy_directly(self):
+        import time
+        stats = {"tool_defer": {"requests": 12}}
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000) - 60_000, stats=stats) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("tool_defer_requests=12", out)
+        self.assert_nothing_reached_the_user_proxy()
+
+    def test_no_call_to_127_0_0_1_uses_plain_urlopen(self):
+        # A new local call written with urllib.request.urlopen would read HTTP_PROXY again.
+        source = (HERE / "bob_plugin.py").read_text()
+        for number, line in enumerate(source.splitlines(), 1):
+            if "urllib.request.urlopen(" in line:
+                self.assertNotIn("127.0.0.1", line, f"bob_plugin.py:{number}: use LOOPBACK.open")
+        self.assertEqual(source.count("urllib.request.urlopen("), 2,
+                         "only the 2 GitHub downloads may use the user's proxy")
+
     def test_signal_reaches_the_local_proxy_directly(self):
         payload = {"session_id": "task-123", "hook_event_name": "SessionStart", "source": "compact"}
         with FakeProxy() as proxy:

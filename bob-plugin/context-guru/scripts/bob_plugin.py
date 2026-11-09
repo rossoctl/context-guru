@@ -1233,7 +1233,7 @@ def last_bob_request_ms(port):
 
 def tool_defer_stats(port):
     """The proxy's /stats tool_defer block, or {} when it has none (deferral never ran)."""
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as reply:
+    with LOOPBACK.open(f"http://127.0.0.1:{port}/stats", timeout=2) as reply:
         block = json.load(reply).get("tool_defer")
     return block if isinstance(block, dict) else {}
 
