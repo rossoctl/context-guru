@@ -41,7 +41,8 @@
 #
 # Exit codes:
 #   0  both reviews are posted (or --cleanup is done)
-#   1  a reviewer failed, or the input is wrong
+#   1  a reviewer failed, or the input is wrong, or the PR head is not in refs/pull/N/head yet
+#      (run again in a minute)
 #   2  the round budget is used; only the user can grant more (OFFLOAD_MAX_ROUNDS)
 #   3  this head already has both reviews of its round; push the fixes first (or --same-head)
 #
