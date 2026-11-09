@@ -282,7 +282,7 @@ func TestSessionRecencySurvivesARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	const now = int64(1_700_000_000_000)
-	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10}
+	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200}
 	rec.Record(e)
 	// Drain, then stop: this is the restart.
 	deadline := time.Now().Add(3 * time.Second)
@@ -357,7 +357,7 @@ func TestARestartDoesNotRecoverRecencyFromAPing(t *testing.T) {
 	}
 	const now = int64(1_700_000_000_000)
 	// A real turn, then a ping 19 minutes later — the shape a keep-alive leaves behind.
-	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10})
+	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200})
 	rec.Record(&Event{TS: now + 1_140_000, TenantID: "t1", SessionID: "t1:live", Model: "m",
 		KeepAlive: true, CacheRead: 50_000, CostUSD: 0.01})
 	deadline := time.Now().Add(3 * time.Second)
@@ -425,7 +425,7 @@ func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 		t.Error("a request with no split reported a tail change")
 	}
 
-	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10,
+	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10, Status: 200,
 		SplitStableTokens: 5654, SplitTailHash: tailB}
 	rec.Record(e)
 	deadline := time.Now().Add(3 * time.Second)
