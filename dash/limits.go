@@ -9,7 +9,7 @@ import (
 // anthropic-ratelimit-unified-* response headers gave it on one answer (#984). A nil field and
 // an empty Status mean the header was missing or did not parse: it is left out, never read as 0.
 type LimitWindow struct {
-	// Utilization is the used share of the window, 0..1, as the header gives it (whole percents).
+	// Utilization is the used share of the window: a 0..1 fraction as the header gives it, in steps of 0.01.
 	Utilization *float64 `json:"utilization,omitempty"`
 	// ResetS is when the window resets, in unix seconds.
 	ResetS *int64 `json:"reset_s,omitempty"`
