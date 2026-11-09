@@ -24,6 +24,9 @@ from test_bob_plugin import (  # noqa: E402
     HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
 
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
+# The proxy's own test runs this exact file through the real pipeline on Bob's route
+# (proxy/bobdefer_test.go), so the preset the plugin writes is the preset that was tested.
+LOSSLESS_DEFER = (PLUGIN_ROOT.parents[1] / "proxy/testdata/bob_lossless_defer.yaml").read_text()
 
 
 class Installed(TempHome):
@@ -54,7 +57,7 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 0, out)
         self.assertIn("preset=lossless\n", out)
         self.assertIn("cache_strategy=none\n", out)
-        self.assertIn("allowed_presets=off,lossless\n", out)
+        self.assertIn("allowed_presets=off,lossless,lossless-defer\n", out)
         self.assertIn("allowed_cache_strategies=none\n", out)
         self.assertEqual(self.tree(), before)
 
@@ -77,9 +80,9 @@ class ConfigureTest(Installed):
                 code, out, _ = self.run_main("configure", "--preset", name)
                 self.assertEqual(code, 2)
                 self.assertIn("result=refused\nreason=preset_not_allowed_for_bob\n", out)
-                self.assertIn(f"{name} can drop content that Bob cannot get back yet. Only off "
-                              "and lossless are allowed for Bob until reversibility is proven.",
-                              out)
+                self.assertIn(f"{name} can drop content that Bob cannot get back yet. Only off, "
+                              "lossless and lossless-defer are allowed for Bob until "
+                              "reversibility is proven.", out)
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(len(self.launchctl_calls()), calls)
 
@@ -96,8 +99,11 @@ class ConfigureTest(Installed):
         self.assertEqual(self.run_main("configure", "--cache-strategy", "none")[0], 0)
 
     def test_the_allow_lists_are_single_constants(self):
-        self.assertEqual(PLUGIN.BOB_PRESETS, {"off": "preset: off\n",
-                                              "lossless": "pipeline: [format, toon, cachesplit]\n"})
+        self.assertEqual(PLUGIN.BOB_PRESETS, {
+            "off": "preset: off\n",
+            "lossless": "pipeline: [format, toon, cachesplit]\n",
+            "lossless-defer": LOSSLESS_DEFER.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
+        self.assertEqual(PLUGIN.DEFAULT_PRESET, "lossless")
         self.assertEqual(PLUGIN.BOB_CACHE_STRATEGIES, ("none",))
 
     def test_an_unmanaged_config_is_refused(self):
@@ -126,6 +132,17 @@ class ConfigureTest(Installed):
         self.assertIn("rolled_back=false", out)
         self.assertIn("fix=", out)
         self.assertEqual(self.config.read_text(), LOSSLESS)
+
+    def test_preset_lossless_defer_writes_the_tested_config_and_restarts(self):
+        calls = len(self.launchctl_calls())
+        code, out, _ = self.run_main("configure", "--preset", "lossless-defer")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=configured\npreset=lossless-defer\n", out)
+        self.assertIn("proxy_restarted=true\n", out)
+        self.assertEqual(self.config.read_text(), LOSSLESS_DEFER)
+        self.assertEqual(self.bootstraps(calls), 1)
+        self.assertEqual(self.run_main("configure", "--show")[1].split("\n")[1],
+                         "preset=lossless-defer")
 
     def test_setup_again_keeps_the_chosen_preset(self):
         self.assertEqual(self.run_main("configure", "--preset", "off")[0], 0)
@@ -418,6 +435,42 @@ class DoctorTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("binary=fail\n", out)
 
+    def defer_doctor(self, stats, preset="lossless-defer"):
+        with FakeProxy(last_bob_ts_ms=self.proxy_bob_ts, stats=stats) as proxy:
+            record = PLUGIN.read_record()
+            record["port"] = proxy.port
+            PLUGIN.write_record(record)
+            PLUGIN.private_dir(PLUGIN.proxy_config(proxy.port).parent)
+            PLUGIN.proxy_config(proxy.port).write_text(
+                f"{PLUGIN.CONFIG_MARKER}\n{PLUGIN.BOB_PRESETS[preset]}")
+            code, out = self.doctor()
+        return code, self.lines(out), out
+
+    def test_doctor_warns_when_a_400_turned_tool_deferral_off(self):
+        code, facts, out = self.defer_doctor({"tool_defer": {"turned_off": 1}})
+        self.assertEqual(facts.get("tool_defer"), "warn", out)
+        self.assertIn("tool_defer=warn\nfix=", out)
+        # turned_off counts since the proxy started, and the gate retries after 24 hours: the
+        # warning must stay true after a retry that worked.
+        self.assertIn("tool deferral off at least once since it started", out)
+
+    def test_doctor_warns_when_a_break_disabled_tool_deferral(self):
+        code, facts, out = self.defer_doctor(
+            {"tool_defer": {"turned_off": 0, "client_search_disabled": {"break": 2}}})
+        self.assertEqual(facts.get("tool_defer"), "warn", out)
+
+    def test_doctor_tool_defer_ok_when_nothing_turned_it_off(self):
+        code, facts, out = self.defer_doctor(
+            {"tool_defer": {"turned_off": 0, "client_search_disabled": {"break": 0}}})
+        self.assertEqual(facts.get("tool_defer"), "ok", out)
+
+    def test_doctor_tool_defer_skips_absent_fields_and_other_presets(self):
+        for stats, preset in ((None, "lossless-defer"), ({}, "lossless-defer"),
+                              ({"tool_defer": {"turned_off": 3}}, "lossless")):
+            with self.subTest(stats=stats, preset=preset):
+                code, facts, out = self.defer_doctor(stats, preset)
+                self.assertNotIn("tool_defer", facts, out)
+
     def test_doctor_not_installed(self):
         PLUGIN.record_path().unlink()
         code, out = self.doctor()
@@ -676,6 +729,12 @@ class ControlSkillsTest(unittest.TestCase):
         preset = (PLUGIN_ROOT / "skills/preset-picker/SKILL.md").read_text()
         self.assertIn("lossless", preset)
         self.assertIn("only one bare word", preset)
+        self.assertIn("`lossless-defer`", preset)
+        self.assertIn("one extra turn", preset)
+        self.assertIn("3 past Bob sessions", preset)
+        self.assertIn("On Bob the proxy does not detect this", preset)
+        readme = (PLUGIN_ROOT / "README.md").read_text()
+        self.assertIn("On Bob the proxy does not\n  detect this", readme)
         update = (PLUGIN_ROOT / "skills/update/SKILL.md").read_text()
         self.assertIn("one network call to GitHub", update)
         doctor = (PLUGIN_ROOT / "skills/doctor/SKILL.md").read_text()

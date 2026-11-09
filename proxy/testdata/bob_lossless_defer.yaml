@@ -1,0 +1,8 @@
+# Managed by the context-guru Bob plugin.
+pipeline: [format, toon, cachesplit, toolfilter]
+components:
+  toolfilter:
+    defer: auto
+    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,
+           execute_command, grep, glob, list_files, ask_followup_question, use_skill,
+           switch_mode, update_todo_list, spawn_subagent, start_subtask]

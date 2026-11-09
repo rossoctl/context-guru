@@ -48,7 +48,21 @@ MINIMUM_BOB_RELEASE = (0, 3, 1)
 # The presets Bob may use: name -> the config body under the marker line. Only presets with no
 # lossy component. Every other CG preset can drop content, and CG must be able to give it back
 # (the expand loop). That is not proven for Bob yet (plan phase P2, test T4). Phase P2 widens this.
-BOB_PRESETS = {"off": "preset: off\n", "lossless": "pipeline: [format, toon, cachesplit]\n"}
+# lossless-defer adds tool deferral: it removes the tools Bob's last 3 sessions did not use, and the
+# model loads one back with a search (context_guru_tools). Nothing is lost. The keep list holds
+# Bob's core tools. proxy/testdata/bob_lossless_defer.yaml is this text; the proxy's test runs it.
+BOB_PRESETS = {
+    "off": "preset: off\n",
+    "lossless": "pipeline: [format, toon, cachesplit]\n",
+    "lossless-defer": (
+        "pipeline: [format, toon, cachesplit, toolfilter]\n"
+        "components:\n"
+        "  toolfilter:\n"
+        "    defer: auto\n"
+        "    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,\n"
+        "           execute_command, grep, glob, list_files, ask_followup_question, use_skill,\n"
+        "           switch_mode, update_todo_list, spawn_subagent, start_subtask]\n"),
+}
 DEFAULT_PRESET = "lossless"
 # The cache strategies Bob may use. Only none: see NO_KEEPALIVE_REASON.
 BOB_CACHE_STRATEGIES = ("none",)
@@ -458,7 +472,8 @@ def write_proxy_config(port, preset=None):
 
 
 def preset_refusal(name):
-    allowed = " and ".join(BOB_PRESETS)
+    *rest, last = BOB_PRESETS
+    allowed = f"{', '.join(rest)} and {last}" if rest else last
     return (f"{name} can drop content that Bob cannot get back yet. Only {allowed} are allowed "
             "for Bob until reversibility is proven.")
 
@@ -1154,6 +1169,19 @@ def doctor(args):
                 f"{proxy_config(port)} is not one of the Bob presets ({', '.join(BOB_PRESETS)}). "
                 "It may run a lossy component, and Bob cannot get dropped content back yet. "
                 "Run: configure --preset lossless"))
+        if up and preset == "lossless-defer":
+            try:
+                counts = tool_defer_facts(tool_defer_stats(port))
+            except Exception:
+                counts = {}
+            off = [counts[k] for k in ("tool_defer_turned_off", "tool_defer_break") if k in counts]
+            if off:
+                report("tool_defer", "ok" if sum(off) == 0 else "warn", None if sum(off) == 0 else (
+                    "The proxy turned tool deferral off at least once since it started: Bob's "
+                    "gateway refused a request with deferred tools. Bob still got all its tools. "
+                    "While it is off, this preset saves no more than lossless. The proxy tries "
+                    "again after 24 hours or a restart. If it keeps happening, run: configure "
+                    "--preset lossless"))
         try:
             hooks = bob_hooks.is_installed(bob_settings())
         except Exception:
@@ -1203,6 +1231,36 @@ def last_bob_request_ms(port):
     return rows[0].get("ts") if rows else None
 
 
+def tool_defer_stats(port):
+    """The proxy's /stats tool_defer block, or {} when it has none (deferral never ran)."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as reply:
+        block = json.load(reply).get("tool_defer")
+    return block if isinstance(block, dict) else {}
+
+
+# status name -> its place in /stats tool_defer. Counts only, never a tool name.
+TOOL_DEFER_FACTS = {
+    "tool_defer_requests": ("requests",),
+    "tool_defer_deferred_tokens": ("ledger", "deferred_tokens"),
+    "tool_defer_add_backs": ("add_backs",),
+    "tool_defer_wrong_guesses": ("wrong_guesses",),
+    "tool_defer_turned_off": ("turned_off",),
+    "tool_defer_break": ("client_search_disabled", "break"),
+}
+
+
+def tool_defer_facts(block):
+    """The TOOL_DEFER_FACTS counts that block has. A field it lacks is left out."""
+    shown = {}
+    for name, keys in TOOL_DEFER_FACTS.items():
+        value = block
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            shown[name] = value
+    return shown
+
+
 def status(_args):
     record = read_record()
     port = record_port(record)
@@ -1225,6 +1283,11 @@ def status(_args):
         except Exception as error:
             values["traffic_error"] = type(error).__name__
     values["last_bob_request_age_s"] = "(none)" if age is None else age
+    if up:
+        try:
+            values.update(tool_defer_facts(tool_defer_stats(port)))
+        except Exception:
+            pass  # an older proxy, or /stats unreadable: the counts are extra, not a check
     if record.get("complete") is False:
         values["result"] = "setup_incomplete"
         values["hint"] = (f"Setup did not finish. Run the context-guru-setup skill again, or "

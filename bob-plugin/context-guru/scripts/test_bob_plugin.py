@@ -70,9 +70,9 @@ exit 0
 
 
 class FakeProxy:
-    """A local HTTP server in a thread: /healthz, /api/requests, /signal."""
+    """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats when given."""
 
-    def __init__(self, last_bob_ts_ms=None):
+    def __init__(self, last_bob_ts_ms=None, stats=None):
         self.signals = []
         self.paths = []
         owner = self
@@ -90,6 +90,8 @@ class FakeProxy:
                                                               "agent": "bob"}]
                     body = json.dumps({"requests": rows, "next_cursor": 0,
                                        "total": len(rows)}).encode()
+                elif self.path == "/stats" and stats is not None:
+                    body = json.dumps(stats).encode()
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -827,6 +829,36 @@ class StatusTest(TempHome):
         code, out, _ = self.run_main("status")
         self.assertEqual(code, 1)
         self.assertIn("result=not_installed", out)
+
+    def test_status_shows_the_tool_defer_counts_from_stats(self):
+        import time
+        stats = {"tool_defer": {"requests": 12, "ledger": {"deferred_tokens": 34567},
+                                "add_backs": 2, "wrong_guesses": 1, "turned_off": 0,
+                                "client_search_disabled": {"unknown_description": 0, "break": 0}}}
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), stats=stats) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("/stats", proxy.paths)
+        for line in ("tool_defer_requests=12", "tool_defer_deferred_tokens=34567",
+                     "tool_defer_add_backs=2", "tool_defer_wrong_guesses=1",
+                     "tool_defer_turned_off=0", "tool_defer_break=0"):
+            self.assertIn(line + "\n", out)
+
+    def test_status_omits_tool_defer_counts_the_proxy_does_not_report(self):
+        import time
+        for stats in (None, {}, {"tool_defer": {"requests": 3}}):
+            with self.subTest(stats=stats):
+                with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), stats=stats) as proxy:
+                    ROUTE.install(self.rc, proxy.port)
+                    self.write_record(proxy.port, rc_file=str(self.rc))
+                    code, out, _ = self.run_main("status")
+                self.assertEqual(code, 0, out)
+                self.assertIn("result=ok\n", out)
+                shown = sorted(line for line in out.splitlines() if line.startswith("tool_defer_"))
+                self.assertEqual(shown, ["tool_defer_requests=3"] if stats and stats.get("tool_defer")
+                                 else [])
 
 
 class HookHandlerTest(TempHome):

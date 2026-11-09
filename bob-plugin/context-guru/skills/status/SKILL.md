@@ -17,6 +17,10 @@ Report these facts in plain words:
 - `proxy_up=`: the proxy answers on `/healthz`.
 - `hooks_installed=`: our hooks are in Bob's settings.
 - `last_bob_request_age_s=`: how long ago the newest Bob request reached the proxy.
+- `tool_defer_*=` (only with the `lossless-defer` preset, after it ran): `requests` held tools
+  back, `deferred_tokens` is the tool tokens not sent, `add_backs` is the tools a search brought
+  back, `wrong_guesses` is the held-back tools a search loaded, `turned_off` and `break` above 0
+  mean the proxy stopped deferral at least once since it started. Leave out a line that is not printed.
 - `result=ok`: all of these are good, and Bob traffic came in the last 24 hours.
 - `result=no_bob_traffic`: the setup is there, but Bob does not use it. Give `hint=`. Bob may have
   started from a terminal or after a self-update. Quit Bob and open it from the Dock.
