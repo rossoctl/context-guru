@@ -125,7 +125,7 @@ func bobLogs(t *testing.T) *syncBuffer {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	ResetBobBackendForTest()
+	resetBobBackendForTest()
 	return logs
 }
 
@@ -194,7 +194,8 @@ func TestBobRouteUnknownShapeWarnsOnceAndCounts(t *testing.T) {
 			if n := strings.Count(out, "cg.bob_backend_unknown"); n != 1 {
 				t.Fatalf("WARN lines = %d, want 1:\n%s", n, out)
 			}
-			want := "msg=cg.bob_backend_unknown prefix=chat len=45 cache_write=false provider_fields=true"
+			want := "msg=cg.bob_backend_unknown prefix=chat len=45 alnum=false cache_write=false " +
+				"creation_details=false mixed_ids=false provider_fields=true"
 			if !strings.Contains(out, want) {
 				t.Errorf("WARN line does not contain %q:\n%s", want, out)
 			}
@@ -394,5 +395,35 @@ func TestBobReplyWithAnIDButNoUsageIsCountedApart(t *testing.T) {
 				t.Errorf("logged a WARN: %s", logs.String())
 			}
 		})
+	}
+}
+
+// The alarm logs once per KIND of shape, not once per id. Backend B ids are random, so keying on
+// their first letters made every changed-B reply a "new" shape: 8 of them used up every slot, and a
+// later, really different change logged nothing.
+func TestBobBackendAlarmIsOncePerKindOfShapeNotPerID(t *testing.T) {
+	logs := bobLogs(t)
+	// IBM changes backend B: it now sends cache_creation_token_details. 20 replies, 20 random ids.
+	letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	for i := 0; i < 20; i++ {
+		id := make([]byte, 23)
+		for j := range id {
+			id[j] = letters[(i*7+j*13)%len(letters)]
+		}
+		bobNoteBackend(bobMarks{id: string(id), usage: true, creationDetails: true})
+	}
+	if n := strings.Count(logs.String(), "cg.bob_backend_unknown"); n != 1 {
+		t.Fatalf("20 replies of one changed shape logged %d WARNs, want 1", n)
+	}
+	// A different change later still gets its own WARN: a 30-character id.
+	bobNoteBackend(bobMarks{id: strings.Repeat("x", 30), usage: true})
+	if n := strings.Count(logs.String(), "cg.bob_backend_unknown"); n != 2 {
+		t.Fatalf("a second, different shape: %d WARNs in all, want 2", n)
+	}
+	// A mixed-id stream must be told apart from a good A reply in the log.
+	bobNoteBackend(bobMarks{id: "chatcmpl-0123456789abcdefghijklmnopqrstuvwxyz", usage: true,
+		cacheWrite: true, creationDetails: true, providerFields: true, mixedIDs: true})
+	if !strings.Contains(logs.String(), "mixed_ids=true") {
+		t.Fatalf("a mixed-id reply's WARN does not say mixed_ids=true:\n%s", logs.String())
 	}
 }

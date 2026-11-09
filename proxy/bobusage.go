@@ -191,15 +191,15 @@ var (
 	bobShapeSeen = map[string]struct{}{}
 )
 
-// ResetBobBackendForTest forgets the shapes logged so far. For TESTS only.
-func ResetBobBackendForTest() {
+// resetBobBackendForTest forgets the shapes logged so far. For TESTS only.
+func resetBobBackendForTest() {
 	bobShapeMu.Lock()
 	defer bobShapeMu.Unlock()
 	bobShapeSeen = map[string]struct{}{}
 }
 
-// bobNoteBackend counts the reply's label and returns it. On "other" it logs the shape once:
-// the first 4 characters of the id, its length and 2 flags. Never the whole id.
+// bobNoteBackend counts the reply's label and returns it. On "other" it logs each kind of shape
+// once: the first 4 characters of the id, its length and the marks it saw. Never the whole id.
 func bobNoteBackend(m bobMarks) string {
 	label := bobBackend(m)
 	switch label {
@@ -215,7 +215,13 @@ func bobNoteBackend(m bobMarks) string {
 	default:
 		bobBackendOther.Add(1)
 		prefix := bobWarnPrefix(m.id)
-		key := prefix + "|" + strconv.Itoa(len(m.id)) + "|" + strconv.FormatBool(m.cacheWrite)
+		// The kind of shape, never the id's own letters: backend B ids are random, so a key on them
+		// would make every reply of one changed backend a "new" shape and use up every slot.
+		key := strings.Join([]string{
+			strconv.FormatBool(strings.HasPrefix(m.id, bobIDPrefixA)), strconv.Itoa(len(m.id)),
+			strconv.FormatBool(bobAlnum(m.id)), strconv.FormatBool(m.cacheWrite),
+			strconv.FormatBool(m.creationDetails), strconv.FormatBool(m.mixedIDs),
+		}, "|")
 		bobShapeMu.Lock()
 		_, dup := bobShapeSeen[key]
 		fresh := !dup && len(bobShapeSeen) < bobShapeMax
@@ -225,7 +231,9 @@ func bobNoteBackend(m bobMarks) string {
 		bobShapeMu.Unlock()
 		if fresh {
 			slog.Default().Warn("cg.bob_backend_unknown", "prefix", prefix, "len", len(m.id),
-				"cache_write", m.cacheWrite, "provider_fields", m.providerFields)
+				"alnum", bobAlnum(m.id), "cache_write", m.cacheWrite,
+				"creation_details", m.creationDetails, "mixed_ids", m.mixedIDs,
+				"provider_fields", m.providerFields)
 		}
 	}
 	return label
