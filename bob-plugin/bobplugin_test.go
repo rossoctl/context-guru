@@ -24,3 +24,18 @@ func TestBobPluginPythonSuite(t *testing.T) {
 	}
 	t.Logf("%s", out)
 }
+
+// TestBobReleasePythonSuite runs the tests of the release installer, uninstaller and packager.
+// Each runs in a temp HOME with a fake launchctl, bobide, pgrep and osascript. The .command
+// tests skip off macOS; the packager test runs wherever zip and shasum are.
+func TestBobReleasePythonSuite(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Fatalf("python3 is required to test the Bob release scripts: %v", err)
+	}
+	cmd := exec.Command("python3", "-m", "unittest", "discover", "-s", "release", "-p", "test_*.py")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Bob release Python tests failed: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
