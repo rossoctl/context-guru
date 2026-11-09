@@ -2,10 +2,10 @@ package metricspush_test
 
 import (
 	"context"
-	"os"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"testing"
 	"time"
