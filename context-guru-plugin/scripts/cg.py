@@ -473,9 +473,9 @@ def _statusline():
     """The status line module, for its token formatters; None in the Codex copy, which has no status line."""
     try:
         import statusline as sl  # noqa: PLC0415
-        return sl
     except Exception:  # noqa: BLE001
         return None
+    return sl if hasattr(sl, "_saved_tokens_text") else None  # a stray `statusline` module is not ours
 
 
 def _real(doc: dict | None, key: str) -> float | None:
@@ -486,7 +486,14 @@ def _real(doc: dict | None, key: str) -> float | None:
 def subscription(api: Api, o: dict) -> dict | None:
     """The account's latest limit headers (GET /api/me/limits): {"used": percent, "start": ms} on a Claude
     subscription, with both None when no 5-hour window is open now. None (today's dollar view) for an API key,
-    Bedrock, Vertex, an older proxy (404), no answer, or the Codex copy."""
+    Bedrock, Vertex, an older proxy (404), no answer, or the Codex copy. Read once per run: `insights` draws
+    several screens with the same `o`."""
+    if "_sub" not in o:
+        o["_sub"] = _subscription(api, o)
+    return o["_sub"]
+
+
+def _subscription(api: Api, o: dict) -> dict | None:
     if _statusline() is None:
         return None
     doc = api.get("/api/me/limits", timeout=3)
@@ -502,11 +509,14 @@ def subscription(api: Api, o: dict) -> dict | None:
 def limit_estimate(used: float | None, win: dict | None) -> str | None:
     """`≈ 3% of the 5-hour limit (estimate at API-price weights)`: the share of the limit the savings are worth, if
     the limit weighted tokens as the API prices them. Anthropic does not publish those weights, and the header has
-    whole percents only, so it is an estimate, and shown only with enough data."""
+    whole percents only, so it is an estimate, and shown only with enough data. The provider stops a user at 100%,
+    so the share saved is at most `100 - used`; at that cap the line says the limit would have been hit."""
     saved, cost = _real(win, "total_saved_usd"), _real(win, "cost_usd")
     if used is None or used < 2 or cost is None or cost < 0.50 or saved is None or saved <= 0:
         return None
     pct = used * saved / cost
+    if pct >= 100 - used:
+        return "≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"
     return f"≈ {f'{pct:.0f}%' if pct >= 0.5 else '<1%'} of the 5-hour limit (estimate at API-price weights)"
 
 

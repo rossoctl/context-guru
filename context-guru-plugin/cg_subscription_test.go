@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -24,6 +25,14 @@ const (
 // "404" or "500") and the lean /api/stats reads of the session and of the 5-hour window. window is that read's body.
 func cgSubscriptionStub(t *testing.T, limits, window string) string {
 	t.Helper()
+	base, _ := cgSubscriptionStubCounted(t, limits, window)
+	return base
+}
+
+// cgSubscriptionStubCounted is cgSubscriptionStub, and also counts the GET /api/me/limits reads.
+func cgSubscriptionStubCounted(t *testing.T, limits, window string) (string, *atomic.Int32) {
+	t.Helper()
+	var reads atomic.Int32
 	up, err := url.Parse(cgProxyStub(t, "cachestate_warm"))
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +40,7 @@ func cgSubscriptionStub(t *testing.T, limits, window string) string {
 	rest := httputil.NewSingleHostReverseProxy(up)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/me/limits", func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
 		switch limits {
 		case "404":
 			http.NotFound(w, nil)
@@ -57,7 +67,7 @@ func cgSubscriptionStub(t *testing.T, limits, window string) string {
 	mux.Handle("/", rest)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, &reads
 }
 
 const subWindow = `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":12.4,"total_saved_usd":0.7}`
@@ -101,6 +111,13 @@ func TestCGSubscriptionEstimateNeedsEnoughData(t *testing.T) {
 		{"no window", `{"subscription":true}`, subWindow,
 			[]string{"This session: saved 610.0k rd / 42.0k wr"}, []string{"5-hour window", est}},
 		{"estimate", subLimits, subWindow, []string{"                    ≈ 3% " + est}, nil},
+		// The provider stops a user at 100%, so the share saved is at most 100 - used (here 55).
+		{"over the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":45}`,
+			[]string{"                    ≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"}, []string{est}},
+		{"at the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":18.4}`,
+			[]string{"                    ≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"}, []string{est}},
+		{"just below the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":18}`,
+			[]string{"                    ≈ 54% " + est}, []string{"would have hit"}},
 	} {
 		base := cgSubscriptionStub(t, c.limits, c.window)
 		out := runCG(t, base, nil, "home")
@@ -117,5 +134,26 @@ func TestCGSubscriptionEstimateNeedsEnoughData(t *testing.T) {
 				t.Errorf("%s: want no %q in:\n%s", c.name, s, out)
 			}
 		}
+	}
+}
+
+// A subscription with no session id and no open window has no tokens to show: the screen is today's dollar view.
+func TestCGSubscriptionNoSessionNoWindow(t *testing.T) {
+	base := cgSubscriptionStub(t, `{"subscription":true}`, subWindow)
+	got := runCG(t, base, []string{"CLAUDE_CODE_SESSION_ID="}, "home")
+	if want := string(cgRead(t, "cg", "home.golden")); got != want {
+		t.Errorf("want the home golden.\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}
+
+// `insights` draws three screens in one run; it reads the limits once.
+func TestCGSubscriptionReadsLimitsOncePerRun(t *testing.T) {
+	base, reads := cgSubscriptionStubCounted(t, subLimits, subWindow)
+	out := runCG(t, base, nil, "insights")
+	if !strings.Contains(out, "This 5-hour window: saved 1.2M rd / 85.0k wr") {
+		t.Errorf("want the token lead in the Savings section:\n%s", out)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("GET /api/me/limits read %d times in one run, want 1", n)
 	}
 }

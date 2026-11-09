@@ -56,6 +56,7 @@ Yesterday    $5.10   $118.40
 
 - **This session** and **This 5-hour window** count the tokens that compaction kept out of the prompts. `rd` is tokens that would have been re-sent as cache reads. `wr` is tokens that would have been written to the cache once.
 - The line that starts with `≈` is an estimate. It says what share of the 5-hour limit the savings are worth if the limit weighted tokens like the API prices them. Anthropic does not publish those weights, and the limit header has whole percents only. The line shows only when the window cost at least $0.50 at API prices and you used at least 2% of the limit.
+- The provider stops you at 100% of the limit, so the share saved is at most 100% minus the share you used. At that cap the line says `≈ without context-guru you would have hit the 5-hour limit`.
 - The window comes from the limit headers that the proxy saw on your last response. When the window is over, only the session line shows.
 - The dollar screen follows, at API prices. A subscription does not pay these dollars. They show where the savings came from.
 - With an API key, Bedrock or Vertex, the screen is the dollar view above, unchanged.
