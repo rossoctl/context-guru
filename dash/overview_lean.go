@@ -9,7 +9,8 @@ import (
 // OverviewLean answers /api/stats?lean=1 (dash/api.go's statsLean branch) — see #502.
 //
 // For a SESSION or a concrete time window (anything but true lifetime), it runs 1 bounded
-// aggregate (overviewLeanWindow) instead of Overview()'s 16 queries, because lean reads only a
+// aggregate (overviewLeanWindow), plus the 2 bounded reads of the `tokens` object (DB.AccTokens,
+// the same reads the full path runs, #998), instead of Overview()'s 16 queries, because lean reads only a
 // handful of their outputs: confirmed against context-guru-plugin/scripts/statusline.py and
 // scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
 // upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
@@ -85,6 +86,13 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	if o.ReplayTokens = o.SavedGross - o.SavedUnique; o.ReplayTokens < 0 {
 		o.ReplayTokens = 0
 	}
+	// The tokens object: the same read the full Overview runs (two aggregates over the same bounded
+	// range, see accTokensRequestQuery and accTokensComponentQuery), so lean and full agree.
+	t, err := d.AccTokens(f)
+	if err != nil {
+		return nil, err
+	}
+	t.apply(o)
 	return o, nil
 }
 

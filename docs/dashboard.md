@@ -292,6 +292,47 @@ keep-alive still plans to ping also carries `pings_left`, `held_until_ms` and `n
 cache goes cold if nothing else is sent (the last planned ping's start plus the cache lifetime), and when
 the next planned ping fires. The mod hides its Ping button while that ping fires before the cache expires.
 
+### Savings in tokens
+
+`/api/stats`, full and `lean=1`, returns every saving the accountant library measured in **tokens**,
+beside the dollars. A subscription is limited in tokens, so a screen can show tokens and no dollars.
+
+- **Tiers.** Each figure has four tiers: `input` (fresh input), `cache_read`, `cache_write_5m` and
+  `cache_write_1h`. The tiers are never added into one number. The provider does not say how a
+  usage limit weights them.
+- **Saved and caused.** Each figure has `saved` (tokens the request did not send or write) and
+  `caused` (tokens the change made the request pay). A feature can save in one tier and pay in
+  another: the keep-alive rescue saves a cache write and pays cache reads.
+- **`tokens.saved`, `tokens.caused`.** The sums over every feature.
+- **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
+  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
+  (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
+  ended). A feature with no tokens has no entry.
+- **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
+  `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
+  not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is
+  `tokens.by_feature.keepalive` less this.
+- **`tokens_unmeasured_requests`.** The requests in the period with no token figure: rows from
+  before the accountant, and rows it could not price. That is "not measured", not "saved nothing".
+- A request whose estimate is held out of the totals (`estimated_requests`) is held out of the
+  component tokens too, as its dollars are.
+
+```json
+"tokens": {
+  "saved":  {"input": 0, "cache_read": 600,  "cache_write_5m": 6000, "cache_write_1h": 0},
+  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 600,  "cache_write_1h": 0},
+  "by_feature": {
+    "mask":      {"saved": {"input": 0, "cache_read": 600, "cache_write_5m": 2000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 0, "cache_write_5m": 600, "cache_write_1h": 0}},
+    "keepalive": {"saved": {"input": 0, "cache_read": 0, "cache_write_5m": 4000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 0, "cache_write_1h": 0}}
+  }
+},
+"tokens_unmeasured_requests": 2,
+"keepalive_ping_tokens": {"input": 3, "cache_read": 9000, "cache_write_5m": 20, "cache_write_1h": 10},
+"keepalive_ping_output_tokens": 1
+```
+
 The session and each thread also carry `next_warm_usd` and `next_cold_usd`: what the next request
 costs for the cached prefix if the cache is still warm (a cache read) or already cold (a rewrite;
 the same number as `rewrite_usd`). Both are left out when the model has no price.

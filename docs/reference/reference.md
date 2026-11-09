@@ -436,7 +436,7 @@ table above is unchanged and every path below returns 404.
 | Route | Purpose |
 |---|---|
 | `GET /dashboard/` | The embedded single-page UI (HTML + CSS + JS from `go:embed`; no CDN, no build step). `/dashboard` redirects here. |
-| `GET /api/stats` | Overview aggregates: token tiers, costs, the four labelled savings denominators, the honest-savings waterfall, safety-mechanism costs, and the accounting / cache-miss / uncompressed-reason distributions. Accepts every filter parameter below. |
+| `GET /api/stats` | Overview aggregates: token tiers, costs, the four labelled savings denominators, the honest-savings waterfall, safety-mechanism costs, and the accounting / cache-miss / uncompressed-reason distributions. `tokens` is every accountant saving in tokens by tier, in total and by feature, and `tokens_unmeasured_requests` counts the requests with no token figure (see [Savings in tokens](../dashboard.md#savings-in-tokens)). Accepts every filter parameter below. |
 | `GET /api/series?bucket=<ms>` | Time series, bucketed **at query time** (no rollup tables). One object per bucket with tokens, the four billed tiers, costs, mean latencies, restorations and cache misses. |
 | `GET /api/requests` | Paginated request list. Server-side filters + **keyset** pagination (`before=<id>`, not an offset). Returns `{requests, next_cursor, total}`. |
 | `GET /api/requests/{id}` | One request with its per-component rows and, for a permitted caller, the before/after content the diff view renders. Carries [`content_captured` and `capture_blocked_by`](#why-a-transcript-panel-is-empty) alongside `content_visible`, `content_cap_bytes` and `content_archived`. |

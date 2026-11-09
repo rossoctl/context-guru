@@ -115,12 +115,20 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 	add("session: cachesplit historical", q, qargs)
 	q, qargs = declFilterSavingsQuery(session)
 	add("session: decl filter savings", q, qargs)
+	q, qargs = accTokensRequestQuery(session)
+	add("session: accountant tokens, effects", q, qargs)
+	q, qargs = accTokensComponentQuery(session)
+	add("session: accountant tokens, components", q, qargs)
 
 	dayWindow := Filter{Since: 1000}
 	q, qargs = leanWindowMainQuery(dayWindow)
 	add("day window: main aggregate", q, qargs)
 	q, qargs = declFilterSavingsQuery(dayWindow)
 	add("day window: decl filter savings", q, qargs)
+	q, qargs = accTokensRequestQuery(dayWindow)
+	add("day window: accountant tokens, effects", q, qargs)
+	q, qargs = accTokensComponentQuery(dayWindow)
+	add("day window: accountant tokens, components", q, qargs)
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
