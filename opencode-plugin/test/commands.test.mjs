@@ -9,6 +9,8 @@ import { createServer } from "node:http"
 
 process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-commands-test-"))
 
+process.env.CONTEXT_GURU_PORT_START = "9100"
+
 import plugin, { stateDirectory } from "../index.js"
 import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
 
@@ -342,7 +344,7 @@ test("chat.headers restarts a dead proxy on its recorded port", async () => {
     await waitUntilUnhealthy(record.port)
 
     const output = { headers: {} }
-    await hooks["chat.headers"]({ sessionID: "session-recovery" }, output)
+    await hooks["chat.headers"]({ sessionID: "session-recovery", provider: { info: { id: "anthropic" } } }, output)
 
     assert.equal(output.headers["x-context-guru-session"], "session-recovery")
     const response = await fetch(`http://127.0.0.1:${record.port}/healthz`)
@@ -356,7 +358,7 @@ test("chat.headers restarts a dead proxy on its recorded port", async () => {
     // With routing disabled, a chat request must not resurrect the proxy.
     writeFileSync(join(state, "disabled"), "test\n")
     const disabledOutput = { headers: {} }
-    await hooks["chat.headers"]({ sessionID: "session-disabled" }, disabledOutput)
+    await hooks["chat.headers"]({ sessionID: "session-disabled", provider: { info: { id: "anthropic" } } }, disabledOutput)
 
     assert.equal(disabledOutput.headers["x-context-guru-session"], "session-disabled")
     assert.equal(Number(readFileSync(join(state, "proxy.pid"), "utf8")), recoveredPid)

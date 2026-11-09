@@ -6,6 +6,8 @@ import { join } from "node:path"
 
 process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-v2-test-"))
 
+process.env.CONTEXT_GURU_PORT_START = "9500"
+
 import plugin, { stateDirectory } from "../index.js"
 import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
 
@@ -67,7 +69,9 @@ test("v2 setup routes providers, registers commands, and scopes the session hook
 
     assert.deepEqual(registered.commands.map((command) => command.name).sort(), [
       "context-guru-install",
+      "context-guru-preset",
       "context-guru-status",
+      "context-guru-strategy",
       "context-guru-uninstall",
       "context-guru-update",
     ])
@@ -148,7 +152,7 @@ test("v2 setup respects the disabled marker", async () => {
 
   assert.equal(providers[0].settings.baseURL, "https://api.anthropic.com")
   assert.equal(registered.hooks.length, 0)
-  assert.equal(registered.commands.length, 4)
+  assert.equal(registered.commands.length, 6)
   assert.ok(existsSync(join(state, "context-guru-install")))
 })
 

@@ -21,7 +21,7 @@ Restart OpenCode after changing the config. On the first startup, the plugin:
 
 1. Reuses `context-guru-proxy` from `PATH`, or downloads the current release and verifies its SHA-256 checksum.
 2. Starts one loopback proxy for the project, using a free port beginning at `8787`.
-3. Routes Anthropic requests to `/anthropic` and OpenAI requests to `/openai/v1`.
+3. Routes Anthropic requests to `/anthropic/v1` and OpenAI requests to `/openai/v1`.
 4. Preserves any configured provider gateway host and path prefix as the proxy's upstream, avoiding a duplicate trailing `/v1`.
 
 The proxy state, log, dashboard database, and recovery command live under:
@@ -36,8 +36,8 @@ The exact project directory is printed to the OpenCode log. The dashboard is at
 ## Configure
 
 The default preset is `off`, so request bodies are forwarded unchanged. The default cache strategy
-is `5-min-ping`, which sends keep-alive requests using the configured provider credential. Set a
-different preset or disable keep-alive with the tuple form:
+is `auto`, the same as the Claude Code plugin. It sends keep-alive requests with your own provider
+credential while you are away. Set other values with the tuple form:
 
 ```json
 {
@@ -48,9 +48,26 @@ different preset or disable keep-alive with the tuple form:
 }
 ```
 
-Available presets are `off`, `conservative`, `medium`, `high`, and `xhigh`. Available cache
-strategies are `5-min-ping` and `none`. Keep-alive can spend provider quota; `none` does not send
-those requests.
+- Presets: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`.
+- Cache strategies: `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`.
+- The old name `5-min-ping` still works. It means `auto`.
+- `none` sends no keep-alive requests.
+
+## Change the preset or strategy in a session
+
+- `/context-guru-preset` shows the saved and running preset. It lists the choices.
+- `/context-guru-strategy` shows the cache strategy. It lists the choices.
+- Both ask before they switch. Both save the choice first.
+- A restart applies the choice now. It costs one cache rewrite in every open session of the project.
+- If you say no, the choice applies at the next OpenCode start.
+- A saved choice wins over the plugin options.
+
+## Other commands
+
+- `/context-guru-status` shows proxy state and savings.
+- `/context-guru-install` repairs the install.
+- `/context-guru-update` checks for a new proxy binary. It installs after you confirm.
+- `/context-guru-uninstall` stops the proxy and disables routing after you confirm.
 
 If OpenCode already uses a gateway, configure its provider `options.baseURL` normally. The plugin
 passes that URL to context-guru instead of replacing it. It does not overwrite API keys or provider
@@ -77,3 +94,11 @@ OpenCode restores the original provider endpoint.
 **The proxy is not on PATH.** The plugin downloads a release automatically. Set `CONTEXT_GURU_BIN`
 to an executable path to use a locally installed binary, or set `CONTEXT_GURU_VERSION` to pin a
 release tag.
+
+## Not ported yet
+
+These Claude Code plugin features do not exist in the OpenCode plugin:
+
+- `doctor`, `insights`, `save-more`, `remove-mcp-and-skills`, `cache-campaign`
+- the status line and the session signal hooks
+- the manual ping header (`x-context-guru-ping`)

@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { spawn, spawnSync } from "node:child_process"
@@ -7,9 +7,40 @@ import { createServer } from "node:net"
 
 const REPOSITORY = "rossoctl/context-guru"
 const DEFAULT_PRESET = "off"
-const DEFAULT_CACHE_STRATEGY = "5-min-ping"
-const PRESETS = new Set(["off", "conservative", "medium", "high", "xhigh"])
-const CACHE_STRATEGIES = new Set(["none", "5-min-ping"])
+// These names and numbers come from the Claude Code plugin, which owns them:
+// context-guru-plugin/scripts/settings.py (STRATEGIES, STRATEGY_ALIASES, DEFAULT_STRATEGY) and
+// context-guru-plugin/skills/preset-picker. Change them there first, then here.
+const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
+const DEFAULT_CACHE_STRATEGY = "auto"
+const STRATEGY_ALIASES = { "5-min-ping": "auto" }
+const KEEPALIVE = { keepalive: true, keepalive_idle_seconds: 240, keepalive_max_usd_per_ping: 0.5, keepalive_min_prefix_tokens: 80000 }
+// What the proxy does for a 1-hour cache when a "_1h" key is absent. settings.py leaves a key out
+// when it equals the default, so an older proxy binary (strict YAML) still loads the file.
+const ONE_HOUR_DEFAULTS = { keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 }
+const STRATEGIES = {
+  none: {},
+  auto: { ...KEEPALIVE, keepalive_max_pings: 2, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 },
+  "1-ping": { ...KEEPALIVE, keepalive_max_pings: 1, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 1 },
+  "2-ping": { ...KEEPALIVE, keepalive_max_pings: 2, keepalive_idle_seconds_1h: 3540, keepalive_max_pings_1h: 2 },
+  "1-hour-head": { head_ttl_1h: true, head_ttl_min_tokens: 50000 },
+}
+const CACHE_STRATEGIES = Object.keys(STRATEGIES)
+
+export function canonicalStrategy(name) {
+  const canonical = STRATEGY_ALIASES[name] ?? name
+  return Object.hasOwn(STRATEGIES, canonical) ? canonical : undefined
+}
+
+// The "cache:" block for a strategy, or "" for none (none is the absence of a config file).
+export function cacheFragment(strategy) {
+  const entries = Object.entries(STRATEGIES[strategy] ?? {}).filter(([key, value]) => ONE_HOUR_DEFAULTS[key] !== value)
+  return entries.length ? `cache:\n${entries.map(([key, value]) => `  ${key}: ${JSON.stringify(value)}`).join("\n")}\n` : ""
+}
+
+export function renderProxyConfig(preset, strategy) {
+  const fragment = cacheFragment(strategy)
+  return fragment ? `# context-guru: strategy=${strategy} written by opencode-context-guru\npreset: ${preset}\n${fragment}` : ""
+}
 
 export function stateDirectory(directory) {
   const root = process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
@@ -26,7 +57,7 @@ function readJSON(path) {
 
 function writeAtomic(path, contents, mode = 0o600) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  const temporary = `${path}.tmp-${process.pid}`
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
   writeFileSync(temporary, contents, { mode })
   renameSync(temporary, path)
 }
@@ -423,6 +454,108 @@ exit 1
 `
 }
 
+// ---- Preset and cache strategy pickers --------------------------------------------------
+// Same names and one-line wording as the Claude Code skills preset-picker and cache-strategy-picker.
+const PRESET_HELP = {
+  off: "nothing runs, requests go through untouched",
+  conservative: "trims obvious waste, the safe first step into carrying less",
+  medium: "conservative plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired",
+  high: "medium, but the summary of older turns is used as soon as the context window is nearly full",
+  xhigh: "high plus a deep-adjudication sweep over turns whose cache has already gone cold, the deepest cut",
+  ultrahigh: "EXPERIMENTAL. xhigh plus tool deferral: tools your last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in",
+}
+const STRATEGY_HELP = {
+  none: "no keep-alive pings, nothing extra happens (free)",
+  auto: "pings the cache so it does not go cold while you are away. A 5-minute cache gets up to 2 pings (first at 240 s). A 1-hour cache gets 1 ping at 59 minutes. Spends a little of your own credential between turns",
+  "1-ping": "at most 1 ping per idle span, on either cache lifetime. Spends your credential, fewer pings",
+  "2-ping": "at most 2 pings per idle span, on either cache lifetime (a 1-hour cache: 59 minutes, then 59 more). Spends your credential, more pings",
+  "1-hour-head": "asks the provider for a longer-lived cache instead of pinging, only on prefixes of 50k tokens or more (free, but on today's models it usually buys nothing)",
+}
+
+function pickerScript(state, kind) {
+  const isPreset = kind === "preset"
+  const names = isPreset ? PRESETS : CACHE_STRATEGIES
+  const help = isPreset ? PRESET_HELP : STRATEGY_HELP
+  const configs = CACHE_STRATEGIES.map((name) => `  ${shQuote(name)}) cat <<'CGEOF'\n${proxyConfigText("__PRESET__", name)}CGEOF\n  ;;`).join("\n")
+  const aliases = Object.entries(STRATEGY_ALIASES).map(([from, to]) => `${shQuote(from)}) name=${shQuote(to)} ;;`).join(" ")
+  return `#!/bin/sh
+# context-guru: show and switch the ${isPreset ? "preset" : "cache strategy"}.
+#   (no args)          show what runs now and the choices
+#   set NAME           save NAME (takes effect at the next proxy start)
+#   set NAME --restart save NAME and restart this project's proxy now
+set -u
+STATE=${shQuote(state)}
+KIND=${kind}
+VALID=${shQuote(names.join(" "))}
+DEFAULT=${shQuote(isPreset ? DEFAULT_PRESET : DEFAULT_CACHE_STRATEGY)}
+[ -f "$STATE/install.env" ] && . "$STATE/install.env"
+saved_value() { sed -n "s/^$1=//p" "$STATE/settings.env" 2>/dev/null | head -1; }
+cur_preset=$(saved_value preset); [ -n "$cur_preset" ] || cur_preset=\${preset:-${DEFAULT_PRESET}}
+cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=\${strategy:-${DEFAULT_CACHE_STRATEGY}}
+running_preset=
+if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ]; then
+  running_preset=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/stats" 2>/dev/null | tr ',' '\\n' | sed -n 's/.*"preset": *"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -1)
+fi
+show() {
+  if [ "$KIND" = preset ]; then saved=$cur_preset; else saved=$cur_strategy; fi
+  printf '%s\\n' "kind=$KIND" "saved=$saved"
+  if [ "$KIND" = preset ]; then
+    if [ -n "$running_preset" ]; then printf '%s\\n' "running=$running_preset"; else printf '%s\\n' "running=no_proxy"; fi
+    if [ -n "$running_preset" ] && [ "$running_preset" != "$saved" ]; then printf '%s\\n' "gap=saved $saved, running $running_preset (a restart applies it)"; fi
+  else
+    printf '%s\\n' "running_note=the proxy reads the strategy at start; the saved one runs after the last restart"
+  fi
+  printf '%s\\n' "default=$DEFAULT"
+  printf '%s\\n' ${names.map((name) => shQuote(`choice ${name}: ${help[name]}`)).join(" ")}
+  printf '%s\\n' "set=sh $STATE/context-guru-${kind} set NAME"
+}
+valid() { for v in $VALID; do [ "$v" = "$1" ] && return 0; done; return 1; }
+render() {
+  case "$1" in
+${configs}
+  esac | sed "s/__PRESET__/$2/"
+}
+case "\${1:-}" in
+  "") show ;;
+  set)
+    name=\${2:-}
+    case "$name" in ${aliases} esac
+    if ! valid "$name"; then printf '%s\\n' "result=error" "reason=unknown_${kind}" "known=$VALID"; exit 2; fi
+    restart=0; [ "\${3:-}" = "--restart" ] && restart=1
+    mkdir -p "$STATE"
+    if [ "$KIND" = preset ]; then new_preset=$name; new_strategy=$cur_strategy; else new_preset=$cur_preset; new_strategy=$name; fi
+    umask 077
+    printf 'preset=%s\\nstrategy=%s\\n' "$new_preset" "$new_strategy" > "$STATE/settings.env.new" && mv "$STATE/settings.env.new" "$STATE/settings.env"
+    printf '%s\\n' "result=saved" "$KIND=$name"
+    if [ "$KIND" = strategy ] && [ "$name" != none ] && [ "$name" != 1-hour-head ]; then printf '%s\\n' "cost=this spends a little of your own credential on pings while nobody is at the keyboard, on every session routed through this proxy"; fi
+    if [ "$restart" -ne 1 ]; then
+      printf '%s\\n' "restart_needed=true" "note=the running proxy keeps its old setting until it restarts; a restart costs one cache rewrite in every open session of this project; it also happens at the next OpenCode start"
+      exit 0
+    fi
+    if [ ! -f "$STATE/context-guru-start" ] || [ ! -f "\${binary:-}" ]; then printf '%s\\n' "result=not_applied" "reason=no-install" "note=restart OpenCode to start the proxy with the saved setting"; exit 1; fi
+    if [ -f "$STATE/proxy.pid" ]; then
+      pid=$(tr -cd '0-9' < "$STATE/proxy.pid")
+      case "$pid" in '') ;; *) command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+        case "$command" in *context-guru-proxy*) kill "$pid" 2>/dev/null || true ;; esac ;; esac
+      rm -f "$STATE/proxy.pid"
+    fi
+    n=0; while [ "$n" -lt 30 ] && curl -fsS --max-time 1 "http://127.0.0.1:\${port:-1}/healthz" >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
+    render "$new_strategy" "$new_preset" > "$STATE/proxy.yaml.new" && mv "$STATE/proxy.yaml.new" "$STATE/proxy.yaml"
+    if sh "$STATE/context-guru-start"; then
+      grep -v '^preset=\\|^strategy=' "$STATE/install.env" > "$STATE/install.env.new" || true
+      printf '%s\\n' "preset=$new_preset" "strategy=$new_strategy" >> "$STATE/install.env.new" && mv "$STATE/install.env.new" "$STATE/install.env"
+      printf '%s\\n' "result=restarted"
+      [ "$KIND" = preset ] && [ "$new_preset" = ultrahigh ] && printf '%s\\n' "probe=$(curl -fsS --max-time 1 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:\${port:-1}/tool-defer/probe" 2>/dev/null || echo unavailable)"
+    else
+      printf '%s\\n' "result=not_applied" "note=see $STATE/proxy.log"
+      exit 1
+    fi
+    ;;
+  *) printf '%s\\n' "result=error" "reason=unknown-arg"; exit 2 ;;
+esac
+`
+}
+
 function writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes }) {
   writeAtomic(join(state, "install.env"), [
     `state=${shQuote(state)}`,
@@ -442,6 +575,8 @@ function writeCommandScripts(state) {
   writeAtomic(join(state, "context-guru-install"), installScript(state), 0o700)
   writeAtomic(join(state, "context-guru-update"), updateScript(state), 0o700)
   writeAtomic(join(state, "context-guru-uninstall"), uninstallScript(state), 0o700)
+  writeAtomic(join(state, "context-guru-preset"), pickerScript(state, "preset"), 0o700)
+  writeAtomic(join(state, "context-guru-strategy"), pickerScript(state, "strategy"), 0o700)
 }
 
 // The four commands, shared by both plugin generations: v1 renders intro + a !`sh …` embed
@@ -475,6 +610,20 @@ const COMMAND_SPECS = [
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
     outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them to restart OpenCode so providers stop routing through the proxy, and that /context-guru-install undoes this. Never run it with --yes without asking first.",
+  },
+  {
+    name: "context-guru-preset",
+    description: "Show the running context-guru preset and switch it",
+    script: "context-guru-preset",
+    intro: "Show and switch this project's context-guru preset.",
+    outro: (path) => "That block ran just now and only SHOWED the preset. Tell the user which preset is saved and which one runs now (a gap means a restart is pending). List the choices, one line each, from the block. Recommend conservative to someone who wants less context but has not asked for a model pass; medium, high, xhigh and ultrahigh are an escalating ladder. Do not suggest ultrahigh unless the user asks for it. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the new preset is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, the old preset runs until the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a preset name.",
+  },
+  {
+    name: "context-guru-strategy",
+    description: "Show the context-guru cache strategy and switch it",
+    script: "context-guru-strategy",
+    intro: "Show and switch this project's context-guru cache strategy.",
+    outro: (path) => "That block ran just now and only SHOWED the cache strategy. Tell the user which strategy is saved. List the choices, one line each, from the block. Before switching TO auto, 1-ping or 2-ping, say once in one line that pings spend the user's own credential while nobody is at the keyboard, on every session routed through this proxy. Be honest about 1-hour-head: on Sonnet and Opus the 1-hour tier is usually silently downgraded, so expect no benefit, and it only acts on prefixes of 50k tokens or more. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the strategy is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, it applies at the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a strategy name.",
   },
 ]
 
@@ -583,7 +732,7 @@ export function routeProviders(config, port, own) {
   for (const id of ids) {
     const dialect = providerDialect(id)
     if (!dialect) continue
-    routes.push({ dialect, upstream: providerUpstream(config.provider[id]?.options?.baseURL, dialect, own) })
+    routes.push({ id, dialect, upstream: providerUpstream(config.provider[id]?.options?.baseURL, dialect, own) })
   }
   for (const dialect of ["anthropic", "openai"]) {
     const upstreams = new Set(routes.filter((route) => route.dialect === dialect).map((route) => route.upstream))
@@ -603,36 +752,110 @@ function upstreamFor(routes, dialect) {
   return routes.find((route) => route.dialect === dialect)?.upstream || defaultUpstream(dialect)
 }
 
+// One lock for every project on this machine. It covers picking a free port, starting the
+// proxy and writing the records, so two OpenCode instances cannot pick one port or write one
+// pid file at the same time. A lock older than 60 s is stale and the next caller removes it.
+async function withLock(root, fn) {
+  mkdirSync(root, { recursive: true, mode: 0o700 })
+  const lock = join(root, ".lock")
+  const deadline = Date.now() + 45000
+  for (;;) {
+    try {
+      mkdirSync(lock, { mode: 0o700 })
+      break
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 60000) { rmSync(lock, { recursive: true, force: true }); continue }
+      } catch {
+        continue
+      }
+      if (Date.now() > deadline) throw new Error(`could not take ${lock}`)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
+}
+
+// Stops the proxy this plugin recorded. It checks the process name first, so a reused pid is safe.
+async function stopRecordedProxy(state, port) {
+  const pid = Number(String(readFileSync(join(state, "proxy.pid"), "utf8")).replace(/\D/g, ""))
+  if (!pid) return
+  const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout || ""
+  if (!command.includes("context-guru-proxy")) return
+  try { process.kill(pid, "SIGTERM") } catch { return }
+  for (let attempt = 0; attempt < 40 && await healthy(port); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100))
+}
+
+export function settingsFile(state) {
+  return join(state, "settings.env")
+}
+
+// The picker commands save the user's choice here. It wins over the plugin options.
+function savedSettings(state) {
+  const saved = {}
+  try {
+    for (const line of readFileSync(settingsFile(state), "utf8").split("\n")) {
+      const match = /^(preset|strategy)=([A-Za-z0-9_-]+)$/.exec(line)
+      if (match) saved[match[1]] = match[2]
+    }
+  } catch {}
+  return saved
+}
+
+export function effectiveSettings(state, options = {}) {
+  const saved = savedSettings(state)
+  const configuredStrategy = options.cacheStrategy ?? options.cache_strategy
+  const preset = [saved.preset, options.preset].find((name) => PRESETS.includes(name)) ?? DEFAULT_PRESET
+  const cacheStrategy = [saved.strategy, configuredStrategy].map((name) => canonicalStrategy(name)).find(Boolean) ?? DEFAULT_CACHE_STRATEGY
+  return { preset, cacheStrategy }
+}
+
+function proxyConfigText(preset, cacheStrategy) {
+  return renderProxyConfig(preset, cacheStrategy) || `# context-guru: strategy=none written by opencode-context-guru\npreset: ${preset}\n`
+}
+
 async function startProxy({ directory, preset, cacheStrategy, routes, client }) {
   const state = stateDirectory(directory)
   mkdirSync(state, { recursive: true, mode: 0o700 })
-  const fingerprint = JSON.stringify({ preset, cacheStrategy, routes: routes.map((route) => [route.dialect, route.upstream]) })
-  const recordPath = join(state, "install.json")
-  const existing = readJSON(recordPath)
-  if (existing?.port && existing.fingerprint === fingerprint && await healthy(existing.port)) return { port: existing.port, state }
+  return withLock(dirname(state), async () => {
+    const configText = proxyConfigText(preset, cacheStrategy)
+    const fingerprint = JSON.stringify({ routes: routes.map((route) => [route.dialect, route.upstream]) })
+    const recordPath = join(state, "install.json")
+    const existing = readJSON(recordPath)
+    const running = existing?.port ? await healthy(existing.port) : false
+    let onDisk
+    try { onDisk = readFileSync(join(state, "proxy.yaml"), "utf8") } catch {}
+    if (running && existing.fingerprint === fingerprint && onDisk === configText) return { port: existing.port, state }
+    // Another setting is wanted: stop this project's old proxy and reuse its port.
+    if (running) await stopRecordedProxy(state, existing.port)
 
-  let binary = findBinary(state)
-  if (!binary) binary = await downloadBinary(state)
-  const port = await freePort(existing?.port || 8787)
-  const configPath = join(state, "proxy.yaml")
-  const keepalive = cacheStrategy !== "none"
-  writeAtomic(configPath, `# context-guru: managed by opencode-context-guru\npreset: ${preset}\ncache:\n  keepalive: ${keepalive}\n  keepalive_idle_seconds: 280\n  keepalive_openai_idle_seconds: 1680\n  keepalive_max_pings: 2\n  keepalive_min_prefix_tokens: 20000\n  keepalive_max_usd_per_ping: 0.25\n`, 0o600)
-  const logPath = join(state, "proxy.log")
-  const log = openSync(logPath, "a", 0o600)
-  const args = ["--listen", `127.0.0.1:${port}`, "--config", configPath, "--dashboard", "--dashboard-db", join(state, "dashboard.db"), "--idle-exit", "24h", "--anthropic-upstream", upstreamFor(routes, "anthropic"), "--openai-upstream", upstreamFor(routes, "openai")]
-  const child = spawn(binary.path, args, { detached: true, stdio: ["ignore", log, log] })
-  child.unref()
-  closeSync(log)
-  if (!(await waitForHealthy(port))) {
-    try { process.kill(child.pid, "SIGTERM") } catch {}
-    throw new Error(`proxy did not become healthy; see ${logPath}`)
-  }
-  writeRecoveryFiles(state, child.pid, binary.managed)
-  writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes })
-  writeAtomic(join(state, "context-guru-start"), startScript(state, binary.path, args, port), 0o700)
-  writeAtomic(recordPath, JSON.stringify({ binary: binary.path, managed: binary.managed, version: binary.version || "external", directory, fingerprint, pid: child.pid, port, args }, null, 2) + "\n")
-  await safeLog(client, "info", `proxy running on 127.0.0.1:${port}; recovery: ${join(state, "context-guru-reset")}`)
-  return { port, state }
+    let binary = findBinary(state)
+    if (!binary) binary = await downloadBinary(state)
+    const port = await freePort(existing?.port || Number(process.env.CONTEXT_GURU_PORT_START) || 8787)
+    const configPath = join(state, "proxy.yaml")
+    writeAtomic(configPath, configText, 0o600)
+    const logPath = join(state, "proxy.log")
+    const log = openSync(logPath, "a", 0o600)
+    const args = ["--listen", `127.0.0.1:${port}`, "--config", configPath, "--dashboard", "--dashboard-db", join(state, "dashboard.db"), "--idle-exit", "24h", "--anthropic-upstream", upstreamFor(routes, "anthropic"), "--openai-upstream", upstreamFor(routes, "openai")]
+    const child = spawn(binary.path, args, { detached: true, stdio: ["ignore", log, log] })
+    child.unref()
+    closeSync(log)
+    if (!(await waitForHealthy(port))) {
+      try { process.kill(child.pid, "SIGTERM") } catch {}
+      throw new Error(`proxy did not become healthy; see ${logPath}`)
+    }
+    writeRecoveryFiles(state, child.pid, binary.managed)
+    writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes })
+    writeAtomic(join(state, "context-guru-start"), startScript(state, binary.path, args, port), 0o700)
+    writeAtomic(recordPath, JSON.stringify({ binary: binary.path, managed: binary.managed, version: binary.version || "external", directory, fingerprint, pid: child.pid, port, args }, null, 2) + "\n")
+    await safeLog(client, "info", `proxy running on 127.0.0.1:${port}; recovery: ${join(state, "context-guru-reset")}`)
+    return { port, state }
+  })
 }
 
 async function safeLog(client, level, message) {
@@ -658,7 +881,11 @@ async function ensureProxyRunning(directory, client) {
   if (existsSync(join(state, "disabled"))) return
   const inFlight = proxyRecoveries.get(state)
   if (inFlight) return inFlight
-  const recovery = recoverProxy(state, record, client).finally(() => proxyRecoveries.delete(state))
+  const recovery = withLock(dirname(state), async () => {
+    // Another instance may have restarted it while this one waited for the lock.
+    if (await healthy(record.port)) return
+    await recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client)
+  }).finally(() => proxyRecoveries.delete(state))
   proxyRecoveries.set(state, recovery)
   return recovery
 }
@@ -687,10 +914,8 @@ async function recoverProxy(state, record, client) {
 }
 
 async function ContextGuruPlugin({ directory, client }, options = {}) {
-  const preset = PRESETS.has(options.preset) ? options.preset : DEFAULT_PRESET
-  const configuredStrategy = options.cacheStrategy ?? options.cache_strategy
-  const cacheStrategy = CACHE_STRATEGIES.has(configuredStrategy) ? configuredStrategy : DEFAULT_CACHE_STRATEGY
-  let routed = false
+  const { preset, cacheStrategy } = effectiveSettings(stateDirectory(directory), options)
+  let routedIds = new Set()
   return {
     config: async (config) => {
       const state = stateDirectory(directory)
@@ -713,18 +938,19 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
         }
         const proxy = await startProxy({ directory, preset, cacheStrategy, routes, client })
         routeProviders(config, proxy.port, own)
-        routed = true
+        routedIds = new Set(routes.map((route) => route.id))
       } catch (error) {
         await safeLog(client, "error", `proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     },
     "chat.headers": async (input, output) => {
-      if (routed) {
-        try {
-          await ensureProxyRunning(directory, client)
-        } catch {
-          // Recovery must never break the request it is trying to save.
-        }
+      // Only a provider this plugin routed sends traffic to the proxy. Do not tag any other.
+      const id = input.provider?.info?.id ?? input.model?.providerID
+      if (!id || !routedIds.has(id)) return
+      try {
+        await ensureProxyRunning(directory, client)
+      } catch {
+        // Recovery must never break the request it is trying to save.
       }
       output.headers["x-context-guru-session"] = input.sessionID
     },
@@ -740,10 +966,8 @@ async function setupV2(ctx) {
   const directory = ctx.location?.directory
   if (!directory) throw new Error("no project directory in the plugin context")
   const options = ctx.options ?? {}
-  const preset = PRESETS.has(options.preset) ? options.preset : DEFAULT_PRESET
-  const configuredStrategy = options.cacheStrategy ?? options.cache_strategy
-  const cacheStrategy = CACHE_STRATEGIES.has(configuredStrategy) ? configuredStrategy : DEFAULT_CACHE_STRATEGY
   const state = stateDirectory(directory)
+  const { preset, cacheStrategy } = effectiveSettings(state, options)
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
