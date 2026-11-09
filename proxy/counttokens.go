@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -76,21 +77,25 @@ func (h *Handler) countTokens(static upstream) http.HandlerFunc {
 			}
 			return
 		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-			up.base+countTokensPath, bytes.NewReader(body))
-		if err != nil {
-			http.Error(w, "proxy: "+err.Error(), http.StatusBadGateway)
-			return
+		build := func(ctx context.Context) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+				up.base+countTokensPath, bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			copyHeaders(req.Header, r.Header)
+			setUpstreamAuth(req.Header, up)
+			// Same gap as doUpstream (proxy.go): this route builds its own request rather
+			// than going through doUpstream, so it needs the same strip. h.stream below
+			// relays resp.Body byte for byte to the caller, and a gzip Content-Encoding
+			// forwarded verbatim would only "work" by accident, same as the chat path.
+			req.Header.Del("Accept-Encoding")
+			return req, nil
 		}
-		copyHeaders(req.Header, r.Header)
-		setUpstreamAuth(req.Header, up)
-		// Same gap as doUpstream (proxy.go): this route builds its own request rather
-		// than going through doUpstream, so it needs the same strip. h.stream below
-		// relays resp.Body byte for byte to the caller, and a gzip Content-Encoding
-		// forwarded verbatim would only "work" by accident, same as the chat path.
-		req.Header.Del("Accept-Encoding")
-
-		resp, err := h.client.Do(req)
+		// A short POST on the same pooled client as the chat path, so it meets the same dropped
+		// keep-alive connection: resent on a new one instead of a 502. No silence deadline — the
+		// answer is one JSON body. See upstreamsilence.go.
+		resp, err := doWithSilenceGuard(r.Context(), h.client, 0, build)
 		if err != nil {
 			recordRefusal(refuseUpstream, "")
 			// The fixed string, not err.Error(): a *url.Error stringifies as

@@ -36,6 +36,9 @@ make build    # build ./bin/lab-cx
 Use conventional-commit titles (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 Keep PRs focused. CI (lint, test, build, Trivy) must be green.
 
+How a PR is reviewed and merged into a release, and how a release is cut, is in
+[RELEASING.md](RELEASING.md).
+
 ## Reporting security issues
 
 See [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.

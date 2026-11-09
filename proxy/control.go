@@ -152,7 +152,9 @@ func (h *Handler) allCtlRoutes() []ctlRoute {
 	// Strategy campaigns: bulk-create keep-alive strategies from a batch of suggest
 	// cells, declared beside their handlers in campaign.go and appended here for the
 	// same reason.
-	return append(rs, h.campaignCtlRoutes()...)
+	rs = append(rs, h.campaignCtlRoutes()...)
+	// Learned keep-alive campaigns: build from a tenant's history, run in shadow or active mode (campaignbuild.go).
+	return append(rs, h.cacheCampaignCtlRoutes()...)
 }
 
 // grafanaUserHeader carries the authorized manager's address from this endpoint to
@@ -264,6 +266,13 @@ func (h *Handler) DashAuth() dash.Authenticator {
 	return func(r *http.Request) (dash.Principal, bool) {
 		t, err := h.webPrincipal(r)
 		if err != nil {
+			// The /api/adapt/* and /api/save-more/* reports alone also take the account's own proxy token, so the
+			// plugin can show one from the terminal (adaptapply.go). Never as a manager.
+			if strings.HasPrefix(r.URL.Path, "/api/adapt/") || strings.HasPrefix(r.URL.Path, "/api/save-more/") {
+				if who, aerr := h.adaptPrincipal(r); aerr == nil && who.ViaToken {
+					return dash.Principal{TenantID: who.TenantID}, true
+				}
+			}
 			return dash.Principal{}, false
 		}
 		return dash.Principal{TenantID: t.ID, Manager: t.IsManager()}, true
@@ -421,6 +430,7 @@ type tenantView struct {
 	UpOpenAI        string       `json:"up_openai"`
 	UpBob           string       `json:"up_bob"`
 	CaptureContent  bool         `json:"capture_content"`
+	RecordTraces    bool         `json:"record_traces"`
 	MaxRows         int64        `json:"max_rows"`
 	Disabled        bool         `json:"disabled"`
 	// DisabledReason is the manager's note, shown to the account's owner as well as to a
@@ -448,8 +458,8 @@ func (h *Handler) view(t *tenant.Tenant) tenantView {
 		EffectiveConfigYAML: h.registry().Config(t),
 		ConfigInherited:     t.TracksDefault(),
 		UpAnthropic:         t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
-		CaptureContent: t.CaptureContent,
-		MaxRows:        t.MaxRows, Disabled: t.Disabled,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		MaxRows: t.MaxRows, Disabled: t.Disabled,
 		DisabledReason: t.DisabledReason, Variant: t.Variant, HasPassword: t.HasPassword,
 		CreatedAt: msOrZero(t.CreatedAt), LastSeenAt: msOrZero(t.LastSeenAt),
 	}
@@ -1240,6 +1250,9 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		UpOpenAI       *string      `json:"up_openai"`
 		UpBob          *string      `json:"up_bob"`
 		CaptureContent *bool        `json:"capture_content"`
+		// RecordTraces is settable HERE ONLY. PATCH /api/tenants/{id} has no such field,
+		// and the registry refuses it from anyone but the account's owner.
+		RecordTraces *bool `json:"record_traces"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		readErr(w, err)
@@ -1310,7 +1323,7 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
-		CaptureContent: in.CaptureContent}
+		CaptureContent: in.CaptureContent, RecordTraces: in.RecordTraces}
 	if err := h.registry().Update(t, t.ID, patch); err != nil {
 		if errors.Is(err, tenant.ErrForbidden) {
 			ctlErr(w, http.StatusForbidden, "not permitted")
@@ -1928,6 +1941,7 @@ func (h *Handler) ctlPurgeTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.purgeTenantData(target.ID)
+	h.predRT().eraseTenant(target.ID) // campaigns are derived from the purged history
 	if err != nil {
 		// 502 rather than 500 when cold storage is what failed: the local rows are gone or
 		// still there as reported, and the part that did not work is a remote system.
@@ -1999,6 +2013,7 @@ func (h *Handler) ctlDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	// gap the test cannot see.
 	h.opts.Tenants.Forget(target.ID)
 	h.keeper.forget(target.ID)
+	h.predRT().eraseTenant(target.ID)
 	// Step 3: the tail. Best-effort by construction — the account is already gone, so
 	// there is nothing left to fail back to.
 	if tail, tErr := h.purgeTenantData(target.ID); tErr != nil {
@@ -2061,12 +2076,21 @@ func (h *Handler) destructiveTarget(w http.ResponseWriter, r *http.Request) (*te
 func (h *Handler) purgeTenantData(tenantID string) (dash.PurgeResult, error) {
 	if h.rec == nil {
 		// No dashboard on this deployment: there is no stored traffic to purge, which is a
-		// complete success rather than a failure.
-		return dash.PurgeResult{}, nil
+		// complete success rather than a failure. Tool deferral may still hold state of its own.
+		ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
+		defer cancel()
+		n, err := h.purgeToolDefer(ctx, tenantID)
+		return dash.PurgeResult{ToolDefer: n}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
 	defer cancel()
-	return h.rec.PurgeTenant(ctx, tenantID)
+	res, err := h.rec.PurgeTenant(ctx, tenantID)
+	n, terr := h.purgeToolDefer(ctx, tenantID)
+	res.ToolDefer += n
+	if err == nil {
+		err = terr
+	}
+	return res, err
 }
 
 // --- A/B variants ----------------------------------------------------------

@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// WaitForSummaryForTest blocks until the session's in-flight summary has landed, or the deadline
-// passes. It reports whether one landed.
+// WaitForSummaryForTest blocks until the thread's in-flight summary has landed, or the deadline
+// passes. It reports whether one landed. session is the THREAD key, thread.Key(session, thread)
+// (#430); for the primary thread that is the bare session id.
 //
 // EXPORTED AND TEST-ONLY, and it is deliberately not a `_test.go` file: components/all's tests
 // drive summarize through the registry from another package, and they need the same drain. The
@@ -15,7 +16,20 @@ import (
 // It waits on the SAME channel a real turn waits on (summaryFlight.done), so a test that passes
 // here is exercising the production synchronisation rather than a sleep that happens to be long
 // enough on the machine that ran it.
+//
+// It first waits out a DEFERRED commission for the thread (#722): a host dispatches one from its
+// request-end hook, which can run after the client already has its response, so a caller that
+// waits right after its request returns could otherwise see nothing in flight yet and return
+// before the summary has even started.
 func WaitForSummaryForTest(session string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for deferralPending(session) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	within = time.Until(deadline)
 	j, ok := inFlight.peek(session)
 	if !ok {
 		// Nothing in flight: either it already finished, or it never started. Both are "no wait
@@ -59,4 +73,18 @@ func WaitForAllSummariesForTest(within time.Duration) bool {
 		time.Sleep(2 * time.Millisecond)
 	}
 	return false
+}
+
+// deferralPending reports whether a cold or warm commission is held for the thread key.
+func deferralPending(key string) bool {
+	coldDeferredMu.Lock()
+	_, cold := coldDeferred[key]
+	coldDeferredMu.Unlock()
+	warmDeferredMu.Lock()
+	_, warm := warmDeferred[key]
+	warmDeferredMu.Unlock()
+	dispatchingMu.Lock()
+	moving := dispatching[key] > 0
+	dispatchingMu.Unlock()
+	return cold || warm || moving
 }

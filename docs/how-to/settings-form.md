@@ -9,7 +9,7 @@ silently ignored, and you can't miss one that exists.
 
 Fields are grouped by component (`dedup`, `extract_llm`, `cachesplit`, and so on), plus the
 top-level `pipeline` (which components run, and in what order) and `mode`. Within a
-component, each field is a dotted key such as `min_request_tokens` or `model.api_key`, and
+component, each field is a dotted key such as `min_request_tokens` or `extract_llm.strategy`, and
 every field has a one-line hint explaining what it does and, for a component that is
 configured but does nothing, *why*.
 
@@ -52,7 +52,6 @@ A few examples of what you'll actually see:
 - `extract_llm.min_tokens` — an int with a minimum of 1. Defaults to 300 if left blank.
 - `dedup.min_tokens` — an int with a minimum of 1. Only replaces a repeated tool output
   above this many tokens; defaults to 100.
-- `model.api_key` — a secret. Write-only, as described below.
 - `trigger.min_request_tokens` — an int shared across every component with a `trigger`
   block.
 

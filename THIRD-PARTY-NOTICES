@@ -52,3 +52,22 @@ Modifications made:
 
 The Apache-2.0 license text is available at http://www.apache.org/licenses/LICENSE-2.0
 and, since context-guru is itself Apache-2.0 licensed, in this repository's LICENSE.
+
+--------------------------------------------------------------------------------
+Apache ECharts (https://echarts.apache.org) v5.5.0 — full build
+Vendored at dash/ui/echarts.min.js and embedded in the proxy binary. Used by the
+dashboard's Cleanup view for its activity heatmap and the dataZoom range control
+that drives the tables below it. Vendored rather than loaded from a CDN because
+that page serves `script-src 'self'` and must keep working on an air-gapped
+install.
+
+The full build (1,005 KB raw / 326 KB gzipped) rather than the smaller `common`
+one, which does not register the heatmap series this view is built on — see
+dash/ui.go for the measurement and why grepping the file for "heatmap" is
+misleading. The `simple` build omits dataZoom as well.
+
+Copyright The Apache Software Foundation
+
+Licensed under the Apache License, Version 2.0. The license text is available at
+http://www.apache.org/licenses/LICENSE-2.0 and, since context-guru is itself
+Apache-2.0 licensed, in this repository's LICENSE.

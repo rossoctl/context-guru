@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -145,6 +146,24 @@ type Overview struct {
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
+	// SummarizeCorrectionUSD is what ApplySummarizeLedger moved the baseline by: summarize's
+	// counted credit less the stored one. Negative when the stored figure over-credited (a first
+	// removal priced as a write, or turns past the attribution span). Zero until the API layer,
+	// which holds the rates and the window resolver, has applied it.
+	SummarizeCorrectionUSD float64 `json:"summarize_correction_usd"`
+	// ReplayCapCorrectionUSD is what ApplyReplayLedger moved the baseline by: the credit of the
+	// replaying components (extract_llm, searchfold, ...) earned after the counterfactual client
+	// compaction, or after a real one, for the removals made before that close. A removal first made
+	// after a close earns again until the next one (#940). Zero or negative.
+	ReplayCapCorrectionUSD float64 `json:"replay_cap_correction_usd"`
+	// AvoidedCompactionUSD is the price of the compaction requests the world without context-guru paid at
+	// its counterfactual closes and we did not. It is not a saving on any request and no total above
+	// includes it. AvoidedCompactionAssumed is true when it rests on the assumed summary size.
+	AvoidedCompactionUSD     float64 `json:"avoided_compaction_usd"`
+	AvoidedCompactionAssumed bool    `json:"avoided_compaction_assumed"`
+	// ReplayCapNotApplied is true when the cap could not be computed (it errored or timed out), so
+	// the figures above carry the stored, uncapped replay credit. The page says so.
+	ReplayCapNotApplied bool `json:"replay_cap_not_applied"`
 	// CacheSavedUSD is what the PROVIDER's prompt cache saved over paying the fresh rate
 	// for the same tokens. Context, not credit: the agent places most of the breakpoints
 	// itself. It is here because it is the number that collapses when a pipeline rewrites
@@ -154,13 +173,17 @@ type Overview struct {
 	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
 	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
 	// and the provider then read at least the stable half from cache while writing less than
-	// it. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
+	// it. Priced against a cache miss. A floor. The accountant library's split effect.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
+	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
+	// TotalSavedUSD and is its own lever. 0 for an account that never deferred.
+	DeferNetUSD float64 `json:"defer_net_usd"`
 	// The three counts behind that figure, so a small number is explicable rather than
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
 	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
 	// 1,105 of 1,127 session starts had no cache to hit, because the previous session's had
-	// expired. That gate is gone (it is TailChanged now, see Event.cachesplitSavedUSD); the
+	// expired. That gate is gone (the split is priced by the accountant library now); the
 	// counts stay, because the replacement gate also fires rarely and for its own reason.
 	//
 	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
@@ -185,6 +208,9 @@ type Overview struct {
 	KeepAliveSavedUSD      float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD        float64 `json:"keepalive_net_usd"`
 	KeepAliveMissesAvoided int64   `json:"keepalive_misses_avoided"`
+	// ManualPings is the user's own pings, apart from the cache strategy's four numbers above;
+	// its net is one addend of TotalSavedUSD.
+	ManualPings ManualPings `json:"manual_pings"`
 
 	// CacheWrite1h is how many written tokens the provider billed at the ONE-HOUR tier. It is
 	// the verification path for the mixed-TTL head: asking for `ttl: "1h"` on a model that does
@@ -365,8 +391,8 @@ type Overview struct {
 	//
 	// DOLLARS ARE NOT UNAFFECTED. This comment used to end "Dollars are unaffected: they come
 	// from the provider's own reported usage", which is true of cost_usd and false of every
-	// savings figure beside it: baseline_cost_usd is cost_usd + baselineDeltaUSD, and that
-	// delta prices OUR token counts (Saved(), SavedUnique) at the provider's rate. A reader
+	// savings figure beside it: baseline_cost_usd is cost_usd plus a delta that prices OUR
+	// token counts at the provider's rate (the accountant library's bytes-to-tokens ratio). A reader
 	// auditing exactly this was told not to look, which is how #240 survived. The correction
 	// factor is NOT this ratio — see tokens.BilledDeltaFactor, which is a factor on a
 	// DIFFERENCE, measured against real bills, where the fixed overhead above cancels.
@@ -397,6 +423,16 @@ type Overview struct {
 	PreCorrectionSavingRows int64   `json:"pre_correction_saving_rows"`
 	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
 	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
+	// EstimatedRequests counts the requests whose saving the accountant library priced without knowing whether
+	// a component broke the cache AND that the proxy held out of the books (requests.estimate_held): the first
+	// request of a thread, and the first one after a restart that lost the state. It does not count a row
+	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
+	EstimatedRequests int64 `json:"estimated_requests"`
+	// EstimatedSavedUSD is what those requests would have saved, held OUT of every total (#915):
+	// NetSavedUSD, TotalSavedUSD, the components and the keep-alive tab never include it. It is
+	// what the library priced without knowing whether the cache was already warm, and that can be
+	// about 2x too high. Shown beside the totals, never added to them.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -501,7 +537,8 @@ type SafetyCost struct {
 
 // splitMoved is the ONE definition of "the volatile tail moved", in SQL. It matches
 // Recorder.ObserveSplit's in-process test: differs from the last non-zero tail hash recorded
-// for this session, and a session with no earlier non-zero hash counts as moved. Written once
+// for this session's THREAD (#423: another thread's tail is another cache entry's), and a thread
+// with no earlier non-zero hash counts as moved. Written once
 // and referenced twice so the count and its reconciliation cannot drift apart.
 // withKeepAlive returns f with ping rows included. A named helper rather than an inline field
 // set, so the two places that legitimately see pings are greppable.
@@ -513,12 +550,14 @@ func withKeepAlive(f Filter) Filter {
 const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 	AND r.split_tail_hash <> COALESCE((
 		SELECT p.split_tail_hash FROM requests p
-		WHERE p.session_id = r.session_id AND p.split_tail_hash <> 0
+		WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
 		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
 // afterOurMutation is the ONE definition of "the session's previous turn mutated something",
 // in SQL, shared by the prefix-change cost and its request count so the two cannot drift.
+// "Previous turn" is the previous turn of the same THREAD (#423): a subagent's mutation cannot
+// change the main thread's prefix.
 //
 // `p.keepalive = 0` is load-bearing. A keep-alive ping is a row in `requests` like any other,
 // so without the predicate a ping becomes "the previous turn"; a ping has no
@@ -530,7 +569,7 @@ const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 const afterOurMutation = `EXISTS (
 			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
 				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND p.keepalive = 0
+				WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
 				  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
 		)`
@@ -558,7 +597,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_saved_usd),0),
 		-- Our own cache saving. A plain SUM of a per-request column, because all three
 		-- conditions that qualify a request were settled at write time where the model's
-		-- rates and the session's history were both in hand (Event.cachesplitSavedUSD).
+		-- rates and the session's history were both in hand (the accountant library).
 		-- The predecessor did the component test here as a correlated EXISTS over
 		-- request_components, which was both slower and wrong: it credited every cache read
 		-- in a session, including the later turns that would have hit anyway.
@@ -627,9 +666,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- computed while it still had the session's gap and the ping's own refreshed-token
 		-- count in hand. The COST half cannot be summed here — this query excludes ping rows
 		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
-		-- has its own query below.
-		COALESCE(SUM(`+kaSaved("r.")+`),0),
-		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
+		-- has its own query below. kaSavedSince stops the credit's ping half at the window
+		-- start, because that cost half is summed inside the window: both halves of the net
+		-- must span the same pings (#678), and SavingsTotals reads this same span.
+		COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0),
+		COALESCE(SUM(CASE WHEN `+kaSavedSince("r.", f.Since)+` > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cache_write_1h),0),
 		-- The #240 boundary. billed_token_factor = 0 means the row was written before the
 		-- tokenizer correction existed, so its savings figures came out of the old arithmetic.
@@ -642,7 +683,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.billed_token_factor = 0
 			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
-			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0)
+			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
+		`+deferNetSum+`,
+		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -659,7 +702,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.TokensBeforeBilled, &o.BilledInputRows,
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
-		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows)
+		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
+		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -746,6 +790,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		estimatorDivergenceCompactedRows       int64
 		estimatorDivergenceCompacted           float64
 		keepAlivePings                         int64
+		manualPings                            manualAgg
 		keepAlivePingUSD                       float64
 		accountingM, cacheMissM, uncompressedM map[string]int64
 		p95cg, p95up                           float64
@@ -790,10 +835,33 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// function must still sort the WHOLE table before the outer filter can narrow anything.
 	// Left as the correlated form on purpose.
 	g.Go(func() error {
-		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM(r.saved_unique * (
-				SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
-				  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
-			FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&replayProjectedRaw)
+		// The later-turn count is a window function now: later = rows in the session minus this
+		// row's rank in (ts, id) order, which is exactly the number of rows p with (p.ts, p.id)
+		// after (r.ts, r.id) that the correlated COUNT(*) here used to count. The comment above
+		// measured the correlated form faster at 14k rows; at 189k rows with sessions of a
+		// thousand turns it is 11 s (one index range walk per saving row) against ~1 s for one
+		// sort, which is what takes the all-time /api/stats from 13 s to a few seconds.
+		//
+		// #492: that measurement does not hold for a single session scoped by `cond`. Confirmed
+		// against a real 262 MB / 12.4k-request deployment, one session of 5,723 rows: this
+		// window form, even narrowed to `r.session_id = ?` so it reads only that session's own
+		// rows (nothing else changed — see below), still took 3.6-4.8 s through
+		// modernc.org/sqlite, where the equivalent indexed correlated subquery took 165 ms for the
+		// IDENTICAL result (verified byte-for-byte on five sessions of 132-5,723 rows). The window
+		// form isn't slow because of HOW MUCH it reads here; `COUNT(*) OVER (PARTITION BY ...)`
+		// with no ORDER BY/frame, paired with a separately-ordered ROW_NUMBER() in the same CTE,
+		// is specifically what this driver executes badly — dash/overview.go's other two
+		// session-scoped window queries (CompactionResets' LAG, the inflation SUM...OVER with a
+		// ROWS frame) are fine once scoped (see their own #492 comments), so this is not blanket
+		// advice against window functions, only against this one shape.
+		//
+		// So: scoped to one session, go back to the correlated form this used to be, over
+		// idx_requests_session(session_id, ts) — bounded by that session's own size, not the
+		// deployment's, which is the opposite of the cost pattern the window form was built to
+		// avoid at full-table scale. Unscoped (the whole-deployment view), keep the window form:
+		// nothing above measured that case, and it is not what #492 is about.
+		q, qargs := replayCeilingQuery(f, cond, args)
+		return d.sql.QueryRowContext(d.readCtx(), q, qargs...).Scan(&replayProjectedRaw)
 	})
 	// The correction to the above, driven from the PING side: one pass to find the pings, then
 	// ONE indexed sum per ping over the earlier rows of its own session. O(pings x session)
@@ -806,34 +874,87 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// 10,000-row perf fixture, 5 trials: gated 52.7 ms against 53.0 ms ungated at 0 pings, and
 	// 58.0 against 57.3 at 100 — one extra scan for no measurable saving, so it is gone.
 	g.Go(func() error {
-		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM((
-				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
-				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
-				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
-				    AND `+cond+`)),0)
-			FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation)
+		// Same rewrite as the ceiling above: the running saved_unique of the in-scope earlier rows
+		// of a session (frame ends one row before the current one, so strictly earlier in
+		// (ts, id) order), read off each ping, instead of one indexed sum per ping.
+		//
+		// #492: same scoping fix as `later` above, same reason — PARTITION BY session_id means a
+		// session with no pings of its own can never match `before.s` for a different reason: the
+		// CTE's own WHERE used to be every session that EVER pinged, not just the caller's.
+		beforeCond, beforeArgs := "r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
+		if f.Session != "" {
+			beforeCond, beforeArgs = "r.session_id = ?", []any{f.Session}
+		}
+		return d.sql.QueryRowContext(d.readCtx(), `WITH before AS (
+				SELECT r.id AS rid, SUM(CASE WHEN `+cond+` AND r.saved_unique > 0
+						THEN r.saved_unique ELSE 0 END)
+					OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id
+						ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS s
+				FROM requests r
+				WHERE `+beforeCond+`)
+			SELECT COALESCE(SUM(before.s),0)
+			FROM requests p JOIN before ON before.rid = p.id WHERE p.keepalive = 1`,
+			append(args, beforeArgs...)...).Scan(&inflation)
 	})
-	// Which cache TTL tier each request asked for. A map rather than columns because ""
-	// (no cache_control at all) is a real third answer that must not be folded into 5m.
+	// Which cache TTL tier each request asked for (a map rather than columns because "" -- no
+	// cache_control at all -- is a real third answer that must not be folded into 5m), the three
+	// reason/accounting breakdowns, and the MODAL breakpoint placement (not the mean: 1.5
+	// breakpoints in a system block is not a thing any request did) are ONE grouped read of the
+	// table, each answer a re-grouping of it in Go. They were five passes over every request.
 	g.Go(func() error {
-		m, err := d.countBy(cond, args, "cache_ttl")
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.token_accounting, r.cache_miss_reason,
+				r.uncompressed_reason, r.cache_ttl, r.cache_bp_system, r.cache_bp_tools,
+				r.cache_bp_messages, r.cache_bp_blocks, COUNT(*)
+			FROM requests r WHERE `+cond+`
+			GROUP BY 1,2,3,4,5,6,7,8 ORDER BY 1,2,3,4,5,6,7,8`, args...)
 		if err != nil {
 			return err
 		}
-		ttl = m
-		return nil
-	})
-	// The MODAL breakpoint placement, not the mean: 1.5 breakpoints in a system block is not
-	// a thing any request did, and an average across locations describes no prompt at all.
-	g.Go(func() error {
-		err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
-				r.cache_bp_blocks, COUNT(*) AS n
-			FROM requests r WHERE `+cond+`
-			GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 1`, args...).Scan(&bs, &bt, &bm, &bb, &modalRequests)
-		if err == sql.ErrNoRows {
-			return nil
+		defer rows.Close()
+		ttl, accountingM, cacheMissM, uncompressedM = map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}
+		type bp struct{ s, t, m, b int64 }
+		placed := map[bp]int64{}
+		var order []bp
+		for rows.Next() {
+			var acct, miss, unc, tier string
+			var k bp
+			var n int64
+			if err := rows.Scan(&acct, &miss, &unc, &tier, &k.s, &k.t, &k.m, &k.b, &n); err != nil {
+				return err
+			}
+			accountingM[acct] += n
+			cacheMissM[miss] += n
+			uncompressedM[unc] += n
+			ttl[tier] += n
+			if _, seen := placed[k]; !seen {
+				order = append(order, k)
+			}
+			placed[k] += n
 		}
-		return err
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// First strictly-greater wins, walking the placements in key order: a tie goes to the
+		// smallest key, which is where the ORDER BY n DESC LIMIT 1 this replaces landed.
+		sort.Slice(order, func(i, j int) bool {
+			a, b := order[i], order[j]
+			if a.s != b.s {
+				return a.s < b.s
+			}
+			if a.t != b.t {
+				return a.t < b.t
+			}
+			if a.m != b.m {
+				return a.m < b.m
+			}
+			return a.b < b.b
+		})
+		for _, k := range order {
+			if placed[k] > modalRequests {
+				modalRequests, bs, bt, bm, bb = placed[k], k.s, k.t, k.m, k.b
+			}
+		}
+		return nil
 	})
 	// Context resets, DERIVED: a turn that arrived smaller than the previous turn of its own
 	// session. This is the bound on amortization — replay accrues only while removed content
@@ -864,14 +985,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// (37,954 rows there, 526 here) and under each tenant scope separately. Keeping the CTE
 		// self-contained but listing only the filterable columns was also tried and is the worse
 		// of the two at 135 ms.
-		q := `WITH prev AS (
-			SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
-				OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
-			FROM requests r
-		) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
-			AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
-			AND r.tokens_before < prev.prev_tokens_before`
-		return d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&o.CompactionResets)
+		// #492: the CTE used to scan `FROM requests r` with no WHERE at all — every row of every
+		// session, every call, however narrow the outer `cond` is. PARTITION BY session_id means
+		// a session's LAG values never depend on any other session's rows, so when the caller
+		// asked for one session, the CTE only needs that session's own rows: same prev_tokens_before
+		// for every row that survives, at a cost bounded by the session instead of the table.
+		// On a real deployment this unscoped scan, combined with stale planner statistics, is what
+		// made a single session's /api/stats?lean=1 call run for minutes instead of milliseconds —
+		// see the issue for the measured timings.
+		q, qargs := compactionResetsQuery(f, cond, args)
+		return d.sql.QueryRowContext(d.readCtx(), q, qargs...).Scan(&o.CompactionResets)
 	})
 	// The estimator check, on the only population where the two counts are comparable: requests
 	// where nothing was removed, so tokens_before and the provider's billed input describe the
@@ -881,51 +1004,45 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// takes a bare column name and so cannot express this ratio. The median query depends on
 	// the row-count query run just before it (the OFFSET is half the count), so those two stay
 	// sequential WITHIN this one goroutine — only across the other units does this run concurrently.
+	// Both ratio medians from ONE read of the rows either population contains: tokens_before =
+	// tokens_after (nothing removed, so our count and the provider's describe the same prompt) and
+	// tokens_before > tokens_after (the rows that produce the savings figures), each with the
+	// complete-accounting, non-empty-billed-input guard. The element at n/2 of the sorted ratios is
+	// what ORDER BY ratio LIMIT 1 OFFSET n/2 returned, and n is the row count that was COUNTed.
 	g.Go(func() error {
-		const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
-			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
-			args...).Scan(&estimatorDivergenceRows); err != nil {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT
+				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before,
+				r.tokens_before = r.tokens_after
+			FROM requests r WHERE `+cond+` AND r.tokens_before >= r.tokens_after AND r.tokens_before > 0
+				AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`, args...)
+		if err != nil {
 			return err
 		}
-		if estimatorDivergenceRows > 0 {
-			var med sql.NullFloat64
-			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
-				FROM requests r WHERE `+cond+ratioPop+`
-				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
-				append(append([]any(nil), args...), estimatorDivergenceRows/2)...).Scan(&med); err != nil {
+		defer rows.Close()
+		var same, compacted []float64
+		for rows.Next() {
+			var ratio float64
+			var eq bool
+			if err := rows.Scan(&ratio, &eq); err != nil {
 				return err
 			}
-			estimatorDivergence = med.Float64
+			if eq {
+				same = append(same, ratio)
+			} else {
+				compacted = append(compacted, ratio)
+			}
 		}
-		return nil
-	})
-	// The SAME ratio over the population that actually produces the savings figures — rows
-	// where we DID remove something. #240's reviewers reached for the divergence above as the
-	// correction factor for saved_usd, and it cannot be: ratioPop requires
-	// tokens_before = tokens_after, the strict COMPLEMENT of the rows saved_usd is nonzero on.
-	// Publishing both makes that visible instead of leaving the reader to assume one stands
-	// for the other. Measured 2026-09-15 on 281,421 production rows: the compacted population
-	// does NOT converge on the uncompacted one as transcripts grow — pooled 3.71x at
-	// 100-200k against 1.91x untouched — so the two are different facts, not one estimate.
-	g.Go(func() error {
-		const compactedPop = ` AND r.tokens_before > r.tokens_after AND r.tokens_before > 0
-			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+compactedPop,
-			args...).Scan(&estimatorDivergenceCompactedRows); err != nil {
+		if err := rows.Err(); err != nil {
 			return err
 		}
-		if estimatorDivergenceCompactedRows > 0 {
-			var med sql.NullFloat64
-			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
-				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
-				FROM requests r WHERE `+cond+compactedPop+`
-				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
-				append(append([]any(nil), args...), estimatorDivergenceCompactedRows/2)...).Scan(&med); err != nil {
-				return err
-			}
-			estimatorDivergenceCompacted = med.Float64
+		sort.Float64s(same)
+		sort.Float64s(compacted)
+		estimatorDivergenceRows, estimatorDivergenceCompactedRows = int64(len(same)), int64(len(compacted))
+		if len(same) > 0 {
+			estimatorDivergence = same[len(same)/2]
+		}
+		if len(compacted) > 0 {
+			estimatorDivergenceCompacted = compacted[len(compacted)/2]
 		}
 		return nil
 	})
@@ -935,44 +1052,37 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	g.Go(func() error {
 		kaCond, kaArgs := withKeepAlive(f).where()
 		return d.sql.QueryRowContext(d.readCtx(), `SELECT
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
-			FROM requests r WHERE `+kaCond, kaArgs...).Scan(&keepAlivePings, &keepAlivePingUSD)
+			COALESCE(SUM(CASE WHEN `+autoPing+` THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN `+autoPing+` THEN r.cost_usd ELSE 0 END),0), `+manualSelect+`
+			FROM requests r WHERE `+kaCond, kaArgs...).Scan(append([]any{&keepAlivePings, &keepAlivePingUSD}, manualPings.dest()...)...)
 	})
-	for name, col := range map[string]string{
-		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
-	} {
-		name, col := name, col // captured per-goroutine, not by the shared loop variable
-		g.Go(func() error {
-			m, err := d.countBy(cond, args, col)
-			if err != nil {
+	// Both p95 latencies from one read. Exact, as DB.percentile is: the sorted column's element at
+	// int((n-1)*0.95) over the rows with a value, which is what its ORDER BY .. OFFSET picked, but
+	// without sorting the whole window twice inside SQLite.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.cg_latency_ms, r.upstream_ms
+			FROM requests r WHERE `+cond+` AND (r.cg_latency_ms > 0 OR r.upstream_ms > 0)`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var cg, up []float64
+		for rows.Next() {
+			var a, b sql.NullFloat64
+			if err := rows.Scan(&a, &b); err != nil {
 				return err
 			}
-			switch name {
-			case "accounting":
-				accountingM = m
-			case "cache_miss":
-				cacheMissM = m
-			case "uncompressed":
-				uncompressedM = m
+			if a.Valid && a.Float64 > 0 {
+				cg = append(cg, a.Float64)
 			}
-			return nil
-		})
-	}
-	g.Go(func() error {
-		v, err := d.percentile(cond, args, "cg_latency_ms", 0.95)
-		if err != nil {
+			if b.Valid && b.Float64 > 0 {
+				up = append(up, b.Float64)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			return err
 		}
-		p95cg = v
-		return nil
-	})
-	g.Go(func() error {
-		v, err := d.percentile(cond, args, "upstream_ms", 0.95)
-		if err != nil {
-			return err
-		}
-		p95up = v
+		p95cg, p95up = percentileOf(cg, 0.95), percentileOf(up, 0.95)
 		return nil
 	})
 	if err := g.Wait(); err != nil {
@@ -999,13 +1109,15 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.KeepAlivePings, o.KeepAlivePingUSD = keepAlivePings, keepAlivePingUSD
+	o.ManualPings = manualPings.pings()
 	// NetSavedUSD, KeepAliveNetUSD (never the gross — o.CostUSD excludes ping rows, so the
 	// pings' own spend appears nowhere else in this walk) and TotalSavedUSD (the three
 	// addends are disjoint token sets: compaction's removals, the prefix split's stable
 	// half, and the entries the pings refreshed) all come from the ONE formula SavingsTotals
 	// also uses, so the dashboard and /stats can never disagree about what they mean.
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
+		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	// Both totals exist before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves both.
@@ -1039,6 +1151,68 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.Denominators = o.denominators()
 	o.Waterfall = o.waterfall()
 	return o, nil
+}
+
+// replayCeilingQuery builds the SQL and args Overview uses to compute the replay ceiling
+// (replayProjectedRaw) for f — pulled out of Overview so #492's regression test
+// (TestOverviewSessionScopedQueriesDoNotScanWholeTable) can run EXPLAIN QUERY PLAN against
+// the EXACT statement the server executes, rather than a hand-copied duplicate that could
+// silently drift from the real one.
+//
+// #492: when f.Session is set, the window-function CTE this used to be — unconditionally,
+// even when scoped to one session — measured 3.6-4.8 s through modernc.org/sqlite on a real
+// deployment (262 MB, 12.4k requests, one session of 5,723), against 165 ms for this
+// correlated form, byte-identical result. `COUNT(*) OVER (PARTITION BY ...)` with no ORDER
+// BY/frame, paired with a separately-ordered ROW_NUMBER() in the same CTE, is specifically
+// what this driver executes badly, independent of how much data it reads — see
+// dash/cachehistory.go's CachesplitHistoricalUSD for the same shape, scoped the same way, and
+// compactionResetsQuery below for a sibling window query that stayed fast once scoped, so this
+// is not blanket advice against window functions. Unscoped (the whole-deployment view) keeps
+// the window form: nothing above measured that case, and #492 is not about it.
+func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
+	if f.Session != "" {
+		return `SELECT COALESCE(SUM(r.saved_unique * (
+				SELECT COUNT(*) FROM requests p
+				WHERE p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
+			)),0)
+			FROM requests r WHERE ` + cond + ` AND r.saved_unique > 0`, args
+	}
+	return `WITH later AS (
+			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
+				- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+			FROM requests r
+			WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
+		SELECT COALESCE(SUM(r.saved_unique * later.n),0)
+		FROM requests r JOIN later ON later.rid = r.id WHERE ` + cond + ` AND r.saved_unique > 0`, args
+}
+
+// compactionResetsQuery builds the SQL and args Overview uses for CompactionResets — pulled
+// out for the same reason as replayCeilingQuery above, and tested the same way.
+//
+// #492: the CTE used to scan `FROM requests r` with no WHERE at all — every row of every
+// session, every call, however narrow the outer `cond` is. PARTITION BY session_id means a
+// session's LAG values never depend on any other session's rows, so when the caller asked for
+// one session, the CTE only needs that session's own rows: same prev_tokens_before for every
+// row that survives, at a cost bounded by the session instead of the table. On a real
+// deployment this unscoped scan, combined with the query planner's statistics having gone
+// stale, is what made a single session's /api/stats?lean=1 call run for minutes instead of
+// milliseconds — see the issue for the measured timings. Unlike replayCeilingQuery above, this
+// one stayed a fast window function once scoped (tens of milliseconds), so it keeps the LAG
+// form rather than moving to a correlated subquery.
+func compactionResetsQuery(f Filter, cond string, args []any) (string, []any) {
+	prevCond, prevArgs := "", []any{}
+	if f.Session != "" {
+		prevCond, prevArgs = "WHERE r.session_id = ?", []any{f.Session}
+	}
+	q := `WITH prev AS (
+		SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+		FROM requests r
+		` + prevCond + `
+	) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
+		AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
+		AND r.tokens_before < prev.prev_tokens_before`
+	return q, append(prevArgs, args...)
 }
 
 // SetTiers attaches the read-time per-tier costing and the two figures that depend on it:
@@ -1189,6 +1363,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"at 1.25x rather than 1x. A ceiling rather than a floor, and the one figure here " +
 				"that is: the provider's cache is keyed on content, so another session sending the " +
 				"same prefix would have refreshed it for nothing."},
+		{Key: "manual_pings", Label: "Manual pings", DeltaUSD: -o.ManualPings.SavedUSD,
+			Description: "Cache rewrites avoided because YOU pressed Ping (the dashboard or the plugin " +
+				"button), net of what those pings cost. Its own line, outside the cache strategy: a " +
+				"person decided it, the strategy did not, so it never moves a strategy's net. Each " +
+				"press is credited the cache write it avoided on the context as it stood, priced at " +
+				"the tier the cache was written at, minus the ping's own cost; a ping that read " +
+				"nothing is credited nothing. A ceiling, like the keep-alive saving: another session " +
+				"sending the same prefix would have refreshed it for free. It also overlaps the " +
+				"keep-alive credit when automatic pings are on, because a press is only possible " +
+				"while the proxy holds the thread for keep-alive, and an automatic ping would " +
+				"often have refreshed the cache anyway."},
 		{Key: "decl_filter_saved", Label: "Declarations no longer sent", DeltaUSD: -o.DeclFilterUSD,
 			Description: "Tool and MCP schemas, and skill listing entries, that the declaration " +
 				"filter stopped sending — measured on requests that were really sent, from the " +
@@ -1199,10 +1384,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"no figure in it and appeared in no total on this page at all, even though 82.7% " +
 				"of a declared catalogue is never invoked and it is the largest lever measured in " +
 				"this project."},
+		{Key: "defer_net", Label: "Tool deferral", DeltaUSD: -o.DeferNetUSD,
+			Description: "Tool definitions the ultrahigh preset left out of the prompt until the model " +
+				"searched for them, NET of the names list and the searches that cost. From the " +
+				"per-request ledger, so it is the same figure as the Tools page. Its own line: the " +
+				"definitions sit in the top-level `tools` array, which the compaction walk never " +
+				"counted, and deferral runs after the declaration filter, so it holds none of the " +
+				"tokens that filter dropped."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
-				"keep-alive's NET — its savings minus what its pings cost — plus the declarations " +
-				"the removal filter stopped sending. FOUR disjoint token " +
+				"keep-alive's NET — its savings minus what its pings cost — plus the manual pings' " +
+				"net, plus the declarations the removal filter stopped sending, plus tool deferral's net. FIVE disjoint token " +
 				"sets, all ours, so nothing is counted twice: compaction's removals never reached " +
 				"the provider, the split moved a breakpoint over tokens that did, the " +
 				"keep-alive refreshed entries that already existed, and the filter's declarations " +
@@ -1276,4 +1468,14 @@ func (d *DB) percentile(cond string, args []any, col string, p float64) (float64
 		return 0, nil
 	}
 	return v.Float64, err
+}
+
+// percentileOf is DB.percentile's rank rule over values already in hand: the element at
+// int((n-1)*p) of the ascending sort, 0 for none.
+func percentileOf(xs []float64, p float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sort.Float64s(xs)
+	return xs[int64(float64(len(xs)-1)*p)]
 }

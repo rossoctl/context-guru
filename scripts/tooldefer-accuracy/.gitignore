@@ -1,0 +1,13 @@
+bin/
+cap/
+cfg/
+logs/
+runs/
+work/
+snap/
+tmpl/
+*.pid
+mcp.json
+settings.json
+capture
+*db-*/

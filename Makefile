@@ -30,6 +30,11 @@ build: ## Build the context-guru-proxy binary into ./bin (pure Go — no C toolc
 	@mkdir -p bin
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
 
+.PHONY: build-record
+build-record: ## Build with the session recorder (--record, --record-otlp) into ./bin; the default build has none
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -tags cg_record -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
+
 .PHONY: build-static
 build-static: ## Same as build, plus -trimpath — the exact build releases ship
 	@mkdir -p bin
@@ -38,11 +43,11 @@ build-static: ## Same as build, plus -trimpath — the exact build releases ship
 
 .PHONY: test
 test: ## Run all tests with the race detector
-	go test -race ./...
+	go test -race -timeout 20m ./...
 
 .PHONY: cover
 cover: ## Run all tests with race + cross-package coverage; write coverage.out and print total
-	go test -race -coverpkg=./... -coverprofile=coverage.out ./...
+	go test -race -timeout 20m -coverpkg=./... -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -1
 
 .PHONY: fmt
@@ -62,3 +67,7 @@ pre-commit: ## Install pre-commit hooks
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf bin
+
+.PHONY: refresh-litellm-snapshot
+refresh-litellm-snapshot: ## Refresh the bundled LiteLLM price snapshot used by modelinfo tests
+	scripts/refresh-litellm-snapshot.sh

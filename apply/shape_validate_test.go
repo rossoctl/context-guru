@@ -49,9 +49,15 @@ func (shapeModel) Complete(context.Context, string) (string, error) {
 	return "essential facts from the earlier trajectory", nil
 }
 
-func assertShapeValid(t *testing.T, what string, msgs []bschemas.ChatMessage) {
+// assertShapeValid judges the normalized list WITH its wire grouping (#461). The groups
+// come from normalize's own slots, via wireGroups: a sibling text block sharing a wire
+// message with the tool_result that answers a call is then read as the answer it is,
+// instead of as a break in the run that answers the call — the false positive the grouped
+// validator exists to fix. nil groups (a slot path that did not parse) is the legacy
+// every-message-its-own-wire-message reading.
+func assertShapeValid(t *testing.T, what string, msgs []bschemas.ChatMessage, groups []int) {
 	t.Helper()
-	if vs := schema.ValidateShape(msgs); len(vs) != 0 {
+	if vs := schema.ValidateShapeGrouped(bschemas.Anthropic, msgs, groups); len(vs) != 0 {
 		t.Errorf("%s: %d shape violation(s) — a provider rejects this request:\n%s",
 			what, len(vs), schema.FormatShapeViolations(vs, msgs))
 	}
@@ -86,11 +92,11 @@ func TestRealCapturedTrafficIsShapeValid(t *testing.T) {
 		if len(msgs) == 0 {
 			t.Fatalf("%s: fixture carries no messages", name)
 		}
-		norm, _ := normalize(bschemas.Anthropic, msgs)
+		norm, slots := normalize(bschemas.Anthropic, msgs)
 		if len(norm) == 0 {
 			t.Fatalf("%s: normalized to nothing", name)
 		}
-		assertShapeValid(t, name, norm)
+		assertShapeValid(t, name, norm, wireGroups(slots))
 		checked++
 	}
 
@@ -225,7 +231,7 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 			if len(arr) != len(msgs) && pl.name == "summarize+extract_llm" {
 				sawRewritingRun = true
 			}
-			norm, _ := normalize(bschemas.Anthropic, arr)
+			norm, slots := normalize(bschemas.Anthropic, arr)
 			for _, m := range norm {
 				if a := m.ChatAssistantMessage; a != nil && len(a.ToolCalls) >= 2 {
 					sawParallelCall = true
@@ -234,7 +240,7 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 					sawResult = true
 				}
 			}
-			assertShapeValid(t, what, norm)
+			assertShapeValid(t, what, norm, wireGroups(slots))
 		}
 	}
 	// Vacuity guards: this test is worthless if summarize never acted, and it does not
@@ -254,5 +260,158 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 	if !sawRewritingRun {
 		t.Fatal("the two-component pipeline never changed the message count, so the " +
 			"count-change rebuild never ran and assertWireRolesLegal cannot fail")
+	}
+}
+
+// buildSplitGroupBody is an Anthropic-shaped transcript (roles strictly alternating, as the
+// real API requires) with one wire message (index 6) that holds BOTH a sibling text block and
+// the tool_result answering the PRECEDING message's tool_use (index 5) — the exact shape #457
+// is about — plus enough ordinary filler turns on each side to position the group either
+// inside a summarized span or inside a kept tail, depending on keep_last.
+//
+// This fixture and its test live INSIDE the apply package (not beside the other sibling tests
+// in normalizer_siblings_test.go) because the shape assertion needs normalize's slots and
+// wireGroups, which are package-internal — the grouping-aware validation that replaced the
+// hand-rolled wire-pairing check the external file used to carry.
+func buildSplitGroupBody() []byte {
+	// summarize's own fixed wrapper text ("=== History Summary ===\n...Do not summarize the
+	// conversation again.") costs the summary message ~50-80 tokens by itself, REGARDLESS of
+	// how short the model's reply is. Every filler message below must be large enough, on its
+	// own, that compacting it still shrinks the request net of that fixed overhead — otherwise
+	// the pipeline's never-worse guard (components/pipeline.go) correctly reverts a "summary"
+	// that grew the request, and the splice this test exists to exercise never happens.
+	filler := func(n string) string { return "small talk " + n + " " + strings.Repeat("filler word ", 60) }
+	body, _ := json.Marshal(map[string]any{
+		"model": "claude-x",
+		"messages": []map[string]any{
+			{"role": "user", "content": "task"},
+			{"role": "assistant", "content": filler("1")},
+			{"role": "user", "content": filler("2")},
+			{"role": "assistant", "content": filler("3")},
+			{"role": "user", "content": filler("4")},
+			{"role": "assistant", "content": []map[string]any{
+				{"type": "tool_use", "id": "call_a", "name": "Read", "input": map[string]any{}},
+			}},
+			{"role": "user", "content": []map[string]any{
+				{"type": "text", "text": "SIBLING TEXT"},
+				{"type": "tool_result", "tool_use_id": "call_a",
+					"content": "tool output a " + strings.Repeat("filler ", 60)},
+			}},
+			{"role": "assistant", "content": "ran it"},
+			{"role": "user", "content": "the final question"},
+		},
+	})
+	return body
+}
+
+// replyModel is shapeModel with a settable reply, for the split-group rebuild. Tagged, not a
+// bare string: summarize's ensureSummaryTags wraps an untagged reply, but cache_aware_summarizer
+// requires the model's own output to already carry a closing </summary> tag — see
+// cacheAwareSummaryIncomplete — or it discards the reply as truncated and never produces a
+// checkpoint for either case to splice.
+type replyModel struct{ reply string }
+
+func (m replyModel) Complete(context.Context, string) (string, error) { return m.reply, nil }
+
+// CompleteMessages makes replyModel also satisfy components.MessagesModel, which
+// cache_aware_summarizer requires — components.Model alone is not enough for it. The prompt
+// is flattened away: this model's job is only to answer with one fixed string.
+func (m replyModel) CompleteMessages(ctx context.Context, _ string, _ []bschemas.ChatMessage) (string, error) {
+	return m.Complete(ctx, "")
+}
+
+// assertSplitGroupRebuild runs the two-pass commission/splice cycle for a count-changing
+// summarizer and checks: the split group (sibling text + its tool_result) survives EITHER
+// wholly verbatim (kept-tail case) or wholly gone (summarized-away case) — never one half of
+// each — and the result is shape-valid (#457 requirement 1 and 3: the rebuild must not split a
+// wire message or orphan a tool_use/tool_result pairing).
+func assertSplitGroupRebuild(t *testing.T, pipelineYAML string, groupInTail bool) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(pipelineYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	body := buildSplitGroupBody()
+	model := replyModel{reply: "<summary>SUMMARY-MARKER covering the exchange</summary>"}
+
+	// Two passes: the first commissions the summary off the hot path and forwards the body
+	// untouched, the second splices the result — see TestSummarizeCountChangeLossless.
+	BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false,
+		components.ModelSpec{Incoming: model})
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, changed := BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false,
+		components.ModelSpec{Incoming: model})
+	if !changed {
+		t.Fatal("the summarizer never acted — the count-changing rebuild under test never ran")
+	}
+
+	hasSibling := strings.Contains(string(out), "SIBLING TEXT")
+	hasTool := strings.Contains(string(out), "tool output a")
+	if groupInTail {
+		if !hasSibling || !hasTool {
+			t.Errorf("the split group was expected verbatim in the kept tail, got sibling=%v tool=%v\n%s",
+				hasSibling, hasTool, out)
+		}
+	} else if hasSibling || hasTool {
+		t.Errorf("the split group was expected summarized away WHOLE, but found sibling=%v tool=%v (one "+
+			"half survived while the other was summarized -- a split wire message)\n%s", hasSibling, hasTool, out)
+	}
+
+	// Shape must stay valid either way: no leaked role=tool message, no orphaned
+	// tool_use/tool_result pairing. Roles are checked on the RAW BODY (assertWireRolesLegal
+	// — the re-normalized view cannot see them, see its comment); the pairing is judged on
+	// the re-normalized view WITH its wire grouping. That grouping is what made the old
+	// hand-rolled assertAnthropicWirePairing redundant: a sibling text block legitimately
+	// sits between a tool_use's answering message and its tool_result block, and the grouped
+	// validator reads the pair as answered because both normalize out of the ONE wire
+	// message that follows the call (#461).
+	assertWireRolesLegal(t, "split-group rebuild", out)
+	norm, slots := normalize(bschemas.Anthropic, gjson.GetBytes(out, "messages").Array())
+	assertShapeValid(t, "split-group rebuild", norm, wireGroups(slots))
+}
+
+// TestSummarizeRebuildWithASplitGroup is #457 requirement 3 for `summarize`: run the
+// count-changing splice with the split group positioned inside the summarized span, and again
+// inside the kept tail.
+func TestSummarizeRebuildWithASplitGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		keepLast    int
+		groupInTail bool
+	}{
+		{"group inside the summarized span", 2, false},
+		{"group inside the kept tail", 5, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: " +
+				fmt.Sprintf("%d", tc.keepLast) + ", start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n"
+			assertSplitGroupRebuild(t, yaml, tc.groupInTail)
+		})
+	}
+}
+
+// TestCacheAwareSummarizerRebuildWithASplitGroup is the same requirement for
+// cache_aware_summarizer, which shares summarizeSpan but reaches it through its own config and
+// splice path.
+func TestCacheAwareSummarizerRebuildWithASplitGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		keepLast    int
+		groupInTail bool
+	}{
+		// The split group is the transcript's LAST tool exchange. cache_aware_summarizer keeps that
+		// exchange verbatim after a splice (#723), so with keep_last_turns 2 it is kept WHOLE too: the
+		// "never split" invariant still holds, and the shape check below still runs.
+		{"group is the last tool exchange, so it is kept", 2, true},
+		{"group inside the kept tail", 5, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n" +
+				"    keep_last_turns: " + fmt.Sprintf("%d", tc.keepLast) + "\n    min_tokens: 1\n" +
+				"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n"
+			assertSplitGroupRebuild(t, yaml, tc.groupInTail)
+		})
 	}
 }

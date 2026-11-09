@@ -2,6 +2,7 @@ package kvcache
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -128,6 +129,33 @@ type BudgetPolicy struct {
 	// who omits the field is priced against the documented behaviour rather than against
 	// three falses that describe no provider.
 	Semantics Semantics
+
+	// memo remembers the last PingBudget answer. Simulate asks the same arm twice per request, once
+	// inside Decide and once for the span budget, with the very same Observation, and the answer
+	// costs a full induction over the reuse model's curve. Optional: a literal BudgetPolicy without
+	// it recomputes, as before. Shared by value copies of the policy, so one policy value is one
+	// memo, and guarded because a policy value may be shared between goroutines.
+	memo *budgetMemo
+}
+
+type budgetMemo struct {
+	mu     sync.Mutex
+	valid  bool
+	o      Observation
+	budget int
+	ok     bool
+}
+
+// same reports whether two observations are the same decision point. Observation holds an
+// interface (Stats); comparing two of them panics if the dynamic type is not comparable, in which
+// case they are simply not treated as the same.
+func (o Observation) same(p Observation) (eq bool) {
+	defer func() {
+		if recover() != nil {
+			eq = false
+		}
+	}()
+	return o == p
 }
 
 // DefaultBudgetMaxK is how far the induction looks ahead.
@@ -237,6 +265,20 @@ func (b BudgetPolicy) Decide(o Observation) Action {
 // one gate that is NOT in that list: it reports (0, true), because declining to ping is a
 // decision.
 func (b BudgetPolicy) PingBudget(o Observation) (budget int, ok bool) {
+	if m := b.memo; m != nil {
+		m.mu.Lock()
+		if m.valid && m.o.same(o) {
+			budget, ok = m.budget, m.ok
+			m.mu.Unlock()
+			return budget, ok
+		}
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			m.valid, m.o, m.budget, m.ok = true, o, budget, ok
+			m.mu.Unlock()
+		}()
+	}
 	// Predictor is injectable — CLAUDE.md's fail-open rule means a third-party implementation
 	// panicking must revert to Config.MaxPings (ok=false), not take down the caller. This is
 	// the one seam both real callers (Decide and the simulator) go through, so it is the one
@@ -307,9 +349,19 @@ func (b BudgetPolicy) Windows(o Observation) (h, s []float64, ok bool) {
 	iv := b.interval()
 	life := TTL5m.Lifetime()
 	h, s = make([]float64, n), make([]float64, n)
+	// A predictor that can hand out its curve for this observation is asked once, not 4n times:
+	// see ReuseModel.reuseCurve. Any other predictor is asked point by point, as before.
+	reuse := func(horizon time.Duration) (float64, bool) { return b.Predictor.ReuseProbability(o, horizon) }
+	if cp, isCurve := b.Predictor.(interface {
+		reuseCurve(Observation) (func(time.Duration) float64, bool)
+	}); isCurve {
+		if curve, ok := cp.reuseCurve(o); ok {
+			reuse = func(horizon time.Duration) (float64, bool) { return curve(horizon), true }
+		}
+	}
 	for j := 1; j <= n; j++ {
 		tj := time.Duration(j) * iv
-		alive, aok := b.Predictor.ReuseProbability(o, tj)
+		alive, aok := reuse(tj)
 		if !aok {
 			return nil, nil, false
 		}
@@ -323,9 +375,9 @@ func (b BudgetPolicy) Windows(o Observation) (h, s []float64, ok bool) {
 		if j > 1 {
 			deadline = time.Duration(j-1)*iv + life
 		}
-		fEnd, e1 := b.Predictor.ReuseProbability(o, tj+life)
-		fStart, e2 := b.Predictor.ReuseProbability(o, deadline)
-		fNext, e3 := b.Predictor.ReuseProbability(o, tj+iv)
+		fEnd, e1 := reuse(tj + life)
+		fStart, e2 := reuse(deadline)
+		fNext, e3 := reuse(tj + iv)
 		if !e1 || !e2 || !e3 {
 			return nil, nil, false
 		}

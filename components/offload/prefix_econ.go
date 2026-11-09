@@ -2,19 +2,20 @@ package offload
 
 import (
 	"math"
+	"sync"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 )
 
 // Economics of deliberately mutating the provider's CACHED PREFIX.
 //
 // Every other offloader refuses to touch the prefix (Ctx.TailOnly) because breaking the
-// prefix hash at index i forces the provider to cache-WRITE everything from i onward. Two
-// components choose to pay that on purpose — coref, and extract_llm when
-// allow_cached_prefix is set — so the price lives here rather than being reimplemented,
-// slightly differently, in each of them.
+// prefix hash at index i forces the provider to cache-WRITE everything from i onward. coref chooses to
+// pay that on purpose, so the price lives here rather than being reimplemented in it.
 //
 //	cost    = W x (2.50 - 0.20) = 11.5 x W   (in cache-read-equivalents)
 //	benefit = S x T x 0.20      =  S x T
@@ -24,30 +25,14 @@ import (
 // counted from the shallowest mutated index to the CACHED boundary, because content past
 // that boundary was never cached and would be written this turn regardless; T is how many
 // turns remain to collect the saving on, which nobody has, so it is estimated from how
-// fast the transcript has been growing.
+// fast the BILLED prompt has been growing on this thread (cacheRewriteHorizon).
 //
-// T IS MEASURED ON THE REQUEST AS THE REMOVAL WILL LEAVE IT, not as it arrived — see
-// turnsRemainingAfter. An earlier form measured it on the arriving request, which made the
-// arithmetic self-defeating at exactly the pressure where a sweep is most wanted: at 90% of
-// the window T read as zero, so no benefit could ever repay, even though removing half the
-// transcript restores a long horizon. The restated consequence is narrower than the one
-// this comment used to draw: a rewrite is charity when the removal is SMALL relative to the
-// room it needs to buy back, which is a statement about the removal's size and not about
-// where in the window it happens.
-//
-// A CALLER THAT PAYS A MODEL TO DECIDE has a second one-time cost, a discount on S, and a
-// belief about what a removed token is worth. It takes prefixRewritePaysCharging instead:
-//
-//	cost    = 11.5 x W + ask         benefit = (S x approval x premium) x T
-//
-// `premium` is the reward premium: measured on iteration 024, the component paid $20.26 to
-// bank $0.72 of cache savings — 28:1 against — while task reward rose 25% with 8 tasks
-// better and none worse. So a removed token demonstrably delivers value the cache term does
-// not see, and `premium` is where that belief is stated, in config, falsifiably.
-//
-// coref takes none of the three — its index is deterministic and free, and its selection is
-// calibrated against the unadjusted expression — so it keeps prefixRewritePays, which is
-// that same expression with ask 0, approval 1 and premium 1. See sweep_askcost.go.
+// WHAT WAS HERE, AND WENT (#404 PR C). The sweep's own pricing (prefixRewriteNet, and the ask cost,
+// approval, reward premium and horizon-credit terms of prefixRewritePaysWith) priced a rewrite the
+// sweep chose to make on a LIVE cache, and a model ask charged against it. The sweep no longer does
+// either: it asks at the keep-alive ping, where the read is already paid, and applies only on a cold
+// request, where the write happens anyway. Nothing called that code but the sweep, so it went with the
+// trigger it served. What is left is exactly what coref reaches.
 
 // cacheWriteX is one cache-write in cache-read-equivalents: ($2.50 - $0.20) / $0.20 on
 // Anthropic's published per-MTok prices. Shared with deploy/harbor/coref.py.
@@ -79,81 +64,25 @@ func prefixRewriteWindow(req *bschemas.BifrostChatRequest, c *components.Ctx) in
 // prefixRewritePays applies S*T > 11.5*W for a mutation of `saved` tokens whose shallowest
 // touched index is `shallowest`. Returns (needed T, estimated T, whether it clears).
 //
+// It uses the fallback horizon only (no billed growth). Callers that track growth use
+// prefixRewritePaysWith.
+func prefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx) (need, have int, ok bool) {
+	need, have, ok, _ = prefixRewritePaysWith(req, saved, shallowest, c, billedGrowth{})
+	return need, have, ok
+}
+
+// prefixRewritePaysWith is prefixRewritePays with the thread's billed growth. It also returns the
+// horizon, so the caller can count a fallback.
+//
 // Always clears when the context window is unknown — the same convention as every
 // fraction-based threshold in this package: an unresolvable threshold imposes no
 // constraint rather than silently disabling the pass.
-func prefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx) (need, have int, ok bool) {
-	return prefixRewritePaysWith(req, saved, shallowest, rewritePricing{approval: 1, premium: 1}, c)
-}
-
-// rewritePricing carries the terms a caller that PAYS A MODEL to decide has and coref does not. A
-// struct rather than four more positional parameters, because the call sites are the documentation:
-// `rewritePricing{approval: 1, premium: 1}` reads as "no ask, no discount, no belief", which is exactly
-// what coref is, and a reader does not have to count arguments to see it.
-type rewritePricing struct {
-	// askUSD is the price of the model call that decides WHAT to remove, in dollars.
-	askUSD float64
-	// approval is the fraction of `saved` that call is expected to actually take. 1 = no discount.
-	approval float64
-	// premium is how much a removed token is believed to be worth relative to the cache read it saves.
-	// 1 = the unadjusted break-even. See extractSweepConfig.RewardPremium.
-	premium float64
-	// creditRemoval measures the turn horizon on the request AS THE REMOVAL WILL LEAVE IT rather than
-	// as it arrived. See turnsRemainingAfter and #232.
-	//
-	// OPT-IN, and coref does not take it: coref calls prefixRewritePays (coref.go:390), which passes
-	// creditRemoval false, so its arithmetic is untouched. THAT default is what protects coref's
-	// calibration — not the state of prefixRewriteNet.
-	//
-	// AN EARLIER VERSION OF THIS COMMENT SAID OTHERWISE, and the correction is worth keeping. It claimed
-	// "coref's drop SELECTION was calibrated against the uncredited form (prefixRewriteNet, which is
-	// unchanged)", which read as a reason not to credit that function. coref never calls it:
-	// prefixRewriteNet has exactly one caller, extract_llm_sweep's selectAffordableDrops. So the
-	// asymmetry it described was protecting nothing, and it cost iteration 028's pre-flight 8 of 9 drops.
-	creditRemoval bool
-}
-
-// prefixRewritePaysWith is prefixRewritePays plus the terms extract_llm_sweep's econ trigger needs and
-// coref does not — see rewritePricing for each of them:
-//
-// See sweep_askcost.go for why both are measured rather than assumed, and for the pre-flight numbers
-// that made them necessary.
-//
-// coref reaches this through prefixRewritePays with an empty-but-for-the-ones pricing, which reduces it
-// to the original arithmetic TERM FOR TERM: it decides with a deterministic index, so there is no call
-// to charge, no vote to discount, no belief to apply, and its horizon stays uncredited. That
-// equivalence is asserted, not assumed — see TestPrefixRewritePaysUnchangedWithoutAnAsk.
-func prefixRewritePaysWith(req *bschemas.BifrostChatRequest, saved, shallowest int,
-	pricing rewritePricing, c *components.Ctx) (need, have int, ok bool) {
-
-	askUSD, approval, premium := pricing.askUSD, pricing.approval, pricing.premium
-
+func prefixRewritePaysWith(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx, g billedGrowth) (need, have int, ok bool, h rewriteHorizon) {
 	if c == nil || c.CtxWindow <= 0 {
-		return 0, 0, true
+		return 0, 0, true, rewriteHorizon{}
 	}
 	if saved <= 0 {
-		return 0, 0, false
-	}
-	if premium <= 0 {
-		premium = 1
-	}
-	// EXPECTED mass, not offered mass. `saved` is the whole inventory; the model takes a subset.
-	//
-	// `premium` is the REWARD PREMIUM: how much a removed token is believed to be worth relative to
-	// the cache read it saves. It multiplies the BENEFIT rather than dividing `need` at the end, which
-	// is the same arithmetic but says the right thing — the claim is about what a removal delivers,
-	// not about tolerating a cost. Note that it therefore shortens repayment for the ADJUDICATION too,
-	// since need is a ratio: if a removed token is worth 20x, the call that produced it repays 20x
-	// faster. That is intended, and it is asserted rather than left to be rediscovered — see
-	// TestRewardPremiumScalesTheAskTermToo.
-	//
-	// 1 means "worth exactly its cache value", which is the original arithmetic and the default
-	// everywhere except a config that opts in. See extractSweepConfig.RewardPremium for the evidence
-	// behind any value above 1, and for why no evidence supports a value below it.
-	expected := float64(saved) * approval
-	eff := expected * premium
-	if eff <= 0 {
-		return 0, 0, false
+		return 0, 0, false, rewriteHorizon{}
 	}
 	end := prefixRewriteWindow(req, c)
 	rewritten := 0
@@ -161,88 +90,32 @@ func prefixRewritePaysWith(req *bschemas.BifrostChatRequest, saved, shallowest i
 		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
 	}
 	rewritten -= saved // the removed mass is not part of what gets written back
-	if rewritten < 0 {
-		// CLAMPED, not returned on. This was `return 0, T, true` — an unconditional authorisation on
-		// the one branch where the cache-write is free and the ask is therefore the ONLY cost, which
-		// is how the econ trigger came to authorise 9 asks in 9 and lose $0.4322 doing it. With
-		// askUSD 0 the arithmetic below still yields need 0 and ok true, so coref is untouched.
-		rewritten = 0
+	h = cacheRewriteHorizon(req, c, g, saved)
+	have = h.turns()
+	if rewritten <= 0 {
+		return 0, have, true, h
 	}
-	// THE HORIZON IS MEASURED ON THE REQUEST AS IT WILL BE, not as it arrived. Removing `eff` tokens
-	// is the very thing being priced, so pricing it against the pre-removal size asks "how many turns
-	// remain if we do nothing" and then charges the removal against that answer. At high pressure the
-	// two differ by everything: a 90k request against a 64k window has NO turns remaining and returns
-	// 0, which no benefit can ever repay — while the same request with 52k removed sits at 60% of the
-	// window with real turns ahead of it. Measured on iteration 024's own decisions, this is the
-	// difference for 51 of 203 firings (25%), and for those a zero horizon refuses unconditionally: no
-	// reward premium, however large, can clear ceil(m*need) <= 0. See issue #232.
-	//
-	// The growth RATE still comes from the pre-removal request, because the rate is a fact about the
-	// history that has already happened; only the ROOM LEFT is a fact about the future. One number
-	// used to serve both, which is why the credit could not simply be subtracted at the call site.
-	reqNow := schema.MessagesTokens(req)
-	after := reqNow
-	if pricing.creditRemoval {
-		// `expected`, NOT `eff`. The two differ by the premium, and the premium is a belief about what
-		// a removed token is WORTH — it is not a claim that more tokens will be removed. Crediting
-		// eff here silently multiplied the removal by the premium, so a premium of 20 pretended 20x
-		// the mass had left the transcript and manufactured a horizon out of nothing. Caught by
-		// TestRewardPremiumCannotAuthoriseAZeroHorizon, which is the assertion that exists to keep
-		// the premium from reaching anything except the benefit term.
-		after = reqNow - int(expected)
-		if after < 1 {
-			after = 1
-		}
-	}
-	have = turnsRemainingAfter(reqNow, after, modelTurns(req), c.CtxWindow)
-	// The ask converted into cache-read-equivalents, so it can be added to a cache-write term already
-	// expressed that way: dollars / (dollars per cache-read token) = tokens.
-	askEquiv := 0.0
-	if askUSD > 0 {
-		if _, read, _ := agentRates(c); read > 0 {
-			askEquiv = askUSD / read
-		}
-	}
-	onetime := cacheWriteX*float64(rewritten) + askEquiv
-	if onetime <= 0 {
-		return 0, have, true
-	}
-	need = int(math.Ceil(onetime / eff))
-	return need, have, need <= have
+	need = int(math.Ceil(cacheWriteX * float64(rewritten) / float64(saved)))
+	return need, have, need <= have, h
 }
 
-// estimateTurnsRemaining projects how many more turns fit before the request reaches the
-// model's window, assuming the transcript keeps growing at the average rate it has so
-// far. Crude on purpose: T only has to be right to an order of magnitude to separate
-// "this rewrite pays for itself" from "this rewrite is charity", and every cheaper proxy
-// (elapsed turns, observed step rate) is the same shape of guess.
+// estimateTurnsRemaining is the FALLBACK horizon: how many more turns fit before the request reaches
+// the model's window, if the transcript keeps growing at the average rate it has so far, counted in
+// LOCAL tokens per model turn.
+//
+// It is NOT right to an order of magnitude. A few large tool outputs move the local tokens per turn by
+// 10x to 100x, and the horizon moves with them (#232). cacheRewriteHorizon is the horizon to use. It
+// prices the turns left from the billed growth the provider reported on this thread. This function
+// runs only when that horizon cannot be computed, and the caller counts each such use with a reason.
 func estimateTurnsRemaining(reqTokens, turns, window int) int {
-	return turnsRemainingAfter(reqTokens, reqTokens, turns, window)
-}
-
-// turnsRemainingAfter is estimateTurnsRemaining with the two roles reqTokens used to play separated:
-//
-//	reqBefore  the request as it stands — the GROWTH RATE is derived from it, because the rate is a
-//	           property of the history that has already been observed
-//	reqAfter   the request as it will be once the mutation under consideration is applied — the ROOM
-//	           LEFT is derived from it
-//
-// Passing the same value for both reproduces the original expression term for term, which is what
-// estimateTurnsRemaining above does and what keeps coref's arithmetic untouched.
-//
-// BOTH CALLERS NOW CREDIT THE REMOVAL. prefixRewriteNet did not until iteration 028, on a stated
-// rationale that turned out to be misattributed — see the correction on rewritePricing.creditRemoval.
-// coref's arithmetic is unaffected either way, because coref reaches this through prefixRewritePays,
-// which passes creditRemoval false.
-func turnsRemainingAfter(reqBefore, reqAfter, turns, window int) int {
-	if window <= 0 || turns <= 0 || reqBefore <= 0 || reqAfter >= window {
+	if window <= 0 || turns <= 0 || reqTokens <= 0 || reqTokens >= window {
 		return 0
 	}
-	perTurn := reqBefore / turns
+	perTurn := reqTokens / turns
 	if perTurn <= 0 {
 		return 0
 	}
-	return (window - reqAfter) / perTurn
+	return (window - reqTokens) / perTurn
 }
 
 // modelTurns counts assistant messages — the closest thing in a request to "steps taken",
@@ -257,52 +130,164 @@ func modelTurns(req *bschemas.BifrostChatRequest) int {
 	return n
 }
 
-// prefixRewriteNet is prefixRewritePays' arithmetic with the terms exposed rather than reduced to a
-// verdict: the NET benefit, in cache-read-equivalents, of removing `saved` tokens whose shallowest
-// touched index is `shallowest`.
+// Horizon models and fallback reasons (rewriteHorizon.Model, rewriteHorizon.Why).
+const (
+	horizonModelBilled   = "billed_growth"
+	horizonModelFallback = "local_estimate"
+
+	horizonWhyNoBilled         = "no_billed_size"
+	horizonWhyWindowNotExact   = "window_not_exact"
+	horizonWhyGrowthUnknown    = "growth_unknown"
+	horizonMaxRatio            = 8.0
+	horizonMaxThreads          = 256
+	horizonGrowthMaxAge        = time.Hour
+	horizonTurnsCap            = math.MaxInt32
+	horizonFallbackEventPrefix = "horizon_fallback_"
+)
+
+// rewriteHorizon is N, the number of turns a cache rewrite has to collect its saving on.
+type rewriteHorizon struct {
+	// N is the turns left. Raw before the int cast is not kept: N is floored.
+	N float64
+	// Model is how N was made: horizonModelBilled, or horizonModelFallback.
+	Model string
+	// Why is the reason for the fallback; empty for the billed model.
+	Why string
+}
+
+func (h rewriteHorizon) turns() int {
+	if h.N <= 0 {
+		return 0
+	}
+	if h.N >= horizonTurnsCap {
+		return horizonTurnsCap
+	}
+	return int(h.N)
+}
+
+// billedGrowth is one thread's growth of the billed prompt: three numbers, no conversation. from is the
+// billed size at the start of the current run, turns the number of turns since, last the latest size.
+type billedGrowth struct {
+	from, turns, last int
+}
+
+// perTurn is the average billed growth per turn over the run, or 0 when it is unknown.
+func (g billedGrowth) perTurn() float64 {
+	if g.turns <= 0 || g.last <= g.from {
+		return 0
+	}
+	return float64(g.last-g.from) / float64(g.turns)
+}
+
+// note folds the billed prompt size of the previous turn into the run. A size that did not grow
+// (a client compaction, our own cut, a rewind) restarts the run from there.
+func (g *billedGrowth) note(billed int) {
+	if billed <= 0 {
+		return
+	}
+	switch {
+	case g.from == 0 || billed < g.last:
+		g.from, g.turns = billed, 0
+	case billed == g.last:
+		// The same previous turn read twice (a retry, a parallel request): not a new turn.
+	default:
+		g.turns++
+	}
+	g.last = billed
+}
+
+type growthEntry struct {
+	g       billedGrowth
+	touched time.Time
+}
+
+var (
+	growthMu      sync.Mutex
+	growthThreads = map[string]*growthEntry{}
+	growthNow     = time.Now // a test replaces it
+)
+
+// noteThreadGrowth records the billed size of the request's thread and returns the thread's growth.
+// The map is bounded (horizonMaxThreads, evicting the least recently touched) and an entry older than
+// horizonGrowthMaxAge restarts. A lost entry reads as unknown growth, which falls back.
+func noteThreadGrowth(c *components.Ctx) billedGrowth {
+	if c == nil {
+		return billedGrowth{}
+	}
+	key := thread.Key(c.Session, c.Thread)
+	now := growthNow()
+	growthMu.Lock()
+	defer growthMu.Unlock()
+	e, ok := growthThreads[key]
+	if ok && now.Sub(e.touched) > horizonGrowthMaxAge {
+		delete(growthThreads, key)
+		ok = false
+	}
+	if !ok {
+		if len(growthThreads) >= horizonMaxThreads {
+			oldestKey, oldest := "", time.Time{}
+			for k, v := range growthThreads {
+				if oldestKey == "" || v.touched.Before(oldest) {
+					oldestKey, oldest = k, v.touched
+				}
+			}
+			delete(growthThreads, oldestKey)
+		}
+		e = &growthEntry{}
+		growthThreads[key] = e
+	}
+	e.touched = now
+	e.g.note(c.PrevBilledInputThread)
+	return e.g
+}
+
+// cacheRewriteHorizon is the ONE horizon for every gate that rewrites the cached prefix on purpose.
 //
-//	net = S*T - 11.5*W
+//		N = (cut - billed after the removal) / (billed growth per turn on this thread)
 //
-// Exposed because choosing WHICH drops to apply is an optimisation over subsets, not a yes/no test, and
-// a bool cannot be maximised. See selectAffordableDrops.
+//	  - cut is the summarizer's trigger fraction of the window when one is in the pipeline
+//	    (Ctx.CutFrac) times Ctx.FillDenominator(): the CompactionPoint when it is known, else the window.
+//	  - billed is Ctx.PrevBilledInputThread (this thread only, not the session), less the removal. The removal is `removedLocal` local tokens,
+//	    scaled to billed units by billed/local of this request (kept within [1, horizonMaxRatio]).
+//	    So N is the room left AFTER the mutation (#232 defect 1).
+//	  - growth is billed growth per turn, measured on this thread (billedGrowth).
 //
-// Note the sign convention that makes the walk work: `shallowest` is the SMALLEST index, i.e. the
-// EARLIEST message. Removing something earlier forces the provider to re-write everything after it, so
-// W grows as the drop set reaches further back. A drop late in the cached region is nearly free; the
-// same drop early in it can cost more than every other drop in the batch combined.
-func prefixRewriteNet(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx) (net float64, rewritten, turns int) {
-	if c == nil || c.CtxWindow <= 0 || saved <= 0 {
-		return 0, 0, 0
+// It falls back to estimateTurnsRemaining only when the billed size, the growth, or an exact window
+// is unknown. The reason is in Why. A size already at the cut gives N = 0 and is not a fallback.
+func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g billedGrowth, removedLocal int) rewriteHorizon {
+	local := schema.MessagesTokens(req)
+	fallback := func(why string) rewriteHorizon {
+		var window int
+		if c != nil {
+			window = c.CtxWindow
+		}
+		// Today's estimate, unchanged: coref's fallback does not credit the removal.
+		n := estimateTurnsRemaining(local, modelTurns(req), window)
+		return rewriteHorizon{N: float64(n), Model: horizonModelFallback, Why: why}
 	}
-	end := prefixRewriteWindow(req, c)
-	for j := shallowest; j <= end && j < len(req.Input); j++ {
-		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
+	if c == nil || c.PrevBilledInputThread <= 0 {
+		return fallback(horizonWhyNoBilled)
 	}
-	rewritten -= saved // the removed mass is not written back
-	if rewritten < 0 {
-		rewritten = 0
+	if !c.CtxWindowExact || c.CtxWindow <= 0 {
+		return fallback(horizonWhyWindowNotExact)
 	}
-	// THE HORIZON IS CREDITED HERE TOO, and it has to be. This function is deciding WHETHER TO REMOVE
-	// `saved` tokens, so measuring the turns remaining on the request as it ARRIVED asks "how long do we
-	// last if we do nothing" and then charges the removal against that answer. #232 fixed exactly this in
-	// prefixRewritePaysWith and left it standing here.
-	//
-	// MEASURED CONSEQUENCE of leaving it uncredited, from iteration 028's pre-flight: a 73,550-token
-	// request against a 64,000 window has `reqAfter >= window`, so turnsRemainingAfter returns 0, so
-	// S*T is 0 for every subset and net = -11.5*W. The walk below then keeps whichever subset has the
-	// smallest W -- which is k=1, because k==1 is accepted unconditionally as the initial best. Observed:
-	// the model authorised 9 drops, 8 were pruned, 105 tokens were removed across 64 requests.
-	//
-	// NO BELIEF TERM, and that is the difference from the trigger. There, the credit uses
-	// `expected = saved * approval` because the ask has not happened and the mass is a projection. Here
-	// the votes are IN HAND: `saved` is the actual mass of the subset being priced, so the post-removal
-	// size is a fact about this decision rather than an estimate. The credit is less arguable here than
-	// where it was first applied.
-	reqNow := schema.MessagesTokens(req)
-	after := reqNow - saved
-	if after < 1 {
-		after = 1
+	growth := g.perTurn()
+	if growth <= 0 {
+		return fallback(horizonWhyGrowthUnknown)
 	}
-	turns = turnsRemainingAfter(reqNow, after, modelTurns(req), c.CtxWindow)
-	return float64(saved)*float64(turns) - cacheWriteX*float64(rewritten), rewritten, turns
+	billedAfter := float64(c.PrevBilledInputThread)
+	if removedLocal > 0 && local > 0 {
+		ratio := float64(c.PrevBilledInputThread) / float64(local)
+		ratio = math.Min(math.Max(ratio, 1), horizonMaxRatio)
+		billedAfter -= ratio * float64(removedLocal)
+	}
+	cut := float64(c.FillDenominator())
+	if c.CutFrac > 0 {
+		cut = c.CutFrac * cut
+	}
+	n := (cut - billedAfter) / growth
+	if n < 0 {
+		n = 0
+	}
+	return rewriteHorizon{N: n, Model: horizonModelBilled}
 }

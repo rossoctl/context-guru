@@ -27,6 +27,8 @@ var statsGoldenTopLevel = []string{
 	// no components" and `null` means "no single pipeline describes this endpoint" (multi-tenant).
 	"pipeline",
 	"pipeline_len",
+	// The preset the proxy runs, so the plugin can show a saved preset that waits for a restart.
+	"preset",
 	// Stray calls the agent made to the proxy-injected adjudication tool. Added to the reviewed
 	// contract rather than loosening the assertion, per the rule above: it is the only figure that
 	// can show a "do not call this yourself" description having stopped working.
@@ -53,7 +55,27 @@ var statsGoldenTopLevel = []string{
 	"cache_aware_summarizer_async_started",
 	"cache_aware_summarizer_async_committed",
 	"cache_aware_summarizer_no_prefix",
+	"prefix_stash_oversized",
+	"cache_anchor_written",
+	"cache_anchor_no_slot",
+	"cache_anchor_not_found",
+	"cache_inband_bp_moved",
+	"cache_inband_bp_no_mark",
+	"cache_inband_bp_not_found",
+	"cache_inband_bp_too_far",
+	"cache_tail_bp_added",
+	"cache_tail_bp_no_slot",
+	"cache_tail_bp_not_needed",
+	"cache_tail_bp_at_end",
+	"cache_tail_bp_short_tail",
+	"cache_tail_bp_no_mark",
+	"cache_tail_bp_not_found",
 	"cache_aware_summarizer_stale_prefix",
+	// The count-changing sibling of stale_prefix (#452): an earlier component changed the
+	// message count, so the stashed span could not be located at all. Split from
+	// stale_prefix because the remedies differ — a stale prefix is re-asked, a shifted one
+	// cannot be. Added to the reviewed contract rather than loosening the assertion.
+	"cache_aware_summarizer_coords_shifted",
 	"cache_aware_summarizer_prefix_ask_used",
 	"cache_aware_summarizer_cache_read_tokens",
 	"cache_aware_summarizer_cache_write_tokens",
@@ -120,6 +142,11 @@ var statsGoldenTopLevel = []string{
 	"sse_buffered",
 	"sse_buffered_pct",
 	"sse_expand_after_stream",
+	// The adjudication half of that leak, split out so the pair can name its tool (#174).
+	// Added to the reviewed contract rather than loosening the assertion: while the two
+	// share one key, an operator reading "the peek leaked" cannot tell a splice that gave
+	// up on an answerable turn from the deliberate co-call deferral.
+	"sse_adjudicate_after_stream",
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",
@@ -314,6 +341,21 @@ func TestStatsComponentShapeIsUnchanged(t *testing.T) {
 	// meaningless to a consumer.
 	if have["seenKeys"] || have["seen_keys"] {
 		t.Error("the unique-savings working set leaked into /stats")
+	}
+}
+
+// TestStatsReportsTheRunningPreset pins the value, not only the key: the plugin compares it with the
+// saved preset, so a wrong or empty value shows a false "after a restart" note.
+func TestStatsReportsTheRunningPreset(t *testing.T) {
+	h := New(nil, nil, metrics.NewAggregator(), Options{Preset: "ultrahigh"})
+	w := httptest.NewRecorder()
+	h.stats(w, httptest.NewRequest("GET", "/stats", nil))
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["preset"] != "ultrahigh" {
+		t.Errorf("/stats preset = %v; want ultrahigh", got["preset"])
 	}
 }
 

@@ -2,9 +2,8 @@ package dash
 
 import (
 	"strings"
-	"time"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -32,6 +31,39 @@ const (
 	CachePrefixChange = "prefix_change"
 	CacheUnknown      = "unknown"
 )
+
+// Cache-miss causes (requests.cache_miss_cause). cache_miss_reason keeps its five values for
+// old readers. The cause says WHAT changed, and it comes from a comparison with the previous
+// request of the same thread (see PrefixFacts), never from a guess. Only the first cause that
+// applies is stored, in this order.
+const (
+	// CauseModelChanged: the thread switched model. Each model has its own cache.
+	CauseModelChanged = "model_changed"
+	// CauseCompactionAfterRewrite: the agent sent an unmodified request (bypass) after
+	// context-guru had rewritten earlier turns of the thread. The cache holds the rewritten
+	// history. The bypass forwards the original, so the prefix differs.
+	CauseCompactionAfterRewrite = "compaction_after_rewrite"
+	// CauseBypassFlip: bypass turned on or off with no earlier rewrite to explain it.
+	CauseBypassFlip = "bypass_flip"
+	// CauseToolsChanged: the tool declarations differ (digest, or count when no digest).
+	CauseToolsChanged = "tools_changed"
+	// CauseSystemChanged: the system prompt differs (hash, or block count when no hash).
+	CauseSystemChanged = "system_changed"
+	// CauseEffortChanged: reasoning effort, thinking mode or thinking budget differs.
+	CauseEffortChanged = "effort_changed"
+	// CauseConcurrent: nothing measured changed and the previous request began less than
+	// concurrentGapMs ago. A cache entry is readable only after the first response starts,
+	// so parallel sub-agent requests miss. The reason is "unknown", not "prefix_change".
+	CauseConcurrent = "concurrent"
+	// CauseFirstOnModel: no successful earlier request of the thread ran this model, and the
+	// request is short or an earlier one failed. It is not stored as a cause: the reason is
+	// cold_start. ObservePrefix returns it so AttributeCache agrees with the thread facts.
+	CauseFirstOnModel = "first_on_model"
+)
+
+// concurrentGapMs is the gap below which an unexplained miss reads as concurrent. Time to
+// first byte on these models is a few seconds, and the cache entry exists only after it.
+const concurrentGapMs = 5000
 
 // "Why didn't you compact this?" — a first-class reason bucket, not an absence of
 // data. An empty string means we DID compact.
@@ -75,17 +107,112 @@ const (
 	ModeObserve = "observe"
 )
 
+// WaitCauseResult is issue #424's RECORD half's output for one request — see Event.WaitCause,
+// which runs the computation that fills this, off the request path.
+type WaitCauseResult struct {
+	WaitingFor, WaitTool, WakeCause string
+	OpenBackground, OpenTeammate    int
+	MonitorExpiryMs                 int64
+}
+
 // Event is one captured request, as handed to the capture channel. It is built on
 // the request goroutine from values the request path already computed (no extra
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
+	// accRes is the accountant Result (see accountant_event.go). Unexported: not serialized.
+	accRes *accountant.Result
+	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
+	accOpsDropped int
+	accObserve    bool
+	// accUnsupportedWire marks a request on a wire the accountant does not read (see SetAccountantUnsupportedWire).
+	accUnsupportedWire bool
+	// accFallback is why PriceMode booked no saving (see AccountantFallback).
+	accFallback string
+	// accUnpricedWhy names which cause lies behind accFallback == FallbackUnpriced (see UnpricedWhy).
+	accUnpricedWhy string
+
 	ID int64 `json:"id"`
 	TS int64 `json:"ts"` // epoch ms
 	// TenantID owns this row; "" in single-tenant deployments.
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
+	// ThreadID names the thread of the session this request belongs to: "" for the session's
+	// primary thread — the main agent, told apart as the first thread without an agent header
+	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that named itself
+	// in a header, and "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread
+	// has its own provider cache entry, so recency and miss attribution are per thread; reporting
+	// stays per session. See internal/thread and issue #423.
+	//
+	// A row keeps the id it was written with. A tool-less request that spoke before the main agent
+	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
+	// "p:" id.
+	ThreadID string `json:"thread_id"`
+	// SessionAlias is the session's content-derived alias id (session.Scoped over the
+	// normalized head), stored so the restart grace's seed can reload the warmth a request
+	// under an EXPLICIT header id also left under the alias id: a later headerless turn
+	// derives exactly that alias and asks for it alone (#766). '' on a row with no separate
+	// alias — a headerless request's own id IS the alias, and a keep-alive ping carries no
+	// body to derive one from — and on every row written before the column existed, which is
+	// the documented limit of the seed: the alias warmth of history is gone.
+	SessionAlias string `json:"session_alias,omitempty"`
+	// AliasFn fills SessionAlias and touches the grace clock under the alias key, on the
+	// WRITER goroutine (Recorder.run's write(), beside WaitCause) — never on the request
+	// path: the derivation transforms and normalizes the whole body, the same scans the
+	// enforced path pays, and finish() runs on the handler's own defer. It derives the id
+	// the pipeline's own turn will ask under, through the envelope transform — see
+	// apply.EnforcedSessionIDFor. nil on a row with no session id.
+	AliasFn func() string `json:"-"`
+	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
+	// from the request body and the response's own tool calls/stop reason, by string match
+	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
+	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
+	// This package NEVER reads these columns to choose a keep-alive ping budget or change
+	// compaction behaviour — it only writes them, so a later change can.
+	//
+	// WaitingFor is set on the row whose OWN response ends a turn with nothing more to do
+	// right now (own_tool|human|background|teammate|retry|done|unknown); WaitTool is the LAST
+	// tool_use name on that response, filled only when WaitingFor is "own_tool". WakeCause
+	// is set on the row that ENDS a wait (tool_result|background|teammate|human|system|
+	// retry|unknown), read off its own last message. OpenBackground/OpenTeammate are the
+	// open-task/open-teammate counts as of THIS request's body (the "waiting_on" detail);
+	// MonitorExpiryMs is the latest known absolute Monitor expiry (epoch ms) among them, 0
+	// when none is open or none stated one. All six are "" / 0 on a row written before this
+	// column existed (see dash/schema.go's additiveColumns: nullable, no default, so an old
+	// row reads SQL NULL rather than a value this package never computed for it).
+	WaitingFor      string `json:"waiting_for"`
+	WaitTool        string `json:"wait_tool"`
+	WakeCause       string `json:"wake_cause"`
+	OpenBackground  int    `json:"open_background"`
+	OpenTeammate    int    `json:"open_teammate"`
+	MonitorExpiryMs int64  `json:"monitor_expiry_ms"`
+	// WaitCause, when set, is invoked by the WRITER goroutine (Recorder.run's write(),
+	// right beside e.Redact() and for the identical reason) to fill the six fields above —
+	// never on the request path. The actual body rescan this runs
+	// (waitcause.Tracker.Observe) measured ~11ms on a 783 KB body; called from finish()
+	// (which runs on the handler's own defer, BEFORE the handler returns) that delayed the
+	// NEXT request on a keep-alive connection by the same amount, which is exactly what
+	// this repo's own TestDashboardAddsNoRequestLatencyWithContentCapture-style tests exist
+	// to catch. nil on any row this does not apply to — a keep-alive ping's row never sets
+	// it at all, which is also how a ping is guaranteed to carry no wait-cause label (issue
+	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
+	// fills are what reaches JSON and the database.
+	WaitCause func() WaitCauseResult `json:"-"`
+	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
+	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
+	// there (it rescans the request body). Neither is part of the JSON event.
+	Lifecycle   *LifecycleRow        `json:"-"`
+	LifecycleFn func() *LifecycleRow `json:"-"`
+	Model       string               `json:"model"`
+	// BypassCount, when set, fills tokens_before/after, attempted_tokens and frozen_tokens of a
+	// BYPASSED request, which the pipeline does not count on the request path (counting a large
+	// transcript took ~0.35 s per MiB). It runs on the recorder's count worker, never on the
+	// writer or the request path, after the row is inserted. nil on every other row.
+	BypassCount func() (before, attempted int) `json:"-"`
+	// BypassBytes is the size of the bypassed request body BypassCount will tokenize; the count
+	// queue is bounded by the total of it (see countMaxBytes).
+	BypassBytes int `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
 	// tokens.BilledDeltaFactor(Model), resolved once in Price.
@@ -101,14 +228,36 @@ type Event struct {
 	BilledTokenFactorMeasured bool   `json:"billed_token_factor_measured"`
 	Provider                  string `json:"provider"`
 	Agent                     string `json:"agent"`
-	Preset                    string `json:"preset"`
-	Mode                      string `json:"mode"`
-	Route                     string `json:"route"`
-	Status                    int    `json:"status"`
+	// Source says how this row came to exist: "" for a request the proxy MEASURED as it passed,
+	// SourceImported for one recovered from a Claude Code transcript after the fact.
+	//
+	// The two can answer different questions and the difference is not recoverable from anything
+	// else on the row. A measured row saw the request, so it knows what was declared on it and
+	// can say "you carried this and never called it". An imported row knows only what the
+	// provider billed, because a transcript does not record the declaration list — so it can
+	// report spend and must never produce a waste verdict.
+	//
+	// "" rather than a word for measured, because every row written before this column existed
+	// is measured and cannot be back-filled.
+	Source string `json:"source,omitempty"`
+	// Project is the directory the agent was started in — what a user means by "project". Read
+	// from the request body, since nothing else in a request identifies one: the session id is a
+	// hash of the conversation head, and one session can span directories (measured: 8 of 48 do).
+	// "" means unattributed, which is what a client that does not state a working directory gets.
+	Project string `json:"project,omitempty"`
+	Preset  string `json:"preset"`
+	Mode    string `json:"mode"`
+	Route   string `json:"route"`
+	Status  int    `json:"status"`
 
-	Bypassed   bool `json:"bypassed"`
-	CacheAware bool `json:"cache_aware"`
-	Messages   int  `json:"messages"`
+	Bypassed bool `json:"bypassed"`
+	// AgentCompaction marks the agent's own compaction request. It is usually not bypassed, but it
+	// can be: a request with the bypass header, or a body over the size ceiling, carries both
+	// flags. The replay cap reads either one as the evidence that a drop in tokens_before is the
+	// client compacting.
+	AgentCompaction bool `json:"agent_compaction"`
+	CacheAware      bool `json:"cache_aware"`
+	Messages        int  `json:"messages"`
 
 	TokensBefore    int `json:"tokens_before"`
 	TokensAfter     int `json:"tokens_after"`
@@ -192,6 +341,8 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+	// DeclDigest is the declaration set this request carried (tool_declarations.digest).
+	DeclDigest string `json:"decl_digest,omitempty"`
 
 	// KeepAlive marks a row that IS a keep-alive ping rather than agent traffic: a request
 	// context-guru sent on its own initiative, to re-read an idle session's cached prefix so
@@ -221,9 +372,8 @@ type Event struct {
 	// distinguishes them.
 	KeepAlivePings int `json:"keepalive_pings"`
 	// KeepAliveRefreshed is what the last ping on this session actually read from cache —
-	// the tokens our ping demonstrably refreshed. Not persisted: it is the numerator's
-	// CEILING, and what gets stored is the credited dollars beside the cache_read they were
-	// computed from. See keepaliveSavedUSD for why the credit is the smaller of the two.
+	// the tokens our ping demonstrably refreshed. Not persisted. The legacy credit rule capped
+	// the credit with it; the credit is now the accountant library's rescue.
 	KeepAliveRefreshed int64 `json:"-"`
 	// KeepAliveSavedUSD is the cache re-creation this request avoided because a ping kept
 	// its prefix alive.
@@ -239,6 +389,13 @@ type Event struct {
 	// keepalive_strategy_id column — so a row from before this feature existed is
 	// distinguishable from one deliberately attributed to nothing.
 	KeepAliveStrategyID string `json:"keepalive_strategy_id,omitempty"`
+	// ManualPing marks a keep-alive row the USER asked for (POST /api/me/cache/ping). It stays a
+	// KeepAlive row — real spend, a real refresh of the provider's entry — and carries strategy id
+	// "manual"; this flag is what every strategy ledger filters on, so a button press never lands
+	// in a strategy's net. ManualSavedUSD is the cache write it avoided (gross; 0 when the ping
+	// read nothing). Its cost is CostUSD, as for any ping.
+	ManualPing     bool    `json:"manual_ping,omitempty"`
+	ManualSavedUSD float64 `json:"manual_saved_usd,omitempty"`
 	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
 	// Not persisted — AttributeCache already turns it into cache_miss_reason — but the
 	// keep-alive credit needs the raw number: the whole claim is that the gap exceeded the
@@ -251,10 +408,77 @@ type Event struct {
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
 	Reverts      int `json:"reverts"`
+	// SweepExpands and SweepExpandTokens are the part of Expands and ExpandTokens that restored a
+	// marker the extract_llm_sweep made (#404 point 7). The sweep's credit has them taken off; the
+	// totals above still carry them, so SavedAdjusted is unchanged.
+	SweepExpands      int `json:"sweep_expands"`
+	SweepExpandTokens int `json:"sweep_expand_tokens"`
+	// SweepFalseExpands is how many drops were expanded back for the FIRST time on this request and
+	// were not already counted as referenced: the expand half of the false-drop count, exact per drop.
+	SweepFalseExpands int `json:"sweep_false_expands"`
+	// SweepAnswerUSD is, on a keep-alive ping row the sweep's question replaced, what the answer cost
+	// beyond the read the ping would have paid anyway (#404 point 9). Booked once, on the ping row, as
+	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
+	// column so the sweep's credit and its answer cost are never one number.
+	SweepAnswerUSD float64 `json:"sweep_answer_usd,omitempty"`
+	// Tool deferral's facts for this request (#485, #869), from the proxy's own deferral ledger:
+	// set only on a request deferral changed and the provider answered with usage. DeferTokens is
+	// the weight of the definitions it deferred (less those a search had already loaded), and
+	// DeferListTokens the names list's weight, in our tokenizer's units. DeferSearches is the
+	// server-side searches the response ran, DeferDroppedSearches the ones with no result (the
+	// client drops a search sent beside another tool call, and the model searches again),
+	// DeferLoaded the distinct tools they loaded, and DeferWrongGuesses the wrong guesses as
+	// tooldefer.WrongGuesses counts them: a tool this request deferred that a search loaded and no
+	// earlier message had loaded. DeferGrossUSD and DeferNetUSD are the ledger's
+	// prices (tooldefer.Price): gross is what the deferred definitions would have cost, net takes
+	// off the names list and the search costs. Both 0 when the model has no price.
+	DeferTokens          int `json:"defer_tokens,omitempty"`
+	DeferListTokens      int `json:"defer_list_tokens,omitempty"`
+	DeferSearches        int `json:"defer_searches,omitempty"`
+	DeferDroppedSearches int `json:"defer_dropped_searches,omitempty"`
+	// CompactionPoint and CompactionPointSource are C in billed tokens and its source, written
+	// ONLY when the client set it: the user's own setting or the client's own default (#948, #963; compactionpoint.Configured, ClientDefault). 0 and ""
+	// on every other row: the table value is read back from the table. A number from a config
+	// file, never content.
+	CompactionPoint       int     `json:"compaction_point,omitempty"`
+	CompactionPointSource string  `json:"compaction_point_source,omitempty"`
+	DeferLoaded           int     `json:"defer_loaded,omitempty"`
+	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
+	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
+	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 
-	TokenAccounting    string `json:"token_accounting"`
+	TokenAccounting string `json:"token_accounting"`
+	// PriceEstimated is true when the accountant library priced this request without knowing whether a
+	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
+	// high. It is stored, so the dashboard marks such a figure after a restart. False on an exact
+	// figure, on an event that books no saving, and on a row from before the column existed.
+	PriceEstimated bool `json:"price_estimated,omitempty"`
+	// AccountantPriced is true when the accountant override applied to this request, so its
+	// keepalive_saved_usd is the library's own rescue decision. Stored (requests.acc_priced), so the
+	// keep-alive reachability gate trusts that decision with no component row and no ping probe. False
+	// on a request the library did not price and on every row from before the column existed, which
+	// keep the SQL gate (context-guru#912, #919).
+	AccountantPriced bool `json:"acc_priced,omitempty"`
+	// EstimatedSavedUSD is the saving the library priced on an estimated request, held apart from
+	// the books (issue #915). With no history the library prices every removal as if the provider
+	// would have written it, so after a restart that lost the state, or on a session that began on a
+	// cache the proxy never saw, the figure can be about 2x too high. Such a request books
+	// BaselineCostUSD == CostUSD and every component SavedUSD 0, so every total, the components table
+	// and the keep-alive tab agree without a filter. This field keeps the figure that was not booked.
+	// 0 on an exact request and on a row from before the column existed.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd,omitempty"`
+	// EstimateHeld is true when the hold-out above applied to this row: the request is estimated AND its
+	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
+	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
+	// figure, and it reads here as false (the column defaults to 0, as acc_priced does). Stored.
+	EstimateHeld       bool   `json:"estimate_held,omitempty"`
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
+	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
+	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
+	CacheMissCause string `json:"cache_miss_cause,omitempty"`
+	// SystemHash is the system prompt's hash, for the prefix comparison only. Not persisted.
+	SystemHash string `json:"-"`
 
 	// Meta is the request's own knobs, embedded so the JSON stays flat.
 	Meta
@@ -280,8 +504,8 @@ type Event struct {
 	// nonzero cachesplit_saved_usd identifies exactly the rows that qualified, and
 	// split_stable_tokens, cache_read and cache_write are all stored beside it, so the
 	// figure can be recomputed from the row. (It is NOT recoverable from
-	// cache_miss_reason, which reads "hit" on every qualifying row — AttributeCache
-	// short-circuits on cache_read > 0 before it ever considers a cold start.)
+	// cache_miss_reason, which reads "hit" on every qualifying row — a qualifying row's
+	// read covers the previous prompt, so the partial-read rule (#496) leaves it a hit.)
 	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
@@ -379,6 +603,9 @@ func (m *Meta) redact() {
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
 	e.Meta.redact()
+	// The launch directory is client-chosen; sanitise the field itself so the feed and the
+	// inventory writer see what the requests table stores.
+	e.Project = ProjectPath(e.Project)
 	for i := range e.Content {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)
@@ -420,14 +647,21 @@ type CompRow struct {
 	SavedUnique int    `json:"saved_unique"`
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
-	// paid — the same rule and the same rates as baselineDeltaUSD, so the per-component
-	// figures sum to the request-level saving. It exists because the components view had
+	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
+	// request-level saving. It exists because the components view had
 	// only a bare COST for the components that spend, and a dollar value improvised
 	// client-side from hardcoded rates is wrong by whatever the deployment's model
 	// actually charges.
-	SavedUSD   float64 `json:"saved_usd"`
-	DurationMs float64 `json:"duration_ms"`
-	Err        string  `json:"err,omitempty"`
+	SavedUSD float64 `json:"saved_usd"`
+	// SavedFirstUSD and SavedReplayUSD split SavedUSD by the tier the accountant library priced the
+	// saved tokens at: the write or input tier (a first removal) and the read tier (a replay of
+	// content in the cached prefix). SavedUSD minus both is the costs. PricedBy is "accountant" when
+	// the library priced the row; "" on a row priced before it (see the request_components schema).
+	SavedFirstUSD  float64 `json:"saved_first_usd"`
+	SavedReplayUSD float64 `json:"saved_replay_usd"`
+	PricedBy       string  `json:"priced_by,omitempty"`
+	DurationMs     float64 `json:"duration_ms"`
+	Err            string  `json:"err,omitempty"`
 	// Gates counts, per named gate, the candidates this component turned away. It is the
 	// only answer to "why did nothing happen?", and it never left the pipeline before:
 	// /stats had it service-wide, the log line had it per request, and the dashboard —
@@ -576,6 +810,27 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.UncompressedReason = uncompressedReason(e, tr)
 }
 
+// DropUnbilledSavings removes the token saving from a request the provider rejected (issue #914).
+// The provider billed none of its tokens, so cost and baseline are 0, and a token saving booked
+// beside them would disagree with the dollar saving. It sets TokensAfter to TokensBefore, zeroes
+// SavedUnique, and zeroes SavedGross and SavedUnique on every component row. A row keeps Mutated
+// (the proxy did rewrite the body) but is no longer Acted. A status of 0 is a request that never
+// reached a provider (/compact, an upstream that did not answer), and a 2xx was billed, so
+// neither is touched. AttemptedTokens goes to 0 too: Overview divides the gross saving by it over
+// the rows that have it, and a rejected row must leave both sides. FrozenTokens describes the
+// cache freeze, not a saving, and stays.
+func (e *Event) DropUnbilledSavings() {
+	if e.Status == 0 || (e.Status >= 200 && e.Status < 300) {
+		return
+	}
+	e.TokensAfter = e.TokensBefore
+	e.SavedUnique, e.AttemptedTokens = 0, 0
+	for i := range e.Components {
+		c := &e.Components[i]
+		c.SavedGross, c.SavedUnique, c.Acted = 0, 0, false
+	}
+}
+
 // uncompressedReason answers "why didn't you compact this?" from what the trace
 // shows. Empty means we did compact.
 func uncompressedReason(e *Event, tr apply.Trace) string {
@@ -612,50 +867,39 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 	return ReasonNoSavings
 }
 
-// Price fills the cost columns AT WRITE TIME, from this request's four billed
-// token tiers plus a baseline counterfactual.
+// Price fills the cost columns AT WRITE TIME, from this request's four billed token tiers: CostUSD,
+// the provider's own cache saving (CacheSavedUSD, a measurement, never ours), and the accounting
+// fields. It books NO saving of ours: BaselineCostUSD equals CostUSD, and every component's SavedUSD,
+// CachesplitSavedUSD and KeepAliveSavedUSD are 0. The savings are the accountant library's, applied
+// by PriceMode. An event the library cannot price (AccountantFallback) keeps these zeros: a saving
+// nothing measured is not shown.
 //
-// The baseline is what the SAME request would have cost had context-guru not
-// removed anything. Getting this right is the whole point of the dashboard, and
-// there are two ways to get it wrong, both of which inflate it:
-//
-//   - Pricing GROSS savings. `Saved()` is tokens_before − tokens_after for THIS
-//     turn, and the agent re-sends its whole transcript every turn, so the same
-//     compaction is re-counted once per remaining turn. On a real 63-request
-//     window that is a 13.1x overcount — a factor this dashboard computes and
-//     displays as `overcount_ratio` right beside the dollar figure. Only
-//     SavedUnique is content that genuinely never reached the provider.
-//   - Pricing everything at the cache-WRITE rate. That rate (12.5x a read) is
-//     right for content entering the prompt for the first time. The re-sent
-//     remainder, on a turn whose cache HIT, would have been served from the
-//     provider's cache, so the most it could have been billed at is the
-//     cache-READ rate. Pricing it as a write multiplies the overcount by ~12.5.
-//
-// So: unique savings at the write rate, and the re-sent remainder at the rate the
-// request itself actually paid — see repeatRate, which is where "whose cache hit"
-// stopped being an assumption. Restored (expanded) content is content we removed
-// and then had to serve back, so it is added to the ACTUAL cost side, never
-// subtracted from baseline.
-//
-// accountingComplete=false leaves every cost at zero and the row is marked
-// partial/missing: a cost we cannot compute must read as unknown, not as free.
+// accountingComplete=false leaves every cost at zero and the row is marked partial/missing: a cost we
+// cannot compute must read as unknown, not as free.
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
+	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
+	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
+	e.priceCost(p, accountingComplete)
+}
+
+// priceCost is Price without clearing the accountant state. It reports whether the cost was
+// computed (accounting complete and a price known).
+func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	if !accountingComplete || p.Zero() {
 		if e.TokensBefore > 0 {
 			e.TokenAccounting = AccountingPartial
 		} else {
 			e.TokenAccounting = AccountingMissing
 		}
-		return
+		return false
 	}
 	e.TokenAccounting = AccountingComplete
-	// Resolve the tokenizer correction ONCE per request, before anything prices a saving.
-	// It multiplies counterfactual token counts only — never a provider-reported count, so
-	// CostUSD below is untouched.
+	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
+	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
 	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
 	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
-	e.BaselineCostUSD = e.CostUSD + e.baselineDeltaUSD(p)
+	e.BaselineCostUSD = e.CostUSD
 	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
 	// billed at the read rate instead of the fresh rate it would have cost with no cache at
 	// all. Kept as a measurement, reported as one, and never called a saving of ours — it is
@@ -666,250 +910,83 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	// NOT on a keep-alive ping. A ping's whole job is to read the prefix, so it reports a large
 	// cache_read and would book ~$0.13 of "provider cache saving" per 48k ping against $0.0073
 	// of real cost — a fabricated saving on a figure PR #83 puts on the page, and at production
-	// ping volumes it is on the order of a thousand dollars. The counterfactual is the tell:
-	// without the keep-alive that ping does not exist, so there is no unbatched-fresh-input
-	// alternative for it to have saved anything against.
+	// ping volumes it is on the order of a thousand dollars. Without the keep-alive that ping
+	// does not exist, so there is no unbatched-fresh-input alternative for it to have saved
+	// anything against.
 	if !e.KeepAlive {
 		e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
 		if e.CacheSavedUSD < 0 {
 			e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
 		}
 	}
-	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
-	e.KeepAliveSavedUSD = e.keepaliveSavedUSD(p)
-	// Per-component dollars, same rule and same rates as baselineDeltaUSD above: the unique
-	// part at the write rate it would have entered as, the re-sent remainder at the tier this
-	// request actually paid. Summed over a component's turns this IS the amortization — value
-	// realized turn by turn as the frozen reduction replays, not a projection.
+	e.CachesplitSavedUSD, e.KeepAliveSavedUSD = 0, 0
 	for i := range e.Components {
-		c := &e.Components[i]
-		gross, unique := c.SavedGross, c.SavedUnique
-		if gross < 0 {
-			gross = 0
-		}
-		if unique > gross {
-			unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
-		}
-		if unique < 0 {
-			unique = 0
-		}
-		c.SavedUSD = (float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)) *
-			e.BilledTokenFactor
+		e.Components[i].SavedUSD = 0
 	}
+	return true
 }
 
-// cachesplitSavedUSD is the cache saving this project is willing to sign its name to.
+// ComponentSavedUSD is the LEGACY per-component rule: a removal priced from a row's own token
+// counts. Nothing stores it any more; the accountant library prices every new row (PriceMode). It
+// stays for rows written before the switch (priced_by ”), which the read-time passes value with it
+// (readvalue.go, summarizeattr.go, replaycap.go), because a stored row has no thread history for
+// the library to price from. A row the library priced is never re-priced with it.
 //
-// The mechanism: Claude Code appends a live environment snapshot (branch, git status, recent
-// commits) to the END of its big system block, and that block is ONE cacheable unit whose
-// breakpoint sits after the churn. So the provider's hash covers the volatile tail and the
-// block re-bills as cache CREATION every time the snapshot changes. cachesplit splits the
-// block in two and moves the breakpoint onto the stable half — same bytes to the model, a
-// hash boundary that excludes the snapshot.
-//
-// Three conditions, each ruling out a way of being wrong:
-//
-//   - SplitStableTokens > 0, i.e. the split actually happened on this request. It is set
-//     only where splitVolatileTail rewrote the block, which is exactly when cachesplit
-//     reports `mutated`, so this is the component test as well as the size.
-//
-//   - the provider READ from cache, and read AT LEAST as much as the half we split off while
-//     WRITING less than that. A hit alone is not enough: on the first request after the
-//     stable half itself changed — someone edited CLAUDE.md, the tool list changed — an
-//     earlier agent breakpoint still hits, so cache_read > 0 while OUR half is being billed
-//     as creation on that very request. The write test is what excludes it. Neither test can
-//     isolate our breakpoint from the usage block, so both are deliberately blunt and both
-//     err towards refusing the credit.
-//
-//   - the volatile TAIL CHANGED since this session's previous request (a session's first
-//     request counts as changed — there was nothing there to match). This is the condition
-//     that makes the hit ours: with the block unsplit, a moved snapshot re-creates the whole
-//     thing, while a tail that did not move would have been served from cache either way.
-//
-//     It replaced "the session's first request", which sounded conservative and was simply
-//     wrong about how this traffic behaves. Measured over 1,127 stored sessions: 1,105 of
-//     the first requests were COLD — the previous session's cache had expired before the
-//     next one began — so that test reported ~$0 while the component was demonstrably
-//     serving the system prompt from cache on hundreds of mid-session turns. The turn that
-//     matters is the one where the agent commits or edits and the snapshot moves, which is
-//     mid-session, and which the SWE-bench A/B (0% -> 96.7% hit) was measuring all along.
-//
-//     The comparison survives a restart: the tail hash is stored per request and the map is
-//     seeded from it (dash.Recorder.SeedSessions), so the first turn after a restart is not
-//     mistaken for a change.
-//
-// And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
-// found by running the control arm rather than by reasoning about it. Real Claude Code
-// sessions against ete-litellm, each started after a fresh commit so the environment snapshot
-// genuinely differed, first request of each session:
-//
-//	                     first-request cache_read     cache_write
-//	cachesplit on                          54,304     1,030-1,065
-//	cachesplit off (control)               45,805     9,555-9,564
-//
-// The control still HIT. Claude Code sets several breakpoints and the ones before this block
-// match whatever we do — so crediting the whole 54,304 would have booked the agent's own cache
-// placement as ours. What the split moved is the difference the provider reports: 8,499
-// tokens, from the write tier to the read tier.
-//
-// We claim less than that. The split's own measurement of the half it moved is 5,654 tokens on
-// that traffic, and the two disagree because they count different things — the provider reports
-// block-granular usage over a prefix that also gained a block boundary, while this counts BPE
-// tokens over the text. Both are evidence; the smaller one is what gets billed, because
-// under-crediting is the only safe direction.
-//
-// In dollars on that request: $0.0099 ours against $0.0743 for the provider's whole cache read.
-// 7.5x, and that 7.5x is the claim this replaced.
-//
-// The counterfactual is a cache MISS, not fresh input: those tokens carry cache_control, so
-// a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, a
-// 1.15x-fresh spread rather than 0.9x. The max(CacheWrite, Input) floor covers a provider that
-// charges no write premium, where a miss still costs at least the fresh rate.
-//
-// It is a FLOOR: a stable prefix serves a whole session while this counts one request of it,
-// and a session resumed after the TTL expires starts another first-request hit this cannot
-// see. Under-crediting is the only direction a savings figure is allowed to be wrong in.
-func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
-	if !e.TailChanged || e.SplitStableTokens <= 0 {
-		return 0
+// The first (unique) removal is priced by uniqueRate, the re-sent remainder by repeatRate.
+func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, unique int) float64 {
+	if gross < 0 {
+		gross = 0
 	}
-	// The read has to be big enough to have included our half, and the write small enough
-	// not to have re-created it. Either failing means the stable half was not what got served
-	// from cache on this request, whatever else was.
-	n := int64(e.SplitStableTokens)
-	if e.CacheRead < n || e.CacheWrite >= n {
-		return 0
-	}
-	miss := p.CacheWrite
-	if miss < p.Input {
-		miss = p.Input
-	}
-	delta := miss - p.CacheRead
-	if delta <= 0 {
-		return 0
-	}
-	return float64(n) * delta
-}
-
-// keepaliveSavedUSD is the cache re-creation a keep-alive ping avoided on THIS request.
-//
-// The mechanism, and why it is worth this much: the provider's default cache lifetime is
-// five minutes, "measured from the start of the request that writes or reads the cache
-// entry, not from the end of its response". A session idle longer than that loses its whole
-// cached prefix, and the next turn re-bills every token of it at the creation rate. Measured
-// over 19,805 production requests: 742 such requests cost $741.07 — 23.6% of all spend — at
-// $0.9987 each against $0.1178 for a request that hit. Comparing each one against its own
-// counterfactual (the same tokens billed as a read) puts the penalty at 11.35x, of which
-// 91.2% is pure re-write.
-//
-// A cache READ refreshes the lifetime for free — "the cache is refreshed for no additional
-// cost each time the cached content is used" — so a ping that re-reads the prefix at 0.1x
-// buys back a re-creation at 1.25x. That 11.5:1 ratio is the whole economics, and it is why
-// this is the one cache lever worth more than everything the transformation pipeline
-// delivers.
-//
-// Four conditions, and each rules out a specific way of claiming money that is not ours:
-//
-//   - A ping actually happened on this session during the idle span this request ended
-//     (KeepAlivePings > 0). Without it, every long-gap hit in the deployment would be
-//     credited to a mechanism that was switched off.
-//   - The gap exceeded the provider's lifetime. Inside the lifetime the entry would have
-//     survived on its own and the ping changed nothing — those pings are the measured waste
-//     the policy accepts (53 of 912 at the shipped X=280s, K=2, gated), and they must not also be
-//     credited.
-//   - The provider read from cache and read MORE than it wrote. A request that re-created
-//     most of its prefix did not get rescued, whatever else it read.
-//   - The credit is the smaller of what the ping refreshed and what this request read. The
-//     ping's own response says exactly how many tokens were in the entry it touched, so
-//     crediting more than that would claim tokens our ping never kept alive.
-//
-// One confound remains and is not removable from a single row: the provider's cache is keyed
-// on CONTENT, so another session sending a byte-identical prefix inside the window would
-// have refreshed the same entry for free. This is therefore the CEILING of what the ping
-// earned on this row, and the counts beside it (pings sent, pings that read nothing) are what
-// an operator checks it against.
-//
-// Priced against a cache MISS rather than fresh input, for the same reason
-// cachesplitSavedUSD is: these tokens carry cache_control, so a miss bills them as creation
-// at 1.25x, not at 1.0x.
-func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
-	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
-		return 0 // a ping never credits itself
-	}
-	if e.SinceLastMs <= keepaliveCreditFloorMs(e.Provider, e.Model) {
-		return 0
-	}
-	if e.CacheWrite >= e.CacheRead {
-		return 0
-	}
-	n := e.CacheRead
-	if e.KeepAliveRefreshed > 0 && e.KeepAliveRefreshed < n {
-		n = e.KeepAliveRefreshed
-	}
-	miss := p.CacheWrite
-	if miss < p.Input {
-		miss = p.Input
-	}
-	delta := miss - p.CacheRead
-	if delta <= 0 {
-		return 0
-	}
-	return float64(n) * delta
-}
-
-func keepaliveCreditFloorMs(provider, model string) int64 {
-	if provider == string(bschemas.OpenAI) {
-		if !modelinfo.GPT56OrLater(model) {
-			return 1<<63 - 1 // no known lifetime means no defensible credit
-		}
-		return apply.OpenAIMinimumCacheTTL.Milliseconds()
-	}
-	return providerCacheTTLMs
-}
-
-// providerCacheTTLMs is the Anthropic default used by the Anthropic-only
-// keep-alive. It comes from apply's lifetime source; OpenAI's minimum must not
-// be used as proof that an entry has expired.
-//
-// IT IS NOT THE ONLY TIER, and keepaliveSavedUSD's use of it above is wrong for the other one.
-// A row that wrote at the ONE-HOUR tier (requests.cache_write_1h) keeps its entry for an hour, so
-// a nine-minute gap did not outlive anything and the entry survived without help — but the gate
-// reads `SinceLastMs <= providerCacheTTLMs` and credits it. Inert today: 0 of 105 credited rows on
-// a 133,064-row production corpus have cache_write_1h > 0, and the gateway grants 1h on
-// aws/claude-haiku-4-5 while refusing it on aws/claude-sonnet-5.
-//
-// Not fixed here because the predicate does not exist yet. The 1h tier is recorded on the row
-// that WROTE the entry, not on the row being credited, and the grant can change mid-session — so
-// "is this a 1h entry" is a walk back through the session to whichever row created the prefix,
-// not a column. Anything written before that walk exists encodes a guess about which row's tier
-// counts, and a test on invented rows would certify the guess rather than check it. This is a
-// sign saying the floor is missing, not a fix.
-//
-// dash.kaSaved corrects a different defect in the same credit and does not touch this one.
-const providerCacheTTLMs int64 = int64(apply.AnthropicDefaultCacheTTL / time.Millisecond)
-
-// baselineDeltaUSD is what the removed content would have cost had it been sent:
-// the unique part as new input (cache-write rate), the re-sent remainder as a
-// cache read — with the token counts corrected to the provider's own count.
-//
-// The correction (BilledTokenFactor) is issue #240: the counts here are
-// schema.MessagesTokens, an o200k_base estimate, while the RATE is the provider's. Pricing
-// one at the other under-reported this delta on every Claude row. See
-// tokens.BilledDeltaFactor for how the factor was measured and what it does not claim.
-func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
-	unique := e.SavedUnique
-	gross := e.Saved()
-	// SavedUnique is attributed per component and can exceed the request's own
-	// gross saving when several components stash the same content key; clamp it, so
-	// the repeat term can never go negative and inflate the baseline.
 	if unique > gross {
-		unique = gross
+		unique = gross // shared content keys can over-attribute
 	}
 	if unique < 0 {
 		unique = 0
 	}
-	raw := float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
-	return raw * e.BilledTokenFactor
+	return (float64(unique)*e.uniqueRate(p, component) + float64(gross-unique)*e.repeatRate(p)) *
+		e.BilledTokenFactor
+}
+
+// SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:
+// a summary replaces turns the provider has already been sent. Every place that treats a
+// component as a summarizer (the first-removal rate, the baseline split, the ledger, the cost
+// attribution, the SQL) reads this list and no other. The default preset runs "summarize"; the
+// medium, high and xhigh presets run "cache_aware_summarizer". Add a new summarizer here and
+// nowhere else.
+var SummarizerComponents = []string{"summarize", "cache_aware_summarizer"}
+
+// IsSummarizer reports whether a component name is on SummarizerComponents.
+func IsSummarizer(component string) bool {
+	for _, n := range SummarizerComponents {
+		if n == component {
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueRate is what the FIRST removal of a component's content would have been billed at.
+//
+// The default is the cache-write rate: content entering a prompt for the first time is billed
+// as a write. That is wrong for a summary. What a summary removes is transcript the previous
+// turn already sent, and when that turn's cache was live the same tokens, left in, would have
+// been READ on this turn. Pricing them as a write over-credited the summary turn by the
+// write:read ratio (10x on Opus 5.5): $2.945 against a real saving of about $0.14 on request
+// 15653.
+//
+// Whether the previous turn's cache was live comes from the verdict. ttl_expiry and cold_start
+// say the entry was gone, so an uncompacted prompt would have re-created it: the write rate
+// stands. Any other verdict (hit, or prefix_change, which on a summary turn is our own rewrite
+// of a live entry) says it was live, so the counterfactual is a read.
+func (e *Event) uniqueRate(p modelinfo.Price, component string) float64 {
+	if IsSummarizer(component) {
+		switch e.CacheMissReason {
+		case CacheTTLExpiry, CacheColdStart:
+		default:
+			return p.CacheRead
+		}
+	}
+	return p.CacheWrite
 }
 
 // repeatRate is what the RE-SENT part of the removed content would have been billed
@@ -962,18 +1039,36 @@ func (e *Event) repeatRate(p modelinfo.Price) float64 {
 // first of either is a COLD START, which is not a failure and must never be
 // reported as a bust (headroom's model-aware rule). TTL wins ties: a prefix that
 // changed after the entry had already expired was not the cause.
-func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, prefixChanged bool) {
+//
+// cause is the measured difference from the thread's previous request (Recorder.ObservePrefix):
+// "" when nothing differed. A miss with no measured difference is "unknown", not "prefix_change".
+//
+// prevPromptTokens is that previous same-model request's whole prompt (fresh input + cache read
+// + cache write), 0 when none is known. A read alone is not a hit (#496): Claude Code keeps the
+// system prompt and tools under a separate breakpoint, so a request that re-wrote the rest of
+// the prompt still reads 35k-51k tokens. A PARTIAL read — under half the previous prompt, with
+// more written than read — re-wrote most of the prompt, so it is a miss and takes the chain
+// below like any other. Old rows are not migrated; they keep the label they got.
+func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, ttlMs int64, cause string, prevPromptTokens int64) {
+	partialRead := prevPromptTokens > 0 && e.CacheRead*2 < prevPromptTokens && e.CacheWrite > e.CacheRead
 	switch {
-	case e.CacheRead > 0:
+	case e.CacheRead > 0 && !partialRead:
 		e.CacheMissReason = CacheHit
-	case !seenSession || !seenModel:
+	case !seenSession || !seenModel || cause == CauseFirstOnModel:
 		e.CacheMissReason = CacheColdStart
 	case ttlMs > 0 && sinceLastMs > ttlMs:
 		e.CacheMissReason = CacheTTLExpiry
-	case prefixChanged:
-		e.CachePrefixChangeReason()
-	default:
+	case cause == "":
 		e.CacheMissReason = CacheUnknown
+	case cause == CauseConcurrent:
+		e.CacheMissReason, e.CacheMissCause = CacheUnknown, cause
+	case e.CacheWrite <= 0:
+		// Nothing was written, so no prefix was re-created: a changed prefix would have
+		// written it. A failed request or one with no usage lands here.
+		e.CacheMissReason = CacheUnknown
+	default:
+		e.CachePrefixChangeReason()
+		e.CacheMissCause = cause
 	}
 }
 

@@ -163,12 +163,12 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // else: what an exemption buys is that adding toon to a THIRD preset still has to be a
 // decision somebody makes here, rather than something that quietly spreads.
 //
-// conservative/medium/high/xhigh are exempt for the same reason as house/housellm: they carry
+// conservative/medium/high/xhigh/ultrahigh are exempt for the same reason as house/housellm: they carry
 // house's or housellm's pipeline verbatim, toon included, rather than re-deriving it.
 func TestToonIsInNoPreset(t *testing.T) {
 	byOperatorRequest := map[string]bool{
 		"house": true, "housellm": true,
-		"conservative": true, "medium": true, "high": true, "xhigh": true,
+		"conservative": true, "medium": true, "high": true, "xhigh": true, "ultrahigh": true,
 	}
 	for name, pipeline := range presets {
 		if byOperatorRequest[name] {
@@ -354,5 +354,49 @@ func TestExpandFixedRestoreReachesThePipeline(t *testing.T) {
 	}
 	if _, err := LoadBytes([]byte("expand:\n  fixed_restor: true\n")); err == nil {
 		t.Error("a typo'd expand key was accepted")
+	}
+}
+
+// `expand.inband_breakpoint` (#784) is off unless set.
+func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: off\n": false,
+		"preset: off\nexpand:\n  inband_breakpoint: true\n":  true,
+		"preset: off\nexpand:\n  inband_breakpoint: false\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.InBandBreakpoint() != want {
+			t.Errorf("%q: InBandBreakpoint() = %v, want %v", doc, pipe.InBandBreakpoint(), want)
+		}
+	}
+}
+
+// `cache.tail_breakpoint` (#795) is on unless set to false, and never on an empty pipeline.
+func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: cache\n": true,
+		"preset: cache\ncache:\n  tail_breakpoint: true\n":  true,
+		"preset: cache\ncache:\n  tail_breakpoint: false\n": false,
+		"preset: off\n": false,
+		"preset: off\ncache:\n  tail_breakpoint: true\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.TailBreakpoint() != want {
+			t.Errorf("%q: TailBreakpoint() = %v, want %v", doc, pipe.TailBreakpoint(), want)
+		}
 	}
 }

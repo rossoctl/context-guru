@@ -2,8 +2,11 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/components"
 )
 
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {
@@ -168,8 +171,18 @@ cache:
 		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
 		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
 		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
-		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
+		got.HeadTTLMinBytes != DefaultHeadTTLMinBytes {
 		t.Errorf("Resolved() defaults = %+v", got)
+	}
+	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds1h != 59*60 || got.KeepAliveMaxPings1h != 1 {
+		t.Errorf("the 1-hour default is 1 ping at 59 minutes; Resolved() = %d s, %d pings",
+			got.KeepAliveIdleSeconds1h, got.KeepAliveMaxPings1h)
+	}
+	for _, idle := range []int{3600, 7200} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf(
+			"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds_1h: %d\n", idle))); err == nil {
+			t.Errorf("keepalive_idle_seconds_1h: %d was accepted; it is at or past the 1-hour lifetime", idle)
+		}
 	}
 	if (CacheConfig{}).KeepAlive {
 		t.Error("the keep-alive is on by default; it spends the caller's money and must not be")
@@ -197,5 +210,263 @@ cache:
 	// Unknown keys under `cache:` are typos and must be loud, like every other block.
 	if _, err := LoadBytes([]byte("preset: off\ncache:\n  keepalve: true\n")); err == nil {
 		t.Error("a misspelled cache key was accepted silently")
+	}
+}
+
+// The picker ladder (#417): every tier from medium up runs cache_aware_summarizer first. medium
+// pins cache_state: pre_expiry (prepare in the background, use only on a cold return); high and
+// xhigh leave it at the component default (`any`: use the summary on the next request).
+func TestPresetLadderSummarizerModes(t *testing.T) {
+	for _, tc := range []struct {
+		preset    string
+		wantState string // "" = not pinned, so the component default (`any`) applies
+	}{
+		{"medium", "pre_expiry"},
+		{"high", ""},
+		{"xhigh", ""},
+	} {
+		t.Run(tc.preset, func(t *testing.T) {
+			c, err := LoadBytes([]byte("preset: " + tc.preset + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Pipeline) == 0 || c.Pipeline[0] != "cache_aware_summarizer" {
+				t.Fatalf("%s pipeline = %v, want cache_aware_summarizer first", tc.preset, c.Pipeline)
+			}
+			for _, name := range c.Pipeline {
+				if name == "summarize" {
+					t.Fatalf("%s still runs summarize: %v", tc.preset, c.Pipeline)
+				}
+			}
+			node, ok := c.Components["cache_aware_summarizer"]
+			if !ok {
+				t.Fatalf("%s carries no cache_aware_summarizer config", tc.preset)
+			}
+			var got struct {
+				Model struct {
+					Source string `yaml:"source"`
+				} `yaml:"model"`
+				Trigger struct {
+					CacheState string `yaml:"cache_state"`
+				} `yaml:"trigger"`
+			}
+			if err := node.Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Model.Source != "incoming" {
+				t.Errorf("%s model.source = %q, want incoming", tc.preset, got.Model.Source)
+			}
+			if got.Trigger.CacheState != tc.wantState {
+				t.Errorf("%s trigger.cache_state = %q, want %q", tc.preset, got.Trigger.CacheState, tc.wantState)
+			}
+			if _, err := c.Build(components.NopEmitter{}); err != nil {
+				t.Fatalf("%s does not build: %v", tc.preset, err)
+			}
+		})
+	}
+}
+
+// The recommended keep-alive policy (#435, B-policy-r2; floor 20000 since #858) is the default; pin the four knobs.
+func TestKeepAliveRecommendedDefaults(t *testing.T) {
+	r := CacheConfig{}.Resolved()
+	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
+		r.KeepAliveMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 20000, 0.50",
+			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
+	}
+}
+
+// The credential hold of a 1-hour thread is (K+1) x 59 min, so K is capped.
+func TestKeepAliveMaxPings1hIsCapped(t *testing.T) {
+	for _, k := range []int{1, 2, 3} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err != nil {
+			t.Errorf("keepalive_max_pings_1h: %d refused: %v", k, err)
+		}
+	}
+	for _, k := range []int{4, 100} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf("preset: off\ncache:\n  keepalive: true\n  keepalive_max_pings_1h: %d\n", k))); err == nil {
+			t.Errorf("keepalive_max_pings_1h: %d accepted; it would hold a credential for hours", k)
+		}
+	}
+}
+
+// xhigh is high plus the sweep (#404 PR C). The other presets do not carry it.
+func TestXHighPresetIsHighPlusTheSweep(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Build(components.NopEmitter{}); err != nil {
+			t.Fatalf("%s does not build: %v", name, err)
+		}
+		return c
+	}
+	has := func(c *Config) bool {
+		for _, n := range c.Pipeline {
+			if n == "extract_llm_sweep" {
+				return true
+			}
+		}
+		return false
+	}
+	xhigh := load("xhigh")
+	if !has(xhigh) {
+		t.Fatalf("xhigh does not run extract_llm_sweep: %v", xhigh.Pipeline)
+	}
+	if _, ok := xhigh.Components["extract_llm_sweep"]; !ok {
+		t.Error("xhigh carries no extract_llm_sweep config block")
+	}
+	var blk map[string]any
+	if n := xhigh.Components["extract_llm_sweep"]; n.Decode(&blk) == nil && blk["shadow"] != nil {
+		t.Errorf("xhigh turns shadow mode on: %v", blk)
+	}
+	// High with the sweep spliced in after extract_llm is exactly xhigh's pipeline.
+	high := load("high")
+	var want []string
+	for _, n := range high.Pipeline {
+		want = append(want, n)
+		if n == "extract_llm" {
+			want = append(want, "extract_llm_sweep")
+		}
+	}
+	if !reflect.DeepEqual(xhigh.Pipeline, want) {
+		t.Errorf("xhigh pipeline = %v, want high + the sweep after extract_llm: %v", xhigh.Pipeline, want)
+	}
+	// No other tier carries the sweep.
+	for _, name := range []string{"conservative", "medium", "high"} {
+		if has(load(name)) {
+			t.Errorf("%s runs the sweep: the user decided only xhigh does", name)
+		}
+	}
+	list, ok := PresetPipeline("xhigh")
+	if !ok || !reflect.DeepEqual(list, want) {
+		t.Errorf("xhigh preset list = %v (ok=%v), want %v", list, ok, want)
+	}
+}
+
+// ultrahigh is xhigh plus tool deferral (#485), and only ultrahigh defers. The YAML is a copy of
+// xhigh's plus one toolfilter block, so it is compared block by block: a retune of xhigh that is not
+// copied here fails.
+func TestUltrahighIsXhighPlusDeferral(t *testing.T) {
+	load := func(name string) *Config {
+		t.Helper()
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	defers := func(c *Config) bool {
+		t.Helper()
+		pipe, err := c.Build(components.NopEmitter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tf, ok := pipe.Find("toolfilter").(interface{ Defers() bool })
+		return ok && tf.Defers()
+	}
+	u, x := load("ultrahigh"), load("xhigh")
+	if !reflect.DeepEqual(u.Pipeline, x.Pipeline) {
+		t.Errorf("ultrahigh pipeline = %v, want xhigh's %v", u.Pipeline, x.Pipeline)
+	}
+	for name, n := range x.Components {
+		var a, b any
+		n.Decode(&a)
+		un := u.Components[name]
+		un.Decode(&b)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("ultrahigh's %s block = %v, want xhigh's %v", name, b, a)
+		}
+	}
+	var tf map[string]any
+	if n := u.Components["toolfilter"]; n.Decode(&tf) != nil || tf["defer"] != "auto" || len(tf) != 1 {
+		t.Errorf("ultrahigh toolfilter block = %v, want exactly defer: auto", tf)
+	}
+	if !defers(u) {
+		t.Error("ultrahigh does not defer")
+	}
+	for name := range presets {
+		if name != "ultrahigh" && defers(load(name)) {
+			t.Errorf("%s defers tools: only ultrahigh may", name)
+		}
+	}
+	if list, ok := PresetPipeline("ultrahigh"); !ok || !reflect.DeepEqual(list, x.Pipeline) {
+		t.Errorf("ultrahigh preset list = %v (ok=%v)", list, ok)
+	}
+}
+
+// head_ttl_min_tokens is deprecated. The gate it set was always bytes/4, so an old value
+// x 4 is the same gate in bytes; head_ttl_min_bytes wins when both are set.
+func TestHeadTTLMinBytesResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		in   CacheConfig
+		want int
+	}{
+		{"nothing set: the default", CacheConfig{}, 200000},
+		{"old key only: tokens x 4", CacheConfig{HeadTTLMinTokens: 50000}, 200000},
+		{"old key, other value", CacheConfig{HeadTTLMinTokens: 12345}, 49380},
+		{"new key only", CacheConfig{HeadTTLMinBytes: 123456}, 123456},
+		{"both set: the new key wins", CacheConfig{HeadTTLMinBytes: 1000, HeadTTLMinTokens: 50000}, 1000},
+	}
+	for _, c := range cases {
+		if got := c.in.Resolved().HeadTTLMinBytes; got != c.want {
+			t.Errorf("%s: Resolved().HeadTTLMinBytes = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestHeadTTLMinKeysLoadFromYAML(t *testing.T) {
+	old, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n"))
+	if err != nil {
+		t.Fatalf("an old config with head_ttl_min_tokens did not load: %v", err)
+	}
+	if got := old.Cache.Resolved().HeadTTLMinBytes; got != 200000 {
+		t.Errorf("old config gate = %d bytes, want 200000", got)
+	}
+	both, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n  head_ttl_min_bytes: 300000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := both.Cache.Resolved().HeadTTLMinBytes; got != 300000 {
+		t.Errorf("config with both keys: gate = %d bytes, want 300000 (the new key)", got)
+	}
+	if _, err := LoadBytes([]byte("preset: off\ncache:\n  head_ttl_min_bytes: -1\n")); err == nil {
+		t.Error("a negative head_ttl_min_bytes was accepted")
+	}
+}
+
+// toolfilter's always_defer list (#878): parsed, sorted and trimmed; a skill name or junk is refused;
+// ultrahigh ships it empty.
+func TestToolfilterAlwaysDeferParses(t *testing.T) {
+	list := func(doc string) ([]string, error) {
+		t.Helper()
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			return nil, err
+		}
+		pipe, err := c.Build(components.NopEmitter{})
+		if err != nil {
+			return nil, err
+		}
+		tf, ok := pipe.Find("toolfilter").(interface{ AlwaysDefer() []string })
+		if !ok {
+			t.Fatal("toolfilter has no AlwaysDefer")
+		}
+		return tf.AlwaysDefer(), nil
+	}
+	got, err := list("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [mcp__pw, ' Monitor ', '']\n")
+	if err != nil || !reflect.DeepEqual(got, []string{"Monitor", "mcp__pw"}) {
+		t.Errorf("always_defer = %v (err %v), want [Monitor mcp__pw]", got, err)
+	}
+	for _, bad := range []string{"skill__dataviz", "a b", "x*"} {
+		if _, err := list("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    always_defer: ['" + bad + "']\n"); err == nil {
+			t.Errorf("always_defer %q was accepted", bad)
+		}
+	}
+	if got, err := list("preset: ultrahigh\n"); err != nil || len(got) != 0 {
+		t.Errorf("ultrahigh always_defer = %v (err %v), want empty", got, err)
 	}
 }

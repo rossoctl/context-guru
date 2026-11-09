@@ -62,7 +62,7 @@ over a `false` you set in `/plugin` (the install then says so, and names the com
 back only if the install was the one that added it. A project that switches the plugin off in its own
 settings still wins there: the more specific scope always does.
 
-### `/plugin configure` — five options, all with working defaults
+### `/plugin configure` — seven options, all with working defaults
 
 Open it, press **Save configuration**, and nothing changes. Only one of these usually needs
 setting, and only in one situation. The Preset and Cache strategy rows have their own pickers —
@@ -73,9 +73,11 @@ form has no explanation of what each choice does; use those for the two rows tha
 |---|---|---|
 | **Proxy port** | *(allocated)* | almost never — leave it empty and the install picks a free port for **this project** and records it. Set it only to pin a specific one. One project per port is deliberate: two projects sharing a proxy meant each project's session start killed and restarted it, losing the other's warm cache every time. The scan starts at 8787 and skips anything already listening |
 | **Preset** | `off` | you want context editing at all. `off` is passthrough: nothing dropped, no model called. `/context-guru:preset-picker` explains each one |
-| **Cache strategy** | `5-min-ping` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
+| **Cache strategy** | `auto` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
 | **Upstream base URL** | *(empty)* | something else is already the gateway (a corporate proxy, a hosted-agent pod) — set it to whatever `ANTHROPIC_BASE_URL` already contains so context-guru chains behind it instead of replacing it |
+| **Client signals** | `auto` | you want to change who gets the exit and compact events that stop the keep-alive on a session's cache. `auto` sends only to a context-guru proxy. `on` sends to any base URL. `off` sends nothing. The proxy acts on them only when its keep-alive runs (`CONTEXT_GURU_CLIENT_SIGNALS=off` on the proxy turns that off); see [Client lifecycle signals](cache-keepalive.md#client-lifecycle-signals) |
+| **Beep** | `on` | you do not want a sound. The plugin plays a short sound when Claude finishes a turn or waits for you. Set `off` to silence it. To silence one shell only, run `export CONTEXT_GURU_BEEP=off` before you start Claude Code. The value is not case-sensitive. The sound also plays in scripted `claude -p` runs. The sound is local: nothing is sent anywhere. It uses `afplay` on macOS, `paplay` or `aplay` on Linux, and a terminal bell if none is installed |
 
 ## You do not need an API key
 
@@ -116,7 +118,7 @@ base URL you already set elsewhere.
 ## What it does to your requests
 
 The default preset is `off` — nothing in the request body is touched. Under the default preset the
-only thing the plugin does is keep-alive: the `5-min-ping` cache strategy pings just under the
+only thing the plugin does is keep-alive: the `auto` cache strategy pings just under the
 provider's 5-minute cache TTL so an idle session's prompt cache doesn't expire between turns. That
 spends your own quota; `/context-guru:cache-strategy-picker` names it or turns it off (`none`).
 
@@ -128,6 +130,9 @@ effort ladder) add components that edit the request body too — see
 [docs/reference/presets.md](../reference/presets.md).
 
 ## Then
+
+You type these commands yourself: Claude does not run them on its own. See
+[Who runs a command](../plugin/commands.md#who-runs-a-command).
 
 - `/context-guru:status` — is it routed, is it up, and what has it saved.
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — `/context-guru:status` names the port, which is
@@ -189,7 +194,9 @@ one you ran it in already has its environment. Start a new session.
 from `.claude/settings.local.json` to get working immediately.
 
 **Requests fail with a connection error.** The proxy isn't running and this project is routed.
-`/context-guru:status` will say so; the log is `${TMPDIR:-/tmp}/context-guru-proxy-<port>.log`.
+`/context-guru:status` will say so; the log is
+`${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/proxy-<port>.log`
+— by default `~/.local/state/context-guru/proxy-<port>.log`.
 
 **"The proxy binary is not on PATH."** The installer puts it in `~/.local/bin`. Add that to your
 `PATH`.

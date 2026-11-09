@@ -2,22 +2,35 @@
 // context-guru proxy binary.
 //
 // WHY THIS EXISTS. cmd/context-guru-proxy is this module's own composition root, and it imports
-// four internal/ packages: buildinfo, cheapmodel, logging and modelinfo. Go forbids importing an
-// internal/ package from another module, so a deployment that needs the standard proxy PLUS its
-// own routes — an enterprise build with SSO, a bespoke activation surface, a private landing page
-// — cannot reuse that root. It has to copy it, and then it owns a 1300-line fork of somebody
-// else's file for ever.
+// three internal/ packages: buildinfo, logging and modelinfo. (cheapmodel used to be a fourth —
+// see below.) Go forbids importing an internal/ package from another module, so a deployment that
+// needs the standard proxy PLUS its own routes — an enterprise build with SSO, a bespoke activation
+// surface, a private landing page — cannot reuse that root. It has to copy it, and then it owns a
+// 1300-line fork of somebody else's file for ever.
 //
 // That is what this package removes. It is a FACADE, deliberately: aliases and thin wrappers over
 // the existing internal packages, adding no behaviour and moving no code. Nothing internal is
-// relocated, so all ~70 files that import those packages today are untouched and no existing
-// deployment changes at all.
+// relocated, so all ~70 files that import those packages today are untouched.
 //
-// WHY A FACADE RATHER THAN PROMOTING THE PACKAGES. Moving internal/modelinfo (38 importers) and
-// internal/cheapmodel (22) out of internal/ would churn ~70 files across the tree and publish
-// their entire surface as API this project then has to keep stable. The composition root uses
-// THIRTEEN symbols. Exporting those thirteen is a promise worth making; exporting three whole
-// packages by accident is not.
+// ONE EXCEPTION, from the same dispatch.Dispatcher split noted below: AnthropicCheapModel and
+// OpenAICheapModel lost their BaseURL/APIKey/AuthScheme/Client fields in favor of a
+// dispatch.Dispatcher + dispatch.Ref, and proxy.Options.CheapModel changed type from
+// components.Model to *proxy.CheapModelConfig. A host built on this facade that constructed
+// either cheap-model type directly, or passed one to Options.CheapModel, stops compiling. There
+// is no way to re-export the OLD shape here without also re-exporting the credential-holding
+// code this project is removing from the core, so this one break is accepted rather than papered
+// over.
+//
+// WHY A FACADE RATHER THAN PROMOTING THE PACKAGES. Moving internal/modelinfo (38 importers) out of
+// internal/ would churn ~70 files across the tree and publish its entire surface as API this
+// project then has to keep stable. The composition root uses THIRTEEN of its symbols. Exporting
+// those thirteen is a promise worth making; exporting the whole package by accident is not.
+//
+// cheapmodel IS promoted, by exception: the dispatch.Dispatcher split (see dispatch/dispatch.go)
+// requires it. Every host now builds its own cheapmodel.Anthropic/OpenAI directly over its own
+// Dispatcher, and a host outside this module (Cortex, say) cannot do that with an internal/
+// package. Its surface is small and host-agnostic on purpose — wire format only, no transport, no
+// credential — so promoting it is a promise this project can keep.
 //
 // WHAT THIS IS NOT. It is not a plugin system and it does not run the proxy for you. A host still
 // writes its own main(), and proxy.Options remains the contract. This only unblocks the parts a
@@ -29,10 +42,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 )
 
 // Build identity, as set by the Makefile's -ldflags. A host that wants its own stamp sets its own
@@ -65,8 +79,10 @@ type (
 	Static = modelinfo.Static
 	// Table is a table loaded from a file.
 	Table = modelinfo.Table
-	// LiteLLM resolves against a live LiteLLM /model/info endpoint.
-	LiteLLM = modelinfo.LiteLLM
+	// LiteLLM resolves against the LiteLLM community price/window map (internal/modelinfo/litellm:
+	// the one network call in this family, kept out of modelinfo itself so that package stays
+	// I/O-free).
+	LiteLLM = litellm.LiteLLM
 	// Price is one model's token prices.
 	Price = modelinfo.Price
 	// Pricer answers what a model's tokens cost.
@@ -82,7 +98,7 @@ func LoadTable(path string) (*Table, error) { return modelinfo.LoadTable(path) }
 
 // NewLiteLLM resolves model windows against a LiteLLM gateway, cached for ttl.
 func NewLiteLLM(url string, client *http.Client, ttl time.Duration) *LiteLLM {
-	return modelinfo.NewLiteLLM(url, client, ttl)
+	return litellm.NewLiteLLM(url, client, ttl)
 }
 
 // ExactWindow reports a model's window and whether the answer is exact rather than inferred. The

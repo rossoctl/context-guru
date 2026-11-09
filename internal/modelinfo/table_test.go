@@ -131,7 +131,7 @@ func TestShippedPriceListLoads(t *testing.T) {
 	}
 }
 
-// The exact model ids ete-litellm serves, read from its /v1/models on 2026-08-19, plus
+// The exact model ids litellm-gateway serves, read from its /v1/models on 2026-08-19, plus
 // the tier names Bob puts on the wire. Every one of them must price, because an id that
 // does not is a dashboard row whose cost reads "unknown" — the Bob symptom this file
 // exists to fix. Note the gateway's own casing (`Azure/gpt-4o`) and the ids it serves
@@ -226,6 +226,88 @@ func TestSpecificEntryBeatsAFamilyRegardlessOfMatchKind(t *testing.T) {
 	} {
 		if p, ok := tb.Price(context.Background(), id); ok {
 			t.Errorf("%s matched a Bob tier and was priced at $%.2f/MTok in", id, p.Input*1e6)
+		}
+	}
+}
+
+// The file-level cache_read_frac: unset follows the model, a set value (even 0.1) wins for every
+// entry, and an entry's own cache_read beats both.
+func TestTableCacheReadFracUnsetFollowsTheModel(t *testing.T) {
+	const models = `
+models:
+  - {match: "aws/claude-opus-5-5", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5-5", in: 3.0, out: 15.0}
+  - {match: "aws/claude-fable-5-1", in: 10.0, out: 50.0}
+  - {match: "aws/claude-opus-5", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5-5-x", in: 3.0, out: 15.0, cache_read: 0.9}
+`
+	read := func(doc, model string) float64 {
+		tb, err := ParseTable([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, ok := tb.Price(context.Background(), model)
+		if !ok {
+			t.Fatalf("%s not priced", model)
+		}
+		return p.CacheRead * perMTok
+	}
+	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	for _, tc := range []struct {
+		doc, model string
+		want       float64
+	}{
+		{models, "aws/claude-opus-5-5", 0.25},
+		{models, "aws/claude-sonnet-5-5", 0.15},
+		{models, "aws/claude-fable-5-1", 0.25},
+		{models, "aws/claude-opus-5", 0.50},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-opus-5-5", 0.50},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-fable-5-1", 1.0},
+		{"cache_read_frac: 0.2\n" + models, "aws/claude-opus-5", 1.0},
+		{models, "aws/claude-sonnet-5-5-x", 0.9},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-sonnet-5-5-x", 0.9},
+	} {
+		if got := read(tc.doc, tc.model); !near(got, tc.want) {
+			t.Errorf("%s: cache_read = %v per MTok, want %v", tc.model, got, tc.want)
+		}
+	}
+	if _, err := ParseTable([]byte("cache_read_frac: 0\n" + models)); err == nil {
+		t.Error("cache_read_frac: 0 must be an error, not a silent per-model fallback")
+	}
+}
+
+// A blank read tier is filled for the QUERIED model, not the match pattern. A family entry and a
+// containment hit serve models with different tiers.
+func TestTableCacheReadFillsFromTheQueriedModel(t *testing.T) {
+	const doc = `
+models:
+  - {match: "claude-opus*", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5", in: 3.0, out: 15.0}
+  - {match: "aws/claude-fable-5-1*", in: 10.0, out: 50.0, cache_read: 0.7}
+`
+	for _, tc := range []struct {
+		doc, model string
+		want       float64
+	}{
+		{doc, "aws/claude-opus-5-5", 0.25},
+		{doc, "claude-opus-5-5", 0.25},
+		{doc, "claude-opus-5", 0.50},
+		{doc, "aws/claude-sonnet-5-5", 0.15}, // containment: the 5 entry serves 5-5
+		{doc, "aws/claude-sonnet-5", 0.30},
+		{doc, "aws/claude-fable-5-1", 0.7}, // explicit cache_read wins
+		{"cache_read_frac: 0.1\n" + doc, "claude-opus-5-5", 0.50},
+		{"cache_read_frac: 0.1\n" + doc, "aws/claude-sonnet-5-5", 0.30},
+	} {
+		tb, err := ParseTable([]byte(tc.doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, ok := tb.Price(context.Background(), tc.model)
+		if !ok {
+			t.Fatalf("%s not priced", tc.model)
+		}
+		if got := p.CacheRead * perMTok; math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("%s: cache_read = %v per MTok, want %v", tc.model, got, tc.want)
 		}
 	}
 }

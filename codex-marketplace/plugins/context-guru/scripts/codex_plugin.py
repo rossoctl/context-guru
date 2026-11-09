@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import signal
 import socket
@@ -263,7 +264,7 @@ def read_proxy_options():
 
 
 def save_proxy_options(preset, keepalive):
-    if preset not in {"off", "conservative", "medium", "high", "xhigh"}:
+    if preset not in {"off", "conservative", "medium", "high", "xhigh", "ultrahigh"}:
         raise RuntimeError(f"unknown preset: {preset}")
     path = proxy_config()
     if path.exists() and not path.read_text().startswith(CONFIG_MARKER):
@@ -315,10 +316,35 @@ def configure(args):
         facts(result="refused", detail=error)
         return 2
     restarted = restart_proxy(read_record())
+    extra = {}
+    if restarted and preset == "ultrahigh":
+        extra["probe"] = ask_defer_probe(int(read_record().get("port", 0)))
     facts(result="configured", preset=preset,
           cache_strategy="30-min-ping" if keepalive else "none",
-          proxy_restarted=str(restarted).lower())
+          proxy_restarted=str(restarted).lower(), **extra)
     return 0 if restarted else 1
+
+
+def ask_defer_probe(port):
+    """For ultrahigh: ask the proxy to run tool deferral's provider check at the next request (#485).
+
+    On models that are not Claude the proxy ignores the ask: Context Guru's own search tool runs there
+    and needs no provider check (#825). It is sent the same way as in the Claude Code plugin so the
+    two pickers behave alike. Never raises.
+    """
+    if not port:
+        return "no_port"
+    for _ in range(20):
+        if healthy(port):
+            break
+        time.sleep(0.1)
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return "asked" if response.status == 202 else f"status_{response.status}"
+    except Exception:
+        return "unavailable"
 
 
 def service_command(executable, port, upstream=None):
@@ -562,6 +588,33 @@ def serve(_args):
     os.execv(executable, proxy_command(executable, port, record.get("upstream")))
 
 
+SIGNAL_EVENTS = {"SessionEnd": "reason", "SessionStart": "source"}
+
+
+def signal_hook(_args):
+    """SessionEnd / SessionStart hook: tell the proxy the session ended or was compacted.
+
+    Content-free: of the hook payload only the session id, the event name and its reason or source
+    are sent. Never fails: a lost event leaves the keep-alive as it is without signals.
+    """
+    try:
+        payload = json.load(sys.stdin)
+        event = payload.get("hook_event_name", "")
+        session = payload.get("session_id", "")
+        kind = payload.get(SIGNAL_EVENTS.get(event, ""), "")
+        port = int(read_record().get("port", 0))
+        if event not in SIGNAL_EVENTS or not port or not isinstance(kind, str) or \
+                not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", session or ""):
+            return 0
+        body = json.dumps({"session": session, "event": event, "kind": kind}).encode()
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/signal", data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(request, timeout=1).close()
+    except Exception:
+        pass
+    return 0
+
+
 def status(args):
     record = read_record()
     port = int(record.get("port", 0))
@@ -571,11 +624,23 @@ def status(args):
             return 1
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as response:
-                sys.stdout.write(response.read().decode("utf-8"))
-            return 0
+                body = response.read()
         except Exception as error:
             print(f"context-guru status --stats: {error}", file=sys.stderr)
             return 1
+        # Written to a file and only the path printed (#411): the document is ~10 KB, and printing
+        # it had the agent echo it into its reply a second time. The file holds the exact bytes the
+        # proxy sent, which a printed copy cannot promise. Inside the same error handling as the
+        # fetch above: an unwritable TMPDIR reports and returns 1, like every other failure here.
+        try:
+            handle, path = tempfile.mkstemp(prefix=f"context-guru-stats-{port}-", suffix=".json")
+            with os.fdopen(handle, "wb") as file:
+                file.write(body)
+        except OSError as error:
+            print(f"context-guru status --stats: {error}", file=sys.stderr)
+            return 1
+        print(path)
+        return 0
     up = bool(port and healthy(port))
     configured = is_routed(main_config())
     values = {"result": "ok" if up and configured else "not_ready", "config": main_config(),
@@ -717,6 +782,7 @@ def main():
     status_parser.add_argument("--stats", action="store_true")
     commands.add_parser("ensure")
     commands.add_parser("serve")
+    commands.add_parser("signal")
     upgrade = commands.add_parser("update")
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
@@ -725,10 +791,10 @@ def main():
     remove.add_argument("--dry-run", action="store_true")
     settings = commands.add_parser("configure")
     settings.add_argument("--show", action="store_true")
-    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh"))
+    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh", "ultrahigh"))
     settings.add_argument("--cache-strategy", choices=("none", "30-min-ping"))
     args = parser.parse_args()
-    return {"setup": setup, "status": status, "ensure": ensure, "serve": serve,
+    return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,
             "update": update, "uninstall": uninstall, "configure": configure}[args.command](args)
 
 

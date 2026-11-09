@@ -165,7 +165,25 @@ const (
 	// so storing keeps there would either be discarded on read or would weaken that guard for
 	// everyone. Different fact, different key.
 	SweepKeepPrefix = "cg:swk:" // extract_llm_sweep: "the adjudicator said keep, at turn N"
-	LenPrefix       = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
+	// SweepHeldPrefix holds extract_llm_sweep's HELD ANSWER for one thread: the verdicts a
+	// keep-alive-ping question produced, waiting for a cold request to use them.
+	//
+	// A SEPARATE NAMESPACE from ResultPrefix, and this is what keeps a held answer from changing a
+	// request. The same-session replay reads cg:res: and splices what it finds at any depth, so a
+	// held verdict stored there would be applied on the very next request, warm or cold. Nothing
+	// replays a cg:swh: record. PINNED, because the record is a paid model call: losing it to LRU
+	// eviction throws the answer away.
+	SweepHeldPrefix = "cg:swh:" // extract_llm_sweep: "the model said drop these, asked at the ping"
+	// SweepDropPrefix holds the sweep's APPLIED drops (#404 PR C), one record per thread and dropped
+	// output. It is the sweep's own replay state, and it is NOT ResultPrefix: only extract_llm writes
+	// cg:res: now, and a sweep reader of that namespace would replay another component's decisions.
+	// PINNED, because losing a record flips an output back to its full form inside the cached prefix,
+	// which is a full-suffix cache write.
+	SweepDropPrefix = "cg:swd:" // extract_llm_sweep: "this output was dropped at a cold request; replay it"
+	// SweepExpandPrefix maps a sweep marker id to its drop record, so an expand of that marker can be
+	// charged to the sweep (the false-drop signal). Metadata only: a thread key and a content key.
+	SweepExpandPrefix = "cg:swx:"
+	LenPrefix         = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
 	// XResultPrefix is extract_llm's CROSS-session result namespace. Pinned for the same
 	// reason ResultPrefix is: every entry is a model call already paid for, and the store's
 	// default cap is 1,000 entries shared with the unpinned expand stashes — which are the
@@ -213,6 +231,13 @@ const (
 	// only grows, so the previous turn is a sound lower bound on this one, and a gate that
 	// fires one turn late is the safe direction.
 	BilledPrefix = "cg:bin:"
+	// BilledThreadPrefix is BilledPrefix per THREAD: the billed input of the previous turn of one
+	// thread (internal/thread.Key(session, thread)), so a side request or a subagent that shares the
+	// session cannot move the main thread's figure. It is metadata (one integer), read only by the
+	// billed-growth horizon (Ctx.PrevBilledInputThread). BilledPrefix stays the session figure every
+	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between
+	// turns. A lost key is safe: the growth run restarts and the horizon falls back to the estimate.
+	BilledThreadPrefix = "cg:bint:"
 	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
 	// this session's next turn.
 	//
@@ -231,13 +256,23 @@ const (
 	// back to kept-verbatim, which reverts the original to its full form inside the cached prefix —
 	// the very cache-write fixed restore exists to avoid — and drops the inserted copy as well.
 	RestorePrefix = "cg:rst:"
+	// ToolDeferPrefix is tooldefer's per-thread decision (#485): the names of the tools deferred
+	// at the thread's first request. Metadata (tool names only), so the disk store keeps it under
+	// every storage level. PINNED, because losing it moves tools between loaded and deferred inside
+	// the cached prefix, which rewrites the whole prefix.
+	ToolDeferPrefix = "cg:tdf:"
+	// ToolSearchOffPrefix is a session's tool search opt-out (#485): the user set ENABLE_TOOL_SEARCH
+	// to an off value, so new threads of that session are not deferred. A flag only (metadata),
+	// pinned for the same reason as ToolDeferPrefix: losing it would change a later decision.
+	ToolSearchOffPrefix = "cg:tso:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, UsagePrefix, RestorePrefix}
+	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
+	ToolDeferPrefix, ToolSearchOffPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
@@ -254,6 +289,10 @@ type entry struct {
 	payload []byte
 	expires time.Time
 	pinned  bool // exempt from LRU eviction (frozen decision); TTL still applies
+	// state marks a key in a pin namespace (session state). It takes the state lifetime, which
+	// can be longer than ttl (Options.StateTTLSeconds). It is a property of the KEY, not of the pin
+	// slot: a pin that lost its slot to the cap is still session state.
+	state bool
 	// stash marks a REWIND PAYLOAD written through PutStash. Also exempt from LRU
 	// eviction, and — unlike a pin, which silently degrades to an evictable entry once
 	// over its cap — a stash that cannot be admitted is REFUSED, so the caller declines
@@ -273,6 +312,7 @@ type Memory struct {
 	// not. See DefaultStashTTL.
 	ttl         time.Duration
 	stashTTL    time.Duration
+	stateTTL    time.Duration // lifetime of pin-namespace keys; 0 = ttl (the default)
 	max         int
 	ll          *list.List               // LRU, front = most recent
 	items       map[string]*list.Element // key -> element(*entry)
@@ -324,6 +364,15 @@ type Memory struct {
 	lostN      int64
 	repairedN  int64
 	noSlide    bool // tests only: restore the old write-only expiry (see DisableSlidingTTLForTest)
+	// disk is the optional write-through copy of the session state (see Disk). nil = memory only,
+	// which is the default and the behavior before the disk store existed.
+	disk *Disk
+	// loadedAt is when each session was last seen by LoadSession. A session seen within the state
+	// lifetime still has its state in memory, so it is not read from disk again.
+	loadedAt    map[string]time.Time
+	loadedOrder []string // insertion order of loadedAt, oldest first
+	// loadFailedAt is when a session's disk read last failed; it backs off the retry.
+	loadFailedAt map[string]time.Time
 }
 
 // Options configures a Memory store; the zero value yields sane defaults.
@@ -351,6 +400,12 @@ type Options struct {
 	// See DefaultStashTTL for why the two namespaces do not want the same horizon.
 	StashTTLSeconds int `yaml:"stash_ttl_seconds"`
 	MaxSessions     int `yaml:"max_sessions"`
+	// StateTTLSeconds is the lifetime of the SESSION STATE keys (the pin namespaces: summary
+	// checkpoint, billed input, freeze decisions...). Zero => TTLSeconds, which is the behavior
+	// before this setting existed. It does not touch the rewind payloads (StashTTLSeconds) or the
+	// other entries. Set it with the disk store (see Disk): a session that comes back after the
+	// memory lifetime is then loaded from disk, so a longer memory lifetime only saves that read.
+	StateTTLSeconds int `yaml:"state_ttl_seconds"`
 }
 
 // Nop is a Store that persists nothing: Put discards, Get/Sticky always miss.
@@ -433,7 +488,7 @@ const DefaultTTL = 10000 * time.Second
 //     not introduced here; this horizon shortens the distance to it by 5.5x.
 //
 // The residual exposure, stated rather than waved at: a turn that runs NO pipeline performs no
-// refresh (an x-context-guru-bypass request, or the agent-compaction bypass), so a long
+// refresh (an x-context-guru-bypass request), so a long
 // unbroken run of bypassed turns could outlive a payload while its marker is still live in the
 // transcript. Both are single-request events in practice. On the reapplyFrozen family the outcome
 // is then the already-reported one — stash_missing on the next replay — not a silent loss, and
@@ -599,7 +654,12 @@ func NewMemory(o Options) *Memory {
 	if pins == nil {
 		pins = DefaultPinPrefixes
 	}
+	var stateTTL time.Duration
+	if o.StateTTLSeconds > 0 {
+		stateTTL = time.Duration(o.StateTTLSeconds) * time.Second
+	}
 	return &Memory{
+		stateTTL: stateTTL, loadedAt: map[string]time.Time{}, loadFailedAt: map[string]time.Time{},
 		ttl: ttl, stashTTL: stashTTL, max: max, maxStick: stick, pinPrefixes: pins,
 		stashMaxBytes: stashMax,
 		ll:            list.New(), items: map[string]*list.Element{},
@@ -611,6 +671,25 @@ func NewMemory(o Options) *Memory {
 }
 
 func (*Memory) Persists() bool { return true }
+
+// Durable reports whether this store's state survives a restart: a disk copy is attached.
+func (m *Memory) Durable() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.disk != nil
+}
+
+// Durable reports whether s keeps its state across a restart. Persists means "keeps state at all";
+// a plain Memory does, but only until the process ends. A Store that does not say is not durable.
+//
+// An optional interface rather than a Store method, so a host's own Store keeps compiling.
+func Durable(s Store) bool {
+	d, ok := s.(interface{ Durable() bool })
+	return ok && d.Durable()
+}
 
 // evictableEntriesForTest counts entries the LRU may take. For TESTS only: the evictable floor
 // is a property of the whole cache rather than of any one write, so asserting it needs the
@@ -692,6 +771,9 @@ func (m *Memory) DisableSlidingTTLForTest() {
 func (m *Memory) ttlFor(e *entry) time.Duration {
 	if e.stash {
 		return m.stashTTL
+	}
+	if e.state && m.stateTTL > 0 {
+		return m.stateTTL
 	}
 	return m.ttl
 }
@@ -888,6 +970,18 @@ func (m *Memory) StashStats() StashStat {
 func (m *Memory) Put(key string, payload []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.putLocked(key, payload)
+	// Write-through to disk, after the memory write and without waiting for it: enqueue only
+	// records the value in a map. A rewind payload never gets here (PutStash), and enqueue refuses
+	// any key outside the persisted namespaces.
+	if m.disk != nil {
+		m.disk.enqueue(key, payload, m.now())
+	}
+}
+
+// putLocked is Put's memory write. The caller holds m.mu. LoadSession uses it too, so a value read
+// back from disk is not written to disk again.
+func (m *Memory) putLocked(key string, payload []byte) {
 	// Writing a key previously recorded as lost IS the repair — the decision is present
 	// again. Counted here, before either branch, so it is not missed when the entry still
 	// exists (over the pin cap it stays in the map, unpinned) and so a decision that is
@@ -920,7 +1014,7 @@ func (m *Memory) Put(key string, payload []byte) {
 		m.ll.MoveToFront(el)
 		return
 	}
-	e := &entry{key: key, payload: payload}
+	e := &entry{key: key, payload: payload, state: isStateKey(key)}
 	// Pin frozen decisions, but never more than half the cache: past that the marginal
 	// pin protects one message while starving the rewind stashes the expand loop needs.
 	// Over the cap the entry is simply evictable — NOT recorded as lost: it is present and
@@ -1017,6 +1111,13 @@ func (m *Memory) Peek(key string) bool {
 }
 
 func (m *Memory) Get(key string) ([]byte, bool) {
+	if v, ok := m.getMem(key); ok {
+		return v, true
+	}
+	return m.getGlobal(key) // a miss: the disk copy may hold a session-less key (nil disk: false)
+}
+
+func (m *Memory) getMem(key string) ([]byte, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	el, ok := m.items[key]

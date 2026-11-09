@@ -27,6 +27,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -62,9 +63,59 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request, so a crafted ?tenant= cannot widen a view.
   tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
+  -- The thread of the session ('' = the primary thread: the main agent, the first thread with no
+  -- agent header that declares tools). See Event.ThreadID.
+  thread_id          TEXT    NOT NULL DEFAULT '',
+  -- Issue #424's RECORD half (see Event.WaitingFor's own comment for what each one means).
+  -- Nullable with NO default, unlike every other column above: a row written before this
+  -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
+  -- waitcause's own enums deliberately keep distinct from "never computed" by producing
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  waiting_for        TEXT,
+  wait_tool          TEXT,
+  wake_cause         TEXT,
+  open_background    INTEGER,
+  open_teammate      INTEGER,
+  monitor_expiry_ms  INTEGER,
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (proxy isAgentCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
+  -- The directory the agent was started in, which is what a user means by "project". Read from
+  -- the request body (schema.WorkingDirOf) and sanitized before it gets here (ProjectPath),
+  -- because it is a client-chosen string that could be named after a credential.
+  --
+  -- '' means UNATTRIBUTED, not "no project": every row written before this column existed reads
+  -- as '', and so does every request from a client that does not state a working directory. The
+  -- dashboard reports that as its own group rather than folding it into any real folder.
+  project            TEXT    NOT NULL DEFAULT '',
+  -- How this row came to exist: '' if the proxy measured the request as it passed, 'imported' if
+  -- it was recovered from a Claude Code transcript afterwards. An imported row carries the usage
+  -- the provider billed and NOT the tools the request declared, because a transcript does not
+  -- record them -- so it can report spend and can never support a waste verdict. '' rather than
+  -- a word for measured, since every row written before this column existed is measured.
+  source             TEXT    NOT NULL DEFAULT '',
+  -- The session's content-derived ALIAS id (session.Scoped over the normalized head), stored
+  -- so the restart grace's seed can reload the warmth a request under an EXPLICIT header id
+  -- also left under the alias id (#766): the conversation's later headerless turns derive
+  -- exactly this id. '' when there is no separate alias, and on every row written before this
+  -- column existed. A hash, not content: the same kind of id session_id itself is.
+  session_alias      TEXT    NOT NULL DEFAULT '',
+  -- 1 when the accountant library could not rule out a cache break (penalty_unknown), so the booked
+  -- net saving may be too high: the gross is right, the penalty is not known. 0 on an exact figure
+  -- and on every row written before this column existed, which is the claim those rows always made.
+  price_estimated    INTEGER NOT NULL DEFAULT 0,
+  -- 1 when the accountant override applied to the request, so keepalive_saved_usd is the library's own
+  -- rescue decision and the read-side gate trusts it. 0 on a request the library did not price and on
+  -- every row written before this column existed, which keep the SQL reachability gate.
+  acc_priced         INTEGER NOT NULL DEFAULT 0,
+  -- the saving the accountant library priced on an estimated request, kept OUT of baseline_cost_usd
+  -- and every total (#915). 0 on an exact request and on every row written before this column.
+  estimated_saved_usd REAL   NOT NULL DEFAULT 0,
+  -- 1 when the hold-out of #915 applied: the request is estimated and its figure was kept out of the books.
+  -- 0 on every row written before this column existed, including an old estimated row that DID book its
+  -- figure (price_estimated alone does not say which meaning a row has).
+  estimate_held      INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -93,8 +144,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- provider read at least that much from cache while writing less, and the snapshot had MOVED
   -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
   -- have missed. Priced against a cache MISS (creation rate), not fresh input.
-  -- See Event.cachesplitSavedUSD, which is the authority on the condition; the
-  -- session's-first-request test it once used was REPLACED because it reported ~$0, and three
+  -- Written from the accountant library's split effect. The legacy rule's
+  -- session's-first-request test was REPLACED because it reported ~$0, and three
   -- descriptions of this column went on stating it for a while after.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
@@ -153,6 +204,43 @@ CREATE TABLE IF NOT EXISTS requests (
   -- is never backfilled — there is no way to know which pre-feature pings would have
   -- matched a strategy that did not exist yet.
   keepalive_strategy_id TEXT,
+  -- A ping the USER asked for (the dashboard or the plugin's Ping button), as opposed to one the
+  -- keeper scheduled. Still a keepalive=1 row, because it is real spend on the caller's key and
+  -- it refreshes the provider's entry; this flag is what keeps it out of every strategy's ledger
+  -- (a person pressing a button is not the strategy's decision). 0 on every earlier row.
+  manual_ping INTEGER NOT NULL DEFAULT 0,
+  -- On a manual ping row: the cache write it avoided on the current context, priced at the write
+  -- rate (0 when the ping read nothing, because then it avoided nothing). Gross; the ping's own
+  -- cost is cost_usd on the same row. Its net joins total_saved_usd.
+  manual_saved_usd REAL NOT NULL DEFAULT 0,
+  -- extract_llm_sweep's quality signals and answer cost (#404 PR C). sweep_expands and
+  -- sweep_expand_tokens are the part of expands and expand_tokens that restored a marker the SWEEP
+  -- made; sweep_false_expands counts drops expanded back for the first time (and not already counted
+  -- as referenced); sweep_answer_usd is, on a ping row the sweep's question replaced, what the answer
+  -- cost beyond the read the ping would have paid. It is PART OF cost_usd, not added to it. 0 on every
+  -- earlier row, which is true: nothing was applied then.
+  sweep_expands       INTEGER NOT NULL DEFAULT 0,
+  sweep_expand_tokens INTEGER NOT NULL DEFAULT 0,
+  sweep_false_expands INTEGER NOT NULL DEFAULT 0,
+  sweep_answer_usd    REAL    NOT NULL DEFAULT 0,
+  -- Tool deferral's per-request facts (#485, #869; Event.DeferTokens and the rest): tokens
+  -- deferred, the names list's tokens, server-side searches, the ones with no result, tools they
+  -- loaded, wrong guesses,
+  -- and the ledger's gross and net dollars. Counts and prices only. 0 on every row deferral did
+  -- not change, and on every earlier row, which is true: nothing was deferred then.
+  defer_tokens        INTEGER NOT NULL DEFAULT 0,
+  defer_list_tokens   INTEGER NOT NULL DEFAULT 0,
+  defer_searches      INTEGER NOT NULL DEFAULT 0,
+  defer_dropped_searches INTEGER NOT NULL DEFAULT 0,
+  defer_loaded        INTEGER NOT NULL DEFAULT 0,
+  defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
+  defer_gross_usd     REAL    NOT NULL DEFAULT 0,
+  defer_net_usd       REAL    NOT NULL DEFAULT 0,
+  -- C, the client's own compaction point in billed tokens, and its source, written only when the
+  -- user's own client setting set it (#948). 0 and '' otherwise: the table value is read back from
+  -- the table. A number from a config file.
+  compaction_point        INTEGER NOT NULL DEFAULT 0,
+  compaction_point_source TEXT    NOT NULL DEFAULT '',
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -160,6 +248,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
+  -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
+  -- written before it existed, where the set is inferred from the tool count instead.
+  decl_digest TEXT NOT NULL DEFAULT '',
   -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
   -- for a body carrying no cache_control at all. The pipeline always computed this and threw
   -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
@@ -181,6 +273,7 @@ CREATE TABLE IF NOT EXISTS requests (
   reverts            INTEGER NOT NULL DEFAULT 0,
   token_accounting   TEXT    NOT NULL DEFAULT 'missing', -- complete|partial|missing
   cache_miss_reason  TEXT    NOT NULL DEFAULT '',        -- cold_start|ttl_expiry|prefix_change|unknown|hit
+  cache_miss_cause   TEXT    NOT NULL DEFAULT '',        -- what changed on a miss; see Cause* in event.go
   uncompressed_reason TEXT   NOT NULL DEFAULT '',        -- why we did not compact: '' = we did
   -- Request metadata: the knobs the CLIENT chose, normalized across the Anthropic and
   -- OpenAI dialects at the capture site, plus the provider's terminal stop reason. Real
@@ -263,6 +356,10 @@ CREATE TABLE IF NOT EXISTS request_components (
   -- that was in force, and because the UI was otherwise left improvising a dollar value
   -- from hardcoded rates.
   saved_usd    REAL    NOT NULL DEFAULT 0,
+  -- The accountant library's split of saved_usd and who priced the row (additiveColumns).
+  saved_first_usd  REAL NOT NULL DEFAULT 0,
+  saved_replay_usd REAL NOT NULL DEFAULT 0,
+  priced_by        TEXT NOT NULL DEFAULT '',
   duration_ms  REAL    NOT NULL DEFAULT 0,
   err          TEXT    NOT NULL DEFAULT '',
   -- Why this component turned candidates away, as {"gate_name":count} — the only answer
@@ -323,32 +420,6 @@ CREATE TABLE IF NOT EXISTS tenant_spend (
   PRIMARY KEY (tenant_id, month)
 );
 
--- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
-CREATE TABLE IF NOT EXISTS bench_runs (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL UNIQUE,   -- run directory name, so re-ingesting replaces
-  ts       INTEGER NOT NULL,
-  dataset  TEXT NOT NULL DEFAULT '',
-  model    TEXT NOT NULL DEFAULT '',
-  summary  TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS bench_tasks (
-  run_id            INTEGER NOT NULL REFERENCES bench_runs(id) ON DELETE CASCADE,
-  arm               TEXT    NOT NULL,   -- config name: off|codesmart|headroom|rtk|…
-  task              TEXT    NOT NULL,
-  reward            REAL    NOT NULL DEFAULT 0,
-  steps             INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read        INTEGER NOT NULL DEFAULT 0,
-  cache_write       INTEGER NOT NULL DEFAULT 0,
-  fresh_input       INTEGER NOT NULL DEFAULT 0,
-  cost_usd          REAL    NOT NULL DEFAULT 0,
-  norm_cost_usd     REAL    NOT NULL DEFAULT 0,
-  wall_s            REAL    NOT NULL DEFAULT 0,
-  exception         INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
 // additiveDDL holds tables that can be created on an EXISTING database without touching
@@ -363,6 +434,34 @@ CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 // index, a different type — still requires a version bump, because an old file would
 // otherwise be read with the wrong shape.
 const additiveDDL = `
+-- Session state (#769): the proxy's summary checkpoint, billed input and the other keys a session
+-- needs between turns, written by package store through this database's own handle. One row per
+-- store key. It is NOT derived from the request rows and NOT pruned with them: its own retention
+-- (--session-state-retention) deletes it, and a session's rows go when the session is archived or
+-- evicted. It holds summary text at the "everything" storage level (docs/data-dependence.md).
+-- Created here so an older database gets it on open; package store creates it too (IF NOT EXISTS).
+CREATE TABLE IF NOT EXISTS session_state (
+  key     BLOB PRIMARY KEY,
+  val     BLOB NOT NULL,
+  updated INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS session_state_updated ON session_state(updated);
+
+-- Lifecycle signals (issue #424/#427), written only with the lifecycle flag on: the facts no
+-- requests column holds. One row per request, and one per keep-alive ping (ping_n > 0; its
+-- thread is the ping's own requests.thread_id, its outcome and cost the same row's cache and
+-- cost columns). A side table so requests is untouched. Counts, byte lengths and a tier label
+-- only. since_prev_end_ms is -1 when unknown, never 0.
+CREATE TABLE IF NOT EXISTS request_lifecycle (
+  request_id        INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  result_count      INTEGER NOT NULL DEFAULT 0,  -- tool_results on the incoming request
+  result_bytes      INTEGER NOT NULL DEFAULT 0,
+  result_error      INTEGER NOT NULL DEFAULT 0,
+  since_prev_end_ms INTEGER NOT NULL DEFAULT -1, -- previous response END on this thread -> this start
+  granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
+  ping_n            INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
 -- Separate from request_components because the relationship is one-to-many and the columns
@@ -436,7 +535,7 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
   tenant_id  TEXT    NOT NULL DEFAULT '',
   session_id TEXT    NOT NULL DEFAULT '',
   digest     TEXT    NOT NULL DEFAULT '',   -- identity of the declaration SET
-  kind       TEXT    NOT NULL DEFAULT '',   -- tool|mcp_tool|server_tool|skill|skill_listing
+  kind       TEXT    NOT NULL DEFAULT '',   -- tool|mcp_tool|server_tool|skill|skill_listing|system_prompt|deferred_listing
   name       TEXT    NOT NULL DEFAULT '',
   server     TEXT    NOT NULL DEFAULT '',   -- MCP server half of mcp__<server>__<tool>
   tokens     INTEGER NOT NULL DEFAULT 0,    -- BPE cost of carrying this declaration
@@ -518,12 +617,30 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   calls      INTEGER NOT NULL DEFAULT 0,
   first_ts   INTEGER NOT NULL DEFAULT 0,
   last_ts    INTEGER NOT NULL DEFAULT 0,
+  -- project is the folder the invocation happened in. '' means UNKNOWN -- a row written before
+  -- this column existed -- which is a different claim from "outside any project" and is reported
+  -- as unknown rather than as a folder.
+  project    TEXT    NOT NULL DEFAULT '',
   -- tenant_id LEADS the key, as on tool_declarations: without it the upsert below
   -- (calls = calls + excluded.calls) ADDS one account's call counts to another account's
   -- row whenever a session id is shared, which is a cross-account write.
-  PRIMARY KEY (tenant_id, session_id, name, skill)
+  --
+  -- project IS IN THE KEY, and that is not cosmetic. One Claude Code session works in several
+  -- folders -- measured on a live store, 8 sessions spanned more than one and one spanned 14 --
+  -- so without it the same capability invoked in two folders collapses into one row whose
+  -- project is whichever folder was written last. That is exactly the defect this column exists
+  -- to fix: every project reported the same usage because the per-project query had to select
+  -- whole sessions instead.
+  PRIMARY KEY (tenant_id, session_id, project, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+-- The idx_tooluses_project index is deliberately NOT here. additiveDDL runs on every open,
+-- BEFORE migrateToolUsesProject, and CREATE TABLE IF NOT EXISTS is a no-op on an existing
+-- database -- so an index over the project column here runs against the OLD table and fails
+-- with "no such column: project". That fails the open, and the proxy then falls back to an
+-- in-memory database: the dashboard comes up looking healthy with every row of history gone.
+-- Observed doing exactly that. The index is created by the migration, which is the only place
+-- that knows the column exists.
 
 -- One row per DISTINCT piece of stored prompt text, keyed by its content hash.
 --
@@ -579,6 +696,22 @@ const additiveDDL2 = `
 -- in both directions: it would delete another account's inventory, and it would DECLINE to
 -- delete this account's (the WHEN clause still sees the other account's request rows), so a
 -- purged tenant's tool names would outlive its request rows.
+-- The project filter on requests. Here and not in additiveDDL: that phase runs BEFORE addColumns,
+-- so on an existing database the column the index names does not exist yet.
+CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, ts);
+-- The session_alias arm of the state cleanup's in-use check (#772): which keys a deleted
+-- session's own id and aliases still have users for. idx_requests_session covers the
+-- session_id arm; without this index the alias arm is a full scan of requests per eviction
+-- pass, on the writer goroutine — the repo's own measurement puts one full scan of this
+-- table at 2.0 s over 1.58 M rows. Here and not in additiveDDL for the same reason as
+-- idx_requests_project above: that phase runs before the column exists.
+CREATE INDEX IF NOT EXISTS idx_requests_session_alias ON requests(session_alias);
+-- Deferred MCP rows (tool_declarations.deferred), for deferredNames on every inventory read and
+-- IsDeferredDecl on a filter write. Partial, so it holds only those rows and costs nothing on a
+-- database without them. Here for the same reason as idx_requests_project: it names a column
+-- addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
+  ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -645,6 +778,12 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "acc_priced", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "estimated_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "estimate_held", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
@@ -653,11 +792,39 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_strategy_id", "TEXT"},
+	{"requests", "manual_ping", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "manual_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
 	// "written before the correction existed" — see the column comment in ddl above.
 	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
+	// #423: the thread of the session. '' on old rows, which is the primary thread — exactly
+	// how those rows were keyed when they were written.
+	{"requests", "thread_id", "TEXT NOT NULL DEFAULT ''"},
+	// #424's RECORD half. Nullable, no default — see the ddl block's own comment on these
+	// six columns for why NULL (never computed) must stay distinct from a real "unknown".
+	{"requests", "waiting_for", "TEXT"},
+	{"requests", "wait_tool", "TEXT"},
+	{"requests", "wake_cause", "TEXT"},
+	{"requests", "open_background", "INTEGER"},
+	{"requests", "open_teammate", "INTEGER"},
+	{"requests", "monitor_expiry_ms", "INTEGER"},
+	// The agent's own compaction request, no longer bypassed (it used to be marked `bypassed`). The
+	// replay cap reads Bypassed || AgentCompaction as the evidence of a client compaction. 0 on old
+	// rows, which were bypassed for exactly this reason.
+	{"requests", "agent_compaction", "INTEGER NOT NULL DEFAULT 0"},
+	// What changed on a miss, from the per-thread prefix comparison. '' on old rows.
+	{"requests", "cache_miss_cause", "TEXT NOT NULL DEFAULT ''"},
+	// The project dimension. Additive with a '' default, which doubles as "unattributed": a row
+	// that predates the column cannot be back-filled, because the body it came from is long gone.
+	{"requests", "project", "TEXT NOT NULL DEFAULT ''"},
+	// Measured-vs-imported. Additive with a '' default, which doubles as "measured": a row that
+	// predates the column saw the proxy, by definition.
+	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
+	// 1 marks a deferred tool (Decl.Deferred), MCP or built-in: read off the deferred-tools list,
+	// so the proxy filter cannot remove it. Old rows read 0, which is right: they came from `tools`.
+	{"tool_declarations", "deferred", "INTEGER NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	// Added with the gates/events split. Additive with a default, so an existing database keeps
 	// serving: pre-migration rows read as '' and the UI renders that as "unknown" rather than as
@@ -665,6 +832,178 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// records having got wrong once already.
 	{"request_components", "events", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
+	// The accountant library's split of saved_usd, stored at write time because the library prices
+	// from the thread's history, which a stored row does not keep, so a read cannot re-price it.
+	// saved_first_usd is the saved tokens it priced at the write or input tier (content the provider
+	// had not cached), saved_replay_usd those at the read tier (content in the cached prefix), and
+	// saved_usd - first - replay is the costs (added tokens, breaks, the head-TTL legs). priced_by is
+	// 'accountant' on such a row; '' on a row from before the switch, which the read views still
+	// value with the legacy estimate (readvalue.go).
+	{"request_components", "saved_first_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "saved_replay_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "priced_by", "TEXT NOT NULL DEFAULT ''"},
+	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
+	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
+	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a
+	// marker the SWEEP made; sweep_false_expands counts first expands of a drop; sweep_answer_usd is
+	// on a ping row the sweep's question replaced and is part of that row's cost_usd, not added to it.
+	{"requests", "sweep_expands", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_expand_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_false_expands", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "sweep_answer_usd", "REAL NOT NULL DEFAULT 0"},
+	// Tool deferral's per-request facts (#869). Additive with a default of 0: an earlier row
+	// deferred nothing.
+	{"requests", "defer_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_list_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_searches", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_dropped_searches", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_loaded", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "defer_net_usd", "REAL NOT NULL DEFAULT 0"},
+	// The user's own compaction point (#948). Additive: an earlier row has none.
+	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
+//
+// A TABLE REBUILD RATHER THAN AN ALTER, because SQLite cannot add a column to a primary key and
+// the column is useless outside it: one session working in two folders would collapse to a single
+// row recording whichever folder was written last. That is the reported defect -- every project
+// showed the same usage figures -- so a migration that added the column alone would look applied
+// and change nothing.
+//
+// Not in additiveColumns for the same reason: that path is for a column a plain ALTER can add.
+// A version bump is also wrong here, since it renames the database aside and discards every row,
+// including the thousands of invocations imported from the user's own history -- which is the
+// data this whole surface exists to show.
+//
+// purgeImportedHistory deletes, ONCE, the rows the removed history import wrote (requests.source =
+// 'imported'). They mixed transcript spend into the totals, and the retention prune never removed
+// them. Run after additiveDDL2 on both paths, so trg_tool_inventory_gc exists. Recorded in meta, so
+// a later open skips the scan (about 60 ms on 500k rows, with no index on source).
+//
+// request_components cascades. trg_tool_inventory_gc removes a session's tool_declarations and
+// tool_uses when its LAST request goes, so an imported-only session is gone entirely. A session that
+// began before the proxy and continued through it keeps its measured rows, and the import's calls,
+// which were merged into the same tool_uses rows with no marker and cannot be told apart.
+func purgeImportedHistory(db *sql.DB) error {
+	var done string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'imported_history_purged'`).Scan(&done); err == nil {
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	return runImportedHistoryPurge(db)
+}
+
+// warnPurge logs a failed purge and lets Open go on. The purge is an optional cleanup: failing Open
+// for it would close the database, and the recorder would fall back to an in-memory dashboard that
+// records nothing to disk. No marker is written on failure, so the next open retries.
+func warnPurge(err error) {
+	if err != nil {
+		slog.Warn("dash: could not delete the old imported history; will retry on the next open", "err", err)
+	}
+}
+
+// runImportedHistoryPurge deletes the imported rows and writes the marker, in one transaction.
+func runImportedHistoryPurge(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	if _, err := tx.Exec(`DELETE FROM requests WHERE source = 'imported'`); err != nil {
+		return err
+	}
+	// OR IGNORE: two processes opening the same old database both read no marker; the second must
+	// not fail on the first one's.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('imported_history_purged', '1')`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Idempotent: migrations run on every open, so it probes for the column and returns if present.
+func migrateToolUsesProject(db *sql.DB) error {
+	var has bool
+	rows, err := db.Query(`PRAGMA table_info(tool_uses)`)
+	if err != nil {
+		// No such table yet: `ddl` will create it with the column already in place.
+		return nil
+	}
+	cols := 0
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols++
+		if name == "project" {
+			has = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// PRAGMA table_info on a missing table yields zero rows, not an error. Rebuilding from a table
+	// that is not there would fail the open, and the proxy answers a failed open with an
+	// in-memory database -- history gone, dashboard looking healthy.
+	if has || cols == 0 {
+		return nil
+	}
+
+	// One transaction: an interrupted rebuild must not leave the table missing or half-copied.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// EXISTING ROWS COPY WITH project = '' -- unknown. Their folder is not recoverable: the
+	// request body they came from is long gone. Guessing one would attribute a user's work to a
+	// project they may never have touched.
+	for _, stmt := range []string{
+		`CREATE TABLE tool_uses_new (
+			tenant_id  TEXT    NOT NULL DEFAULT '',
+			session_id TEXT    NOT NULL DEFAULT '',
+			name       TEXT    NOT NULL DEFAULT '',
+			server     TEXT    NOT NULL DEFAULT '',
+			skill      TEXT    NOT NULL DEFAULT '',
+			calls      INTEGER NOT NULL DEFAULT 0,
+			first_ts   INTEGER NOT NULL DEFAULT 0,
+			last_ts    INTEGER NOT NULL DEFAULT 0,
+			project    TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id, project, name, skill)
+		)`,
+		`INSERT INTO tool_uses_new(
+			tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, project)
+		 SELECT tenant_id, session_id, name, server, skill, calls, first_ts, last_ts, ''
+		 FROM tool_uses`,
+		// THE TRIGGER HAS TO GO FIRST. trg_tool_inventory_gc names tool_uses in its body, and
+		// SQLite refuses to drop a table a trigger references. Missing this failed the open on a
+		// real database -- and the proxy answers that by falling back to in-memory, so the
+		// dashboard came up healthy-looking with every row of history gone.
+		`DROP TRIGGER IF EXISTS trg_tool_inventory_gc`,
+		`DROP TABLE tool_uses`,
+		`ALTER TABLE tool_uses_new RENAME TO tool_uses`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_tooluses_project ON tool_uses(tenant_id, project)`,
+		// THE GC TRIGGER NEEDS NO RESTORE HERE, verified rather than assumed: it is defined in
+		// additiveDDL2, which migrate() executes on BOTH paths (already-at-version and fresh)
+		// after this migration runs, so it is recreated on the same open that drops it. Checked by
+		// removing it from this list and confirming the trigger was still present afterwards.
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // migrate creates the schema and validates its version. A version mismatch is
@@ -678,6 +1017,12 @@ func migrate(db *sql.DB) error {
 	if err := addColumns(db); err != nil {
 		return err
 	}
+	// The tool_uses rebuild. After addColumns and on every open, like the additive phases: an
+	// existing database at the current version returns early below, so a migration placed after
+	// that check would never run on exactly the databases that need it.
+	if err := migrateToolUsesProject(db); err != nil {
+		return err
+	}
 	var have string
 	err := db.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have)
 	switch {
@@ -689,8 +1034,11 @@ func migrate(db *sql.DB) error {
 		return &versionMismatch{have: have}
 	default:
 		// Already at this version: `ddl` is skipped, but the late additive phase still runs.
-		_, err = db.Exec(additiveDDL2)
-		return err
+		if _, err = db.Exec(additiveDDL2); err != nil {
+			return err
+		}
+		warnPurge(purgeImportedHistory(db))
+		return nil
 	}
 	if _, err := db.Exec(ddl); err != nil {
 		return err
@@ -698,6 +1046,7 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(additiveDDL2); err != nil {
 		return err
 	}
+	warnPurge(purgeImportedHistory(db))
 	_, err = db.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)`, fmt.Sprint(schemaVersion))
 	return err
 }

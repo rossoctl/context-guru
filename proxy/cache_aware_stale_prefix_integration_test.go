@@ -34,7 +34,7 @@ func varyingFiller(n int) string {
 }
 
 // PR #402 review, finding 1 (High): the PrefixAsk path answers from WHATEVER body proxy's
-// sentStash holds for a session, and a body over its 1.5 MB cap used to be skipped while the
+// sentStash holds for a session, and a body over its cap (maxSentBody) used to be skipped while the
 // OLDER body stayed in place — so the next commission silently answered from a transcript that
 // did not cover the span it was about to claim as summarized. The checkpoint it wrote still
 // recorded the CURRENT (correct) CoveredCount/CoveredHash, because those come from the real
@@ -52,7 +52,7 @@ func varyingFiller(n int) string {
 //	turn 1 (3 messages): below trigger.min_messages (7) — declines at the sized gate, forwarded
 //	                      unchanged, and stashed as-is (3 messages).
 //	turn 2 (5 messages): adds the test's own payload as its last message — 10 KB (control) or
-//	                     1.6 MB (over sentStash's cap). Still below min_messages: declines, is
+//	                     maxSentBody+100 KB (over sentStash's cap). Still below min_messages: declines, is
 //	                     forwarded unchanged, and h.sent.put sees this turn's own (possibly
 //	                     oversized) body.
 //	turn 3 (7 messages): reaches min_messages. keep_last_turns: 2 makes the span this turn would
@@ -171,9 +171,9 @@ func TestCacheAwareStalePrefixThroughARealOversizedTurn(t *testing.T) {
 		}
 	})
 
-	t.Run("oversized_1.6MB", func(t *testing.T) {
+	t.Run("oversized", func(t *testing.T) {
 		noPrefixBefore := offload.CacheAwareSummarizerNoPrefix()
-		asked, noPrefix, _ := run(t, varyingFiller(1_600_000))
+		asked, noPrefix, _ := run(t, varyingFiller(maxSentBody+100_000))
 		if len(asked) != 0 {
 			t.Fatalf("got %d ask calls; an oversized turn 2 must decline BEFORE paying for a call "+
 				"that could only answer from turn 1 while claiming to cover turn 2 too: %q",

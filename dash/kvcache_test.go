@@ -738,3 +738,29 @@ func near2(t *testing.T, what string, got, want float64) {
 		t.Errorf("%s = %.12f, want %.12f", what, got, want)
 	}
 }
+
+// ByThread links a request to the next one on its own thread: a subagent's request in between is not the main thread's successor.
+func TestKVCacheDatasetByThreadLinksWithinTheThread(t *testing.T) {
+	main1, sub, main2 := kvEvent("t", "s", "m", kvBase, 1000, 0), kvEvent("t", "s", "m", kvBase+10_000, 1000, 0), kvEvent("t", "s", "m", kvBase+600_000, 1000, 0)
+	sub.ThreadID = "a:sub"
+	db := seedKV(t, main1, sub, main2)
+	for _, c := range []struct {
+		by   bool
+		want time.Duration
+	}{{false, 10 * time.Second}, {true, 600 * time.Second}} {
+		rows, _, err := db.KVCacheDataset(allTenants(), KVCacheOptions{ByThread: c.by})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.TS == kvBase {
+				if idle, _ := r.Idle(); idle != c.want {
+					t.Errorf("ByThread %v: the main thread's first gap = %v, want %v", c.by, idle, c.want)
+				}
+			}
+			if r.TS == kvBase+10_000 && r.ThreadID != "a:sub" {
+				t.Errorf("thread id not read: %q", r.ThreadID)
+			}
+		}
+	}
+}

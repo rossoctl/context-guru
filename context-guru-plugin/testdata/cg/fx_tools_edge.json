@@ -1,0 +1,156 @@
+{
+ "/api/adapt/tools": {
+  "kind": "tools",
+  "version": 1,
+  "summary": "9 declared items were never used; filtering the 6 with enough evidence would have saved $31.40.",
+  "window": {
+   "since": 1788881400000,
+   "until": 1791473400000,
+   "sessions": 64,
+   "requests": 5210
+  },
+  "class": "counterfactual",
+  "method": "unused declarations priced on the requests that carried them",
+  "basis_id": "8c21e0d4",
+  "current": "keep",
+  "default": "keep",
+  "best": "remove-sufficient",
+  "options": [
+   {
+    "id": "keep",
+    "label": "Keep everything",
+    "saved_usd": 0,
+    "spend_usd": 0,
+    "net_usd": 0
+   },
+   {
+    "id": "remove-sufficient",
+    "label": "Filter the 6 unused items seen in 5+ sessions over 7+ days",
+    "saved_usd": 31.4,
+    "spend_usd": 0,
+    "net_usd": 31.4
+   },
+   {
+    "id": "remove-all",
+    "label": "Filter all 9 unused items",
+    "saved_usd": 33.9,
+    "spend_usd": 0,
+    "net_usd": 33.9
+   }
+  ],
+  "items": [
+   {
+    "kind": "mcp_server",
+    "name": "playwright",
+    "usd": 18.4,
+    "last_used_ms": null
+   },
+   {
+    "kind": "mcp_server",
+    "name": "figma",
+    "usd": 6.2,
+    "last_used_ms": null
+   },
+   {
+    "kind": "skill",
+    "name": "brand-voice",
+    "usd": 3.1,
+    "last_used_ms": null
+   },
+   {
+    "kind": "mcp_tool",
+    "name": "sentry__list_releases",
+    "usd": 2.2,
+    "last_used_ms": null
+   },
+   {
+    "kind": "skill",
+    "name": "slides",
+    "usd": 0,
+    "priced": false,
+    "last_used_ms": null
+   },
+   {
+    "kind": "skill",
+    "name": "pdf-export",
+    "usd": 1.1,
+    "last_used_ms": null
+   },
+   {
+    "kind": "mcp_tool",
+    "name": "sentry__get_event",
+    "usd": 0.8,
+    "last_used_ms": null
+   },
+   {
+    "kind": "skill",
+    "name": "changelog",
+    "usd": 0.4,
+    "last_used_ms": null
+   },
+   {
+    "kind": "skill",
+    "name": "release-notes",
+    "usd": 0.2,
+    "last_used_ms": null
+   },
+   {
+    "kind": "tool",
+    "name": "Read",
+    "usd": 9.9,
+    "last_used_ms": null
+   }
+  ],
+  "recommendation": {
+   "option": "remove-sufficient",
+   "change": "filter mcp__playwright, mcp__figma, skill__brand-voice and 3 more",
+   "effective": "now",
+   "reason": "declared in 5+ sessions over 7+ days and never called",
+   "items_n": 6,
+   "payback_weeks": 1.2
+  },
+  "warnings": [
+   "Unused means unused in this window, not that it will never be needed.",
+   "Filtering changes the cached prefix, so the next request re-writes it once; that cost is not included."
+  ],
+  "to_date": {
+   "saved_usd": 2.0,
+   "since": 1789486200000,
+   "until": 1791473400000,
+   "class": "observed",
+   "items": 0
+  },
+  "removed": [
+   {
+    "kind": "mcp_server",
+    "name": "jira",
+    "since_ms": 1789486200000,
+    "saved_usd": 3.1,
+    "requests": 812
+   },
+   {
+    "kind": "skill",
+    "name": "old-release",
+    "since_ms": 1789486200000,
+    "saved_usd": 1.1,
+    "requests": 812
+   },
+   {
+    "kind": "unattributed",
+    "name": "not matched to an item on the current list",
+    "class": "observed",
+    "since_ms": 1789486200000,
+    "saved_usd": 0.3,
+    "requests": 0
+   },
+   {
+    "kind": "mcp_server",
+    "name": "linear",
+    "class": "estimated",
+    "since_ms": 1789486200000,
+    "saved_usd": 0.9,
+    "requests": 0
+   }
+  ]
+ }
+}

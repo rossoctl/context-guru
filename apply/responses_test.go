@@ -502,3 +502,98 @@ func TestResponsesKeepAliveTouchRefreshesTheCacheClock(t *testing.T) {
 		t.Fatalf("phase after a confirmed keep-alive read = %s, want warm", got)
 	}
 }
+
+// The Responses route must set Ctx.RawInput exactly as the Messages route does (PR #431 review
+// round 2): without it, a stale-prefix guard falls back to req.Input at its own pipeline position,
+// which an earlier component has already rewritten.
+func TestResponsesSetsRawInputBeforeThePipelineRewrites(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"original output"}]}`)
+	probe := &cachePhaseProbe{}
+	p := components.NewPipeline([]components.Component{responseReducer{}, probe}, nil)
+	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.OpenAI, API: "responses", Body: body,
+	})
+	raw := probe.seen.RawInput
+	if len(raw) == 0 || len(raw) != res.Messages {
+		t.Fatalf("RawInput has %d messages, want %d (the normalized input)", len(raw), res.Messages)
+	}
+	var sawTool bool
+	for _, m := range raw {
+		if m.Role == bschemas.ChatMessageRoleTool {
+			sawTool = true
+			if got := schema.MessageText(m); got != "original output" {
+				t.Fatalf("RawInput tool output = %q, want the pre-pipeline text", got)
+			}
+		}
+	}
+	if !sawTool {
+		t.Fatal("RawInput has no tool message, so the test proves nothing")
+	}
+	if got := gjson.GetBytes(res.Body, "input.2.output").String(); got != "reduced" {
+		t.Fatalf("the earlier component did not run: output = %q", got)
+	}
+}
+
+// #727 review, round 2. A cache_aware_summarizer splice of ONE message on the Responses route keeps
+// the input count, so the equal-count gate sends it to rebuildResponsesCountChanged. That rebuild
+// found the summary by summarize's header only, returned not-ok, and the splice was dropped.
+func TestResponsesCacheAwareOneMessageSpliceIsWritten(t *testing.T) {
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	body := []byte(`{"model":"gpt-5.6","input":[` +
+		`{"role":"user","content":"task"},` +
+		`{"role":"assistant","content":"ONLY SPAN ` + strings.Repeat("long answer with many words in it ", 120) + `"},` +
+		`{"role":"user","content":"more"},` +
+		`{"role":"user","content":"final question"}]}`)
+	o := apply.Opts{Provider: bschemas.OpenAI, API: "responses", Body: body,
+		Models: components.ModelSpec{Incoming: &recordingModel{reply: "<summary>CA-SUMMARY of one message</summary>"}}}
+	apply.BodyOpts(context.Background(), p, st, o)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("background summary did not finish")
+	}
+	res := apply.BodyOpts(context.Background(), p, st, o)
+	if got, want := gjson.GetBytes(res.Body, "input.#").Int(), gjson.GetBytes(body, "input.#").Int(); got != want {
+		t.Fatalf("this test needs an equal-count splice: input %d -> %d", want, got)
+	}
+	if !res.Changed || !strings.Contains(string(res.Body), "CA-SUMMARY") || strings.Contains(string(res.Body), "ONLY SPAN") {
+		t.Fatalf("the one-message cache-aware splice was not written to the Responses input:\n%.500s", res.Body)
+	}
+}
+
+// #730 review. The Responses route is always OpenAI, so no breakpoint can be written: the summary
+// covers the last function_call_output instead of stopping before it.
+func TestResponsesSummaryCoversTheLastToolExchange(t *testing.T) {
+	cfg := pipe(t, "pipeline: [cache_aware_summarizer]\ncomponents:\n  cache_aware_summarizer:\n"+
+		"    keep_last_turns: 2\n    min_tokens: 1\n"+
+		"    trigger:\n      min_messages: 1\n      min_request_tokens: 1\n      min_request_frac: 0\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	long := strings.Repeat("verbose tool output ", 60)
+	body := []byte(`{"model":"gpt-5.6","input":[` +
+		`{"role":"user","content":"task ` + long + `"},` +
+		`{"role":"assistant","content":"thinking ` + long + `"},` +
+		`{"role":"user","content":"go on ` + long + `"},` +
+		`{"type":"function_call","call_id":"c1","name":"shell","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"LASTEXCHANGE ` + long + `"},` +
+		`{"role":"assistant","content":"done"},` +
+		`{"role":"user","content":"final question"}]}`)
+	o := apply.Opts{Provider: bschemas.OpenAI, API: "responses", Body: body,
+		Models: components.ModelSpec{Incoming: &recordingModel{reply: "<summary>CA-SUMMARY-730</summary>"}}}
+	apply.BodyOpts(context.Background(), p, st, o)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("background summary did not finish")
+	}
+	res := apply.BodyOpts(context.Background(), p, st, o)
+	if !strings.Contains(string(res.Body), "CA-SUMMARY-730") {
+		t.Fatalf("the summarizer never spliced:\n%.500s", res.Body)
+	}
+	if strings.Contains(string(res.Body), "LASTEXCHANGE") {
+		t.Fatalf("the Responses summary kept the last tool exchange, which no breakpoint can mark")
+	}
+}

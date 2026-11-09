@@ -5,6 +5,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Unavailable is what a caller substitutes for an id the store no longer holds. One string
@@ -57,7 +59,7 @@ func RestoredInPlace(hashID string) string {
 // so the same transcript arrives needing the same repair on every later turn, and repairing
 // it to the same bytes each time is what keeps the provider's prefix cache warm.
 func RepairToolResults(provider string, body []byte, resolve func(id string) (string, bool)) (out []byte, restored []string) {
-	if provider == "responses" {
+	if schema.IsResponses(provider) {
 		return repairResponsesToolResults(body, resolve)
 	}
 	msgs := gjson.GetBytes(body, "messages")
@@ -70,7 +72,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	// assistant turn it answers called context_guru_expand.
 	ours := map[string]string{}
 	for _, m := range msgs.Array() {
-		if provider == "anthropic" {
+		if provider == schema.WireAnthropic {
 			for _, blk := range m.Get("content").Array() {
 				// An id-less tool_use would make "" a live key, and then a tool_result that
 				// carries no tool_use_id — someone else's block — matches it and is
@@ -96,7 +98,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	}
 	out = body
 	for mi, m := range msgs.Array() {
-		if provider != "anthropic" {
+		if provider != schema.WireAnthropic {
 			if m.Get("role").String() != "tool" {
 				continue
 			}
@@ -213,6 +215,9 @@ func responsesContentPresent(body []byte, orig string, exceptIndex int) bool {
 					return true
 				}
 			}
+			if value.IsArray() && schema.ContentText(value) == orig {
+				return true
+			}
 		}
 	}
 	return false
@@ -299,6 +304,12 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 			}
 			return !found
 		}
+		// A message whose content is an array holding the original split over several text blocks
+		// (an OpenAI role=tool message, say) counts as present, as CallSites reads it.
+		if c := m.Get("content"); c.IsArray() && base+".content" != exceptPath && schema.ContentText(c) == orig {
+			found = true
+			return false
+		}
 		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
 			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)
 			return !found
@@ -356,6 +367,11 @@ func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
 				return true
 			})
 			if hit {
+				return true
+			}
+			// The joined text of the blocks counts too, as CallSites reads it: a client may split
+			// the original over several text blocks.
+			if schema.ContentText(v) == orig {
 				return true
 			}
 		}

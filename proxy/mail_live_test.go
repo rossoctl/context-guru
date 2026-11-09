@@ -16,7 +16,7 @@ import (
 // any relay will accept it. Run it after changing smtpSend, or when standing up a new
 // deployment:
 //
-//	CG_SMTP_HOST=na.relay.ibm.com \
+//	CG_SMTP_HOST=mail-relay.internal.example.com \
 //	CG_SMTP_FROM=context-guru@<this-host> \
 //	CG_SMTP_LIVE_TO=you@example.com \
 //	  go test ./proxy/ -run TestSendCodeLive -v

@@ -38,7 +38,7 @@ func recWithInventory(t *testing.T, inv *Inventory, withText bool) *DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	rec.RecordInventory("t1", "s1", 1000, inv, withText)
+	rec.RecordInventory("t1", "s1", 1000, inv, withText, "")
 	db := rec.DB()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -302,7 +302,7 @@ func TestSessionSystemPromptRowsAreBounded(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		inv := ScanInventory("anthropic", sysBody(t,
 			fmt.Sprintf("You are Claude Code. It is %d.", i), tools, skillsReminder))
-		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true)
+		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true, "")
 	}
 	db := rec.DB()
 	deadline := time.Now().Add(10 * time.Second)
@@ -366,7 +366,7 @@ func TestSystemPromptIsRecordedForEveryDeclarationSet(t *testing.T) {
 			t.Fatal("no inventory scanned")
 		}
 		digests = append(digests, inv.Digest)
-		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true)
+		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true, "")
 	}
 	if digests[0] == digests[1] {
 		t.Fatal("the two declaration sets hashed the same; the fixture proves nothing")

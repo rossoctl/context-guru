@@ -3,13 +3,23 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
 
@@ -32,12 +42,21 @@ type capture struct {
 	provider  string
 	model     string
 	agent     string
+	project   string
 	start     time.Time
 	cgMs      float64
 	upstream  float64
 	status    int
 	expands   int
 	expandTok int
+	// The expands that restored a sweep marker, and what they returned. A subset of the two above.
+	sweepExpands   int
+	sweepExpandTok int
+	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
+	sweepFalseExp int
+	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
+	// did not change it.
+	deferFacts *deferFacts
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -54,6 +73,41 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
+	predArrival *predictive.Arrival
+	// thread is the session thread this request belongs to (see internal/thread), set by
+	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
+	// name the thread a NEW thread continues by content (thread.Result.Inherits).
+	thread    string
+	agentComp bool
+	// cpoint and cpointSrc are C for this request and where it came from (#948).
+	cpoint     int
+	cpointSrc  string
+	inherits   string
+	hasInherit bool
+	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
+	// everything else here); waitBody is the PRISTINE request body, stashed by noteWaitBody —
+	// a plain slice-header copy, no scan. finish() builds a CLOSURE around both of these
+	// (plus the response's own facts) and hands it to the dash.Event as Event.WaitCause,
+	// which the dashboard's WRITER goroutine invokes — never finish() itself, and never
+	// anything on the request path: the actual rescan (waitcause.Tracker.Observe, ~11ms on
+	// a 783 KB body) running inside finish() was measured adding exactly that much latency
+	// to the NEXT request on a keep-alive connection, because finish() runs on the
+	// handler's own defer, before the handler returns (same reason dash.Event.Redact runs
+	// on the writer goroutine, not here). See dash/capture.go's write().
+	waits    *waitcause.Tracker
+	waitBody []byte
+	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
+	terminal []string
+	// The alias derivation's other inputs (#766): the pipeline that will transform this
+	// body, the wire dialect, and the bypass flag — everything apply.EnforcedSessionIDFor
+	// needs to derive the id the pipeline's own turn will ask under. Stashed here because
+	// the derivation runs on the WRITER goroutine, in finish()'s AliasFn closure. Set by
+	// noteAliasSource; a capture it was never called on derives off the raw body (nil pipe
+	// transforms nothing), the pre-round-4 behavior.
+	aliasPipe   *components.Pipeline
+	aliasAPI    string
+	aliasBypass bool
 	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
 	// this request just ended: how many pings it sent, how many tokens the last of them
 	// read from cache, and which manager-controlled strategy (if any) resolved the policy
@@ -63,11 +117,39 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
+	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
+	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
+	// request's record (nil when it was skipped); accDone guards a double finish.
+	savings *savingsTracker
+	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
+	// and the accountant figure must not be booked.
+	observe bool
+	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
+	pings  *PingStore
+	accReq *accountant.Request
+	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
+	accUnsupportedWire bool
+	// accNoResult says why no Result was attached when Compute was reached and gave none.
+	accNoResult string
+	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
+	accClient []byte
+	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
+	accThread string
+	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
+	// newer ping that arrived while the request was in flight.
+	accPingWindow string
+	accDone       bool
+	// rounds is the number of upstream rounds of the expand loop (noteRounds). The usage is the
+	// LAST round's, billed on a body the expand loop grew, while the savings record holds the
+	// first round's body: with rounds > 1 the library's bytes-to-tokens ratio would be wrong, so
+	// the record is not computed.
+	rounds int
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -87,8 +169,12 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
-		llm:    &cheapmodel.Sink{},
-		unique: map[string]int{},
+		llm:      &cheapmodel.Sink{},
+		unique:   map[string]int{},
+		waits:    h.waits,
+		terminal: h.opts.TerminalTools,
+		savings:  h.savings, pings: h.opts.Pings,
+		observe: tn.Mode == components.ModeObserve,
 	}
 }
 
@@ -139,6 +225,48 @@ func (c *capture) noteTrace(tr apply.Trace) {
 	}
 }
 
+// noteAgentCompaction records that this request is the agent's own compaction request.
+func (c *capture) noteAgentCompaction(v bool) {
+	if c != nil {
+		c.agentComp = v
+	}
+}
+
+// noteThread records which thread of the session this request belongs to.
+func (c *capture) noteThread(res thread.Result) {
+	if c != nil {
+		c.thread = res.ID
+		c.inherits, c.hasInherit = res.InheritsFrom()
+	}
+}
+
+// noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
+// can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
+// is a slice-header copy — the request path pays nothing beyond this one field write, however
+// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
+// after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
+// the same body threadFor already matches on.
+func (c *capture) noteWaitBody(body []byte) {
+	if c != nil {
+		c.waitBody = body
+	}
+}
+
+// noteAliasSource stashes the inputs of this request's alias derivation: the pipeline that
+// transforms the body, the wire dialect, and the bypass flag. The restart grace's record
+// side (#766) must touch the grace clock under the id the pipeline's own turn will ASK
+// for, and apply derives that id from the body AFTER transformEnvelope — toolfilter's
+// skills half rewrites the head message the session hash reads — so hashing the pristine
+// body the capture already holds would produce a key no request ever derives. See
+// apply.EnforcedSessionIDFor, the same door the expand repair and the observe job use.
+func (c *capture) noteAliasSource(pipe *components.Pipeline, api string, bypass bool) {
+	if c == nil {
+		return
+	}
+	c.aliasPipe, c.aliasAPI, c.aliasBypass = pipe, api, bypass
+}
+
 // noteMeta records the request's own metadata. Called once, from the chat handler, with
 // the PRISTINE inbound body — what the client asked for, before the pipeline rewrote
 // anything. That is the honest subject: `temperature` and `reasoning_effort` are the
@@ -147,6 +275,16 @@ func (c *capture) noteTrace(tr apply.Trace) {
 func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
+	}
+}
+
+// noteProject records the directory the agent was started in. Called once, from the chat handler,
+// with the PRISTINE inbound body — for the same reason noteMeta is: the pipeline may compact the
+// environment block out of the transcript it forwards, and reading the project from the rewritten
+// body would record "unattributed" on exactly the requests the pipeline acted on.
+func (c *capture) noteProject(p string) {
+	if c != nil {
+		c.project = p
 	}
 }
 
@@ -201,6 +339,21 @@ func (c *capture) noteInventory(provider string, body []byte) {
 // Breakpoint counts are NOT read here: the pipeline already counts them to respect the
 // provider's cap of four, and they reach the event on the trace for free (see FromTrace).
 func metaFromBody(body []byte) dash.Meta {
+	m := metaFromBodyRefs(body)
+	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
+	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
+	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
+	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
+	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
+	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
+	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
+	m.ThinkingMode = strings.Clone(m.ThinkingMode)
+	m.ToolChoice = strings.Clone(m.ToolChoice)
+	return m
+}
+
+// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
+func metaFromBodyRefs(body []byte) dash.Meta {
 	var m dash.Meta
 	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
 		switch k.Str {
@@ -289,9 +442,18 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string) {
+func (c *capture) noteKeepAlive(ka kaArrival) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
+		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
+		c.kaRefreshedAt = ka.refreshedAt
+	}
+}
+
+// noteCompactionPoint records C (billed tokens) and its source, so the replay cap and the
+// episode panel read the figure this request ran under and not a recomputed one (#948).
+func (c *capture) noteCompactionPoint(tokens int, source string) {
+	if c != nil {
+		c.cpoint, c.cpointSrc = tokens, source
 	}
 }
 
@@ -305,6 +467,38 @@ func (c *capture) noteExpand(tokens int) {
 		c.expands++
 		c.expandTok += tokens
 	}
+}
+
+// noteSweepExpand records that an expand call restored a sweep marker, so the dashboard can charge
+// it to the sweep (#404 point 7). It is in addition to noteExpand, which still counts the expand in
+// the totals. note.First is true only for the first expand of a drop, so a stale tool error repaired
+// on every later turn is one false drop and not many.
+func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
+	if c == nil || !note.Sweep {
+		return
+	}
+	c.sweepExpands++
+	c.sweepExpandTok += tokens
+	if note.First && !note.Overlap {
+		c.sweepFalseExp++
+	}
+}
+
+// deferFacts is what tool deferral did on one request, for the dashboard row (#869).
+type deferFacts struct {
+	tokens, list, searches, dropped, loaded, wrong int
+	gross, net                                     float64
+}
+
+// noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
+// booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
+// none) and how many different tools its searches loaded.
+func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
+	if c == nil {
+		return
+	}
+	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net}
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -341,14 +535,91 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Status:   c.status,
 	}
 	e.Agent = dash.AgentFor(c.agent)
+	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
+	// A request the provider rejected saved nothing: book no tokens beside its zero dollars (#914).
+	e.DropUnbilledSavings()
+	e.ThreadID = c.thread
+	e.AgentCompaction = c.agentComp
+	// Only a client-set C (the user's setting or the client's own default, #963) is stored: the table value scales with the window and is read back
+	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
+	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {
+		e.CompactionPoint, e.CompactionPointSource = c.cpoint, c.cpointSrc
+	}
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
+	// Issue #424's RECORD half: a CLOSURE, not a call. The body scan (waitcause.Tracker.
+	// Observe, ~11ms on a 783 KB body) must NOT run here — finish() runs on the handler's
+	// own defer, before the handler returns, so anything synchronous here delays the NEXT
+	// request on a keep-alive connection (measured: that is exactly what calling Observe
+	// inline here used to add). The dashboard's writer goroutine invokes this closure right
+	// before the insert, the same place and for the same reason e.Redact() already runs
+	// there — see dash/capture.go's write(). Everything the closure needs is captured by
+	// value/reference now, cheaply: no scan happens until the writer calls it.
+	//
+	// RecordOutcome (this request's own status + message count, for the NEXT request's
+	// retry check) is folded into the SAME closure rather than called separately on the
+	// request path, so it still runs strictly after Observe reads the PREVIOUS state —
+	// exactly the ordering the retry rule depends on — and in the same relative order
+	// requests arrived in (the writer processes one channel, FIFO, same as the order
+	// Record() was called in). The trade-off: if this row is ever DROPPED (a full capture
+	// channel under heavy load — see dash.Recorder.Record's own doc), RecordOutcome never
+	// runs for it either, so a retry right after a dropped row could be missed. Fail-open,
+	// consistent with every other field here: a missed retry reads as a fresh wake, not a
+	// wrong one.
+	//
+	// failed is this proxy's own analogue of a transcript's isApiErrorMessage: a call that
+	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
+	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
+	// that case as WaitingUnknown rather than WaitingRetry.
+	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
+	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	if usage.ToolUseIncomplete {
+		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
+	}
+	failedCall := status != 0 && status/100 != 2
+	provider := bschemas.ModelProvider(c.provider)
+	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
+	var normMsgs []bschemas.ChatMessage
+	var normDone bool
+	norm := func() []bschemas.ChatMessage {
+		if !normDone {
+			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+		}
+		return normMsgs
+	}
+	if c.rec.LifecycleOn() {
+		ts, endTS, cacheW, cacheW1h := e.TS, time.Now().UnixMilli(), usage.CacheWrite-usage.CacheWrite1h, usage.CacheWrite1h
+		rec := c.rec
+		e.LifecycleFn = func() *dash.LifecycleRow {
+			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
+				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
+		}
+	}
+	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
+	e.WaitCause = func() dash.WaitCauseResult {
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
+		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
+		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
+			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		return dash.WaitCauseResult{
+			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
+			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
+			MonitorExpiryMs: obs.MonitorExpiryMs,
+		}
+	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
+	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	if d := c.deferFacts; d != nil {
+		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
+		e.DeferDroppedSearches = d.dropped
+		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
+		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
+	}
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
@@ -377,18 +648,90 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	cgCacheWrite, cgCacheRead := c.llm.CacheTotals()
 	cgModel := c.llm.Model()
 
-	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
-	// pricing, because whether this is the session's first request is an input to a dollar
-	// figure and not only to a label — see Event.cachesplitSavedUSD.
-	seenSession, seenModel, sinceMs, tailChanged := c.rec.ObserveSplit(
-		e.TenantID, e.SessionID, e.Model, e.TS, e.SplitTailHash)
+	// Cache attribution, with a cold start treated as the non-failure it is. The verdict is a
+	// label on the row; the savings are the accountant library's.
+	//
+	// Per THREAD (#423). Keyed on the session alone, a subagent's requests reset the main
+	// thread's idle gap, so the main thread's TTL expiries fell through to prefix_change — on
+	// one long session, 46 of 65 prefix_change rows ($70.27) were exactly that.
+	//
+	// A NEW thread whose content is mostly a known thread's is that conversation with a changed
+	// prefix (a rewind, an edit, a fork): by the mass it shares it is not a cold start.
+	observe := c.rec.ObserveThread
+	if c.hasInherit {
+		observe = func(tenant, session, threadID, model string, now int64, tail uint64) (bool, bool, int64, bool) {
+			return c.rec.ObserveThreadFrom(tenant, session, threadID, c.inherits, model, now, tail)
+		}
+	}
+	seenSession, seenModel, sinceMs, tailChanged := observe(
+		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
+	// The restart grace's clock must also learn this session's ALIAS id (#766): a seesaw-id
+	// tenant (the session header on some turns, not others) refreshes the ONE provider entry
+	// under either id, so a later headerless turn — whose own derived id IS the alias — must
+	// find this turn's warmth under the key it will ask for. The id is derived through the
+	// pipeline's own transform (apply.EnforcedSessionIDFor, empty explicit id), because
+	// apply derives the id it asks for from the body AFTER transformEnvelope — toolfilter's
+	// skills half rewrites the head message the session hash reads — and a hash of the
+	// pristine body is a key no request ever derives. Which id comes out: the METADATA
+	// session id when the body carries one (metadata.user_id / metadata.taskId), else the
+	// content hash of the transformed head — the same ONE rule the ask side resolves
+	// (apply.graceAliasID), so the two cannot drift. A closure for the same reason
+	// WaitCause is one: the transform and re-parse run on the writer goroutine, not the
+	// handler's defer. Only set when this row ran under a session id at all — observe-mode
+	// rows carry none — and the closure answers '' when the alias is the request's own id
+	// (a headerless turn, or no body to derive from: /compact never stashes one), which
+	// observe() above already touched or nothing can.
+	//
+	// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the alias
+	// of a Bob IDE session is the content hash.
+	if e.SessionID != "" {
+		pipe, api, bypass := c.aliasPipe, c.aliasAPI, c.aliasBypass
+		e.AliasFn = func() string {
+			alias := apply.EnforcedSessionIDFor(pipe, tenantID, "", api, provider, bypass, waitBody)
+			if alias == "" || alias == sessionID {
+				return ""
+			}
+			return alias
+		}
+	}
 	// Only a known expiry can establish ttl_expiry. OpenAI's 30m is a
 	// minimum guarantee, so a later miss cannot be attributed to expiry alone.
-	e.AttributeCache(seenSession, seenModel, sinceMs,
-		cacheAttributionTTLMs(e.Provider, e.Model), e.CacheWrite > 0)
+	//
+	//
+	// The cause comes from a measured comparison with this thread's previous request, not from
+	// CacheWrite > 0 (issue #600). A miss with nothing measured reads unknown.
+	if c.inv != nil && c.inv.System != nil {
+		e.SystemHash = c.inv.System.Hash
+	}
+	if c.inv != nil {
+		e.DeclDigest = c.inv.Digest
+	}
+	//
+	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
+	// belongs to one model, so a request on another model between two requests on this one does
+	// not refresh it. SinceLastMs below keeps the per-thread gap.
+	cause, modelGap, known, lastWasSame, prevPromptTokens, prevOneHour := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+	//
+	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+	// reads as an expiry on a turn that came 8 s after the refresh.
+	age := sinceMs
+	if known {
+		age = modelGap
+		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+		// when that was this model. This holds after a failed request too, when the gap since
+		// the last good request differs from sinceMs.
+		if lastWasSame {
+			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+		}
+	} else {
+		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
+	}
+	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
-	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
-	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
+	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
+	// saving is the accountant library's rescue, not computed from these.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
@@ -398,7 +741,44 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if c.pricer != nil && c.model != "" {
 		price, priced = c.pricer.Price(context.Background(), c.model)
 	}
-	e.Price(price, usageOK && priced)
+	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
+	// state stays untouched and the event carries no result. Not after several upstream rounds
+	// either (see rounds): no Result is attached, so PriceMode books no saving
+	// (acc_fallback reason no_result). The thread state is left as the
+	// previous request left it; the next request then sees a longer gap, which the library
+	// handles (a phase it cannot prove is unknown and falls back too).
+	// Whatever way the request ended, the client hash begin kept for end is not needed past here. end removes it
+	// on the normal path and accDrop on a recovered panic; this covers any path that reached neither.
+	defer c.savings.drop(c.accReq)
+	if c.accReq != nil && usageOK && !c.accDone {
+		c.accDone = true
+		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
+		// dollars. The response body of a 4xx or 5xx can still carry a usage object, but the provider
+		// billed none of the request, so the library must not price a saving on it. DropUnbilledSavings
+		// zeroed the tokens above; skipping the compute leaves the event with no Result, so PriceMode
+		// books no dollars either (acc_fallback no_result, reason rejected_status). PingSavings refuses
+		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
+		if c.rejected() {
+			c.accNoResult = "rejected_status"
+		} else if c.rounds <= 1 {
+			c.accBilledTTL(usage)
+			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
+				e.SetAccountant(res)
+			} else {
+				c.accNoResult = "compute_panicked"
+			}
+			// The ping facts were read for this request; now that it is priced they are spent.
+			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
+		}
+	}
+	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
+	if c.accUnsupportedWire {
+		e.SetAccountantUnsupportedWire()
+	}
+	e.PriceMode(price, usageOK && priced)
+	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
+		logFallback(e, c.noResultWhy(usageOK))
+	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
 		cgPrice, cgPriced := price, priced
 		if c.pricer != nil && cgModel != "" && cgModel != c.model {
@@ -451,14 +831,89 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// are whatever the caller wrote, up to and including something they pasted — so it rides
 	// the same captureContent decision as the transcript, and the writer stores NULL for it
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
+	// e.Project rides along: invocations are recorded per folder, because one session works in
+	// several and a per-session folder cannot scope a per-project report.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }
 
-func cacheAttributionTTLMs(provider, model string) int64 {
-	ttl, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil)
-	if kind != apply.CacheLifetimeExact {
+// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
+// the last real request, cut short by a ping that refreshed the entry later than that request.
+func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
+	if refreshedAt.IsZero() || sinceMs <= 0 {
+		return sinceMs
+	}
+	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
+		return age
+	}
+	return sinceMs
+}
+
+// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
+// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
+// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
+// five minutes. false (also "unknown") keeps the five-minute lifetime.
+func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
+	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
 		return 0
 	}
-	return ttl.Milliseconds()
+	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
+}
+
+// LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
+// a campaign sees at serve time the values it was trained on.
+type LiveFacts struct {
+	Messages, Tools, SystemBlocks, MaxTokens int
+	Effort, Thinking, CacheTTL, Agent        string
+	Stream                                   bool
+	TTFBMs                                   float64
+	// Arrival is this request's identity in a learned campaign's tracker (nil when no campaign applies). It travels with the request, not with its thread,
+	// because requests overlap on a thread.
+	Arrival *predictive.Arrival
+}
+
+// liveFacts reads them off the capture (nil-safe). ttfbMs is the streamed first-byte delay, 0 on buffered responses, as the dashboard records it.
+func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
+	if c == nil {
+		return nil
+	}
+	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+}
+
+// noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
+func (c *capture) noteRounds(n int) {
+	if c != nil {
+		c.rounds = n
+	}
+}
+
+// accDrop forgets the savings record: the pipeline's rewrite did not go upstream. Nil-safe.
+func (c *capture) accDrop() {
+	if c != nil {
+		c.savings.drop(c.accReq)
+		c.accReq = nil
+	}
+}
+
+// noResultWhy names the branch that left an event with no accountant Result, for the acc_fallback line. The reason
+// no_result covers four unrelated things, and the log line used to say only that.
+// rejected is true when the provider answered with a status that is not 2xx. Status 0 means no upstream
+// answered (such as /compact), and is not a rejection.
+func (c *capture) rejected() bool {
+	return c.status != 0 && (c.status < 200 || c.status > 299)
+}
+
+func (c *capture) noResultWhy(usageOK bool) string {
+	switch {
+	case c.accReq == nil:
+		return "no_record" // no session, or the pipeline did not run: accBegin never opened a record
+	case !usageOK:
+		return "no_usage"
+	case c.accNoResult != "":
+		return c.accNoResult
+	case c.rounds > 1:
+		return "upstream_rounds=" + strconv.Itoa(c.rounds)
+	}
+	return ""
 }

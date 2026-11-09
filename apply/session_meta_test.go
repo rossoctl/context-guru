@@ -189,7 +189,7 @@ func TestSessionIDFromMetadataTaskID(t *testing.T) {
 		sessionOfHead(t, "", "", "", sysBefore, firstUser); got != want {
 		t.Errorf("metadata without a known key changed the session: %q, want %q", got, want)
 	}
-	// Both keys present: user_id wins, deterministically (metaSessionKeys order).
+	// Both keys present: user_id wins, deterministically (session.Explicit order).
 	ccSession := "2e168312-56a5-423e-92d1-816863d16a7d"
 	both := `{"user_id":` + mustJSON(t, ccUserID(ccSession)) + `,"taskId":"` + bobTask + `"}`
 	if got := sessionOf(t, "", "", both, firstUser); got != ccSession {

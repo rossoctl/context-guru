@@ -4,7 +4,22 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/rossoctl/context-guru/keepalive"
 )
+
+// SetWaitPolicy supplies an account's per-wait ping plan settings (keepalive_wait_plan and its three
+// counts) for the calculator and the recommendation. dash holds no tenant configuration of its own,
+// so the host answers. nil: the shipped plan, on.
+func (a *API) SetWaitPolicy(fn func(tenantID string) keepalive.Policy) { a.waitPolicyFn = fn }
+
+// waitPolicy is the plan settings of the caller's account. The base count is set by the caller.
+func (a *API) waitPolicy(tenantID string) keepalive.Policy {
+	if a.waitPolicyFn == nil {
+		return DefaultWaitPolicy(0)
+	}
+	return a.waitPolicyFn(tenantID)
+}
 
 // The keep-alive tab's six read routes.
 //
@@ -55,6 +70,10 @@ func (a *API) keepAliveBehaviour(w http.ResponseWriter, r *http.Request) {
 	// the page knows it. Defaulted in the DB layer, never guessed here.
 	x, _ := strconv.ParseFloat(r.URL.Query().Get("x"), 64)
 	k, _ := strconv.Atoi(r.URL.Query().Get("k"))
+	// CoverageSeconds is a POLICY figure: the reach of the caller's (X, K) against the 5-minute
+	// default. The gap bands are drawn for the whole account, with no session, so there is no
+	// provider or model to ask. The calculator and the recommendation, which see each expiry,
+	// judge it against that expiry's own lifetime (missLifetime).
 	b, err := a.db(r).KeepAliveBehaviour(f, CoverageSeconds(x, k))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -133,7 +152,7 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 			model = m
 		}
 	}
-	out, err := db.KeepAliveCalc(f, x, prefix, model, a.priceFn(r), k)
+	out, err := db.KeepAliveCalc(f, x, prefix, model, a.priceFn(r), k, a.waitPolicy(f.Tenant))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -173,7 +192,7 @@ func (a *API) keepAliveRecommend(w http.ResponseWriter, r *http.Request) {
 		a.unauthorized(w)
 		return
 	}
-	rec, err := a.db(r).KeepAliveRecommend(f)
+	rec, err := a.db(r).KeepAliveRecommend(f, a.waitPolicy(f.Tenant))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

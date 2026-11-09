@@ -1,0 +1,17 @@
+$43.95 saved today. 2 of 3 caches are cold: their next message costs about
+$0.65 extra.
+
+[1mCaches[0m[2m  time left before the next message costs extra[0m
+[32m●[0m  session-A/main   opus-5    [32m█████░░░░░░░[0m  [32m2:14[0m     ctx 34%
+[31m○[0m  session-A/sub-1  sonnet-5  [31m░░░░░░░░░░░░[0m  [31mCOLD[0m     ctx 9%
+[31m○[0m  session-B/main   opus-5    [31m░░░░░░░░░░░░[0m  [31mCOLD[0m     ctx 58%
+
+[1mSaved today [0m$43.95  [32m█▅█▁▆▁▄▂▁▆█▅▄▁▁▅[0m
+
+[1mLast 20 requests[0m[2m  oldest to newest[0m
+[32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m [32m■[0m↻[31m✖[0m
+[32m■[0m hit  [33m▨[0m partial  [31m✖[0m miss  ↻ ping
+
+[1mDo: [0mthe next message costs extra; /compact first to cut it.
+
+[2mupdated 22s ago   q quit  r refresh[0m

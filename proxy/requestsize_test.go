@@ -9,19 +9,37 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/proxy"
 	"github.com/tidwall/gjson"
 )
 
-// The two constants live in the internal proxy package (proxy.go), not exported. Mirrored
-// here rather than imported, same convention as agentcompaction_test.go's fixture phrases:
-// a change to either constant must not make these tests pass by construction.
+// The ceilings are lowered for these tests (tokenizing a 33 MiB body took over 100 s under
+// -race and the tests only need a body over the ceiling, not a body of a particular size).
+// The shipped values are pinned by TestShippedRequestCeilings, so a change to either must not
+// pass by construction.
 const (
-	testMaxRequestBytes           = 32 << 20
-	testMaxCompactionRequestBytes = 128 << 20
+	testMaxRequestBytes           = 1 << 20
+	testMaxCompactionRequestBytes = 4 << 20
 )
 
+// useSmallCeilings lowers the two ceilings for one test and restores them after. These tests
+// are serial, so the swap is not observed by a running handler of another test.
+func useSmallCeilings(t *testing.T) {
+	t.Helper()
+	prevReq, prevCompact := proxy.SetRequestCeilings(testMaxRequestBytes, testMaxCompactionRequestBytes)
+	t.Cleanup(func() { proxy.SetRequestCeilings(prevReq, prevCompact) })
+}
+
+func TestShippedRequestCeilings(t *testing.T) {
+	req, compact := proxy.SetRequestCeilings(0, 0)
+	proxy.SetRequestCeilings(req, compact)
+	if req != 32<<20 || compact != 128<<20 {
+		t.Fatalf("shipped ceilings = %d / %d, want 32 MiB / 128 MiB", req, compact)
+	}
+}
+
 // repeatBannerToSize builds the realistic shape that actually triggers #278: a repeated,
-// low-entropy line (the cgssh2 SSH MOTD banner, in the real incident) rather than a single
+// low-entropy line (an SSH MOTD banner, in the real incident) rather than a single
 // repeated character. A single repeated byte is a known BPE-tokenizer worst case (pathological
 // merge behavior on a run of one character) and made an earlier version of this test hang for
 // minutes on a size a real transcript reaches routinely — using realistic filler avoids that
@@ -59,6 +77,7 @@ func oversizedBody(t *testing.T, over int, lastMsg map[string]any) []byte {
 // rendered it as "Request too large (max 32MB)" with no distinguishable status from the
 // proxy at all). An ordinary oversized request must still be refused, but honestly.
 func TestOversizedNonCompactionRequestGets413(t *testing.T) {
+	useSmallCeilings(t)
 	var upstreamHit bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
@@ -87,11 +106,12 @@ func TestOversizedNonCompactionRequestGets413(t *testing.T) {
 
 // TestOversizedAgentCompactionRequestSucceeds is the fix for #278 itself: the agent's own
 // compaction request — the one whose whole purpose is carrying a transcript already larger
-// than testMaxRequestBytes — must reach the existing, already-correct bypass path instead
-// of dying at the read. Forwarded byte-identical, exactly as a small compaction request
-// already is (see agentcompaction_test.go's TestAgentCompactionIsBypassed) — this test
-// only proves the SAME thing still holds once the body is oversized.
+// than testMaxRequestBytes — must be read up to the higher ceiling instead of dying at the
+// read. Over that ceiling the request is bypassed: it is forwarded byte for byte and counted on
+// agent_compaction as oversize_bypass. Under it, it runs the pipeline (see
+// agentcompaction_test.go's TestAgentCompactionIsNotBypassed).
 func TestOversizedAgentCompactionRequestSucceeds(t *testing.T) {
+	useSmallCeilings(t)
 	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.record(r)
@@ -114,9 +134,12 @@ func TestOversizedAgentCompactionRequestSucceeds(t *testing.T) {
 		t.Fatalf("status = %d, want 200 — got %s", resp.StatusCode, mustReadAll(t, resp.Body))
 	}
 	got := up.last().body
-	if !bytes.Equal(got, body) {
-		t.Fatalf("an oversized compaction request must reach the upstream byte-identical "+
-			"(len sent=%d, len got=%d)", len(body), len(got))
+	if up.hits() != 1 || !bytes.Equal(got, body) {
+		t.Fatalf("the oversized compaction request must reach the upstream byte for byte "+
+			"(hits=%d, len sent=%d, len got=%d)", up.hits(), len(body), len(got))
+	}
+	if n := gjson.GetBytes(statsOf(t, srv.URL), "components.agent_compaction.gates.oversize_bypass").Int(); n != 1 {
+		t.Fatalf("oversize_bypass = %d, want 1", n)
 	}
 }
 
@@ -124,6 +147,7 @@ func TestOversizedAgentCompactionRequestSucceeds(t *testing.T) {
 // ceiling, it does not remove it. A body over testMaxCompactionRequestBytes is refused
 // regardless of content — memory is still bounded, just at the higher tier.
 func TestOverHardCeilingIsRefusedEvenIfCompaction(t *testing.T) {
+	useSmallCeilings(t)
 	var upstreamHit bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
@@ -158,6 +182,7 @@ func TestOverHardCeilingIsRefusedEvenIfCompaction(t *testing.T) {
 // proxy.go's own doc comment on compact()), so this also proves the oversized body actually
 // reaches and is shrunk by the pipeline, not merely accepted.
 func TestCompactEndpointAcceptsOversizedBody(t *testing.T) {
+	useSmallCeilings(t)
 	h, _ := buildHandler(t, "pipeline: [dedup]\ncomponents:\n  dedup: {min_tokens: 20}\n", "http://unused.invalid")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -196,12 +221,12 @@ func TestCompactEndpointAcceptsOversizedBody(t *testing.T) {
 // KNOWN, DOCUMENTED tradeoff rather than leaving it a surprise: isAgentCompaction's own doc
 // comment (agentcompaction.go) already accepts that a trailing tool_result quoting the
 // compaction phrase verbatim is a reachable false positive — an agent that reads
-// docs/how-to/agent-compaction.md lands the phrase in its own last message. Before this
-// fix, that cost a skipped pipeline pass on one request. After it, it additionally unlocks
+// docs/how-to/agent-compaction.md lands the phrase in its own last message. It unlocks
 // reading up to testMaxCompactionRequestBytes instead of testMaxRequestBytes for that one
-// request — still bounded, not unlimited, but a real, larger blast radius worth a named
-// test rather than an implicit one.
+// request, and bypasses it: it is forwarded untouched. Still bounded, not unlimited, but a
+// real, larger blast radius worth a named test rather than an implicit one.
 func TestOversizedToolResultQuotingCompactionPhraseStillGetsThroughAtTheHigherCeiling(t *testing.T) {
+	useSmallCeilings(t)
 	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.record(r)
@@ -226,9 +251,9 @@ func TestOversizedToolResultQuotingCompactionPhraseStillGetsThroughAtTheHigherCe
 		t.Fatalf("status = %d, want 200 (documenting the known false-positive letting this "+
 			"through) — got %s", resp.StatusCode, mustReadAll(t, resp.Body))
 	}
-	if got := up.last().body; !bytes.Equal(got, body) {
-		t.Fatalf("expected the false positive to forward byte-identical, same as a real " +
-			"compaction request would")
+	if got := up.last().body; up.hits() != 1 || !bytes.Equal(got, body) {
+		t.Fatalf("expected the false positive to be bypassed and reach the upstream whole, same "+
+			"as a real compaction request would (hits=%d, len got=%d)", up.hits(), len(got))
 	}
 }
 
@@ -272,6 +297,7 @@ const ccCompactPromptForSizeTest = "CRITICAL: Respond with TEXT ONLY. Do NOT cal
 // reworded, but `error.type` is a wire contract with the client and changing it silently
 // re-breaks the diagnosis.
 func TestRefusalIsParseableByTheAgent(t *testing.T) {
+	useSmallCeilings(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("an oversized, non-compaction request must never reach the upstream")
 	}))
@@ -313,6 +339,7 @@ func TestRefusalIsParseableByTheAgent(t *testing.T) {
 // the 32 MiB tier here would tell a caller its compaction request was refused by a limit it
 // was in fact allowed to exceed.
 func TestRefusalOverHardCeilingNamesTheHigherTier(t *testing.T) {
+	useSmallCeilings(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("a body over the hard ceiling must never reach the upstream")
 	}))
@@ -349,5 +376,54 @@ func TestRefusalOverHardCeilingNamesTheHigherTier(t *testing.T) {
 	if got := gjson.Get(raw, "error.limit_bytes").Int(); got != testMaxCompactionRequestBytes {
 		t.Errorf("error.limit_bytes = %d, want %d (the hard ceiling, not the ordinary tier)",
 			got, testMaxCompactionRequestBytes)
+	}
+}
+
+// statsOf reads /stats.
+func statsOf(t *testing.T, base string) []byte {
+	t.Helper()
+	resp, err := http.Get(base + "/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return []byte(mustReadAll(t, resp.Body))
+}
+
+// A compaction just under the ceiling runs the pipeline: dedup collapses the duplicate tool output
+// and the request is counted as detected, not as an oversize bypass.
+func TestACompactionUnderTheCeilingRunsThePipeline(t *testing.T) {
+	useSmallCeilings(t)
+	var up upstreamCapture
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up.record(r)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+	h, _ := buildHandler(t, "pipeline: [dedup]\ncomponents:\n  dedup: {min_tokens: 20}\n", upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	dump := strings.Repeat("a verbose repeated tool output line\n", 60)
+	body, _ := json.Marshal(map[string]any{"model": "gpt-x", "messages": []map[string]any{
+		{"role": "tool", "tool_call_id": "a", "content": dump},
+		{"role": "tool", "tool_call_id": "b", "content": dump},
+		{"role": "user", "content": ccCompactPromptForSizeTest},
+	}})
+	if len(body) >= testMaxRequestBytes {
+		t.Fatalf("fixture too big: %d", len(body))
+	}
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(gjson.GetBytes(up.last().body, "messages.1.content").String(), "repeat of") {
+		t.Fatalf("dedup did not run on a compaction under the ceiling: %s", up.last().body)
+	}
+	st := statsOf(t, srv.URL)
+	if gjson.GetBytes(st, "components.agent_compaction.gates.detected").Int() != 1 ||
+		gjson.GetBytes(st, "components.agent_compaction.gates.oversize_bypass").Exists() {
+		t.Fatalf("gates wrong: %s", st)
 	}
 }

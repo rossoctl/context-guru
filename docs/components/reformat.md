@@ -534,7 +534,42 @@ records).
 | Lossy? | Yes, deliberately and by name — a removed declaration is not sent |
 | Reversible? | Yes: delete the name from `remove`. Re-anchors the prefix once (~$0.70) |
 | In any preset? | **No.** It has no effect without an explicit list, and the list is a decision only the account can make |
-| Config | `remove: [<declaration name> ...]`, plus `mcp__<server>` for a whole MCP server |
+| Config | `remove: [<declaration name> ...]`, plus `mcp__<server>` for a whole MCP server. Tool deferral: `defer: auto\|off`, `keep: [...]`, `always_defer: [...]` |
+
+### Tool deferral: `defer`, `keep` and `always_defer`
+
+`defer: auto` (the `ultrahigh` preset) defers the tools the user's own history shows unused; see
+[Choose a preset](../reference/presets.md) for the rule. It removes nothing. Two lists change it:
+
+| Key | What it does |
+|---|---|
+| `keep: [<name> ...]` | Never defer these tools. |
+| `always_defer: [<name> ...]` | Defer these tools in every new thread, whatever the history says (#878). Empty by default. |
+
+A name is a tool name, or `mcp__<server>` for a whole MCP server. A tool on `always_defer` skips the
+history rule (the user's last 3 sessions) and the project veto (the project's last 10 sessions). It still
+stays loaded when:
+
+- it is on the never-defer list (Bash, Read, Edit, Write, Agent, Skill, ToolSearch, AskUserQuestion,
+  Context Guru's own tools);
+- it is on `keep`: the keep list wins when a name is on both;
+- the thread used or loaded it earlier, or `tool_choice` forces it;
+- it weighs under 200 tokens (a server: all its tools together).
+
+A server is one unit: list it as `mcp__<server>`. One listed tool of a server does not defer the rest.
+The set is decided at the thread's first request and stays for the thread, so a change to either list
+reaches new threads only. With `defer: off`, nothing is deferred.
+
+```yaml
+preset: ultrahigh
+components:
+  toolfilter:
+    defer: auto
+    always_defer: [mcp__playwright]
+```
+
+`/context-guru:save-more tools` writes both lists (`keep:`, `unkeep:`, `defer:`, `undefer:`); see
+[save-more](../plugin/save-more.md#tools).
 
 ### When it helps
 
@@ -575,6 +610,45 @@ declaration, which posts to `POST /api/toolfilter` (`{kind, name, server, action
 A candidate is only suggested once it was declared in at least 5 distinct captured sessions spanning
 7+ days, and invoked in none of them — the count guards against a fluke, the span against "one
 afternoon's task didn't need it."
+
+`GET /api/adapt/tools` (what `/context-guru:remove-mcp-and-skills` reads) is the full list behind that: every
+MCP server, MCP tool and skill the account declared and never used, whether or not it meets the
+5-session bar (`sufficient` says which). Each item is priced on exactly the requests that carried
+it, at that request's own model and cache tier, and comes with its `remove_as` filter entry and the
+client-side change that stops sending it (`claude mcp remove`, a `permissions.deny` entry,
+`skillOverrides`, or disabling the plugin). Each request records the digest of the declaration set
+it carried; rows written before that are matched by tool count, and `usd_low`/`usd_high` bound the
+guess. Context Guru's own tools and skills are never listed.
+Claude Code's and Codex's built-in tools are never listed either: removing one breaks the agent rather than
+saving anything.
+
+`recommendation` carries the best option as one question to ask (`question`), with the set it removes,
+what it would have saved over the window and per week, and the one-off cache rewrite it costs.
+`would_add_usd` is that saving net of the rewrite. `payback_weeks` is how many weeks of that saving the
+rewrite costs; the question says "pays back in about N weeks" when it is more than one, and when it is
+longer than the history window the recommendation is to keep everything as is.
+
+`saved_so_far` (and, in the shared adapt shape, `to_date` and one `removed` row per item) is what removals
+already made have saved, measured rather than estimated:
+
+- **Filter.** The inventory is read from the request body before the filter runs, so every request the
+  filter acted on records both the declaration set the client sent (`decl_digest`) and the tokens the
+  filter did not forward (`filtered_decl_tokens`). Each removed item is priced on exactly the requests it
+  was stripped from, at that request's model and cache tier (read, write, input), and the total is the
+  filter's own count priced the same way. Requests from before the removal count for nothing.
+- **Client — an estimate, shown apart.** A declaration removed in the client (`claude mcp remove`,
+  `skillOverrides`) leaves no row of its own. It is detected when it stops appearing in at least three later
+  sessions that still carried MCP tools (or skills), and priced at its tokens on each request of those later
+  sessions whose set still carried them, at that request's model and tier. It is labelled
+  "estimated (removed in the client)" and never added to the measured total. An item that is also on the
+  filter list is counted once, under the filter.
+`POST /api/adapt/tools/apply {"option", "basis"}` writes one option of a report fetched in the last
+30 minutes into the removal list; `restore` takes those entries out, and `revert` undoes the last tools
+apply (never another adapt command's change). It shares identity, rate limit, audit and the single-tenant override file with every
+`/api/adapt/*/apply`; on a single-tenant proxy the running pipeline is rebuilt at once. A single-tenant
+proxy accepts apply only from a caller on the same machine (loopback, no forwarding headers), which
+means it trusts every local user and process on that machine; run it on a shared host only if that is
+acceptable.
 
 Any signed-in account can switch off declarations it added itself (MCP tools/servers, other
 non-Claude-Code-native tools) — those are on your own bill. Switching off one of Claude Code's

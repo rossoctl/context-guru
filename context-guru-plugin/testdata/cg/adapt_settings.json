@@ -1,0 +1,31 @@
+{
+  "kind": "settings",
+  "version": 1,
+  "class": "counterfactual",
+  "window": {
+    "since": 1788881400000,
+    "until": 1791473400000
+  },
+  "checks": [
+    {
+      "id": "disable-experimental-betas",
+      "measured": true,
+      "requests": 6016,
+      "cost_usd": 249.52,
+      "also": [
+        {
+          "id": "classifier-stage-2",
+          "requests": 12,
+          "cost_usd": 3.5
+        }
+      ]
+    },
+    {
+      "id": "session-recap",
+      "measured": false,
+      "requests": 0,
+      "cost_usd": null,
+      "also": []
+    }
+  ]
+}

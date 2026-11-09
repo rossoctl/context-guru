@@ -1,0 +1,88 @@
+{
+ "kind": "compaction",
+ "version": 1,
+ "summary": "medium would have saved $6.40 more than your current conservative preset on the requests that could be replayed.",
+ "window": {
+  "since": 1788881400000,
+  "until": 1791473400000,
+  "sessions": 40,
+  "requests": 3100
+ },
+ "class": "counterfactual",
+ "method": "every shipped preset replayed on your stored requests",
+ "basis_id": "a1b2c3d4",
+ "current": "current",
+ "default": "conservative",
+ "best": "medium",
+ "to_date": {
+  "saved_usd": 9.4,
+  "since": 1788881400000,
+  "until": 1791473400000,
+  "class": "observed",
+  "label": "what your current config saved so far"
+ },
+ "options": [
+  {
+   "id": "current",
+   "label": "Your config (conservative)",
+   "saved_usd": 9.6,
+   "spend_usd": 0.2,
+   "net_usd": 9.4
+  },
+  {
+   "id": "off",
+   "label": "No compaction",
+   "saved_usd": 0,
+   "spend_usd": 0,
+   "net_usd": 0
+  },
+  {
+   "id": "conservative",
+   "label": "Trim obvious waste",
+   "saved_usd": 9.6,
+   "spend_usd": 0.2,
+   "net_usd": 9.4
+  },
+  {
+   "id": "medium",
+   "label": "+ cheap-model relevance pass",
+   "saved_usd": 17.9,
+   "spend_usd": 2.1,
+   "net_usd": 15.8,
+   "class": "estimate",
+   "detail": "the relevance model's choices are estimated from the stored rewrites"
+  },
+  {
+   "id": "high",
+   "label": "+ summary near a full window",
+   "saved_usd": 18.4,
+   "spend_usd": 3.5,
+   "net_usd": 14.9,
+   "class": "estimate",
+   "detail": "summaries are estimated, not re-run"
+  },
+  {
+   "id": "xhigh",
+   "label": "+ cold-cache sweep",
+   "net_usd": null,
+   "unavailable": "too few cold turns in the window to replay"
+  }
+ ],
+ "recommendation": {
+  "option": "medium",
+  "change": "preset conservative -> medium",
+  "net_delta_usd": 6.4,
+  "per_week_usd": 1.49,
+  "effective": "now",
+  "reason": "highest net on your own sessions, after its own model spend",
+  "gain_usd": 6.4,
+  "gain_range_usd": [
+   1.7,
+   11.6
+  ]
+ },
+ "warnings": [
+  "The replay covers 14% of requests; on the rest the presets were not compared.",
+  "medium and high include model components whose output is estimated, not re-run."
+ ]
+}

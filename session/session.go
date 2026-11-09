@@ -3,7 +3,8 @@
 // Per the design (D4): each host supplies an explicit id when it has one
 // (bifrost proxy: x-context-guru-session header, else the agent's own id off the
 // request body — Anthropic metadata.user_id or Bob Shell's metadata.taskId;
-// sidecar plugin: pctx.Session A2A id; eval-containers: gateway-stamped). When none
+// sidecar plugin: pctx.Session A2A id; eval-containers: gateway-stamped). The
+// proxy's Bob model route also reads the Bob IDE's X-Task-Id header, last. When none
 // is available we fall back to a deterministic content hash of the system
 // prompt + first user message, which needs no host cooperation.
 package session
@@ -72,7 +73,8 @@ const maxMetadataLen = 1024
 // ExplicitID returns the first usable id from the candidates a host can offer, in
 // the caller's precedence order — the proxy passes the x-context-guru-session header
 // first, then Anthropic's `metadata.user_id` (Claude Code), then `metadata.taskId`
-// (Bob Shell). It returns "" when none is usable, which makes Scoped fall back to
+// (Bob Shell). On the Bob model route only, the Bob IDE's `X-Task-Id` header is last.
+// It returns "" when none is usable, which makes Scoped fall back to
 // the derived content hash — i.e. today's behaviour.
 //
 // A host-supplied id matters because of COMPACTION. The derived hash covers the
@@ -109,14 +111,67 @@ func ExplicitID(cands ...string) string {
 	return ""
 }
 
+// metadataKeys are the request `metadata` fields carrying the agent's OWN session id, in
+// precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON object
+// string, unwrapped by ExplicitID) and `metadata.taskId` is Bob Shell's (a bare randomUUID,
+// re-rolled only by /clear). Both survive the agent's context compaction, which the derived
+// hash does not. A request carrying both resolves to user_id, by this order. The Bob IDE
+// sends neither. Its id is a header, which Explicit takes as a host id after these.
+var metadataKeys = [...]string{"user_id", "taskId"}
+
+// Explicit is the ONE rule for which explicit id a request carries: the header first, then
+// each metadataKeys field in order, then each host id in order, then "" (Scoped's
+// derived-hash fallback).
+//
+// metaString reads one metadata field. It returns ok=false when the field is absent or is not
+// a string, so a number, object or array falls back to the derived hash and never becomes a
+// key like `map[]`. A nil metaString means the host has no metadata.
+//
+// host holds ids only the host can see, such as the Bob IDE's X-Task-Id header. They go
+// last. So a request that resolved an id without them resolves the same id with them.
+func Explicit(header string, metaString func(key string) (string, bool), host ...string) string {
+	return explicit(header, metaString, true, host)
+}
+
+// ExplicitStrict is Explicit for a host that cannot tell a per-conversation id from a
+// per-user one. It takes `metadata.user_id` only in Claude Code's JSON-object form, which
+// carries a session_id. A plain `user_id` such as `user_42` names a user, not a
+// conversation, so it falls back to the derived hash. `taskId` is taken as in Explicit.
+func ExplicitStrict(header string, metaString func(key string) (string, bool)) string {
+	return explicit(header, metaString, false, nil)
+}
+
+func explicit(header string, metaString func(key string) (string, bool), plainUserID bool, host []string) string {
+	cands := make([]string, 0, 1+len(metadataKeys)+len(host))
+	cands = append(cands, header)
+	if metaString != nil {
+		for _, k := range metadataKeys {
+			v, ok := metaString(k)
+			if !ok {
+				continue
+			}
+			if k == "user_id" && !plainUserID && !isJSONObject(v) {
+				continue
+			}
+			cands = append(cands, v)
+		}
+	}
+	return ExplicitID(append(cands, host...)...)
+}
+
+// isJSONObject reports whether v looks like Claude Code's JSON-object user_id.
+func isJSONObject(v string) bool {
+	return strings.HasPrefix(strings.TrimSpace(v), "{")
+}
+
 // metaSessionID unwraps Claude Code's JSON-object user_id, or returns v unchanged.
 // Every malformed shape (truncated JSON, an object without session_id, a nested
 // non-string session_id) yields "", which ExplicitID treats as "no candidate".
 func metaSessionID(v string) string {
-	s := strings.TrimSpace(v)
-	if !strings.HasPrefix(s, "{") {
+	if !isJSONObject(v) {
 		return v
 	}
+	s := strings.TrimSpace(v)
 	if len(s) > maxMetadataLen {
 		return ""
 	}

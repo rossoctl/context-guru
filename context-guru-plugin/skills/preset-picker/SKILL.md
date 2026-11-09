@@ -1,6 +1,6 @@
 ---
 name: preset-picker
-description: Show which preset is running and switch between them - `off`, `conservative` (the recommended default for "carry less"), `medium`, `high`, `xhigh`. Use when the user asks which preset is set, to change what context-guru trims, to carry less context, or says /plugin configure is awkward for this.
+description: Show the running preset and switch it (`off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`). Use when the user asks which preset is set, to change what context-guru trims, or to carry less context.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 
@@ -35,13 +35,14 @@ a fault, just unset.
 |---|---|
 | `off` | nothing runs, requests go through untouched |
 | `conservative` | trims obvious waste — the safe first step into "carry less" |
-| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output |
-| `high` | `medium` plus a summarizer that compacts older turns once the context window is nearly full |
+| `medium` | `conservative` plus a cheap model that keeps only what looks relevant in recent tool output, and a summary prepared in the background that is used only if you come back after the cache expired |
+| `high` | `medium`, but the summary of older turns is used as soon as the context window is nearly full |
 | `xhigh` | `high` plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut |
+| `ultrahigh` | **Experimental.** `xhigh` plus tool deferral: tools your own last sessions never used are sent as names only, and the model loads one through search when it needs it. Opt-in. Turn it off for one session with `ENABLE_TOOL_SEARCH=false` |
 
 Recommend `conservative` to someone who wants to carry less context but hasn't said they want an
 LLM pass: it is deterministic, so nothing about the request path depends on a model call
-succeeding. `medium`, `high` and `xhigh` are an escalating ladder — each is a strict superset of
+succeeding. `medium`, `high`, `xhigh` and `ultrahigh` are an escalating ladder — each is a strict superset of
 the one below it — so "somewhere in between" usually means one tier up from wherever they are now,
 not a custom mix.
 
@@ -60,16 +61,46 @@ way. Only a project with no routing at all falls back to project-local, since th
 to inherit. Pass `--user-scope` to deliberately diverge from that — a preset the user wants on
 every project even though routing itself is project-scoped.
 
-## 4. A restart is required
+`preset show` and `preset set` also print `running=` (the preset the proxy runs now, from its
+`/stats`; `no_proxy` when nothing answers). `gap=` appears when the saved and the running preset
+differ.
 
-Like a cache-strategy change, this takes effect at the **next proxy start**, not this session.
-Say so plainly rather than implying it applies immediately — `/context-guru:status` after a
-restart is the way to confirm it stuck.
+## 4. A restart applies it, after one yes
+
+The running proxy keeps its old preset until it restarts. When `preset set` prints
+`restart_needed=true`, tell the user in plain words:
+
+- The new preset is saved.
+- A restart applies it now.
+- **A restart costs one cache rewrite in every open session on this port.**
+- If they say no, the old preset runs until the next session start.
+
+Then ask for a yes. Do not restart without it. On yes:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" preset restart --name <name>
+```
+
+It restarts the proxy through `start-proxy.sh`, the same path a session start uses (`strategy sync`,
+then a fingerprint compare, then a stop by pidfile and a start). It never kills by pattern, and it
+leaves a proxy that another project owns alone. It then reads `/stats` to confirm. Report
+`result=restarted` (the new preset runs) or `result=not_applied` with the `starter=` lines that say why.
+
+For `ultrahigh`, `preset restart` then asks the RESTARTED proxy to start the provider check that tool
+deferral needs, and prints `probe=asked` (or why not: `not_routed`, `unavailable`). The check runs at
+your next request, in the background. The first session on each model after the restart is not
+deferred. `preset set` sends no probe while the old proxy runs: that proxy would take it and do
+nothing with it.
+
+On no, say the old preset runs until the next session start. `/context-guru:status` and the status line
+show `preset: <running> (<saved> after a restart)` until then.
 
 ## Do not
 
 - Do not invent a preset name. `settings.py preset list` is the authoritative set; anything else
   exits 2 with `reason=unknown_preset`.
 - Do not push someone toward `high` or `xhigh` by default. `medium` is already the first tier that
-  makes its own model calls and spends on its own; `high`/`xhigh` add a compaction-model summarizer
-  on top. Offer them, don't default to them.
+  makes its own model calls and spends on its own; `high`/`xhigh` use the summary of older turns
+  while you work, not only after a cold return. Offer them, don't default to them.
+- Do not suggest `ultrahigh` unless the user asks for it or asks about tool cost. It is opt-in: it
+  changes which tool definitions the model sees at the start, and the model must search to load one.

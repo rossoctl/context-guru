@@ -4,10 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // Filter is the server-side filter set every list/aggregate query accepts. Every
@@ -33,11 +37,32 @@ type Filter struct {
 	// query per session. Mutually exclusive with Session in practice; if both are set, both
 	// apply (AND), which is never useful, so callers should pick one.
 	SessionIn []string
-	Model     string
-	Provider  string
-	Agent     string
-	Preset    string
-	Mode      string
+	// ProjectIn selects rows in ANY of these folders, which is how a project root is scoped.
+	//
+	// A PROJECT IS SEVERAL FOLDERS. Claude Code records a working directory per request, and one
+	// project produces many -- measured, one produced 14 -- so matching the root path alone would
+	// return a fraction of its traffic and selecting a project would show LESS than the pooled
+	// view. Set by ExpandProjectFilter from Project; callers set Project and let that expand it.
+	ProjectIn []string
+	// PerSession asks the tool inventory to keep its per-session cost attribution instead of
+	// collapsing it to totals. Not a row predicate — it changes the SHAPE of the response, not
+	// which rows are in it — and off by default because the breakdown is a per-row array that
+	// most readers of /api/tools do not use.
+	PerSession bool
+	Model      string
+	Provider   string
+	Agent      string
+	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
+	// dashboard opens on — not "the unattributed ones", since absence is not a value.
+	Project string
+	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
+	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
+	// here (it is what every pre-migration row and every client that does not state a directory
+	// records), so absence could not also mean "only those" without making one of the two
+	// meanings unreachable.
+	ProjectNone bool
+	Preset      string
+	Mode        string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -93,7 +118,7 @@ func (f Filter) where() (string, []any) {
 	}
 	for col, v := range map[string]string{
 		"r.session_id": f.Session, "r.model": f.Model, "r.provider": f.Provider,
-		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode,
+		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode, "r.project": f.Project,
 		"r.token_accounting": f.Accounting,
 		"r.reasoning_effort": f.Effort, "r.thinking_mode": f.Thinking,
 		"r.stop_reason": f.StopReason,
@@ -118,8 +143,23 @@ func (f Filter) where() (string, []any) {
 		}
 		add("r.session_id IN ("+strings.Join(placeholders, ",")+")", vals...)
 	}
+	if len(f.ProjectIn) > 0 {
+		placeholders := make([]string, len(f.ProjectIn))
+		vals := make([]any, len(f.ProjectIn))
+		for i, p := range f.ProjectIn {
+			placeholders[i] = "?"
+			vals[i] = p
+		}
+		add("r.project IN ("+strings.Join(placeholders, ",")+")", vals...)
+	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)
+	}
+	// The rows that state no project. A predicate of its own rather than a value in the map
+	// above, because the value it matches is "" — which in the map would be indistinguishable
+	// from the field being unset, and so would silently mean "every project".
+	if f.ProjectNone {
+		add("r.project = ''")
 	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
@@ -147,12 +187,23 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
-	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason`
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
+	r.thread_id,
+	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
+	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
+	r.project, r.source,
+	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
+	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held,
+	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
+	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
+	r.compaction_point, r.compaction_point_source`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive int
+	var byp, ca, stream, keepAlive, agentComp, manual, estimated, accPriced, held int
 	var temp, topP sql.NullFloat64
+	var waitingFor, waitTool, wakeCause sql.NullString
+	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
@@ -163,9 +214,25 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
-		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason)
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
+		&e.ThreadID,
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
+		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
+		&e.Project, &e.Source,
+		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
+		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held,
+		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
+		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
+		&e.CompactionPoint, &e.CompactionPointSource)
+	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
+	e.EstimateHeld = held != 0
+	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
+	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
+	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	e.AgentCompaction = agentComp != 0
 	e.KeepAlive = keepAlive != 0
+	e.ManualPing = manual != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.
 	if temp.Valid {
@@ -245,7 +312,8 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events,
+		saved_first_usd, saved_replay_usd, priced_by FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -257,7 +325,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var gates, events string
 		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
 			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
-			&gates, &events); err != nil {
+			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -535,15 +603,40 @@ type SessionRow struct {
 // five minutes (the extended beta is an hour, which would only widen the "still counting"
 // window — under-claiming the in-flight state is the safe direction, since it never labels a
 // settled session as provisional).
-const cacheTTLMs int64 = 5 * 60 * 1000
+const cacheTTLMs int64 = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
+
+// inFlightMs is cacheTTLMs for one session: the OpenAI minimum when every provider the session
+// used is OpenAI and every model is GPT-5.6+, else the Anthropic default. A mixed session keeps
+// the shorter horizon, the safe direction named above.
+func inFlightMs(providers, models string) int64 {
+	if providers != "openai" || models == "" {
+		return cacheTTLMs
+	}
+	for _, m := range strings.Split(models, ",") {
+		if _, ok := modelinfo.FixedCacheLifetime(providers, m); !ok {
+			return cacheTTLMs
+		}
+	}
+	return modelinfo.OpenAIMinimumCacheTTL.Milliseconds()
+}
 
 // Sessions returns the session list, most-recently-active first, filtered and
 // paginated server-side.
 func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error) {
+	return d.SessionsOrdered(f, limit, offset, false)
+}
+
+// SessionsOrdered is Sessions with a choice of order: newest first, or costliest first (the
+// five-page dashboard's "where did the money go" list).
+func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*SessionRow, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
 	cond, args := f.where()
+	order := "MAX(r.ts) DESC"
+	if byCost {
+		order = "SUM(r.cost_usd) DESC, MAX(r.ts) DESC"
+	}
 	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
@@ -562,9 +655,11 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		-- The keep-alive's SAVING half, which lives on the real request that benefited. The COST
 		-- half cannot be summed here: this query excludes ping rows, and that exclusion is what
 		-- keeps Turns and every average on the row agent-only. It has its own query below.
-		COALESCE(SUM(` + kaSaved("r.") + `),0)
+		-- kaSavedSince stops the credit's ping half at the window start, because that cost half
+		-- is summed inside the window: both halves of the net must span the same pings (#678).
+		COALESCE(SUM(` + kaSavedSince("r.", f.Since) + `),0)
 		FROM requests r WHERE ` + cond + `
-		GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ? OFFSET ?`
+		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -590,7 +685,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		s.PrimaryModel = primaryModel.String
 		s.Saved = s.TokensBefore - s.TokensAfter
 		s.SavedUSD = s.BaselineCostUSD - s.CostUSD - s.CGLLMCostUSD
-		s.InFlight = now-s.End < cacheTTLMs
+		s.InFlight = now-s.End < inFlightMs(s.Providers, s.Models)
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {
@@ -626,7 +721,7 @@ type pingCount struct {
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
 func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -716,6 +811,10 @@ type ComponentRow struct {
 	// runs the identical formula, so agreement is arithmetic. The UI prints the covered
 	// fraction rather than presenting the whole comparison as evidence.
 	SavedUSDDecomposedStored float64 `json:"saved_usd_decomposed_stored"`
+	// SavedUSDCosts is the costs the accountant library netted into saved_usd on the rows it
+	// priced: added tokens and the breaks a component caused. Negative. It is the third term of
+	// SavedUSDDecomposed on those rows (first removal + replay + costs = saved_usd); 0 before them.
+	SavedUSDCosts float64 `json:"saved_usd_costs,omitempty"`
 	// UniqueUnkeyed marks a component whose saved_unique is not a dedup measurement, because
 	// it reports no content keys and MarkUnique therefore returns its saving in full every
 	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
@@ -741,9 +840,38 @@ type ComponentRow struct {
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
 	// expensive component on tokens and latency and could never say "underwater".
-	LLMCalls     int64 `json:"llm_calls"`
-	LLMCallsCold int64 `json:"llm_calls_cold"`
-	LLMCallsAcc  int64 `json:"llm_calls_accepted"`
+	LLMCalls int64 `json:"llm_calls"`
+	// SummarizeCreditPastSpanUSD / SummarizeCreditPrefixChangeUSD are stored summarize credit the
+	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
+	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
+	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
+	// The sweep's ledger (#404 PR C), set on the extract_llm_sweep row only. SweepExpandChargeUSD is the
+	// cost of the sweep's expands, already taken off SavedUSD and NetUSD. SweepAnswerUSD is what the
+	// answers cost beyond the pings' own reads: its own column, NOT subtracted again (the component's
+	// model spend already carries it). The false-drop rate is the number to pull the sweep on.
+	SweepApplied         int64   `json:"sweep_applied,omitempty"`
+	SweepFalseDrops      int64   `json:"sweep_false_drops,omitempty"`
+	SweepFalseDropRate   float64 `json:"sweep_false_drop_rate,omitempty"`
+	SweepExpands         int64   `json:"sweep_expands,omitempty"`
+	SweepExpandTokens    int64   `json:"sweep_expand_tokens,omitempty"`
+	SweepExpandChargeUSD float64 `json:"sweep_expand_charge_usd,omitempty"`
+	SweepAnswerUSD       float64 `json:"sweep_answer_usd,omitempty"`
+	// L1: the sweep's net saving by the provider's usage (credit - expand charge - answer cost). C2: the
+	// provider's cache tiers on the cold-apply requests, and on the first warm request after each.
+	SweepNetUSD              float64 `json:"sweep_net_usd,omitempty"`
+	SweepColdApplyRequests   int64   `json:"sweep_cold_apply_requests,omitempty"`
+	SweepColdApplyCacheRead  int64   `json:"sweep_cold_apply_cache_read,omitempty"`
+	SweepColdApplyCacheWrite int64   `json:"sweep_cold_apply_cache_write,omitempty"`
+	SweepNextWarmRequests    int64   `json:"sweep_next_warm_requests,omitempty"`
+	SweepNextWarmCacheRead   int64   `json:"sweep_next_warm_cache_read,omitempty"`
+	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
+	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
+	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`
+	// ReplayWindowAssumed marks a row whose cap used an assumed context window for some
+	// conversations (the model's window is not exactly published).
+	ReplayWindowAssumed bool  `json:"replay_window_assumed,omitempty"`
+	LLMCallsCold        int64 `json:"llm_calls_cold"`
+	LLMCallsAcc         int64 `json:"llm_calls_accepted"`
 	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
 	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
 	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
@@ -771,32 +899,86 @@ type ComponentRow struct {
 
 // Components aggregates per-component accounting over the filtered window.
 func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
+	rows, _, err := d.components(f)
+	return rows, err
+}
+
+// components is Components and the finest-grain groups it was built from, which the read-time
+// valuations re-group instead of reading the table again.
+func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup, error) {
 	cond, args := f.where()
 	// Note: the filter's own Component clause deliberately still applies — it
 	// selects the REQUESTS in scope, and we then report every component that ran on
 	// them, which is how you see what a component co-occurs with.
-	q := `SELECT c.component, MAX(c.kind), COUNT(*),
-		SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
-		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
-		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END)
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE ` + cond + ` GROUP BY c.component ORDER BY SUM(c.saved_unique) DESC, c.component`
-	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
-	if err != nil {
-		return nil, err
+	// ONE join of request_components to requests, at the finest grain any of the tab's aggregates
+	// needs (componentGroups), read in id slices side by side; every figure below is a re-grouping
+	// of it. This used to be three joins (here, the decomposition, the estimate) of 1.7M rows each.
+	type agg struct {
+		kind                                                   sql.NullString
+		runs, acted, mutated, reverted, skipped, gross, unique int64
+		usd, dur                                               float64
+		errs                                                   int64
 	}
-	defer rows.Close()
-	out := []*ComponentRow{}
-	for rows.Next() {
-		var c ComponentRow
-		var kind sql.NullString
-		var savedUSD sql.NullFloat64
-		if err := rows.Scan(&c.Component, &kind, &c.Runs, &c.Acted, &c.Mutated, &c.Reverted,
-			&c.Skipped, &c.SavedGross, &c.SavedUnique, &savedUSD, &c.DurationMsTotal, &c.Errors); err != nil {
-			return nil, err
+	// The two JSON counter sums below read the same join; start them with it rather than after it.
+	var counters [2]map[[2]string]int64
+	var cg errgroup.Group
+	for i, col := range []string{"gates", "events"} {
+		i, col := i, col
+		cg.Go(func() error {
+			var err error
+			counters[i], err = d.counterTotals(cond, args, col)
+			return err
+		})
+	}
+	groups, err := d.componentGroups(cond, args)
+	if cerr := cg.Wait(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	merged := map[string]*agg{}
+	// In key order, so the float sums do not depend on map iteration.
+	for _, k := range sortedCompKeys(groups) {
+		g := groups[k]
+		m := merged[k.comp]
+		if m == nil {
+			m = &agg{}
+			merged[k.comp] = m
 		}
-		c.SavedUSD = savedUSD.Float64
-		c.Kind = kind.String
+		if g.kind.Valid && (!m.kind.Valid || g.kind.String > m.kind.String) {
+			m.kind = g.kind
+		}
+		m.runs += g.runs
+		m.acted += g.acted
+		m.mutated += g.mutated
+		m.reverted += g.reverted
+		m.skipped += g.skipped
+		m.gross += g.gross
+		m.unique += g.unique
+		m.usd += g.usd
+		m.dur += g.dur
+		m.errs += g.errs
+	}
+	names := make([]string, 0, len(merged))
+	for n := range merged {
+		names = append(names, n)
+	}
+	// The query's ORDER BY, now applied to the merged groups.
+	sort.Slice(names, func(i, j int) bool {
+		if merged[names[i]].unique != merged[names[j]].unique {
+			return merged[names[i]].unique > merged[names[j]].unique
+		}
+		return names[i] < names[j]
+	})
+	out := []*ComponentRow{}
+	for _, name := range names {
+		m := merged[name]
+		c := ComponentRow{Component: name, Runs: m.runs, Acted: m.acted, Mutated: m.mutated,
+			Reverted: m.reverted, Skipped: m.skipped, SavedGross: m.gross, SavedUnique: m.unique,
+			DurationMsTotal: m.dur, Errors: m.errs}
+		c.SavedUSD = m.usd
+		c.Kind = m.kind.String
 		if c.SavedUnique > 0 {
 			c.OvercountRatio = float64(c.SavedGross) / float64(c.SavedUnique)
 		}
@@ -811,32 +993,38 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		}
 		out = append(out, &c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	// The per-call economics, in a second pass over the same filtered window. A JOIN into
 	// the query above would multiply the component rows by the number of calls and silently
 	// inflate every SUM in it.
+	// billedElsewhereGlob matches a call another row already bills (a committed keep-alive
+	// summary call, booked on its ping row: #455, components/offload's deferredCall.BilledElsewhere).
+	// Its extraction_calls row is real and stays in the counts above, but requests.cg_llm_cost_usd
+	// does not include it, so it must stay out of the gateway cost-share split below and have its
+	// own cost added back afterwards. GLOB, not LIKE: `_` is a LIKE wildcard.
+	const billedElsewhereGlob = "*_billed"
 	xq := `SELECT x.component, COUNT(*), SUM(x.cold), SUM(x.accepted), SUM(x.cost_usd),
-		AVG(x.latency_ms), SUM(x.saved_tokens)
+		AVG(x.latency_ms), SUM(x.saved_tokens),
+		SUM(CASE WHEN x.strategy GLOB '` + billedElsewhereGlob + `' THEN x.cost_usd ELSE 0 END)
 		FROM extraction_calls x JOIN requests r ON r.id = x.request_id
 		WHERE ` + cond + ` GROUP BY x.component`
 	xrows, err := d.sql.QueryContext(d.readCtx(), xq, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer xrows.Close()
 	byName := map[string]*ComponentRow{}
 	for _, c := range out {
 		byName[c.Component] = c
 	}
+	billedElsewhere := map[string]float64{}
 	for xrows.Next() {
 		var name string
 		var calls, cold, acc, saved int64
-		var cost, lat sql.NullFloat64
-		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved); err != nil {
-			return nil, err
+		var cost, lat, billed sql.NullFloat64
+		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved, &billed); err != nil {
+			return nil, nil, err
 		}
+		billedElsewhere[name] = billed.Float64
 		c, ok := byName[name]
 		if !ok {
 			continue // a call recorded against a component with no surviving component row
@@ -845,7 +1033,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		c.LLMCostUSD, c.LLMLatencyMsAvg, c.LLMSavedTokens = cost.Float64, lat.Float64, saved
 	}
 	if err := xrows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The SAME spend, priced the other way, because this dashboard used to report it twice at
 	// two different numbers.
@@ -866,7 +1054,8 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// rather than approximate. Written as a share anyway so it stays correct if that changes.
 	iq := `WITH per AS (
 			SELECT x.request_id AS rid, x.component AS comp, SUM(x.cost_usd) AS ccost
-			FROM extraction_calls x GROUP BY 1, 2
+			FROM extraction_calls x WHERE x.strategy NOT GLOB '` + billedElsewhereGlob + `'
+			GROUP BY 1, 2
 		), tot AS (SELECT rid, SUM(ccost) AS tcost FROM per GROUP BY 1)
 		SELECT per.comp,
 			SUM(r.cg_llm_cost_usd * CASE WHEN tot.tcost > 0 THEN per.ccost / tot.tcost ELSE 0 END)
@@ -874,14 +1063,14 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		WHERE ` + cond + ` GROUP BY 1`
 	irows, err := d.sql.QueryContext(d.readCtx(), iq, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer irows.Close()
 	for irows.Next() {
 		var name string
 		var cost sql.NullFloat64
 		if err := irows.Scan(&name, &cost); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if c, ok := byName[name]; ok {
 			c.LLMCostGatewayUSD = cost.Float64
@@ -890,12 +1079,29 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 			// unpriced cg model) the component's own figure is all there is, so it stands
 			// rather than being replaced by a zero.
 			if c.LLMCostGatewayUSD > 0 {
-				c.LLMCostUSD = c.LLMCostGatewayUSD
+				// Plus the calls the gateway split never saw (billedElsewhereGlob): their own
+				// cost is the only figure there is for them in this tab.
+				c.LLMCostUSD = c.LLMCostGatewayUSD + billedElsewhere[name]
 			}
 		}
 	}
 	if err := irows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// A summarizer's own spend. It records no extraction_calls rows, so the loops above left it at
+	// zero calls and zero dollars while its cost sat unowned in requests.cg_llm_cost_usd.
+	for _, name := range SummarizerComponents {
+		sc, ok := byName[name]
+		if !ok {
+			continue
+		}
+		calls, usd, err := d.summarizerOwnCost(cond, args, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		sc.LLMCalls += calls
+		sc.LLMCostUSD += usd
+		sc.LLMCostGatewayUSD += usd
 	}
 	// The verdict, once both halves are in. A deterministic component spends nothing, so its
 	// net is just its saving; only a component that calls a model can come out negative.
@@ -922,65 +1128,272 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// request_components c ...) and measured 2.807s — no change, because the planner reorders it
 	// straight back. Only the barrier holds. Query 1 above needs none: with no json_each
 	// cross-join to cost around, the planner already picks requests first.
-	gq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
+	// Both per-key totals were read alongside the aggregate above; apply them.
+	for i, col := range []string{"gates", "events"} {
+		for k, n := range counters[i] {
+			c, ok := byName[k[0]]
+			if !ok {
+				continue
+			}
+			m := &c.Gates
+			if col == "events" {
+				m = &c.Events
+			}
+			if *m == nil {
+				*m = map[string]int64{}
+			}
+			(*m)[k[1]] += n
+		}
+	}
+	return out, groups, nil
+}
+
+// compGroupKey is the grain of the Components tab's one pass: everything its aggregates split by.
+// usd is "this row carries a stored saved_usd", gross "it removed something", complete "its request
+// was fully priced".
+type compGroupKey struct {
+	comp, model, tier    string
+	usd, gross, complete bool
+	// acc is a group of rows the accountant library priced (priced_by): their dollar split is
+	// stored (firstUSD, replayUSD), and no read-time formula re-prices them.
+	acc bool
+	// fallback is a group of rows of a request the accountant path handled and could not price
+	// (priced_by 'none'). They are also acc: no read-time formula values them. They book no saving, and the
+	// reader must be told that, because a stored 0 here is not a measured 0 (context-guru#768 B8).
+	fallback bool
+}
+
+// compGroup is one cell of that pass. uClamp and rClamp are the decomposition's unique and replay
+// token sums with Event.Price's clamps already applied row by row, which is why they are carried
+// rather than derived from unique and gross; nDiff counts rows whose two figures differ.
+type compGroup struct {
+	kind                                                   sql.NullString
+	runs, acted, mutated, reverted, skipped, gross, unique int64
+	errs, uClamp, rClamp, nDiff                            int64
+	usd, dur                                               float64
+	firstUSD, replayUSD                                    float64 // the stored split, on an acc group
+}
+
+func sortedCompKeys(groups map[compGroupKey]*compGroup) []compGroupKey {
+	keys := make([]compGroupKey, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		switch {
+		case a.comp != b.comp:
+			return a.comp < b.comp
+		case a.model != b.model:
+			return a.model < b.model
+		case a.tier != b.tier:
+			return a.tier < b.tier
+		case a.usd != b.usd:
+			return !a.usd
+		case a.gross != b.gross:
+			return !a.gross
+		}
+		return !a.complete && b.complete
+	})
+	return keys
+}
+
+// componentGroups reads request_components joined to requests ONCE, per id slice, and merges the
+// slices. Every sum is of integers except saved_usd and duration, so the merge is exact for all of
+// the former and for the latter differs from one big SUM only in the order of the additions.
+func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGroup, error) {
+	const gross = `max(c.saved_gross,0)`
+	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
+	var mu guarded
+	out := map[compGroupKey]*compGroup{}
+	err := d.forEachShard(func(pred string, bounds []any) error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, r.model,
+		CASE WHEN r.cache_read > 0 THEN 'read'
+		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
+		     ELSE 'fresh' END,
+		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '', c.priced_by = 'none',
+		MAX(c.kind), COUNT(*), SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
+		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
+		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END),
+		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END),
+		SUM(c.saved_first_usd), SUM(c.saved_replay_usd)
+		FROM request_components c JOIN requests r ON r.id = c.request_id
+		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`,
+			append(append([]any(nil), args...), bounds...)...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k compGroupKey
+			var g compGroup
+			var usd sql.NullFloat64
+			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc, &k.fallback,
+				&g.kind, &g.runs, &g.acted, &g.mutated, &g.reverted, &g.skipped, &g.gross, &g.unique,
+				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff, &g.firstUSD, &g.replayUSD); err != nil {
+				return err
+			}
+			g.usd = usd.Float64
+			mu.Lock()
+			if m := out[k]; m == nil {
+				out[k] = &g
+			} else {
+				if g.kind.Valid && (!m.kind.Valid || g.kind.String > m.kind.String) {
+					m.kind = g.kind
+				}
+				m.runs += g.runs
+				m.acted += g.acted
+				m.mutated += g.mutated
+				m.reverted += g.reverted
+				m.skipped += g.skipped
+				m.gross += g.gross
+				m.unique += g.unique
+				m.errs += g.errs
+				m.uClamp += g.uClamp
+				m.rClamp += g.rClamp
+				m.nDiff += g.nDiff
+				m.usd += g.usd
+				m.dur += g.dur
+				m.firstUSD += g.firstUSD
+				m.replayUSD += g.replayUSD
+			}
+			mu.Unlock()
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// counterTotals sums every key of the JSON counter column `col` ("gates" or "events") per
+// (component, key) over the filtered window, per id slice (forEachShard).
+//
+// Read as the raw JSON text and summed in Go when every row is a flat object of integers (all the
+// recorder ever writes: a map[string]int marshalled by encoding/json), because the SQL form,
+// json_each, builds and frees a virtual table per row — 7 µs a row and, being allocation-bound,
+// it scales to 2.7x on eight cores where this scales to eight. A row of any other shape sends the
+// whole column back through json_each, so the answer is the same either way.
+func (d *DB) counterTotals(cond string, args []any, col string) (map[[2]string]int64, error) {
+	var mu guarded
+	totals := map[[2]string]int64{}
+	var unsupported atomic.Bool
+	err := d.forEachShard(func(pred string, bounds []any) error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, c.`+col+`
 		FROM requests r CROSS JOIN request_components c ON c.request_id = r.id
-		CROSS JOIN json_each(c.gates) j
-		WHERE ` + cond + ` AND json_valid(c.gates) GROUP BY 1, 2`
-	grows, err := d.sql.QueryContext(d.readCtx(), gq, args...)
+		WHERE `+cond+pred+` AND c.`+col+` <> '' AND c.`+col+` <> '{}'`,
+			append(append([]any(nil), args...), bounds...)...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		local := map[[2]string]int64{}
+		for rows.Next() {
+			var name, raw string
+			if err := rows.Scan(&name, &raw); err != nil {
+				return err
+			}
+			if !addIntObject(raw, func(k string, n int64) { local[[2]string{name, k}] += n }) {
+				unsupported.Store(true)
+				return nil
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		mu.Lock()
+		for k, n := range local {
+			totals[k] += n
+		}
+		mu.Unlock()
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer grows.Close()
-	for grows.Next() {
-		var name, gate string
-		var n int64
-		if err := grows.Scan(&name, &gate, &n); err != nil {
-			return nil, err
-		}
-		c, ok := byName[name]
-		if !ok {
-			continue
-		}
-		if c.Gates == nil {
-			c.Gates = map[string]int64{}
-		}
-		c.Gates[gate] += n
+	if !unsupported.Load() {
+		return totals, nil
 	}
-	if err := grows.Err(); err != nil {
-		return nil, err
-	}
-	// EVENT totals, aggregated the same way and for the same reason. Summed in SQL rather than by
-	// decoding a map per row in Go, because a filtered window is hundreds of thousands of rows.
-	//
-	// A second query rather than a UNION over both columns: the two must land in separate maps, and
-	// merging them here would undo at the API what the column split did at the storage layer. The
-	// duplication is four lines and the alternative is a discriminator column threaded through the
-	// scan.
-	eq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
+	// General path: some row is not a flat integer object. Same sums, by json_each.
+	totals = map[[2]string]int64{}
+	err = d.forEachShard(func(pred string, bounds []any) error {
+		q := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
 		FROM requests r CROSS JOIN request_components c ON c.request_id = r.id
-		CROSS JOIN json_each(c.events) j
-		WHERE ` + cond + ` AND json_valid(c.events) GROUP BY 1, 2`
-	erows, err := d.sql.QueryContext(d.readCtx(), eq, args...)
-	if err != nil {
-		return nil, err
+		CROSS JOIN json_each(c.` + col + `) j
+		WHERE ` + cond + pred + ` AND json_valid(c.` + col + `) GROUP BY 1, 2`
+		rows, err := d.sql.QueryContext(d.readCtx(), q, append(append([]any(nil), args...), bounds...)...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name, key string
+			var n int64
+			if err := rows.Scan(&name, &key, &n); err != nil {
+				return err
+			}
+			mu.Lock()
+			totals[[2]string{name, key}] += n
+			mu.Unlock()
+		}
+		return rows.Err()
+	})
+	return totals, err
+}
+
+// addIntObject parses `{"key":123,"other":-4}` (no whitespace, no escapes in keys, integer values)
+// and calls add for each pair. It returns false for anything else, which is how a caller learns to
+// use the general parser instead: it is deliberately too strict to guess at.
+func addIntObject(s string, add func(k string, n int64)) bool {
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return false
 	}
-	defer erows.Close()
-	for erows.Next() {
-		var name, event string
+	s = s[1 : len(s)-1]
+	for len(s) > 0 {
+		if s[0] != '"' {
+			return false
+		}
+		end := strings.IndexByte(s[1:], '"')
+		if end < 0 {
+			return false
+		}
+		key := s[1 : 1+end]
+		if strings.IndexByte(key, '\\') >= 0 {
+			return false
+		}
+		s = s[2+end:]
+		if len(s) == 0 || s[0] != ':' {
+			return false
+		}
+		s = s[1:]
+		i, neg := 0, false
+		if i < len(s) && s[i] == '-' {
+			neg, i = true, 1
+		}
+		start := i
 		var n int64
-		if err := erows.Scan(&name, &event, &n); err != nil {
-			return nil, err
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			if i-start > 17 {
+				return false // would risk overflow; leave it to SQLite
+			}
+			n = n*10 + int64(s[i]-'0')
+			i++
 		}
-		c, ok := byName[name]
-		if !ok {
-			continue
+		if i == start || (i-start > 1 && s[start] == '0') {
+			return false
 		}
-		if c.Events == nil {
-			c.Events = map[string]int64{}
+		if neg {
+			n = -n
 		}
-		c.Events[event] += n
+		add(key, n)
+		s = s[i:]
+		if len(s) == 0 {
+			break
+		}
+		if s[0] != ',' || len(s) == 1 {
+			return false
+		}
+		s = s[1:]
 	}
-	return out, erows.Err()
+	return true
 }
 
 // Bucket is one time bucket of the series. Bucketing is done in SQL at query
@@ -1016,6 +1429,9 @@ type Bucket struct {
 	Expands            int64   `json:"expands"`
 	ExpandTokens       int64   `json:"expand_tokens"`
 	Misses             int64   `json:"cache_misses"`
+	// DeferNetUSD is tool deferral's net saving in this bucket: its own series, left out of the
+	// JSON when 0 so an account that never deferred has no deferral series.
+	DeferNetUSD float64 `json:"defer_net_usd,omitempty"`
 }
 
 // DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the
@@ -1030,6 +1446,41 @@ type Bucket struct {
 // ponytail: UTC days; take an offset parameter here if per-viewer local days ever matter.
 const DayMs int64 = 24 * 60 * 60 * 1000
 
+// seriesMaxBuckets is the most buckets one /api/series answer carries. The UI asks for hourly
+// buckets over all history (about 1,300 over 54 days, comfortably inside), but the route's
+// default bucket is one minute, which over the same history is 78,000 buckets and a 12.9 MB
+// body. SeriesBucketFor widens such a request instead of answering it at full width.
+const seriesMaxBuckets = 2000
+
+// SeriesBucketFor returns the bucket width Series should use for a request of bucketMs over
+// the window f selects: bucketMs itself when it yields at most seriesMaxBuckets buckets, else
+// the smallest whole multiple of it that does. A multiple, so every coarse bucket is a union of
+// the fine ones the caller asked for and sums stay comparable.
+func (d *DB) SeriesBucketFor(f Filter, bucketMs int64) int64 {
+	if bucketMs <= 0 {
+		bucketMs = 60_000
+	}
+	lo, hi := f.Since, f.Until
+	if lo == 0 || hi == 0 {
+		cond, args := f.where()
+		var mn, mx sql.NullInt64
+		if d.sql.QueryRowContext(d.readCtx(), `SELECT MIN(r.ts), MAX(r.ts) FROM requests r WHERE `+cond,
+			args...).Scan(&mn, &mx) != nil || !mn.Valid {
+			return bucketMs
+		}
+		if lo == 0 {
+			lo = mn.Int64
+		}
+		if hi == 0 {
+			hi = mx.Int64 + 1
+		}
+	}
+	if n := (hi-lo)/bucketMs + 1; n > seriesMaxBuckets {
+		bucketMs *= (n + seriesMaxBuckets - 1) / seriesMaxBuckets
+	}
+	return bucketMs
+}
+
 // Series buckets the filtered window into fixed-width buckets of bucketMs.
 func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 	if bucketMs <= 0 {
@@ -1043,8 +1494,9 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd), SUM(r.cachesplit_saved_usd),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		SUM(r.expands), SUM(r.expand_tokens),
-		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END)
-		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, cond)
+		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END),
+		%s
+		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, deferNetSum, cond)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1057,7 +1509,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		if err := rows.Scan(&b.TS, &b.Requests, &b.TokensBefore, &b.TokensAfter, &b.SavedUnique,
 			&b.AttemptedTokens, &b.FrozenTokens, &b.FreshInput, &b.CacheRead, &b.CacheWrite,
 			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD, &b.CachesplitSavedUSD,
-			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses); err != nil {
+			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses, &b.DeferNetUSD); err != nil {
 			return nil, err
 		}
 		b.CGLatencyMs, b.UpstreamMs = cgAvg.Float64, upAvg.Float64
@@ -1157,6 +1609,13 @@ var breakdownDims = map[string]string{
 	// Overview reports a coverage count beside every TTL figure.
 	"cache_ttl": "r.cache_ttl",
 	"stream":    "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+	// Issue #424's RECORD half: let a dashboard user split cost and request count by why a
+	// thread was about to wait, or by what woke it up. NULL (a row from before this feature
+	// existed) renders as COALESCE('') below, same as every other nullable text dimension
+	// here would if one existed — there is no prior example to match because every other
+	// dimension in this map is NOT NULL from its very first column.
+	"waiting_for": "COALESCE(r.waiting_for, '')",
+	"wake_cause":  "COALESCE(r.wake_cause, '')",
 }
 
 // BreakdownDims lists the valid dimensions, sorted, for the API's error message and the
@@ -1227,6 +1686,10 @@ var facetQueries = map[string]string{
 	"effort":      "reasoning_effort",
 	"thinking":    "thinking_mode",
 	"stop_reason": "stop_reason",
+	// The projects seen in the window, so a picker populates itself and a folder the user starts
+	// working in appears without a UI change. Facets already exclude '' — the unattributed rows
+	// are the UI's own option with its own wording, not a folder named "".
+	"project": "project",
 }
 
 // selfBlanked returns f with ONE dimension's own value cleared.
@@ -1265,8 +1728,68 @@ func selfBlanked(f Filter, dim string) Filter {
 		f.Thinking = ""
 	case "stop_reason":
 		f.StopReason = ""
+	case "project":
+		// Without this the project list is scoped by the project already chosen, so it would
+		// contain exactly one entry — the one selected — and switching projects would be
+		// impossible. A one-way door, which is what this whole function exists to prevent.
+		f.Project = ""
+		// ProjectIn is the expanded form of the same choice and shuts the same door.
+		f.ProjectIn = nil
 	}
 	return f
+}
+
+// ExpandProjectFilter turns a selected project ROOT into the set of folders that roll up to it.
+//
+// A project is several folders -- Claude Code records a working directory per request and one
+// project produced 14 of them on a measured machine -- so a query matching the root path alone
+// returns a fraction of its traffic. The picker folds subdirectories into the root, and without
+// this the query would not, which means selecting a project shows LESS than the pooled view did.
+//
+// A root the transcripts do not recognise expands to itself, so a folder with no transcript is
+// still reachable rather than silently empty.
+func ExpandProjectFilter(f Filter, g *ProjectGroup) Filter {
+	if f.Project == "" || g == nil {
+		return f
+	}
+	folders := g.FoldersOf(f.Project)
+	if len(folders) <= 1 {
+		return f // just itself: the plain Project predicate already matches it
+	}
+	f.ProjectIn = folders
+	f.Project = ""
+	return f
+}
+
+// FacetsFor is Facets with the project dimension rolled up to project roots.
+//
+// WHY A SEPARATE ENTRY POINT. Facets reads raw columns, and the project column holds every
+// working directory a session was launched in: on a real machine, 40 folders for six projects,
+// the rest being subdirectories of the same repositories and eighteen throwaway /private/tmp
+// directories. Reported as "I don't understand why I saw so many projects".
+//
+// `home` overrides the home directory, for tests. An empty transcript directory -- the normal
+// state of a hosted proxy, which cannot see the user's disk -- leaves the list unrolled, which
+// degrades to the raw folders rather than to an empty picker.
+func (d *DB) FacetsFor(f Filter, home string) (map[string][]string, error) {
+	out, err := d.Facets(f)
+	if err != nil {
+		return nil, err
+	}
+	groups := ProjectGroups(home)
+	seen := map[string]bool{}
+	var roots []string
+	for _, p := range out["project"] {
+		r := groups.Project(p)
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		roots = append(roots, r)
+	}
+	sort.Strings(roots)
+	out["project"] = roots
+	return out, nil
 }
 
 // Facets returns the distinct values available for each filter dimension, so the

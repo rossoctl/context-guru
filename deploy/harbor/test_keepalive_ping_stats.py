@@ -279,5 +279,19 @@ class TestSummarize(unittest.TestCase):
         self.assertIn("WARNING", ps.summarize(pd.DataFrame([r])))
 
 
+class UnexplainedMissIsUnrescuable(unittest.TestCase):
+    """An unexplained miss ("unknown") is never counted as rescuable (issue #600)."""
+
+    def test_the_offline_fits_treat_unknown_like_prefix_change(self):
+        import kv_ttl_cost_model as cost
+        import kv_ttl_keepalive_policy as policy
+        for reason in ("unknown", "prefix_change", "cold_start"):
+            self.assertIn(reason, cost.UNRESCUABLE)
+            self.assertIn(reason, policy._FULL_MISS)
+        for reason in ("hit", "ttl_expiry"):
+            self.assertNotIn(reason, cost.UNRESCUABLE)
+            self.assertNotIn(reason, policy._FULL_MISS)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

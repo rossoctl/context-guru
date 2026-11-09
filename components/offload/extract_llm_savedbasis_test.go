@@ -31,8 +31,16 @@ func (m *summarizingModel) Complete(_ context.Context, _ string) (string, error)
 	// 40 of the body's 400 lines: enough to clear the acceptance check's keep-ratio floor (a
 	// result below ~5% of the body is refused as insane, which is what a one-line OUTPUT hit),
 	// small enough that the compaction is large and the fixture's numbers are unambiguous.
+	return summarizingProgram(m.summary), nil
+}
+
+// summarizingProgram is the reply summarizingModel returns: a program that keeps the first
+// 40 lines AND sets a SUMMARY, so the splice takes the marker-plus-summary shape that
+// `apply` actually writes. Split out so a parked leader (parkingModel) can return the
+// same reply — see TestExtractLLMDoesNotBookASingleFlightFollowersSaving.
+func summarizingProgram(summary string) string {
 	return "```python\nOUTPUT = \"\\n\".join(INPUT.split(\"\\n\")[0:40])\nSUMMARY = \"" +
-		m.summary + "\"\n```", nil
+		summary + "\"\n```"
 }
 
 // A realistic one-line digest, kept just under clipSummary's 120-rune bound so the assertions can
@@ -213,16 +221,17 @@ func TestExtractLLMReplayBooksWhatTheReplayedMessageActuallySaved(t *testing.T) 
 // in place — `before - TextTokens(out[k].projected)` rather than the spliced message — fails this
 // test too, at 3,953 against 3,907. Found by the reviewing session on #216 with a variant mutation.
 //
-// AND THE DEDUP RIDES A SCHEDULING RACE: the leader must still hold the single-flight key when the
-// three followers reach extractInflight.Do, and summarizingModel.Complete is pure string work that
-// returns immediately. Verified 50/50 at -count=50. Deliberately left as is, because a lost race
-// FATALS on the deduped_inflight_extraction and model.calls preconditions rather than passing
-// vacuously — so a red here says whether the guard broke or the fixture produced no followers, which
-// is the property that matters. A failure on those two lines means the latter, and it has two very
-// different causes: the race was lost, or SINGLE-FLIGHT DEDUP ITSELF REGRESSED — a changed result
-// key, a concurrency semaphore that now serialises the candidates, getResultGlobal starting to
-// answer them. Neither is a defect in out[k].called, but the second is a defect worth chasing, so do
-// not read those two lines going red as nothing having happened.
+// AND THE DEDUP IS ARRANGED, NOT RACED FOR (#479). The leader parks inside the model
+// until every candidate has reached the single-flight join (offloadWithParkedLeader /
+// beforeInflightJoinForTest), so the three followers exist because the fixture put them
+// behind a key that is still held. It used to ride a scheduling race — the model is pure
+// string work that returns immediately, so the leader could drop the key before the
+// others reached the join, and under CPU load it did, about 3 runs in 4. A failure on the
+// two precondition lines below now means the fixture broke (a gate or cap trimmed the
+// batch), not that the scheduler was busy; SINGLE-FLIGHT DEDUP ITSELF REGRESSING — a
+// changed result key, a concurrency semaphore that now serialises the candidates,
+// getResultGlobal starting to answer them — would show up the same way and is still worth
+// chasing.
 func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
 	// Byte-identical bodies, so all four share one extraction key and three become followers.
 	// The text is distinct from every other fixture here because extractInflight's group is
@@ -235,7 +244,8 @@ func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
 	for i := 0; i < identical; i++ {
 		req.Input = append(req.Input, toolResultMsg(body))
 	}
-	model := &summarizingModel{summary: basisSummary}
+	release := make(chan struct{})
+	model := &parkingModel{reply: summarizingProgram(basisSummary), release: release}
 	e := newTimeoutTestComponent(t, model)
 	rep := &components.Report{Component: "extract_llm"}
 	c := &components.Ctx{
@@ -247,7 +257,7 @@ func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
 		CacheAware: false, MaxCachedIdx: -1,
 	}
 	savedBefore := extractGrossSaved("extract_llm")
-	if _, err := e.Offload(req, rep, c); err != nil {
+	if err := offloadWithParkedLeader(t, e, req, rep, c, release, identical); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 

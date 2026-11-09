@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // Operating modes on the request path (#31).
@@ -51,20 +52,25 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// is off even then — the ttl field reaches the provider, but Bedrock grants the 1h
 	// tier only for the Claude 4.5 family and silently downgrades the models this
 	// service actually runs.
-	headTTL1h, headTTLMinTokens := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
-		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLMinTokens)
+	headTTL1h, headTTLMinBytes := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
+		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLGateBytes())
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
 		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
 		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
-		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
-		HeadTTL1h:        headTTL1h,
-		HeadTTLMinTokens: headTTLMinTokens,
-		Mode:             mode, Tracker: h.tracker,
+		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx), ThreadOf: r.threadOf,
+		HeadTTL1h:       headTTL1h,
+		HeadTTLMinBytes: headTTLMinBytes,
+		Mode:            mode, Tracker: h.tracker,
 		// The asker a component may use to put a question to the request's own model over its
 		// cached transcript. nil on a non-Anthropic route or without an incoming client; a
 		// component decides for itself what nil means. See prefixask.go.
 		PrefixAsk: h.prefixAskerForAPI(r.provider, r.api, r.models),
+		// Whether the keep-alive can ping this thread, so a component that prepares something for a
+		// ping keeps nothing for a thread that will never get one. See keeper.canPing.
+		CanKeepAlive: func(session, thread string) bool {
+			return h.keeper.canPing(r.tn, session, thread, r.provider)
+		},
 	})
 	added := time.Since(start)
 	if res.Body == nil {
@@ -77,6 +83,9 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 // Bundled because an off-path run outlives the *http.Request it came from and must
 // therefore hold a copy of everything, never a pointer into request-scoped state.
 type reqInfo struct {
+	// threadOf resolves the request's session thread once apply knows the session id; see
+	// apply.Opts.ThreadOf. nil leaves the request to be resolved after the pipeline.
+	threadOf func(session string) thread.Result
 	ctx      context.Context
 	provider bschemas.ModelProvider
 	api      string
@@ -91,7 +100,7 @@ type reqInfo struct {
 	windowExact bool
 	// compactionPoint is C in provider-billed tokens: where the CONVERSATION'S OWN compaction
 	// mechanism acts, which is the denominator a fill fraction belongs over rather than the window.
-	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "window_fallback", carried so a
+	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "window_fallback", carried so a
 	// decision made on a guess is distinguishable from one made on a measurement.
 	// See internal/compactionpoint.
 	compactionPoint       int
@@ -155,6 +164,10 @@ func (h *Handler) observe(r *reqInfo) {
 			Models: info.models, Window: info.window, WindowExact: info.windowExact, CacheMode: h.opts.CacheMode,
 			CompactionPoint: info.compactionPoint, CompactionPointSource: info.compactionPointSource,
 			Mode: components.ModeObserve,
+			// The thread, resolved from the same facts the response path's billed-input write
+			// uses (serve), so the per-thread figure the off-path run READS (cg:bint:) is the one
+			// that write PUT. Without it every observed run reads the primary thread's key.
+			ThreadOf: info.threadOf,
 			// The Tracker, so the projection is measured under the SAME cached-prefix
 			// boundary an enforcing mode would use. Without it the boundary is unknown,
 			// MaxCachedIdx is -1, the tail gate never fires, and every message in the

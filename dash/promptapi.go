@@ -32,6 +32,7 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"sort"
 )
@@ -92,7 +93,7 @@ type PromptView struct {
 
 // promptRoutes is mounted from toolRoutes, so the scoping test walks it like every other.
 func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, principal, ok := a.scope(r)
 	if !ok {
 		a.unauthorized(w)
 		return
@@ -107,8 +108,22 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		trusted = true
 	}
-	view, err := a.db(r).PromptViewFor(f)
-	if err != nil {
+	// The view is read through the response cache, but what is cached is the UNSTRIPPED view and the
+	// strip below is applied to each reader's own copy. That is the whole of why this route can be
+	// cached at all: the cache key is the principal and the query, not the caller's address, and
+	// the address is what decides whether the text may be shown. Caching the body that was written
+	// for a trusted address would hand it to an untrusted one on the same account, so nothing that
+	// depends on the address is ever stored.
+	var view PromptView
+	rec := &capture{h: http.Header{}, code: http.StatusOK}
+	a.serveJSON(rec, r, &a.promptCache, r.URL.Path+"\x00"+cacheKey(principal, r), func(db *DB) ([]byte, error) {
+		v, err := db.PromptViewFor(f)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(v)
+	})
+	if rec.code != http.StatusOK || json.Unmarshal(rec.buf.Bytes(), &view) != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the prompt text")
 		return
 	}
@@ -136,7 +151,7 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 			view.Regions[i].Parts, view.Regions[i].PartsTokens = nil, 0
 		}
 	}
-	writeJSON(w, view)
+	writeJSON(w, &view)
 }
 
 // The three fragments every read of stored prompt text is built from, in one place because
@@ -173,24 +188,50 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// declaration set mid-way has several rows saying the same thing — raw rows came out at
 	// 4,192 where the report's PromptStat said 309, and two coverage figures 13x apart on one
 	// page with nothing connecting them is how a dashboard loses a reader's trust for good.
-	tq := `SELECT COUNT(*), SUM(txt) FROM (
-		SELECT MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END) txt
+	if sessions, err := d.declSessionSet(f); err != nil {
+		return nil, err
+	} else if len(sessions) >= declScanMinSessions {
+		// Broad scope: both reads below from one concurrent pass over the table (declfacts.go).
+		return d.promptViewScan(f, v, sessions)
+	}
+	// The groups are read, then counted in Go, so the stale-kind rule (stalekind.go) and the
+	// deferred marker (a note, not a region) are applied as the other paths apply them.
+	tq := `SELECT d.session_id, d.kind, d.name, d.server, 0,
+		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN ` + sub
 	ta := append([]any{}, args...)
 	if !f.TenantAll {
 		tq += ` AND d.tenant_id = ?`
 		ta = append(ta, f.Tenant)
 	}
-	tq += ` GROUP BY d.session_id, d.kind, d.name, d.server)`
-	var rows, textRows *int
-	if err := d.sql.QueryRowContext(d.readCtx(), tq, ta...).Scan(&rows, &textRows); err != nil {
+	tq += ` GROUP BY d.session_id, d.kind, d.name, d.server`
+	grows, err := d.sql.QueryContext(d.readCtx(), tq, ta...)
+	if err != nil {
 		return nil, err
 	}
-	if rows != nil {
-		v.Rows = *rows
+	var groups []declRow
+	for grows.Next() {
+		var r declRow
+		var txt int
+		if err := grows.Scan(&r.session, &r.kind, &r.name, &r.server, &r.tokens, &txt, &r.ts); err != nil {
+			grows.Close()
+			return nil, err
+		}
+		r.hasText = txt == 1
+		groups = append(groups, r)
 	}
-	if textRows != nil {
-		v.TextRows = *textRows
+	grows.Close()
+	if err := grows.Err(); err != nil {
+		return nil, err
+	}
+	for _, g := range dropStaleDecls(groups) {
+		if g.kind == KindDeferredListing {
+			continue
+		}
+		v.Rows++
+		if g.hasText {
+			v.TextRows++
+		}
 	}
 
 	// Which set to show: the newest that HAS text, else the newest at all. Two clauses of
@@ -213,7 +254,13 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	case err != nil:
 		return nil, err
 	}
-	v.Session, v.Digest, v.TS, v.Captured = session, digest, ts, txt == 1
+	return d.promptRegions(v, tenant, session, digest, ts, txt == 1)
+}
+
+// promptRegions reads the regions of the chosen set and shapes the view. Shared by the two ways of
+// choosing the set (the per-session SQL above, the whole-table pass in promptViewScan).
+func (d *DB) promptRegions(v *PromptView, tenant, session, digest string, ts int64, captured bool) (*PromptView, error) {
+	v.Session, v.Digest, v.TS, v.Captured = session, digest, ts, captured
 
 	// Pinned to the tenant the chosen row belongs to, ALWAYS — not only when the filter
 	// narrows. A session id is client-supplied, so two accounts can present the same one
@@ -224,6 +271,34 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		FROM tool_declarations d ` + declTextJoin + `
 		WHERE d.tenant_id = ? AND d.session_id = ? AND d.digest = ?`
 	ra := []any{tenant, session, digest}
+	// The session's newest fact per (kind, name), for the stale-kind rule (stalekind.go): a region
+	// of this digest may be replaced by a fact of another digest of the same session.
+	fq, err := d.sql.QueryContext(d.readCtx(), `SELECT kind, name, server, MAX(ts) FROM tool_declarations
+		WHERE tenant_id = ? AND session_id = ? GROUP BY kind, name, server`, tenant, session)
+	if err != nil {
+		return nil, err
+	}
+	var sessFacts []declRow
+	for fq.Next() {
+		var r declRow
+		if err := fq.Scan(&r.kind, &r.name, &r.server, &r.ts); err != nil {
+			fq.Close()
+			return nil, err
+		}
+		sessFacts = append(sessFacts, r)
+	}
+	fq.Close()
+	if err := fq.Err(); err != nil {
+		return nil, err
+	}
+	stale := newStaleRules()
+	for _, r := range sessFacts {
+		stale.observe("", "", r.kind, r.name, r.ts)
+	}
+	factTS := map[[3]string]int64{}
+	for _, r := range sessFacts {
+		factTS[[3]string{r.kind, r.name, r.server}] = r.ts
+	}
 	rs, err := d.sql.QueryContext(d.readCtx(), rq, ra...)
 	if err != nil {
 		return nil, err
@@ -234,6 +309,9 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		var gz []byte
 		if err := rs.Scan(&reg.Kind, &reg.Name, &reg.Server, &reg.Tokens, &gz); err != nil {
 			return nil, err
+		}
+		if reg.Kind == KindDeferredListing || stale.stale("", "", reg.Kind, reg.Name, reg.Server, factTS[[3]string{reg.Kind, reg.Name, reg.Server}]) {
+			continue // a note, not a region; or a server_tool region a newer fact replaced
 		}
 		if gz != nil {
 			reg.Text, reg.HasText = gunzipText(gz), true
@@ -272,4 +350,47 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		return a.Name < b.Name
 	})
 	return v, nil
+}
+
+// promptViewScan is PromptViewFor for a broad scope: the coverage counts and the set to show, both
+// from one concurrent pass over tool_declarations instead of two probing GROUP BYs (10 s each).
+// The set shown is the digest group with the greatest (has-text, newest-ts); on an exact tie the
+// smallest (tenant, session, digest), which is the group SQLite's ordered GROUP BY reaches first.
+func (d *DB) promptViewScan(f Filter, v *PromptView, sessions map[string]bool) (*PromptView, error) {
+	scan, err := d.scanDecls(f, true)
+	if err != nil {
+		return nil, err
+	}
+	type grp struct{ session, kind, name, server string }
+	text := map[grp]bool{}
+	stale := scan.staleRules(func(s string) bool { return sessions[s] }, false)
+	for k, fact := range scan.facts {
+		if sessions[k.session] && k.kind != KindDeferredListing && !stale.stale("", k.session, k.kind, k.name, k.server, fact.last) {
+			g := grp{k.session, k.kind, k.name, k.server}
+			text[g] = text[g] || fact.hasText
+		}
+	}
+	v.Rows = len(text)
+	for _, t := range text {
+		if t {
+			v.TextRows++
+		}
+	}
+	var best digestKey
+	var bf *digestFact
+	for k, fact := range scan.digests {
+		if !sessions[k.session] {
+			continue
+		}
+		if bf == nil || (fact.hasText && !bf.hasText) ||
+			(fact.hasText == bf.hasText && (fact.ts > bf.ts ||
+				(fact.ts == bf.ts && (k.tenant < best.tenant || (k.tenant == best.tenant &&
+					(k.session < best.session || (k.session == best.session && k.digest < best.digest))))))) {
+			best, bf = k, fact
+		}
+	}
+	if bf == nil {
+		return v, nil // nothing captured in scope at all
+	}
+	return d.promptRegions(v, best.tenant, best.session, best.digest, bf.ts, bf.hasText)
 }

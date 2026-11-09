@@ -27,9 +27,12 @@ memory on a single request. Two exceptions, both because the whole point of the 
 carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
-  — detected the same way it already is for the pipeline bypass — may read up to 128 MiB. It
-  must be forwarded byte-identical regardless of size, so relaxing the *read* ceiling for it
-  costs nothing extra: no pipeline component runs on it either way.
+  — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
+  (`isAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
+  `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
+  `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
+  13.7 s on the request path and allocated 5.7 GiB.
 - **`/compact`** always reads up to 128 MiB, unconditionally — every caller of this endpoint
   wants exactly this: a body already larger than 32 MiB is the normal, intended input, never a
   reason to refuse up front.
@@ -446,8 +449,6 @@ table above is unchanged and every path below returns 404.
 | `GET /api/breakdown?dim=<name>` | Requests, tokens and **spent vs saved** grouped by one dimension: `model`, `provider`, `agent`, `preset`, `mode`, `reasoning_effort`, `thinking_mode`, `stop_reason`, `tool_choice`, `cache_miss_reason`, `cache_breakpoints`, `stream`. `spent_usd` is billed cost plus context-guru's own model spend; `saved_usd` is the baseline counterfactual minus that. `incomplete_rows` counts rows the provider reported no usage for, so a group with no priced rows renders as **unknown** rather than as zero. The dimension is an **allowlist**: an unknown one is a `400` naming the valid set, never a chart of some other dimension's numbers. Defaults to `model`. Per-**day** usage bars need no route of their own — they are `/api/series?bucket=86400000`, since bucketing happens in SQL at query time. |
 | `GET /api/facets` | The distinct values present for each filter dimension, so a UI shows only what the data contains. |
 | `GET /api/config` | **This proxy process's** effective (resolved, key-allowlisted) configuration, wrapped in a scope envelope — see [below](#the-config-route-serves-the-servers-configuration-not-yours). Access-gated; **manager-only** in hosted mode. |
-| `GET /api/benchmarks` | Ingested harness runs with per-arm aggregates. `?refresh=1` re-scans the configured run directories. **Manager-only** in hosted mode — the runs are the operator's own eval history, and `?refresh=1` walks the filesystem and inserts rows. |
-| `GET /api/benchmarks/{id}/tasks` | Per-task rows for a run (`?arm=<name>` to restrict). **Manager-only** in hosted mode. |
 | `GET /api/capture` | The capture pipeline's own health, **including its drop count**. The counters are process-wide, so in hosted mode a non-manager gets `mode` alone (with a `description` that says so, rather than one describing counters that are not in the payload). |
 | `GET /api/events` | SSE stream of captured requests (summary rows only — never content). Honors `Last-Event-ID` (or `?last_event_id=`) so a reconnect backfills the gap. |
 | `GET /api/kvcache` | The KV-cache analysis: summary cards, the idle histogram, the survival curve, the grouped views (observed TTL, user, model, time-of-day band), the price list and the **coverage statement**. One payload, so every figure shares its denominator. `scanned` / `total` / `truncated` say whether the read was capped (`kvCacheMaxRows`, 200,000) — a silent cap would read as "this is your whole history". |
@@ -558,7 +559,7 @@ question — a test walks the table and asserts every route's declared scope. Th
 |---|---|
 | Public — no principal at all | `/dashboard/`, `/api/whoami` |
 | Tenant — that principal's data only, and a manager may widen with `?tenant=<id>` or `?tenant=*` | every other `/api/*` data route |
-| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config`, `/api/benchmarks`, `/api/benchmarks/{id}/tasks`, and `/api/capture`'s counters |
+| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config` and `/api/capture`'s counters |
 
 A manager reading another tenant sees their **metrics and their transcripts** — an
 explicit owner decision. `/api/requests/{id}`, `/api/sessions/{session}/transcript` and
@@ -671,6 +672,7 @@ block is covered in [Cache keep-alive](../how-to/cache-keepalive.md)):
 | `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it (the cap is silent, so `/config` reports the **effective** value, not the configured one). A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
 | `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
+| `state_ttl_seconds` | `0` (= `ttl_seconds`) | Memory lifetime of the **session state** keys only (summary checkpoint, billed input, freeze decisions, sweep records). Other keys and the rewind payloads keep their own lifetime. The proxy sets `86400` (24 h) when the session state database is on and this is `0`. |
 
 ##### The two exemptions, and the floor under them
 
@@ -780,7 +782,8 @@ startup with the replacement named, rather than silently migrated to a value tha
 moment.
 
 (The agent's own compaction is a second route to the same skip — it shrinks the incoming request and
-can drop it back under `min_request_tokens` for several consecutive turns.)
+can drop it back under `min_request_tokens` for several consecutive turns. The compaction request
+itself is not skipped: it goes through the pipeline.)
 
 That is only safe because a skipped turn still **splices**. Once a checkpoint exists, every later turn
 re-emits the same summary bytes from it, with no model call, whichever gate declined and whether or
@@ -790,7 +793,7 @@ full-suffix cache-write, so under a rarely-firing trigger the component would co
 every turn to save it on a few.
 
 The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
-`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+`x-context-guru-bypass` request), so an unbroken run of bypassed
 turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
 single-request events in practice, and on the first row above the outcome is the reported one —
 `stash_missing` — not a silent loss.
@@ -829,6 +832,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 | Field | Default | Purpose |
 |---|---|---|
 | `fixed_restore` | `false` | After the agent expands an offloaded output, keep the original **compacted** at its own position and give the content back as a separate message, labelled with the same `<<cg:HASH>>` marker, inserted right after the turn that expanded it — at the same index, byte-identical, on every later turn. Off is the older behaviour: the original reverts to full at its own position (kept-verbatim), a change inside the cached prefix that costs a cache-write of the whole suffix. One switch for every offloader, because the compacting component can be any of them. See [What an expand costs](../how-to/recover-context.md#fixed-restore-opt-in). |
+| `inband_breakpoint` | `false` | When the proxy answers an expand call itself and sends the follow-up request upstream, move the last `cache_control` in `messages`, whoever placed it, to the end of that follow-up. The provider then caches the tool call and the expanded original instead of billing them as plain input. The breakpoint keeps the client's TTL, and the count stays the client's count. A client with no breakpoint in `messages` gets none. Anthropic only; a no-op on other wires. Off by default: a cache write costs more than plain input, and the client's next request does not carry the in-band tool call, so it cannot read that entry. Only a later round of the same expand loop can. |
 
 !!! warning "Strict: unknown keys are rejected"
     The YAML loader runs with `KnownFields(true)`, so a typo'd key fails loudly
@@ -870,6 +874,9 @@ for every component's config block.
 | `CACHE_MODE` | `auto` | Cache-aware compaction: `auto` (on when the agent sets its own breakpoints) \| `on` \| `off`. |
 | `MODEL_INFO_URL` / `MODEL_INFO` | LiteLLM map | Source for context-window sizes (used by the fractional triggers). `MODEL_INFO=off` disables the lookup; fractions are then ignored and absolutes apply. |
 | `MODEL_PRICES` | — | Path to an **operator price list**, consulted before the public map. See below. A file that fails to load is fatal. |
+| `--session-state` / `SESSION_STATE` | `true` | With `--dashboard`: keep the **session state** in the dashboard database (#769), in its own table `session_state`. Without it, a restart or a pause longer than `store.ttl_seconds` loses the summary checkpoint and the billed input. With it, the proxy writes each state key to the table (batched once a second, never inside the request) and keeps it 24 h in memory (`store.state_ttl_seconds`). When a request arrives for a session that has no state in memory, the proxy reads **that session's** rows once. It reads nothing at startup. The proxy opens no second file: the store uses the dashboard's own handle. `--session-state=false` keeps the memory-only store. Off without `--dashboard`, with an in-memory dashboard database, with `--store=false` and with `--upstreams` (a warning says why). The data is **not encrypted**. Any database error is logged once per kind of operation and the proxy goes on with memory only. **A failed write drops that batch (up to 1 s of writes), not only a crash.** The rewind payloads (the stash) are never written. |
+| `--session-state-metadata-only` / `SESSION_STATE_METADATA_ONLY` | `false` | With `--session-state`: write only the metadata keys (`cg:bin:`, `cg:bint:`, `cg:len:`, `cg:ttl:`, `cg:seen:`, `cg:swd:`, `cg:swk:`, `cg:swx:`, `cg:rst:`, `cg:use:`). The summary text and the other content keys stay out of the table. |
+| `--session-state-retention` / `SESSION_STATE_RETENTION` | `720h` | Delete a state row this long after its last write. The dashboard's own retention (`--dashboard-retention`) does not touch these rows. The rows of a session also go when the dashboard archives or evicts that session. |
 | `--store` / `STORE` | on | Enable/disable the state store; `--store=false` disables offload reversibility. Wins over the file's `store:` block. |
 | `--mode` / `MODE` | `sync` | Operating mode: `sync` \| `observe`. Wins over the file's `mode:`. |
 
@@ -879,7 +886,7 @@ Every dollar figure on the dashboard is `observed tokens × per-model rates`. Th
 from LiteLLM's public `model_prices_and_context_window.json`, which prices the **public API**.
 A gateway does not have to charge that, and two things go wrong when it does not:
 
-* **Wrong rates.** IBM's `ete-litellm` bills `aws/claude-sonnet-5` at $1.52/MTok in where
+* **Wrong rates.** IBM's `litellm-gateway` bills `aws/claude-sonnet-5` at $1.52/MTok in where
   anthropic.com bills $3.00 — so every cost, every baseline and every saving for that gateway
   read about twice the truth.
 * **No rates at all.** A model the public map has never heard of — a preview id, an internal
@@ -889,10 +896,11 @@ A gateway does not have to charge that, and two things go wrong when it does not
 
 `MODEL_PRICES=/etc/context-guru/prices.yaml` fixes both. Start from
 [`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml),
-which carries the whole ete-litellm table:
+which carries the whole litellm-gateway table:
 
 ```yaml
-cache_read_frac: 0.1     # fills cache_read where an entry omits it
+# cache_read_frac: 0.1  # optional: one read multiple for every model. Unset, it follows the model
+                         # (0.1x; 0.05x Opus/Sonnet 5.5; 0.025x Fable/Mythos 5.1)
 cache_write_frac: 1.25   # …and cache_write
 models:
   - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
@@ -910,6 +918,11 @@ Containment applies only to entries that look like a model id (one containing a 
 let the public map answer. `window:` optionally supplies a context window for a model the
 public map does not list either.
 
+`cache_write_1h_frac:` optionally sets an entry's 1-hour cache-write rate as a multiple of
+`in`. Unset or 0, it is 2.0x (Anthropic's rate). Set it when a gateway bills the 1-hour write at
+another rate, for example `1.0` for the input rate. A 1-hour write never costs less than a
+5-minute write, so a value below the entry's 5-minute rate gives the 5-minute rate.
+
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
 indistinguishable from "every model is free".
@@ -922,6 +935,9 @@ indistinguishable from "every model is free".
     dollar figure for those rows — baseline, compaction savings, prefix-cache savings and the
     "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
     rate error cancels.
+
+    The Bob tiers set `cache_write_1h_frac: 1.0`: Bob bills a 1-hour cache write at the input
+    rate (measured 2026-11-04).
 
 #### Extraction-model pricing
 
@@ -961,9 +977,10 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-max-bytes` / `DASHBOARD_MAX_BYTES` | `536870912` (512 MiB) | Cap the database size, dropping the oldest requests first. `0` disables the size rule. |
 | `--dashboard-content` / `DASHBOARD_CONTENT` | `false` | Capture before/after message text for the diff view. It stores arbitrary agent output on disk, scrubbed of known credential shapes and size-capped **before** storage — but content cannot be allowlisted the way headers and config keys are, so the safe default is off. In hosted mode this is only the **operator's** half of the decision: a tenant is registered with its own `capture_content` already **on**, so this flag is what keeps a new account's transcripts off disk. |
 | `--dashboard-content-cap` / `DASHBOARD_CONTENT_CAP` | `16384` | Maximum bytes stored per captured before/after blob. |
+| `--dashboard-lifecycle-signals` / `DASHBOARD_LIFECYCLE_SIGNALS` | `true` | Write one `request_lifecycle` row per request (and per keep-alive ping) with the signals no other column holds: gap from the previous response's end to this request's start on the same thread (proxy clock), granted cache TTL tier (`5m`/`1h`/`mixed`), incoming tool_result count, bytes and error flag, and the ping ordinal. Counts and sizes only. Thread id, previous stop reason and tool names are already `requests` columns. Set to `false` to turn it off. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
 | `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content**, prompt text (tool schemas and the system prompt) and the effective config. Loopback always is; aggregates and token weights are open to everyone. |
-| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Comma-separated directories of benchmark runs (each with `summary.json` + `rows-*.json`) to ingest at startup. Re-ingesting replaces a run rather than duplicating it. |
+| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Deprecated and ignored. The Benchmarks tab and its routes were removed; the flag is accepted so existing command lines keep working. |
 
 !!! note "Retention is bounded by age AND size"
     Age alone cannot bound a burst of traffic; size alone silently erases a quiet week.

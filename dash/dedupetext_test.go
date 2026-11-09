@@ -82,7 +82,7 @@ func TestDeclarationTextIsStoredOncePerDistinctText(t *testing.T) {
 	}
 	const sessions = 25
 	for i := 0; i < sessions; i++ {
-		rec.RecordInventory("t1", "s"+itoa(int64(i)), 1000, inv, true)
+		rec.RecordInventory("t1", "s"+itoa(int64(i)), 1000, inv, true, "")
 	}
 	db := rec.DB()
 	// Wait for the last session's rows rather than for a fixed time: this is the writer

@@ -1,0 +1,388 @@
+package proxy
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/metrics"
+)
+
+// Apply writes exactly the names the caller's own report offers, refuses a stale basis or an
+// unknown option, and "restore" takes them back out.
+func TestAdaptToolsApplyWritesOnlyTheReportedNames(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	_, me := f.do(t, "GET", "/api/me", "", jar)
+	tn, _ := me["tenant"].(map[string]any)
+	id, _ := tn["id"].(string)
+
+	e := &dash.Event{TS: time.Now().UnixMilli(), TenantID: id, SessionID: "s1", Model: "m",
+		CacheRead: 1000, TokenAccounting: dash.AccountingComplete, DeclDigest: "d1"}
+	e.Tools = 1
+	f.rec.Record(e)
+	f.rec.RecordInventory(id, "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
+		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
+	var rep map[string]any
+	waitInventory(t, f.rec, 1)
+	_, rep = f.do(t, "GET", "/api/adapt/tools", "", jar)
+	basis, _ := rep["basis_id"].(string)
+	if basis == "" {
+		t.Fatalf("no report: %v", rep)
+	}
+	config := func() string {
+		_, me := f.do(t, "GET", "/api/me", "", jar)
+		tn, _ := me["tenant"].(map[string]any)
+		doc, _ := tn["effective_config_yaml"].(string)
+		return doc
+	}
+
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"stale"}`, jar); w.Code != 409 {
+		t.Fatalf("stale basis = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, jar); w.Code != 400 {
+		t.Fatalf("missing basis = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"Read","basis":"`+basis+`"}`, jar); w.Code != 409 {
+		t.Fatalf("unknown option = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused"}`, nil); w.Code != 401 {
+		t.Fatalf("no cookie = %d %s", w.Code, w.Body)
+	}
+	if strings.Contains(config(), "mcp__srv") {
+		t.Fatal("a refused apply wrote the list")
+	}
+	w, out := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"`+basis+`"}`, jar)
+	if w.Code != 200 || out["ok"] != true {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(config(), "mcp__srv") {
+		t.Fatalf("apply did not write the server: %q", config())
+	}
+	undo, _ := out["undo"].(map[string]any)
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"`+undo["option"].(string)+`"}`, jar); w.Code != 200 {
+		t.Fatalf("undo = %d %s", w.Code, w.Body)
+	}
+	if strings.Contains(config(), "mcp__srv") {
+		t.Fatalf("undo left the server filtered: %q", config())
+	}
+}
+
+// On a single-tenant proxy, apply goes through the shared adapt helper: the running pipeline
+// filters the names at once, from loopback only, and revert takes them back out.
+func TestAdaptToolsApplyOnALocalProxy(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	h.API().SetToolFilterState(h.DashToolFilter())
+	mux := h.Mux()
+	do := func(method, path, body, addr string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	e := &dash.Event{TS: time.Now().UnixMilli(), SessionID: "s1", Model: "m", CacheRead: 1000,
+		TokenAccounting: dash.AccountingComplete, DeclDigest: "d1"}
+	e.Tools = 1
+	h.rec.Record(e)
+	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
+		Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
+	var rep map[string]any
+	waitInventory(t, h.rec, 1)
+	json.Unmarshal(do("GET", "/api/adapt/tools", "", "127.0.0.1:1").Body.Bytes(), &rep)
+	body := `{"option":"remove-unused","basis":"` + rep["basis_id"].(string) + `"}`
+	if w := do("POST", "/api/adapt/tools/apply", body, "198.51.100.7:1"); w.Code != http.StatusForbidden {
+		t.Fatalf("off-loopback apply = %d %s", w.Code, w.Body)
+	}
+	if w := do("POST", "/api/adapt/tools/apply", body, "127.0.0.1:1"); w.Code != http.StatusOK {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	removed := func() string {
+		tf, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ Removed() []string })
+		if tf == nil {
+			return ""
+		}
+		return strings.Join(tf.Removed(), ",")
+	}
+	if got := removed(); got != "mcp__srv" {
+		t.Fatalf("running pipeline filters %q", got)
+	}
+	if w := do("POST", "/api/adapt/tools/apply", `{"option":"revert"}`, "127.0.0.1:1"); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if got := removed(); got != "" {
+		t.Fatalf("after revert the pipeline filters %q", got)
+	}
+}
+
+// The apply note is read back from what was written, and adding toolfilter to a pipeline that
+// already runs it leaves the order alone.
+func TestAdaptToolsNoteAndPipelineOrder(t *testing.T) {
+	doc := "pipeline: [format, toolfilter, searchfold]\ncomponents:\n  toolfilter:\n    remove: [mcp__ops]\n"
+	if got := applyNote([]string{"mcp__ops", "mcp__srv"}, doc, true); got !=
+		"stopped filtering mcp__srv; still filtered because your configuration lists them: mcp__ops" {
+		t.Errorf("restore note %q", got)
+	}
+	if got := applyNote([]string{"mcp__ops"}, doc, false); got != "filtering mcp__ops" {
+		t.Errorf("apply note %q", got)
+	}
+	if got := strings.Join(withComponent([]string{"format", "toolfilter", "searchfold"}, "toolfilter", true), ","); got != "format,toolfilter,searchfold" {
+		t.Errorf("present component moved: %s", got)
+	}
+	if got := strings.Join(withComponent([]string{"format"}, "toolfilter", true), ","); got != "format,toolfilter" {
+		t.Errorf("absent component not added: %s", got)
+	}
+}
+
+// A manager's dashboard default is the whole service, but a removal list is one account's: the
+// report and the apply act on the manager's own traffic, never another tenant's.
+func TestAdaptToolsApplyForAManagerWritesOnlyTheirOwn(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "boss@ibm.com", "m")
+	boss := w.Result().Cookies()
+	w, _ = f.signUp(t, "user@ibm.com", "u")
+	user := w.Result().Cookies()
+	idOf := func(jar []*http.Cookie) string {
+		_, me := f.do(t, "GET", "/api/me", "", jar)
+		tn, _ := me["tenant"].(map[string]any)
+		id, _ := tn["id"].(string)
+		return id
+	}
+	for _, s := range []struct{ id, server string }{{idOf(boss), "mine"}, {idOf(user), "other"}} {
+		e := &dash.Event{TS: time.Now().UnixMilli(), TenantID: s.id, SessionID: "s-" + s.server, Model: "m",
+			CacheRead: 1000, TokenAccounting: dash.AccountingComplete, DeclDigest: "d"}
+		e.Tools = 1
+		f.rec.Record(e)
+		f.rec.RecordInventory(s.id, "s-"+s.server, time.Now().UnixMilli(), &dash.Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []dash.Decl{{Kind: dash.KindMCPTool, Name: "mcp__" + s.server + "__q", Server: s.server, Tokens: 100}}}, false, "")
+	}
+	var rep map[string]any
+	waitInventory(t, f.rec, 2)
+	_, rep = f.do(t, "GET", "/api/adapt/tools", "", boss)
+	if items, _ := rep["items"].([]any); len(items) != 1 {
+		t.Fatalf("a manager's default report is not their own: %v", rep["items"])
+	}
+	if w, _ := f.do(t, "POST", "/api/adapt/tools/apply", `{"option":"remove-unused","basis":"`+rep["basis_id"].(string)+`"}`, boss); w.Code != 200 {
+		t.Fatalf("apply = %d %s", w.Code, w.Body)
+	}
+	_, me := f.do(t, "GET", "/api/me", "", boss)
+	tn, _ := me["tenant"].(map[string]any)
+	doc, _ := tn["effective_config_yaml"].(string)
+	if !strings.Contains(doc, "mcp__mine") || strings.Contains(doc, "mcp__other") {
+		t.Fatalf("manager apply wrote the wrong account's names: %q", doc)
+	}
+}
+
+// waitInventory waits for the inventory writer (its own queue and flush cadence) to have stored
+// n sessions, reading the database directly: the report route is rate-limited per account.
+func waitInventory(t *testing.T, rec *dash.Recorder, n int) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		doc, err := rec.DB().AdaptTools(dash.Filter{TenantAll: true}, nil, dash.ToolFilterState{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc.Coverage.SessionsCaptured >= n {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("inventory for %d sessions never landed", n)
+}
+
+// The last line of defence: whatever an offer holds, apply writes no built-in, no bare tool and
+// none of Context Guru's own entries.
+func TestAdaptToolsApplyRefusesOwnAndNonMCPNames(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	mux := h.Mux()
+	for _, bad := range []string{"mcp__plugin_context-guru_cg", "skill__context-guru:waste", "Read"} {
+		basis := h.API().OfferAdapt("tools", "", map[string]any{"x": []string{bad}})
+		r := httptest.NewRequest("POST", "/api/adapt/tools/apply", strings.NewReader(`{"option":"x","basis":"`+basis+`"}`))
+		r.RemoteAddr = "127.0.0.1:1"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: apply = %d %s", bad, w.Code, w.Body)
+		}
+	}
+	if tf, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ Removed() []string }); tf != nil && len(tf.Removed()) > 0 {
+		t.Fatalf("a refused name was written: %v", tf.Removed())
+	}
+}
+
+// save-more tools on a local proxy (#869): the report offers keep and the search switch, an apply
+// writes toolfilter's keep list and `defer` into the running pipeline, and revert undoes it.
+func TestSaveMoreToolsApplyOnALocalProxy(t *testing.T) {
+	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
+	mux := h.Mux()
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.RemoteAddr = "127.0.0.1:1"
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	e := &dash.Event{TS: time.Now().UnixMilli(), SessionID: "s1", Model: "m", CacheRead: 1000,
+		TokenAccounting: dash.AccountingComplete, DeclDigest: "d1"}
+	e.Tools = 2
+	h.rec.Record(e)
+	h.rec.RecordInventory("", "s1", time.Now().UnixMilli(), &dash.Inventory{Digest: "d1", UseFingerprint: 1,
+		Decls: []dash.Decl{{Kind: dash.KindTool, Name: "WebFetch", Tokens: 500},
+			{Kind: dash.KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}, false, "")
+	waitInventory(t, h.rec, 1)
+
+	read := func() map[string]any {
+		w := do("GET", "/api/save-more/tools", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("report = %d %s", w.Code, w.Body)
+		}
+		var rep map[string]any
+		json.Unmarshal(w.Body.Bytes(), &rep)
+		return rep
+	}
+	rep := read()
+	if rep["search_on"] != false || rep["writable"] != true {
+		t.Fatalf("report = %v", rep)
+	}
+	names := map[string]string{}
+	for _, r := range rep["rows"].([]any) {
+		row := r.(map[string]any)
+		names[row["name"].(string)] = row["state"].(string)
+	}
+	if names["WebFetch"] != dash.StateLoaded || names["mcp__srv"] != dash.StateLoaded {
+		t.Fatalf("rows = %v", names)
+	}
+	tf := func() (bool, []string) {
+		x, _ := h.static.Load().Pipe.Find("toolfilter").(interface {
+			Defers() bool
+			Keep() []string
+		})
+		if x == nil {
+			return false, nil
+		}
+		return x.Defers(), x.Keep()
+	}
+	basis := rep["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("keep = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after keep: defers %v keep %v", on, keep)
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"search_on","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("search_on = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || strings.Join(keep, ",") != "mcp__srv" {
+		t.Fatalf("after search_on: defers %v keep %v", on, keep)
+	}
+	if read()["search_on"] != true {
+		t.Fatal("the report does not read search on back")
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"unkeep:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("unkeep = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || len(keep) != 0 {
+		t.Fatalf("after unkeep: defers %v keep %v", on, keep)
+	}
+	// #878: defer and undefer write toolfilter's always_defer list.
+	always := func() []string {
+		x, _ := h.static.Load().Pipe.Find("toolfilter").(interface{ AlwaysDefer() []string })
+		if x == nil {
+			return nil
+		}
+		return x.AlwaysDefer()
+	}
+	basis = read()["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"defer:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("defer = %d %s", w.Code, w.Body)
+	}
+	if got := always(); strings.Join(got, ",") != "mcp__srv" {
+		t.Fatalf("after defer: always_defer %v", got)
+	}
+	rep = read()
+	if fmt.Sprint(rep["always_defer"]) != "[mcp__srv]" {
+		t.Fatalf("the report does not read the list back: %v", rep["always_defer"])
+	}
+	basis = rep["basis_id"].(string)
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"undefer:mcp__srv","basis":"`+basis+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("undefer = %d %s", w.Code, w.Body)
+	}
+	if got := always(); len(got) != 0 {
+		t.Fatalf("after undefer: always_defer %v", got)
+	}
+	if doc, _ := h.adaptConfig(adaptWho{Local: true}); strings.Contains(doc, "always_defer") {
+		t.Fatalf("an empty list left a key behind:\n%s", doc)
+	}
+	// An option no report offered is refused.
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"keep:Bash","basis":"`+basis+`"}`); w.Code != http.StatusConflict {
+		t.Fatalf("unoffered option = %d %s", w.Code, w.Body)
+	}
+	if w := do("POST", "/api/save-more/tools/apply", `{"option":"revert"}`); w.Code != http.StatusOK {
+		t.Fatalf("revert = %d %s", w.Code, w.Body)
+	}
+	if on, keep := tf(); !on || len(keep) != 0 || strings.Join(always(), ",") != "mcp__srv" {
+		t.Fatalf("after revert: defers %v keep %v always %v; want the undefer undone and search still on", on, keep, always())
+	}
+}
+
+// editDefer writes always_defer next to keep and leaves every other key alone (#878); an empty list
+// takes the key out. The hosted and the local path both write through it.
+func TestEditDeferWritesTheAlwaysDeferList(t *testing.T) {
+	doc := "pipeline: [format, toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    keep: [WebFetch]\n    remove: [mcp__ops]\n"
+	out, err := editDefer(doc, func(c deferConf) deferConf {
+		c.always = withDecl(c.always, "mcp__pw", true)
+		return c
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok, _ := deferSettings(out)
+	if !ok || !c.on || strings.Join(c.keep, ",") != "WebFetch" || strings.Join(c.always, ",") != "mcp__pw" {
+		t.Fatalf("after defer: %+v\n%s", c, out)
+	}
+	if r, _, _ := removedFrom(out); strings.Join(r, ",") != "mcp__ops" {
+		t.Fatalf("remove list changed: %v\n%s", r, out)
+	}
+	out, err = editDefer(out, func(c deferConf) deferConf {
+		c.always = withDecl(c.always, "mcp__pw", false)
+		return c
+	})
+	if err != nil || strings.Contains(out, "always_defer") {
+		t.Fatalf("after undefer (err %v):\n%s", err, out)
+	}
+}
+
+// The host reads the always-defer list out of the tenant's pipeline (#878), and only with defer: auto.
+func TestDeferOnReadsTheAlwaysDeferList(t *testing.T) {
+	read := func(doc string) (bool, []string, []string) {
+		t.Helper()
+		cfg, err := config.LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := cfg.Build(metrics.NewAggregator())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return deferOn(&Tenancy{Pipe: pipe})
+	}
+	on, keep, always := read("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    keep: [Kept]\n    always_defer: [mcp__pw, Monitor]\n")
+	if !on || strings.Join(keep, ",") != "Kept" || strings.Join(always, ",") != "Monitor,mcp__pw" {
+		t.Fatalf("defer: auto: on %v keep %v always %v", on, keep, always)
+	}
+	if on, _, always := read("pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: off\n    always_defer: [Monitor]\n"); on || len(always) != 0 {
+		t.Fatalf("defer: off: on %v always %v; want nothing deferred", on, always)
+	}
+}

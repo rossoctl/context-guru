@@ -15,7 +15,7 @@ stop_reason, timestamps) from the live DB. It must be invoked as `sudo -n -u cg
 stdout, --out, --coefs-out — is an AGGREGATE: dollar totals, percentages, coefficients,
 counts, feature importances, keyed by PSEUDONYMIZED tenant ids (t01, t02, ...), never the
 real tenant_id and never a per-row value. See pseudonymize() below, ported from
-/home/vpcuser/kvpred/extract_features.py's function of the same name.
+the research feature extractor's function of the same name.
 
 Usage (read-only against the live store, as cg):
     sudo -n -u cg /tmp/kvpred-venv/bin/python3 kv_ttl_predictor_arms.py \

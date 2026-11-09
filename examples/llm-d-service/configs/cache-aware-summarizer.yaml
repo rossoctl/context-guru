@@ -9,8 +9,8 @@
 # ⛔ IT NEEDS A MESSAGE-ARRAY CLIENT. The component requires components.MessagesModel and
 # DECLINES when the configured client cannot send one, because flattening the conversation
 # into a single prompt string is exactly the prefix-destroying shape it exists to avoid. Only
-# the OpenAI-shaped client implements it today (internal/cheapmodel/openai.go) — so
-# model.provider MUST be openai here. Check `cache_aware_summarizer_declined` in /stats: any
+# the OpenAI-shaped client implements it today (cheapmodel/openai.go) — so
+# CHEAP_MODEL_PROVIDER MUST be openai on the host. Check `cache_aware_summarizer_declined` in /stats: any
 # non-zero value means this config compacted NOTHING and behaved like `off`.
 #
 # ⛔ Run it ALONE. It changes the message count, and apply's count-change rebuild re-emits
@@ -63,15 +63,13 @@ components:
     # have verified yourself without rebuilding.
     # profiles_path: /etc/cg/summarizer_model_profiles.yaml
 
-    # ⭐ Point this at the SAME endpoint serving the agent. The saving comes from hitting a
-    # prefix that server already has; a different endpoint has a cold cache and there is
-    # nothing to reuse.
+    # ⭐ Point the host's CHEAP_MODEL_BASE at the SAME endpoint serving the agent (e.g.
+    # http://vllm-smoke:8001), with CHEAP_MODEL_PROVIDER=openai. The saving comes from hitting
+    # a prefix that server already has; a different endpoint has a cold cache and there is
+    # nothing to reuse. The endpoint and credential are host settings, not set in this block.
     model:
       source: config
-      provider: openai
-      base_url: http://vllm-smoke:8001
       model: Qwen/Qwen3.6-27B
-      api_key: ""
 
     trigger:
       min_messages: 20

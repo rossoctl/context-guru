@@ -80,23 +80,3 @@ Some nonzero exits are local reporting errors, not failed GitHub operations:
   duplicate posts.
 - The credential-helper warnings described above do not reverse a successful Git ref update.
   Verify the remote commit or PR head before attempting another push.
-
-## Eval-box access from a managed Codex sandbox
-
-The `cgssh2` wrapper reaches the eval box (`contextguru2.vpc.cloud9.ibm.com`) only when the
-command runs **outside** the local filesystem/network sandbox. Inside the sandbox, SSH can fail
-with `Could not resolve hostname ...`; this is a sandbox DNS restriction, not an SSH or API-key
-failure. Do not repeatedly retry the same sandboxed command or change credentials to fix it.
-
-For an authorized eval-box task, invoke `/Users/davidamid/cgssh2 '<remote command>'` with
-`sandbox_permissions: "require_escalated"` on the command tool, and briefly explain that the
-escalation permits the known eval-box SSH connection. Request approval if prompted. Use the same
-pattern when piping only explicitly selected files to the remote worktree for testing. On that
-box, Go is available at `/usr/local/go/bin/go`. Never print or copy credentials as a workaround.
-
-The eval box may not have `rg`; use `grep` there when needed. A selected-file copy under `/tmp`
-has no Git metadata, so Go commands that inspect VCS state can fail with `error obtaining VCS
-status` even though the source compiles. Pass `-buildvcs=false` to both `go list` and `go test`
-in that test copy. If a pipeline produces no package names, `xargs` may otherwise invoke `go
-test` in the repository root and print a misleading `no Go files` error. Check the upstream
-command's exit status before treating that as a package-test failure.

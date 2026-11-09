@@ -134,7 +134,7 @@ func TestSummarizeKeepFirstRetreatsOffADanglingToolCall(t *testing.T) {
 		toolResultMsg(span),
 		userMsg("keep going"),
 	}
-	headCount, start, end := summarizeSpan(msgs, 2, 1)
+	headCount, start, end := summarizeSpan(msgs, 2, 1, nil)
 	if headCount != 1 {
 		t.Errorf("keep_first 2 ending on a tool-calling assistant: headCount = %d, want 1 "+
 			"(the dangling call must fold into the span)", headCount)
@@ -150,7 +150,7 @@ func TestSummarizeKeepFirstRetreatsOffADanglingToolCall(t *testing.T) {
 // keep_first 0 is a real configuration — summarize everything, pin nothing — and must not be
 // confused with unset. A negative value is a typo and is refused rather than clamped.
 func TestSummarizeKeepFirstZeroIsHonouredAndNegativeIsRefused(t *testing.T) {
-	if _, start, _ := summarizeSpan(openAIShaped(), 0, 2); start != 0 {
+	if _, start, _ := summarizeSpan(openAIShaped(), 0, 2, nil); start != 0 {
 		t.Errorf("keep_first 0: start = %d, want 0", start)
 	}
 	if _, err := newSummarize([]byte("keep_first: -1\n")); err == nil {

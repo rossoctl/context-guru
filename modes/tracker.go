@@ -15,8 +15,10 @@
 package modes
 
 import (
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // compactionResets counts, process-wide, how many turns had their cached-prefix
@@ -66,37 +68,115 @@ func Boundary(prev, n int) int {
 	return prev
 }
 
-// Tracker holds the per-session cached-prefix boundary, each session's state guarded by
-// one lock so concurrent turns cannot interleave a read and a write.
+// DefaultMaxKeys bounds the tracker so an unbounded stream of distinct keys cannot grow it
+// without limit. The key is a THREAD (thread.Key), not a session (#484), so one busy session
+// holds one entry per subagent and per side request. 4,096 entries of about 40 bytes plus the
+// key is well under 1 MB. Exported so other per-thread maps (extract_llm's growth record) use
+// the same bound.
+const DefaultMaxKeys = 4096
+
+// StaleAfter is how long a key may go without a request before the tracker may expire it. It is
+// a MEMORY bound, not a cache verdict: a keep-alive can hold a provider entry warm with no
+// request at all, so an expired key is remembered as dropped (see Tracker.dropped) and never
+// read as "nothing cached". 6 hours is far past the longest provider TTL (1 hour) plus the
+// default keep-alive span.
+const StaleAfter = 6 * time.Hour
+
+// Tracker holds the cached-prefix boundary per key (a session, or one thread of a session), each
+// key's state guarded by one lock so concurrent turns cannot interleave a read and a write.
 type Tracker struct {
 	mu  sync.Mutex
 	m   map[string]turn
-	max int // bound on tracked sessions; 0 => default
+	max int    // bound on tracked keys; 0 => default
+	seq uint64 // use counter: each turn stamps its key, and the smallest stamp is evicted first
+	// startedAtMs is when this tracker was created, in unix milliseconds: a proxy restart's
+	// marker. It is the FALLBACK clock of the restart grace: with no last-seen lookup (below),
+	// an unknown key whose first request comes less than that request's cache lifetime after
+	// the start reads as all-cached (#496). 0 (a Tracker built without NewTracker) gets no
+	// grace, which is the old behaviour.
+	startedAtMs int64
+	// lastSeen, when the host sets it (SetLastSeen), answers "when did this key's cached prefix
+	// last get refreshed?" from state that survived the restart — the dashboard's grace map,
+	// seeded from the database at startup and kept current by requests and by keep-alive pings
+	// that read the cache. It is the PRIMARY clock of the restart grace (#766): the thread's
+	// own idle gap decides whether its prefix can still be cached, where the proxy's start
+	// time cannot tell a new thread from a long-idle one. Nil (no database, dashboard off)
+	// means the fallback above, and so does the third return value: have=false says "cannot
+	// answer for this key" — the host wires the lookup process-wide but a tenant running
+	// observe mode records no session ids, so for that tenant's keys there is nothing to look
+	// up and the start-time fallback must answer, where a miss (have=true, known=false) would
+	// read every warm thread as new. Called under t.mu, so it must not call back into this
+	// tracker.
+	lastSeen func(key string) (atMs int64, known, have bool)
+	// graceOn is the host's on/off switch for that rule. The length is not ours to choose: each
+	// request carries its own cache lifetime, and the caller passes it to TurnFrom. A benchmark
+	// that sends whole transcripts to a fresh proxy switches the rule off (false) so it measures
+	// compaction, not the grace.
+	graceOn bool
+	// dropped holds a hash of every key the tracker evicted or expired, bounded at 4x max. A
+	// later request on such a key gets the WHOLE request as its boundary (nothing may change),
+	// not 0. 0 would let every component rewrite a prefix the provider may still hold — the
+	// same cache write a proxy restart causes. 8 bytes a key, so it outlives the records.
+	dropped map[uint64]struct{}
 }
 
-// turn is what one session's previous request left behind: how long the transcript was,
-// and WHEN it happened.
+// turn is what one key's previous request left behind: how long the transcript was, and WHEN
+// it happened.
 //
 // The timestamp is here rather than in a second map because the two are read together and
-// under the same lock, and because this is already the one place per-session request state
-// is bounded. It answers a question nothing on the request path could answer before: how
-// long has this session been idle — and therefore, given the provider's cache TTL, is the
-// prefix we are about to protect still cached at all?
+// under the same lock, and because this is already the one place per-key request state is
+// bounded. It answers a question nothing on the request path could answer before: how long
+// has this thread been idle — and therefore, given the provider's cache TTL, is the prefix we
+// are about to protect still cached at all?
 type turn struct {
-	n  int
-	at int64 // unix milliseconds; 0 = no previous turn recorded
+	n    int
+	at   int64  // unix milliseconds; 0 = no previous turn recorded
+	used uint64 // Tracker.seq at the last turn on this key
 }
 
-// defaultMaxSessions bounds the tracker so an unbounded stream of distinct sessions
-// cannot grow it without limit. Matches the store's sticky-set bound.
-const defaultMaxSessions = 1000
-
-// NewTracker returns an empty tracker. maxSessions <= 0 uses the default bound.
-func NewTracker(maxSessions int) *Tracker {
-	if maxSessions <= 0 {
-		maxSessions = defaultMaxSessions
+// NewTracker returns an empty tracker. maxKeys <= 0 uses DefaultMaxKeys.
+func NewTracker(maxKeys int) *Tracker {
+	if maxKeys <= 0 {
+		maxKeys = DefaultMaxKeys
 	}
-	return &Tracker{m: map[string]turn{}, max: maxSessions}
+	return &Tracker{m: map[string]turn{}, max: maxKeys, startedAtMs: time.Now().UnixMilli(),
+		graceOn: true, dropped: map[uint64]struct{}{}}
+}
+
+// SetStartedAt sets the tracker's start time (unix milliseconds). NewTracker stamps the real
+// clock; a test can set a past time to build a tracker BEYOND its restart grace (#496) without
+// waiting for the grace to pass.
+func (t *Tracker) SetStartedAt(ms int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.startedAtMs = ms
+}
+
+// SetRestartGrace switches the restart grace on or off. The grace's LENGTH is per request (the
+// caller passes the cache lifetime to TurnFrom); this is only the on/off switch, which the host
+// passes its setting to (the proxy's --restart-grace). A benchmark that sends whole transcripts
+// to a fresh proxy switches it off. Startup setting, not a live knob.
+func (t *Tracker) SetRestartGrace(on bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.graceOn = on
+}
+
+// SetLastSeen gives the tracker a "last seen" lookup for the restart grace (#766): when this
+// key's cached prefix was last refreshed, as far as state that survived the restart knows —
+// by the thread's own last request or by a keep-alive ping that read the cache; the host
+// decides what counts. The proxy sets it from the dashboard recorder, which reloads that time
+// per thread at startup; the library itself must not import dash, so the host hands the
+// function in. Three answers: known=true carries the timestamp; known=false with have=true
+// says "looked, never seen" (a new thread); have=false says "cannot answer for this key"
+// (no database, or a deployment whose rows carry no session id), and #759's start-time rule
+// answers instead. Startup setting, like SetRestartGrace. The lookup runs under the
+// tracker's lock, so it must not call back into the tracker; a panic inside it reads as
+// "no lookup", so a broken lookup cannot fail a request.
+func (t *Tracker) SetLastSeen(f func(key string) (atMs int64, known, have bool)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastSeen = f
 }
 
 // Turn records that this session's current turn carries n normalized messages and
@@ -107,29 +187,84 @@ func NewTracker(maxSessions int) *Tracker {
 // A shorter transcript under the same session id is the agent's own compaction, and
 // resets the boundary to 0 — see Boundary for the rule and why it is not "grow only".
 func (t *Tracker) Turn(session string, n int) (prevLen int) {
-	prevLen, _ = t.TurnAt(session, n, 0)
+	prevLen, _ = t.TurnAt(session, n, 0, 0)
 	return prevLen
 }
 
 // TurnAt is Turn plus the previous turn's timestamp, so the caller can tell how long this
 // session has been idle. nowMs of 0 means "do not record a time" (the legacy Turn path);
-// the clock is the caller's so this stays a pure, testable function.
+// the clock is the caller's so this stays a pure, testable function. grace is this request's
+// cache lifetime; it matters only for a key with no record (see TurnFrom).
 //
 // prevAtMs is 0 when there is no previous turn recorded — a new session, or one evicted by
 // the bound above. A caller MUST treat that as "unknown", never as "idle forever": acting
 // on a fabricated idle time is how a warm cache gets invalidated after a proxy restart.
-func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
+func (t *Tracker) TurnAt(session string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
+	return t.TurnFrom(session, "", "", "", n, nowMs, grace)
+}
+
+// TurnFrom is TurnAt for a key that may be a NEW thread continuing another thread's prefix.
+//
+// parent is the key of the thread this one inherits from ("" for none): Claude Code's side
+// requests (title, quota check, end-of-turn note) and forks start with the main thread's whole
+// transcript, which the provider already holds. When key has no record of its own, its boundary
+// and idle clock come from parent's record, so the first request of such a thread protects the
+// cached prefix it reads. parent's record is only READ, never written: the parent's next request
+// must still be measured against its own last request (#484).
+//
+// aliasKey and aliasParent are the SAME thread and parent under the session's ALIAS id (also ""
+// for none): one conversation can reach the proxy under two ids — an explicit session header on
+// some turns and a content-derived id on others — so a record under either id says the prefix
+// is warm. The restart grace asks the last-seen lookup for both keys and takes the LATER
+// timestamp, the same widening apply.go gives the cold decision's alias clock. They matter only
+// in the grace; the tracker's own records stay keyed by the id the request carried.
+//
+// The inherited boundary is min(parent's count, n): a fork shorter than its parent diverged
+// somewhere inside the parent's prefix, and freezing all of it is the safe direction. It is never
+// counted as a compaction.
+//
+// A key the tracker dropped (evicted or expired), or a new key whose parent was dropped, gets
+// prevLen = n: the whole request is treated as cached, so nothing changes on this one turn, and
+// the next turn has a real record again.
+//
+// The same answer serves a proxy restart (#496, #766): a key with no record, no drop and no
+// usable parent falls to the restart grace, which asks the host's last-seen lookup (SetLastSeen)
+// for when this thread's cached prefix was last refreshed — its own last request, a ping that
+// read the cache, under either session id. Inside this request's cache lifetime (the caller
+// passes it as grace) the key reads as all-cached, because the process forgot the record, not
+// the provider the prefix; past it the thread is expired — cold, not new. A key the lookup does
+// not know under either id is a really new thread: nothing is cached, so its first request is
+// editable as usual. Without a lookup (no database, dashboard off, or one that declines the
+// key — an observe-mode deployment records no session ids), #759's start-time rule answers
+// instead, and the host can switch the grace off entirely (SetRestartGrace).
+func (t *Tracker) TurnFrom(key, parent, aliasKey, aliasParent string, n int, nowMs int64, grace time.Duration) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prev, ok := t.m[session]
-	if !ok && len(t.m) >= t.max {
-		// ponytail: arbitrary eviction, same policy as the store's sticky sets. A dropped
-		// session restarts at 0, which means "treat everything as tail" — correct, just
-		// less saving. Add an LRU only if session churn is shown to cost real savings.
-		for k := range t.m {
-			delete(t.m, k)
-			break
+	prev, ok := t.m[key]
+	switch {
+	case ok:
+		prevLen, prevAtMs = Boundary(prev.n, n), prev.at
+	case t.wasDropped(key):
+		prevLen = n
+	case parent == "":
+		prevLen = t.graceLocked(key, aliasKey, n, nowMs, grace)
+	default:
+		if p, pok := t.m[parent]; pok {
+			prevLen, prevAtMs = min(p.n, n), p.at
+		} else if t.droppedLocked(parent) {
+			// The parent was evicted, but the provider may still hold the prefix this request
+			// reads: all cached, as for a dropped key of its own. Peek only, so the parent's own
+			// next request still reads as dropped too.
+			prevLen = n
+		} else {
+			// The parent's last request is the clock that matters here: this request READS the
+			// parent's prefix, so the grace asks about the parent (and the parent's alias), not
+			// about the key itself.
+			prevLen = t.graceLocked(parent, aliasParent, n, nowMs, grace)
 		}
+	}
+	if !ok && len(t.m) >= t.max {
+		t.pruneLocked(nowMs)
 	}
 	// Always record THIS turn's length: on growth it is the max anyway, and on a shrink
 	// it is the new prefix every later turn must be measured against.
@@ -137,8 +272,138 @@ func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevA
 	if nowMs > 0 {
 		at = nowMs
 	}
-	t.m[session] = turn{n: n, at: at}
-	return Boundary(prev.n, n), prev.at
+	t.seq++
+	t.m[key] = turn{n: n, at: at, used: t.seq}
+	return prevLen, prevAtMs
+}
+
+// graceLocked is the boundary for a key with no record, no drop and no usable parent. With a
+// last-seen lookup (#766) the thread's OWN idle gap decides: n when the lookup's timestamp is
+// less than grace — this request's cache lifetime, the longest a restart-forgotten entry of
+// this thread can still be alive (#496) — in the past, 0 once that window is past (the thread
+// is expired, cold — not new), and 0 for a key the lookup does not know (a really new thread:
+// nothing is cached, so there is nothing to protect). aliasKey is the same thread under the
+// session's alias id: the lookup is asked for BOTH keys and the LATER timestamp wins, because
+// a request under either id refreshes the one provider entry. Without a lookup (no database,
+// dashboard off) the fallback is #759's rule: n while the tracker itself started less than
+// grace ago. prevAtMs stays 0 either way: the grace answers a yes/no question, so nothing may
+// read cold off a fabricated age.
+//
+// nowMs <= 0 (the legacy Turn path, which records no time) gets no grace: there is no clock to
+// measure the restart against, and the request path always supplies one. A caller clock BEHIND
+// the last-seen time (or the start, in the fallback) is not a restart either: it reads as past
+// the grace, which keeps fake-clock callers on the old behaviour.
+func (t *Tracker) graceLocked(key, aliasKey string, n int, nowMs int64, grace time.Duration) int {
+	if !t.graceOn || nowMs <= 0 || grace <= 0 {
+		return 0
+	}
+	at, known, have := t.lastSeenLocked(key)
+	if aliasKey != "" && aliasKey != key {
+		// The alias widens only toward WARM: a later refresh under either id keeps the entry
+		// alive, so we take the later timestamp, never the earlier one.
+		if a, aKnown, aHave := t.lastSeenLocked(aliasKey); aHave {
+			have = true
+			if aKnown && (!known || a > at) {
+				at, known = a, true
+			}
+		}
+	}
+	if have {
+		if !known {
+			return 0
+		}
+		if d := nowMs - at; d >= 0 && d < grace.Milliseconds() {
+			return n
+		}
+		return 0
+	}
+	if t.startedAtMs == 0 {
+		return 0
+	}
+	if d := nowMs - t.startedAtMs; d >= 0 && d < grace.Milliseconds() {
+		return n
+	}
+	return 0
+}
+
+// lastSeenLocked asks the host's lookup, fail-open: a panic inside it reads as "no lookup", so
+// the start-time fallback answers instead and a broken lookup cannot fail the request.
+func (t *Tracker) lastSeenLocked(key string) (atMs int64, known, have bool) {
+	if t.lastSeen == nil {
+		return 0, false, false
+	}
+	defer func() {
+		if recover() != nil {
+			atMs, known, have = 0, false, false
+		}
+	}()
+	at, known, have := t.lastSeen(key)
+	return at, known, have
+}
+
+// pruneLocked makes room for one new key. It first expires every key idle past StaleAfter
+// (side-request keys are used once and land here), and only if none is stale does it evict the
+// least recently used key. Either way the key is remembered in dropped, so its next request
+// reads as "all cached", never as "nothing cached". The scans are O(n), and they run only when a
+// NEW key arrives at a full tracker.
+func (t *Tracker) pruneLocked(nowMs int64) {
+	if nowMs > 0 {
+		for k, v := range t.m {
+			if v.at > 0 && nowMs-v.at > StaleAfter.Milliseconds() {
+				t.dropLocked(k)
+			}
+		}
+		if len(t.m) < t.max {
+			return
+		}
+	}
+	var oldest string
+	var least uint64
+	first := true
+	for k, v := range t.m {
+		if first || v.used < least {
+			oldest, least, first = k, v.used, false
+		}
+	}
+	if !first {
+		t.dropLocked(oldest)
+	}
+}
+
+func (t *Tracker) dropLocked(key string) {
+	delete(t.m, key)
+	if len(t.dropped) >= 4*t.max {
+		// ponytail: arbitrary eviction. A forgotten drop reads as a new key (boundary 0), which
+		// is the old behaviour. Add order only if drops outrun 4x the live bound in practice.
+		for h := range t.dropped {
+			delete(t.dropped, h)
+			break
+		}
+	}
+	t.dropped[keyHash(key)] = struct{}{}
+}
+
+// wasDropped reports, and forgets, whether key was evicted or expired. A hash collision makes
+// a new key read as dropped, which only freezes its first request: the safe direction.
+func (t *Tracker) wasDropped(key string) bool {
+	h := keyHash(key)
+	if _, ok := t.dropped[h]; ok {
+		delete(t.dropped, h)
+		return true
+	}
+	return false
+}
+
+// droppedLocked reports whether key was evicted or expired, without forgetting it.
+func (t *Tracker) droppedLocked(key string) bool {
+	_, ok := t.dropped[keyHash(key)]
+	return ok
+}
+
+func keyHash(key string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return h.Sum64()
 }
 
 // Sessions reports how many sessions are tracked (test/telemetry aid).

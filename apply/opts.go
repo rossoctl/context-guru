@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 )
 
@@ -17,10 +18,16 @@ type Opts struct {
 	Provider bschemas.ModelProvider
 	Body     []byte
 	// API identifies the wire envelope. Empty means Chat Completions / Messages;
-	// "responses" selects OpenAI's native Responses instructions+input shape.
+	// "responses" (or the upstream path "/v1/responses") selects OpenAI's native Responses
+	// instructions+input shape. schema.WireFor reads it.
 	API string
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
+	// ThreadOf, when set, finds the thread of the session this request belongs to (see
+	// internal/thread). It is called once, as soon as the session id is resolved and BEFORE the
+	// pipeline runs, so components see the thread on Ctx.Thread; the result rides on
+	// Trace.Thread. nil leaves every request on the primary thread.
+	ThreadOf func(session string) thread.Result
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
 	// in single-tenant use, which leaves session keys byte-identical to before this
 	// field existed.
@@ -46,7 +53,7 @@ type Opts struct {
 	// mechanism acts. 0 = unknown, and components fall back to Window. See
 	// internal/compactionpoint for the definition and why it is not the window.
 	CompactionPoint int
-	// CompactionPointSource is "measured" | "assumed" | "window_fallback".
+	// CompactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "window_fallback".
 	CompactionPointSource string
 	// CacheMode is "auto" (default) | "on" | "off" — see resolveCacheAware.
 	CacheMode string
@@ -77,15 +84,18 @@ type Opts struct {
 	// cannot affect anything today because this is off, but it is the one way this field
 	// touches shared behaviour.
 	HeadTTL1h bool
-	// HeadTTLMinTokens is the size gate on HeadTTL1h, in estimated tokens. 0 disables the
+	// HeadTTLMinBytes is the size gate on HeadTTL1h, in bytes of the request body. 0 disables the
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.
-	HeadTTLMinTokens int
+	HeadTTLMinBytes int
 	// PrefixAsk, when set, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the cached prefix. See components.PrefixAsker. nil => a component
 	// that wants one gets none and decides for itself; today's behaviour for every caller that does
 	// not set it.
 	PrefixAsk components.PrefixAsker
+	// CanKeepAlive, when set, tells a component whether the host's keep-alive can ping the thread of
+	// the session this request belongs to. See components.Ctx.CanKeepAlive. nil => it cannot.
+	CanKeepAlive func(session, thread string) bool
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.
@@ -114,4 +124,36 @@ func (o Opts) nowMs() int64 {
 		return time.Now().UnixMilli()
 	}
 	return o.Now.UnixMilli()
+}
+
+// canKeepAliveFor binds the host's keep-alive check to one request's session and thread. nil in, nil
+// out: a component then reads "cannot". A panic in the hook reads "cannot" as well (fail open: the
+// thread keeps nothing extra and is pinged as before).
+func canKeepAliveFor(f func(session, thread string) bool, session, thread string) func() bool {
+	if f == nil {
+		return nil
+	}
+	return func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return f(session, thread)
+	}
+}
+
+// resolveThread runs ThreadOf once for the resolved session id. Fails open: a panic in the hook
+// leaves the request on the primary thread, never fails it.
+func (o Opts) resolveThread(tr *Trace, session string) {
+	if o.ThreadOf == nil || tr.ThreadResolved {
+		return
+	}
+	tr.ThreadResolved = true
+	defer func() {
+		if recover() != nil {
+			tr.Thread = thread.Result{ID: thread.Primary, Source: thread.SourceSession}
+		}
+	}()
+	tr.Thread = o.ThreadOf(session)
 }

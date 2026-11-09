@@ -68,8 +68,13 @@ The same transcript cut by 60k in **one pass** needs *T* > 23, which a long sess
 
 - `min_batch_frac` — one rewrite has to serve the whole pass.
 - `rewrite_budget` — the spend is capped per session and answerable, not incidental.
-- `break_even` — the inequality itself, with *T* estimated from how fast the transcript has been
-  growing. Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
+- `break_even` — the inequality itself, with *T* priced from the **billed** growth per turn on this
+  thread: *T* = (the cut − the billed prompt after the removal) ÷ (billed growth per turn). The cut is
+  the summarizer's trigger fraction of the window when one is in the pipeline, else the whole window. If
+  the billed size, the growth or an exact window is unknown, `break_even` uses the old local-token
+  estimate and counts the event `horizon_fallback_<reason>` (`no_billed_size`, `window_not_exact`,
+  `growth_unknown`). The summarizer's own cut fires on the session figure, while *T* uses the thread
+  figure. In a session with several threads the cut point can drift from the one *T* assumes. Its consequence is counter-intuitive and deliberate: **firing at 90% of the window means
   *T* ≈ 0**, so the profitable moment to compact is *earlier* than the moment of maximum pressure.
 
 ## Before → After
@@ -306,7 +311,7 @@ total. Real, small on this traffic, and the reason
 | **11.5×** | One cache-write costs 11.5 cache-reads: `($2.50 − $0.20) / $0.20` per MTok. |
 | **`S`** | Tokens the cut removes (the saving, collected on every later turn). |
 | **`W`** | The **rewritten suffix** — tokens from the shallowest cut to the end of what the provider already cached. The cost. |
-| **`T`** | Turns remaining in the session, i.e. how many times the saving gets collected. Nobody has this, so it's estimated from how fast the transcript has been growing. |
+| **`T`** | Turns remaining in the session, i.e. how many times the saving gets collected. Nobody has this, so it is priced from the billed growth per turn on this thread (see `break_even`). When that is unknown it falls back to a local-token estimate and counts `horizon_fallback_<reason>` (`no_billed_size`, `window_not_exact`, `growth_unknown`). A summarizer's `min_request_tokens` / `max_request_tokens` gates can cut earlier than its fraction says, so *T* can be an overestimate. |
 | **break-even** | `S × T > 11.5 × W`. |
 
 **Why this reshapes everything:** a single early cut can never clear it — 5k cut from 20% depth of a 150k
@@ -380,7 +385,7 @@ of the request for 40–60 turns of headroom — and Tier-1 matching finds only 
 | **`repairLostFreeze`** | Background: an offloader `freeze`s its replacement text against the original's content hash and replays it every turn, so the bytes stay stable. If the store *drops* that record (TTL, eviction), the offloader would normally decline to act at depth — but then the message reverts to full text, which is *itself* a prefix change. So `mask` and `failed_run` are allowed to re-derive the decision even deep in the prefix: their replacement is a pure function of `(content, config)`, so re-deriving reproduces byte-for-byte what the provider already cached. **`coref` must never use this.** Its decision depends on the whole transcript, so re-deriving against a longer one can yield a different class and different bytes — the precise byte-flip the repair exists to prevent. A lost `coref` freeze therefore declines and the output stays verbatim. |
 | **marker / `<<cg:HASH>>`** | What's left in place of cut content, resolvable back to the stashed original via `context_guru_expand`. |
 | **head peek** | A one-line snippet of the cut output left inside the marker, so the model knows *what* went missing without a blind `expand` round-trip. |
-| **kept-verbatim** | Once the agent expands something, it's marked never-re-cut — otherwise it expands again every turn (an **expand loop**). |
+| **kept-verbatim** | Once the agent expands something, it's marked never-re-cut **in that session** (the mark is keyed by session, so another session's copy is still cut) — otherwise it expands again every turn (an **expand loop**). |
 | **`expand` rate** | The precision inner loop: how often the model asks for cut content back. Cheap, needs no scoring, no seeds, no n=30. **But it counts *noticed* errors only** — see the box below — so a falling expand rate is ambiguous rather than good news. |
 | **fail open** | Any error reverts this component only; the original request is always forwardable. |
 

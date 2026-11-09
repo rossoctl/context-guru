@@ -108,9 +108,10 @@ type Summarize struct {
 	resummarizeTokens int
 	includeToolCalls  bool
 	modelSource       string
-	modelClient       components.Model // config-pinned client (model: block), or nil
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
 	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
 	// 0 = defaultSummaryWait. See summarize_async.go.
 	summaryWaitSeconds int
@@ -150,7 +151,7 @@ type summarizeConfig struct {
 
 func newSummarize(raw []byte) (components.Component, error) {
 	cfg := summarizeConfig{SummaryLevel: "regular", KeepFirst: 1, KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("summarize", raw, &cfg); err != nil {
 		return nil, err
 	}
 	// Refused rather than clamped: a negative keep_first is a typo, and silently reading it as 0
@@ -170,7 +171,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 	return &Summarize{
 		level: cfg.SummaryLevel, keepFirst: cfg.KeepFirst, customPrompt: cfg.CustomPrompt, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
+		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, trigger: cfg.Trigger,
 		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
 }
@@ -266,6 +267,9 @@ const (
 	// is filed by the goroutine that commits it. Two names because a started-and-lost call is a
 	// real outcome that must not read as a delivered summary.
 	EventSummaryStarted = "summary_started"
+	// EventSummaryDeferredToStash marks a cache_aware_summarizer prefix-ask commission held until
+	// the host has stashed this turn's body, then started from the host's hook (#722).
+	EventSummaryDeferredToStash = "summary_deferred_to_stash"
 	// EventAwaitedCheckpoint marks a turn that WAITED for a summary an earlier turn started and
 	// then spliced it. Distinct from EventReusedCheckpoint because this one cost latency: it is
 	// the turn that paid for the async design, and the pair (awaited, summary_wait_timeout) is
@@ -326,6 +330,10 @@ func (Summarize) Enabled(c *components.Ctx) bool {
 }
 func (*Summarize) NeedsModel() bool { return true }
 
+// CutFrac is the trigger fraction of the window at which this component cuts the conversation
+// (components.CutFracProvider).
+func (s *Summarize) CutFrac() float64 { return s.trigger.MinRequestFrac }
+
 func summaryStashJSON(c *components.Ctx, start, end int, span []bschemas.ChatMessage) ([]byte, error) {
 	if c.SummaryStashPayload != nil {
 		return c.SummaryStashPayload(start, end, span)
@@ -344,11 +352,36 @@ func summaryCoveredHash(c *components.Ctx, start, end int, span []bschemas.ChatM
 	return spanHash(span)
 }
 
+// summaryCoveredHashMatches is how a span is compared with a stored summaryCoveredHash. It also
+// accepts the hash an earlier version wrote over the same span (see spanHashMatches, #783).
+func summaryCoveredHashMatches(c *components.Ctx, start, end int, span []bschemas.ChatMessage, want string) bool {
+	if summaryCoveredHash(c, start, end, span) == want {
+		return true
+	}
+	prefix := ""
+	if c.SummaryStashPayload != nil {
+		b, err := c.SummaryStashPayload(start, end, span)
+		if err != nil {
+			return false
+		}
+		prefix = string(b) + ":"
+	}
+	for _, legacy := range components.LegacySpanHashes(span) {
+		if prefix != "" {
+			legacy = hashKey(prefix + legacy)
+		}
+		if legacy == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
-	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast)
+	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast, c.WireGroup)
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
 	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the
@@ -370,6 +403,19 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
 	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
 	takeDeferredUsage(c, rep)
+	adoptParentCheckpoint(c)
+	// A non-nil WireGroup that no longer lines up with msgs means wire groups DO exist on this
+	// request (Anthropic traffic normalized at least one shared message) but an earlier
+	// component changed the message count, so their current positions are unknown. The
+	// headCount/start/end just computed above are UNALIGNED in that case (summarizeSpan's own
+	// defensive check collapsed WireGroup to nil, same as "no groups ever existed" — e.g.
+	// OpenAI-shaped traffic). Decline rather than risk splitting a wire message that is really
+	// there, just not where WireGroup says. See wireGroupsStale.
+	if wireGroupsStale(c, msgs) {
+		rep.Gate("wire_groups_stale")
+		rep.Skipped = true
+		return nil, nil
+	}
 	if end > start && c.AllowSummarySpan != nil && !c.AllowSummarySpan(start, end) {
 		rep.Gate("wire_span_unsafe")
 		rep.Skipped = true
@@ -390,11 +436,9 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	phase := c.CachePhase(s.trigger.PreExpiry())
 	phased := s.trigger.CacheAllows(c, phase)
 	if !phased {
-		// NOT extract_llm_sweep's `not_in_pre_expiry_window`, deliberately. That component has
-		// exactly one permitted state, so a name asserting which one is always true of it. This
-		// trigger's state is CONFIGURED, and a deployment running `cache_state: cold` reading
-		// "not in the pre-expiry window" off /stats would be told something false about its own
-		// configuration. The phase it actually saw is appended, because "the cache state declined"
+		// The gate name carries the phase, because this trigger's state is CONFIGURED: a deployment
+		// running `cache_state: cold` reading a fixed "not in the pre-expiry window" off /stats would
+		// be told something false about its own configuration. The phase it actually saw is appended, because "the cache state declined"
 		// without saying which state is the sort of counter that can tell you THAT something
 		// happened and never why.
 		rep.Gate("cache_state_declined_" + phase.String())
@@ -437,7 +481,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		return reusedKeys, nil
 	}
 
-	model := s.modelClient // config-pinned client wins
+	model := s.modelClient // test-injection seam; nil in production
 	if model == nil {
 		model = c.Model.For(s.modelSource)
 	}
@@ -454,8 +498,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
 	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
 	// result: without it, it forwards the full transcript at 1.25xF.
-	if _, running := inFlight.peek(c.Session); running {
-		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+	if _, running := inFlight.peek(convKey(c)); running {
+		waited, landed := inFlight.waitFor(c.Ctx, convKey(c), s.summaryWait())
 		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
 		if landed {
 			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
@@ -479,11 +523,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		}
 	}
 
-	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
-	// cache-stable shape available, which is the standing checkpoint when there is one. Both
-	// reasons take the same path because they have the same remedy; the gates above already
-	// recorded WHICH it was.
-	if !fires || model == nil {
+	// A side request replays its parent's checkpoint but never commissions one. See sideRequest.
+	side := sideRequest(c)
+	if side {
+		rep.Gate("side_request_read_only")
+	}
+	// No new summary this turn — gated, a side request, or nothing to summarize with. Fall back to
+	// the most cache-stable shape available, which is the standing checkpoint when there is one.
+	// All take the same path because they have the same remedy; the gates above already recorded
+	// WHICH it was.
+	if !fires || model == nil || side {
 		if stale {
 			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 		}
@@ -574,8 +623,8 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// the worst case.
 	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
 	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
-	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
-	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// THE SAME THREAD: the checkpoint is keyed by the thread of the session (sumKey(convKey(c))) and
+	// the single-flight registry is keyed the same way. With no session id there is no key to save
 	// under, nothing to single-flight on, and no later turn that could ever find it — so going
 	// async would spend a model call and discard the result, every turn, forever.
 	//
@@ -683,7 +732,7 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	if len(keys) == 0 {
 		rep.Irreversible = true
 	}
@@ -722,17 +771,19 @@ func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *
 // tryReuse and the refusal fallback so a replayed checkpoint is byte-identical whichever path
 // emits it — a difference between them would itself be a cache flip.
 func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage,
-	headCount, boundary int) ([]bschemas.ChatMessage, []string) {
+	headCount, boundary int, groups []int) ([]bschemas.ChatMessage, []string) {
 	// USER for the same reason as the fresh-summary path: a system role at index 1 is rejected
 	// by the provider. The replayed checkpoint must match that shape exactly, or a replayed
 	// turn would emit different bytes from the turn that created it.
 	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
-	// The replayed boundary must respect exchange atomicity exactly as the fresh path does,
-	// or a replayed turn emits different bytes from the turn that created it.
-	for boundary < len(msgs) && msgs[boundary].Role == bschemas.ChatMessageRoleTool {
-		boundary++
-	}
+	// The replayed boundary must respect exchange AND wire-message atomicity exactly as the
+	// fresh path does (advanceSpanBoundary — #457 round 2), or a replayed turn emits different
+	// bytes from the turn that created it. This used to be its own copy of just the role==tool
+	// half of that rule, which is exactly the shape of gap summarizeSpan had before #457: a
+	// sibling-first group lets the tail begin on the sibling (role=user) while its tool_result
+	// orphans a tool_use one slot earlier.
+	boundary = advanceSpanBoundary(msgs, groups, boundary)
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[:headCount]...)
 	out = append(out, summaryMsg)
@@ -773,7 +824,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
-	if summaryCoveredHash(c, start, boundary, covered) != cp.CoveredHash {
+	if !summaryCoveredHashMatches(c, start, boundary, covered, cp.CoveredHash) {
 		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The hash
 		// is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
 		// component mutating a message inside the checkpointed span lands here. extract_llm_sweep is the
@@ -839,7 +890,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
-	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary, c.WireGroup)
 	return emitted, ks, true, false
 }
 
@@ -975,7 +1026,7 @@ var summaryMarkerRe = regexp.MustCompile(
 
 func summaryWrapper(summary, key string, mode markerMode) string {
 	summary = sanitizeSummary(summary)
-	body := "=== History Summary ===\n" +
+	body := schema.SummaryHeader + "\n" +
 		"The earlier trajectory is summarized below.\n\n" +
 		summary + "\n\n" +
 		"Use this summary as the older context, and use the following messages as the most recent context. " +

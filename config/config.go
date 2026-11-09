@@ -62,6 +62,17 @@ type ExpandConfig struct {
 	// traffic. Anything that makes the anchor unusable (store eviction, a client-side compaction,
 	// an edited history) falls back to the off behaviour for that turn.
 	FixedRestore bool `yaml:"fixed_restore"`
+	// InBandBreakpoint, when true, moves the last cache_control in `messages`, whoever placed it, to
+	// the end of each
+	// in-band follow-up request (#784): the request the proxy sends upstream after it answered an
+	// expand call itself. The provider then caches the new content (the tool call and the expanded
+	// original) instead of billing it as plain input. The mark keeps the client's TTL and count.
+	//
+	// Off (the default) because a cache write costs more than plain input (1.25x, 2x for 1h) and
+	// nothing reads this entry: the client never sees the in-band tool call, so its next request
+	// diverges before the mark. Only a later round of the same loop can read it. See
+	// apply.MarkInBandFollowUp.
+	InBandBreakpoint bool `yaml:"inband_breakpoint"`
 }
 
 // CacheConfig is the `cache:` block: provider prompt-cache policy that lives above the
@@ -87,14 +98,15 @@ type CacheConfig struct {
 	// default.
 	KeepAlive bool `yaml:"keepalive"`
 	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
-	// 0 = DefaultKeepAliveIdle (280).
+	// 0 = DefaultKeepAliveIdle (240).
 	//
-	// 280 rather than 240 is measured, not tuned by feel. The provider's default lifetime
-	// is 5 minutes and "the lifetime is measured from the start of the request that writes
-	// or reads the cache entry, not from the end of its response", so the budget is 300s
-	// from the previous request's START. Simulated over the production window: X=240 wastes
-	// 111 pings on gaps that would have hit anyway, X=280 wastes 53, and the net moves from
-	// +$94.85 to +$125.08.
+	// 240 so that a ping and its whole timeout fit inside the cache: 240 s + the 60 s ping
+	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
+	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
+	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
+	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
 	// GPT-5.6+ implicit caches. Their guaranteed lifetime is 30 minutes after
@@ -123,6 +135,13 @@ type CacheConfig struct {
 	// KeepAliveMinPrefixTokens at 50,000 with K=2 gives +$125.12 on 908 pings — the same money
 	// for fewer requests, a shorter hold, and no extra exposure to the dead-entry mode.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
+	// KeepAliveIdleSeconds1h and KeepAliveMaxPings1h are X and K for a session whose cache the
+	// provider BILLED at the one-hour tier (see proxy.kaEntry.ttl1h). The proxy reads the tier per
+	// session from the traffic, so one proxy serves a 1h subscription session and a 5m API or
+	// subagent session side by side: the 5m pair above runs the second, this pair runs the first.
+	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
+	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
+	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -146,6 +165,32 @@ type CacheConfig struct {
 	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
 	// well as the efficiency one.
 	KeepAliveMinPrefixTokens int `yaml:"keepalive_min_prefix_tokens"`
+	// KeepAliveTerminalTools names the tools whose call ENDS an agent (#857). When the last tool
+	// call of a response is one of them, the thread is done: no tool result comes back, so the
+	// keep-alive plans no pings for it, and the wait cause reads "done". Absent: the shipped list
+	// (StructuredOutput). An empty list (`keepalive_terminal_tools: []`) turns the rule off, which
+	// is the behavior before #857: such a thread gets its pings.
+	KeepAliveTerminalTools []string `yaml:"keepalive_terminal_tools"`
+	// KeepAliveWaitPlan turns on the per-wait ping plan (#858). Absent: on. `false` is the one switch
+	// that brings back the behavior before #858: MaxPings for every wait, time windows for every wait,
+	// sweep questions during tool waits, and pings for a thread with no tool call yet. It does not
+	// bring back the 80k minimum prefix, which is only a default (keepalive_min_prefix_tokens).
+	//
+	// With the plan on, the ping count follows what the thread waits for. "Base" is
+	// keepalive_max_pings:
+	//   - its own tool (main or subagent): keep pinging until the result comes, at most
+	//     keepalive_tool_wait_max_pings (default 8);
+	//   - main, end_turn, background work: base + keepalive_background_extra_pings (default 3);
+	//   - main, end_turn, a person: base + keepalive_human_extra_pings (default 1);
+	//   - main waiting for a teammate, or a subagent waiting for its main agent: base;
+	//   - a finished thread, or one with no tool call yet: 0.
+	// Manager-strategy time windows then apply only to a wait for a person, and the sweep question is
+	// not asked while a thread waits for its own tool. It applies to the 5-minute tier. 0 on the three
+	// counts means the default. The three counts are at most 11, the highest strategy ping count.
+	KeepAliveWaitPlan             *bool `yaml:"keepalive_wait_plan"`
+	KeepAliveToolWaitMaxPings     int   `yaml:"keepalive_tool_wait_max_pings"`
+	KeepAliveBackgroundExtraPings int   `yaml:"keepalive_background_extra_pings"`
+	KeepAliveHumanExtraPings      int   `yaml:"keepalive_human_extra_pings"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -170,8 +215,9 @@ type CacheConfig struct {
 	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
 	// zero on a model the honest projection for it is $0.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
-	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
-	// DefaultHeadTTLMinTokens (50,000).
+	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
+	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
+	// (200,000). When both are set, this key wins.
 	//
 	// A dollar filter, not a probability filter, and that distinction is the whole result.
 	// Gating 1h on the best available predictor of a long gap leaves the net unchanged
@@ -179,19 +225,62 @@ type CacheConfig struct {
 	// SAME cache_write on the same requests, so multiplying both by a probability cannot
 	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
 	// requests that pay the premium and can never produce a large miss.
+	HeadTTLMinBytes int `yaml:"head_ttl_min_bytes"`
+	// HeadTTLMinTokens is DEPRECATED: use head_ttl_min_bytes. It is a byte gate with a token label
+	// (the gate always measured len(body)/4). It still works: when head_ttl_min_bytes is not set,
+	// this value x 4 is the gate, so an old config behaves exactly as before.
 	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
+	// TailBreakpoint adds one cache breakpoint at the end of a request whose client put its last
+	// breakpoint far from the end (#795): Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+	// puts it on the user's text and appends a ~3k-token `system` message after it, which the
+	// provider then bills as plain input. The new mark copies the client's TTL, never takes the
+	// 5th slot, and is added only when more than ~1k tokens follow the client's mark. See
+	// apply.markTail.
+	//
+	// On by default (nil = on), because a live test showed a gain: $0.0574 to $0.0424 a run, 3
+	// runs each way, and no change with default Claude Code settings. `tail_breakpoint: false`
+	// turns it off. The switch is there mainly to debug a cache-cost problem; we know no reason
+	// today to turn it off as a rule.
+	// A pipeline with no components (`preset: off`) never runs it, so the A/B control arm stays a
+	// passthrough.
+	TailBreakpoint *bool `yaml:"tail_breakpoint"`
 }
 
 // Keep-alive and head-TTL defaults. Named constants because the same numbers are asserted
 // in tests and quoted in the settings page, and three copies of 280 is how one of them
 // becomes 240.
 const (
-	DefaultKeepAliveIdle          = 280
+	DefaultKeepAliveIdle          = 240
 	DefaultKeepAliveOpenAIIdle    = int(modelinfo.OpenAIDefaultKeepAliveIdle / time.Second)
 	DefaultKeepAliveMaxPings      = 2
-	DefaultKeepAliveMaxUSDPerPing = 0.25
-	DefaultKeepAliveMinPrefix     = 20000
-	DefaultHeadTTLMinTokens       = 50000
+	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
+	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
+	DefaultKeepAliveMaxUSDPerPing = 0.50
+	// DefaultKeepAliveMinPrefix is 20000 since #858. No long subagent idle span had a prefix under
+	// 20k, so any floor at or under 20k gives the same result there. It was 80000 (#435).
+	DefaultKeepAliveMinPrefix = 20000
+	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
+	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.
+	DefaultKeepAliveToolWaitMaxPings     = 8
+	DefaultKeepAliveBackgroundExtraPings = 3
+	DefaultKeepAliveHumanExtraPings      = 1
+	// MaxKeepAliveWaitPings bounds each of the three counts: the highest strategy ping count.
+	MaxKeepAliveWaitPings  = 11
+	DefaultHeadTTLMinBytes = 200000
+	// DefaultHeadTTLMinTokens is DEPRECATED, kept for old callers: the old default of 50,000.
+	DefaultHeadTTLMinTokens = DefaultHeadTTLMinBytes / HeadTTLBytesPerToken
+	// HeadTTLBytesPerToken converts the deprecated head_ttl_min_tokens into bytes. It is the
+	// factor the old gate used (len(body)/4).
+	HeadTTLBytesPerToken = 4
+	// MaxHeadTTLMinBytes bounds the size gate. 1 GiB is far above any request body, and it keeps
+	// head_ttl_min_tokens x HeadTTLBytesPerToken from overflowing an int.
+	MaxHeadTTLMinBytes = 1 << 30
+)
+
+// The provider's cache lifetimes in seconds, for the validate caps below.
+const (
+	lifetime5mSeconds = int(modelinfo.AnthropicCacheLifetime5m / time.Second)
+	lifetime1hSeconds = int(modelinfo.AnthropicCacheLifetime1h / time.Second)
 )
 
 // Resolved returns the block with every zero replaced by its default, so callers never
@@ -207,14 +296,33 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMaxPings <= 0 {
 		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
 	}
+	if c.KeepAliveIdleSeconds1h <= 0 {
+		c.KeepAliveIdleSeconds1h = DefaultKeepAliveIdle1h
+	}
+	if c.KeepAliveMaxPings1h <= 0 {
+		c.KeepAliveMaxPings1h = DefaultKeepAliveMaxPings1h
+	}
 	if c.KeepAliveMaxUSDPerPing <= 0 {
 		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
 	}
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
-	if c.HeadTTLMinTokens <= 0 {
-		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
+	if c.KeepAliveToolWaitMaxPings <= 0 {
+		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
+	}
+	if c.KeepAliveBackgroundExtraPings <= 0 {
+		c.KeepAliveBackgroundExtraPings = DefaultKeepAliveBackgroundExtraPings
+	}
+	if c.KeepAliveHumanExtraPings <= 0 {
+		c.KeepAliveHumanExtraPings = DefaultKeepAliveHumanExtraPings
+	}
+	if c.HeadTTLMinBytes <= 0 {
+		if c.HeadTTLMinTokens > 0 {
+			c.HeadTTLMinBytes = c.HeadTTLMinTokens * HeadTTLBytesPerToken
+		} else {
+			c.HeadTTLMinBytes = DefaultHeadTTLMinBytes
+		}
 	}
 	return c
 }
@@ -226,15 +334,37 @@ func (c CacheConfig) Resolved() CacheConfig {
 // of reading at 0.1x.
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
-		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
+		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
+		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
-	if c.KeepAliveIdleSeconds >= 300 {
-		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under 300 "+
+	if c.KeepAliveToolWaitMaxPings > MaxKeepAliveWaitPings || c.KeepAliveBackgroundExtraPings > MaxKeepAliveWaitPings ||
+		c.KeepAliveHumanExtraPings > MaxKeepAliveWaitPings {
+		return fmt.Errorf("config: cache: keepalive_tool_wait_max_pings, keepalive_background_extra_pings and "+
+			"keepalive_human_extra_pings must be at most %d (the credential hold is (K+1) x the idle time)",
+			MaxKeepAliveWaitPings)
+	}
+	if c.HeadTTLMinBytes > MaxHeadTTLMinBytes || c.HeadTTLMinTokens > MaxHeadTTLMinBytes/HeadTTLBytesPerToken {
+		return fmt.Errorf("config: cache: head_ttl_min_bytes must be at most %d (head_ttl_min_tokens at most %d)",
+			MaxHeadTTLMinBytes, MaxHeadTTLMinBytes/HeadTTLBytesPerToken)
+	}
+	if c.KeepAliveIdleSeconds >= lifetime5mSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under %d "+
 			"(the provider's 5-minute lifetime runs from the previous request's START, "+
 			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
-			c.KeepAliveIdleSeconds)
+			lifetime5mSeconds, c.KeepAliveIdleSeconds)
+	}
+	if c.KeepAliveIdleSeconds1h >= lifetime1hSeconds {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds_1h must be under %d "+
+			"(the one-hour lifetime runs from the previous request's START); got %d",
+			lifetime1hSeconds, c.KeepAliveIdleSeconds1h)
+	}
+	if c.KeepAliveMaxPings1h > modelinfo.AnthropicMaxKeepAliveMaxPings1h {
+		return fmt.Errorf("config: cache: keepalive_max_pings_1h must be at most %d "+
+			"(the credential hold is (K+1) x the 1-hour idle time); got %d",
+			modelinfo.AnthropicMaxKeepAliveMaxPings1h, c.KeepAliveMaxPings1h)
 	}
 	if c.KeepAliveOpenAIIdleSeconds >= 1730 {
 		return fmt.Errorf("config: cache: keepalive_openai_idle_seconds must be under 1730 " +
@@ -406,9 +536,15 @@ var presets = map[string][]string{
 	// request, and no model is called. The loudest objection to putting a proxy on the
 	// wire — "you are editing my agent's context" — does not apply to it.
 	//
-	// It is also the best-evidenced single component in the repo: -34.1% cost and 0% ->
-	// 96.7% prefix-cache hit in an isolated A/B (docs/results/context-guru.md), which is
-	// why the funnel leads with the cache rather than the offloaders.
+	// It is also the best-evidenced single component in the repo, and the evidence is NARROW:
+	// -34.1% mean cost is one Terminal-Bench task (fix-code-vulnerability) measured three times
+	// on Claude Code CLI traffic at Sonnet 5 rates, and 0% -> 96.7% prefix-cache hit is the
+	// two-session A/B beside it (docs/components/caching.md). The figure does not transfer:
+	// Agent-SDK traffic carries no volatile-tail marker, so cachesplit acted=0 on all of it
+	// (docs/results/terminal-bench-comparison.md), and this service's own interactive window
+	// credited the split $0.03 (docs/results/measured-2026-08.md). The funnel still leads with
+	// the cache because its claim is verifiable by reading one line, not because it is the
+	// biggest lever.
 	//
 	// Deliberately NOT `safe` (format -> textclean -> searchfold -> cachesplit): those are
 	// lossless in meaning but they still rewrite the JSON, so "we do not touch your
@@ -507,22 +643,34 @@ var presets = map[string][]string{
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
-	// codesmart/housellm chooser. Each tier is a strict superset of the one below it:
-	//   conservative = house, verbatim.
-	//   medium       = housellm minus extract_llm_sweep — the cheap-model pass, no cold-cache sweep.
-	//   high         = medium + summarize, at its own default trigger (min_request_frac 0.9,
-	//                  cache_state any — see the note beside its presetConfigs entry below for
-	//                  why cache_state is NOT overridden to pre_expiry despite the name "high").
-	//   xhigh        = high + extract_llm_sweep back in — i.e. housellm + that same summarizer.
-	// Unmeasured: nobody has benchmarked summarize ahead of the housellm offloaders (or in
-	// combination with them at all) for savings, only for wire-shape correctness
-	// (apply/shape_validate_test.go). It is placed first on that test's precedent, not on
-	// evidence that the order matters — keep_last (default 3) leaves the tail summarize would
-	// interact with untouched regardless of order.
+	// codesmart/housellm chooser. Each tier is a strict superset of the one below it (#417):
+	//   conservative = house, verbatim. No summarizer.
+	//   medium       = housellm minus extract_llm_sweep, plus cache_aware_summarizer with
+	//                  cache_state: pre_expiry — the conservative mode. It prepares a summary in
+	//                  the background (in place of one keep-alive ping), keeps it in reserve, and
+	//                  uses it only when the user returns after the cache expired. It never
+	//                  changes the history while the user is working.
+	//   high         = medium with cache_aware_summarizer at its own default cache_state (`any`):
+	//                  summarize at 0.9 of the window and use the summary on the next request.
+	//   xhigh        = high + extract_llm_sweep — i.e. housellm + the cache-reusing summarizer.
+	// `summarize` is no longer in any picker tier. It stays available by name for the cases
+	// where it is the better choice (a much cheaper summary model than the agent's; a route with
+	// no stored request; a gateway that rejects the reused-request shape) — see
+	// docs/components/advanced-offload.md, "Two ways to use cache_state".
+	// Unmeasured: nobody has benchmarked the summarizer ahead of the housellm offloaders (or in
+	// combination with them at all) for savings, only for wire-shape correctness and for the
+	// pipeline-order guard (proxy/cache_aware_pipeline_order_integration_test.go). It is placed
+	// first so its stale-prefix guard and the stored request see the same messages; keep_last_turns
+	// (default 10) leaves the tail the other components act on untouched regardless of order.
 	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
-	"medium":       {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"high":         {"summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"xhigh":        {"summarize", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	// The sweep is back in xhigh (#404 PR C), with no production shadow phase first: the false-drop
+	// signals (SweepDropCounters, the dashboard) are the watch on it.
+	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	// ultrahigh = xhigh + tool deferral (#485): the same pipeline, with toolfilter's `defer: auto`.
+	// Opt-in only. Every other preset, xhigh included, leaves deferral off. See package tooldefer.
+	"ultrahigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -634,8 +782,7 @@ components:
 	// omission. It asks the REQUEST's own model, because only that model's prompt cache holds the
 	// transcript, so there is no `model` to name. The conversation IS the cached prefix, so there is
 	// no `context` to size. One ask covers every candidate, so there is no call cap. And the economic
-	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor
-	// and the window.
+	// gate prices a per-output cheap-model call, which is not what this is. What remains is the floor.
 	//
 	// The sweep's floor is 1000 and not 3000. At 3000 the old preset produced ZERO extractions
 	// across 3,437 requests: 3,401 warm turns did nothing, and on all 36 turns that DID sweep,
@@ -650,21 +797,32 @@ components:
 	// warm requests, ~4,124 written tokens per turn), so it is worth the cache-WRITE rate,
 	// not the request-level cache-READ rate the gate used to apply to everything.
 	//
-	// min_tokens: 8000 is that path's floor, and it is DERIVED, not chosen. Measured on real
+	// min_tokens: 3000 is that path's floor, and it is DERIVED, not chosen. Measured on real
 	// warm sessions through a local proxy, an extraction call costs ~$0.015-0.018 and the cost
 	// is OUTPUT-dominated — trimming the prompt barely moves it (context_messages 7 -> 2 -> 0
 	// gave $0.0149 / $0.0159 / $0.0179 per call). Including the 1-in-5 call that is rejected
-	// outright and pays full price for nothing, cost per ACCEPTED call was $0.0193. At the
-	// cache-write rate that needs 4,060 saved tokens to break even, and the observed reduction
-	// on accepted tail calls was ~65%, so the candidate has to be ~6,250 tokens. 8,000 carries
-	// the margin.
+	// outright and pays full price for nothing, cost per ACCEPTED call was $0.0193. Against
+	// that, a saved token is worth the cache-WRITE rate times the amortization prior, and the
+	// prior is turn-aware (reuses 12 on a long transcript): ~$9.31/MTok, so a call needs
+	// ~2,073 saved tokens, which at the observed ~65% reduction needs a ~3,190-token candidate.
+	// The 873-call per-band measurement agrees from the loss side: candidates under 2,000
+	// tokens cost more per MTok saved than a token is worth even on a top-decile session, so
+	// 2,000 is the measured lower bound and the shipped 3,000 clears it. The bands are the
+	// authority, not this comment:
+	// TestHousellmFloorClearsTheBandsThatLoseAtEveryK (config/config_more_test.go).
 	//
-	// Below that floor the path is measurably a LOSS, which is why the floor is not lower:
+	// An earlier revision of this derivation used 8,000, priced WITHOUT the amortization, and
+	// was wrong twice over: the arithmetic ignored that a saved token is re-served many turns,
+	// and on this workload tool outputs top out near 7,399 tokens — only 1 of 132 production
+	// candidates reached 8,000, so that floor disabled the path rather than bounded it.
+	// TestHousellmDoesNotAttemptTheTailBelowBreakEven (components/all/xglobal_test.go) pins
+	// the floor's effect from the loss side.
+	//
+	// Below the floor the path is measurably a LOSS, which is why the floor is not lower:
 	// at min_tokens 1000 real sessions made 5 warm calls, accepted 4, saved 8,718 tokens for
 	// $0.0771 — net -$0.036. Every one of those calls was allowed by the EXPLORATION budget
 	// (2 per session) rather than by the arithmetic, so a low floor buys exploration waste and
-	// not savings. At 8,000 the same corpus makes zero warm calls and loses nothing, while the
-	// cold sweep still returns net +$0.062. context_messages is 2 for the same reason it is
+	// not savings. context_messages is 2 for the same reason it is
 	// cheap: the tail call carries the candidate, not the conversation.
 	//
 	// allow_on_caching_backend IS DELIBERATELY ABSENT, and it is now VESTIGIAL rather than
@@ -685,16 +843,13 @@ components:
 	// eligibility: 132 calls in three days of heavy use, under a per-session cap of 40 that
 	// was never approached. llm_max_per_request: 8 is the per-turn brake.
 	//
-	// The sweep's `pre_expiry_seconds` is UNSET on purpose, which takes its one-minute default: one
-	// apply.coldMargin, the only figure in this codebase with a stated purpose for clock uncertainty
-	// around cache expiry. The number that used to sit here was a per-sweep CALL cap, motivated by a
-	// production request that made 27 calls, spent $0.229 and added 76.6 s to a turn whose upstream
-	// took 33.5 s. That shape is gone: the sweep makes exactly one ask per firing turn, and what
-	// bounds it is how often the pre-expiry window comes round — at most once per cache lifetime per
-	// session.
+	// The sweep asks its question at the keep-alive ping, in place of the ping, and holds the answer for
+	// the next cold request (#404). There is no window to size. The number that used to sit here was a
+	// per-sweep CALL cap, motivated by a production request that made 27 calls, spent $0.229 and added
+	// 76.6 s to a turn whose upstream took 33.5 s. That shape is gone: the sweep makes exactly one ask
+	// per idle span per thread, and what bounds it is the keep-alive's own schedule.
 	//
-	// The WIDTH of that window is the one unmeasured number in this preset, and widening it is a
-	// yield/cost trade nothing has measured. See extract_llm_sweep's own comment.
+	// `shadow` is deliberately NOT set here or in any preset: it is the measurement switch.
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
   extract:
@@ -725,8 +880,16 @@ components:
 components:
   extract:
     min_tokens: 400`,
-	"medium": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	// medium's summarizer runs in the conservative mode (#417): cache_state: pre_expiry holds the
+	// summary in reserve and uses it only on a cold return. Everything else comes from the
+	// component's defaults (min_request_frac 0.9, the money-gated refresh of #415).
+	"medium": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+    trigger:
+      cache_state: pre_expiry
   extract:
     min_tokens: 400
   extract_llm:
@@ -745,17 +908,12 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	// high's summarize block sets only model.source: incoming (reuse the request's own model and
-	// key). trigger.cache_state is left at its component default (`any`) ON PURPOSE: an earlier
-	// revision pinned `cache_state: pre_expiry` here on the theory that it made this a
-	// "cache-aware" summarizer, which components/offload/summarize.go's own docstring (above
-	// summarizeDefaultCacheState) retracts for exactly this component — `summarize` flattens its
-	// prompt into a single string and reuses no live prefix, so `pre_expiry` is honoured as a
-	// gate but "buys nothing but a lower firing rate" here. That is `cache_aware_summarizer`'s
-	// job, not this one's. Caught in review of #358.
-	"high": `pipeline: [summarize, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	// high's summarizer is cache_aware_summarizer at its default cache_state (`any`): summarize at
+	// 0.9 of the window and use the summary on the next request (#417). Only model.source is
+	// carried over, as for xhigh below.
+	"high": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
-  summarize:
+  cache_aware_summarizer:
     model:
       source: incoming
   extract:
@@ -776,9 +934,11 @@ components:
     strategy: code
     trigger:
       min_request_tokens: 3000`,
-	"xhigh": `pipeline: [summarize, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	// xhigh = high + extract_llm_sweep. Same summarizer settings as high: model.source: incoming,
+	// trigger at the component's own defaults (min_request_frac 0.9, cache_state any).
+	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
-  summarize:
+  cache_aware_summarizer:
     model:
       source: incoming
   extract:
@@ -801,6 +961,35 @@ components:
       min_request_tokens: 3000
   extract_llm_sweep:
     min_tokens: 1000`,
+	// ultrahigh = xhigh + toolfilter `defer: auto` (#485). Everything else is xhigh's block, copied
+	// verbatim; TestUltrahighIsXhighPlusDeferral pins that the two cannot drift.
+	"ultrahigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+  toolfilter:
+    defer: auto`,
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
 	// reflection model being much cheaper than the agent's — the paper's own choice was
@@ -854,6 +1043,8 @@ func (c *Config) Build(e components.Emitter) (*components.Pipeline, error) {
 	}
 	pipe := components.NewPipeline(comps, e)
 	pipe.SetFixedRestore(c.Expand.FixedRestore)
+	pipe.SetInBandBreakpoint(c.Expand.InBandBreakpoint)
+	pipe.SetTailBreakpoint(len(comps) > 0 && (c.Cache.TailBreakpoint == nil || *c.Cache.TailBreakpoint))
 	return pipe, nil
 }
 
@@ -865,3 +1056,6 @@ func (c *Config) NewStore() store.Store {
 	}
 	return store.NewMemory(c.Store)
 }
+
+// WaitPlanOn reports whether the per-wait ping plan is on (#858). Absent is on.
+func (c CacheConfig) WaitPlanOn() bool { return c.KeepAliveWaitPlan == nil || *c.KeepAliveWaitPlan }

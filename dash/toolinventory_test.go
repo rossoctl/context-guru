@@ -6,11 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/skills"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // The fixtures below are hand-built to the shape MEASURED on real captured Claude Code
@@ -197,7 +201,7 @@ func TestScanInventoryOpenAIDialect(t *testing.T) {
 	for _, d := range inv.Decls {
 		names = append(names, d.Kind+":"+d.Name+"/"+d.Server)
 	}
-	want := []string{KindServerTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx"}
+	want := []string{KindTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx"}
 	if strings.Join(names, " ") != strings.Join(want, " ") {
 		t.Errorf("declarations = %v, want %v", names, want)
 	}
@@ -366,9 +370,9 @@ func TestRecordInventoryEndToEnd(t *testing.T) {
 	}
 	inv := ScanInventory("anthropic", ccBody(t, []string{tool("Bash", "b")}, skillsReminder,
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
-	rec.RecordInventory("t1", "s1", 1000, inv, true)
-	rec.RecordInventory("t1", "", 1000, inv, true) // no session: nothing to key on, dropped
-	rec.RecordInventory("t1", "s2", 1000, nil, true)
+	rec.RecordInventory("t1", "s1", 1000, inv, true, "")
+	rec.RecordInventory("t1", "", 1000, inv, true, "") // no session: nothing to key on, dropped
+	rec.RecordInventory("t1", "s2", 1000, nil, true, "")
 	db := rec.DB()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -408,14 +412,14 @@ func seedReport(t *testing.T) *DB {
 	var evs []*Event
 	for i := 0; i < 10; i++ { // 10 requests, all cache hits
 		e := mkEvent(int64(1000+i), "used", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 4
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 4, "d1" // the set each request carried
 		evs = append(evs, e)
 	}
 	e := mkEvent(2000, "nocapture", "claude", 100, 90)
 	e.TenantID, e.Tools = "t1", 4
 	evs = append(evs, e)
 	other := mkEvent(3000, "someone-else", "claude", 100, 90)
-	other.TenantID, other.Tools = "t2", 4
+	other.TenantID, other.Tools, other.DeclDigest = "t2", 4, "d2"
 	evs = append(evs, other)
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
@@ -585,7 +589,7 @@ func TestToolAPIScope(t *testing.T) {
 	// Reuse the seeded shape on the recorder's own database.
 	db := rec.DB()
 	e := mkEvent(1000, "used", "claude", 100, 90)
-	e.TenantID, e.Tools = "t1", 1
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
 	if err := db.insertBatch([]*Event{e}); err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +802,7 @@ func TestScanSystemMemoizesTheEmptyCase(t *testing.T) {
 	sysMu.Lock()
 	sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
 	sysMu.Unlock()
-	if sp := scanSystem(body); sp != nil {
+	if sp := scanSystem("anthropic", body); sp != nil {
 		t.Fatalf("an empty system array scanned as a prompt: %+v", sp)
 	}
 	sysMu.Lock()
@@ -809,7 +813,7 @@ func TestScanSystemMemoizesTheEmptyCase(t *testing.T) {
 			"is repeated on every request", n)
 	}
 	// And the stored nil reads back as a hit, not as a fresh miss returning nil by accident.
-	if sp := scanSystem(body); sp != nil {
+	if sp := scanSystem("anthropic", body); sp != nil {
 		t.Errorf("the memoized negative came back as %+v", sp)
 	}
 }
@@ -828,7 +832,7 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	var evs []*Event
 	for i := 0; i < 10; i++ {
 		e := mkEvent(int64(1000+i), "skillsonly", "claude", 100, 90)
-		e.TenantID, e.Tools = "t1", 2 // r.tools > 0 is what makes a session eligible
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "d1" // r.tools > 0 is what makes a session eligible
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -877,4 +881,293 @@ func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
 	if rep.Skills.UnusedListingReads != 10_000 {
 		t.Errorf("unused listing reads = %d, want 10000", rep.Skills.UnusedListingReads)
 	}
+}
+
+// A declaration is billed on the requests that carried it, not on every request of the session
+// that declared it: here half the session's requests are a subagent's, whose set has no Workflow.
+func TestToolReportBillsOnlyTheRequestsThatCarriedIt(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(int64(1000+i), "s", "claude", 100, 90)
+		e.TenantID, e.Tools, e.DeclDigest = "t1", 2, "main"
+		if i%2 == 1 {
+			e.Tools, e.DeclDigest = 1, "sub"
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	bash := Decl{Kind: KindTool, Name: "Bash", Tokens: 100}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "main", UseFingerprint: 1,
+			Decls: []Decl{bash, {Kind: KindTool, Name: "Workflow", Tokens: 5000}}}},
+		{tenant: "t1", session: "s", ts: 1000, inv: &Inventory{Digest: "sub", UseFingerprint: 1, Decls: []Decl{bash}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range rep.Tools {
+		if st.Name == "Workflow" {
+			if st.UnusedReads != 5*5000 || st.UnusedUSDLow != st.UnusedUSD || st.UnusedUSDHigh != st.UnusedUSD {
+				t.Fatalf("Workflow %+v: want 5 carrying requests x 5000 tokens, exact", st)
+			}
+			if rep.Carried == nil || rep.Carried.RequestsExact != 10 {
+				t.Fatalf("coverage %+v", rep.Carried)
+			}
+			return
+		}
+	}
+	t.Fatalf("no Workflow row: %+v", rep.Tools)
+}
+
+// carry_usd prices carrying a declaration over EVERY request that declared it, used or not, so a
+// tool the user does call still shows its price. unused_usd stays what it was.
+func TestToolReportCarriesTheCostOfUsedDeclarationsToo(t *testing.T) {
+	db := seedReport(t)
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bash (a built-in, so in Aside) is called, so it wasted nothing, but 100 tokens x 10 requests
+	// at the cache-read rate ($0.1/MTok) is what carrying it cost.
+	var bash ToolStat
+	for _, s := range rep.Aside {
+		if s.Name == "Bash" {
+			bash = s
+		}
+	}
+	if bash.UnusedUSD != 0 || bash.CarryReads != 1000 || !near(bash.CarryUSD, 0.0001) {
+		t.Errorf("Bash = unused %v carry_reads %d carry_usd %v, want 0 / 1000 / 0.0001", bash.UnusedUSD, bash.CarryReads, bash.CarryUSD)
+	}
+	for _, s := range rep.Tools {
+		if s.Name == "Workflow" && (s.CarryReads != s.UnusedReads || !near(s.CarryUSD, s.UnusedUSD)) {
+			t.Errorf("a never-used tool carries exactly its unused cost: %+v", s)
+		}
+	}
+	for _, sv := range rep.Servers {
+		if sv.Server == "pw" && (sv.CarryReads != 4000 || sv.CarryUSD <= 0) {
+			t.Errorf("pw server = %+v, want carry_reads 4000 and a price", sv)
+		}
+	}
+}
+
+// A Responses body declares tools flat and calls them with function_call items in `input`.
+// Read as plain OpenAI Chat, the names came out empty and the calls were missed.
+func TestScanInventoryResponses(t *testing.T) {
+	body := []byte(`{"model":"gpt","tools":[
+	  {"type":"function","name":"Skill","description":"d","parameters":{}},
+	  {"type":"function","name":"mcp__ctx__query-docs","description":"d","parameters":{}},
+	  {"type":"function","description":"no name"},
+	  {"type":"web_search"}],
+	  "input":[
+	    {"type":"function_call","call_id":"c0","name":"old","arguments":"{}"},
+	    {"type":"message","role":"user","content":"x"},
+	    {"type":"function_call","call_id":"c1","name":"Skill","arguments":"{\"skill\":\"dataviz\"}"},
+	    {"type":"function_call","call_id":"c2","name":"mcp__ctx__query-docs","arguments":"{}"}]}`)
+	inv := ScanInventory(schema.WireFor("openai", "responses"), body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var names []string
+	for _, d := range inv.Decls {
+		names = append(names, d.Kind+":"+d.Name+"/"+d.Server)
+	}
+	want := []string{KindTool + ":Skill/", KindMCPTool + ":mcp__ctx__query-docs/ctx", KindServerTool + ":web_search/"}
+	if strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Errorf("declarations = %v, want %v", names, want)
+	}
+	var used []string
+	for _, u := range inv.Used {
+		used = append(used, u.Name+"/"+u.Skill)
+	}
+	if len(used) != 2 || !contains(used, "Skill/dataviz") || !contains(used, "mcp__ctx__query-docs/") {
+		t.Errorf("used = %v (the earlier turn's call must not count)", used)
+	}
+	if inv.UseFingerprint == 0 {
+		t.Error("no fingerprint")
+	}
+}
+
+// The memo of a declaration set is per wire: one tools array must not serve both dialects.
+func TestScanInventoryMemoIsPerWire(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Flat","parameters":{}}]}`)
+	resp := ScanInventory(schema.WireResponses, body)
+	chat := ScanInventory(schema.WireOpenAI, body)
+	if resp == nil || len(resp.Decls) != 1 || resp.Decls[0].Name != "Flat" {
+		t.Fatalf("responses read = %+v", resp)
+	}
+	if chat != nil && len(chat.Decls) != 0 {
+		t.Errorf("chat read a flat tool from the responses memo: %+v", chat.Decls)
+	}
+	if resp.Digest != chat.Digest {
+		t.Errorf("stored digest must not depend on the wire: %s vs %s", resp.Digest, chat.Digest)
+	}
+}
+
+// The trace from review: a custom_tool_call between two function_calls of one turn must not split
+// it, and must count itself. An output item or a user message ends the turn.
+func TestUsedFromResponsesCountsCustomCallsAndKeepsTheRun(t *testing.T) {
+	body := []byte(`{"input":[
+	  {"type":"function_call","call_id":"o","name":"old","arguments":"{}"},
+	  {"type":"function_call_output","call_id":"o","output":"x"},
+	  {"type":"function_call","call_id":"a","name":"A","arguments":"{}"},
+	  {"type":"reasoning","id":"r"},
+	  {"type":"custom_tool_call","call_id":"b","name":"B","input":"patch"},
+	  {"type":"message","role":"assistant","content":[]},
+	  {"type":"function_call","call_id":"c","name":"C","arguments":"{}"}]}`)
+	used, fp := usedFromResponses(body)
+	var names []string
+	for _, u := range used {
+		names = append(names, u.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "A,B,C" || fp == 0 {
+		t.Errorf("used = %v fp = %d, want A,B,C", names, fp)
+	}
+}
+
+// The skills listing of a Responses body sits in `instructions` or in a system or developer item
+// of `input`. The inventory reads it with the finder the declaration filter uses
+// (skills.LocateResponses), so the page and the filter read the same string (#817).
+func TestScanInventoryResponsesReadsTheSkillsListing(t *testing.T) {
+	listing := skills.Header + `\n- dataviz: charts\n- plan: plans\n`
+	for name, body := range map[string]string{
+		"instructions": `{"instructions":"` + listing + `","tools":[{"type":"function","name":"Bash","parameters":{}}],"input":[]}`,
+		"input item": `{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],
+		  "input":[{"type":"message","role":"developer","content":"` + listing + `"}]}`,
+		"input text block": `{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+		  "input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"` + listing + `"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			inv := ScanInventory(schema.WireResponses, []byte(body))
+			if inv == nil {
+				t.Fatal("no inventory")
+			}
+			var skillNames []string
+			for _, d := range inv.Decls {
+				if d.Kind == KindSkill {
+					skillNames = append(skillNames, d.Name)
+				}
+				if d.Kind == KindSkillListing && d.Server != SkillsOK {
+					t.Errorf("listing state = %q, want %q", d.Server, SkillsOK)
+				}
+			}
+			sort.Strings(skillNames)
+			if strings.Join(skillNames, ",") != "dataviz,plan" {
+				t.Errorf("skills = %v, want dataviz and plan", skillNames)
+			}
+		})
+	}
+}
+
+// The system prompt of a Responses body is `instructions`.
+func TestScanInventoryResponsesReadsTheInstructions(t *testing.T) {
+	inv := ScanInventory(schema.WireResponses, []byte(`{"instructions":"be brief","tools":[{"type":"function","name":"Bash","parameters":{}}],"input":[]}`))
+	if inv == nil || inv.System == nil || inv.System.Text != "be brief" {
+		t.Errorf("system = %+v, want the instructions", inv)
+	}
+}
+
+// A header that no system or developer text holds (here, a tool result that printed it) is NOT a
+// listing. The page says "unknown", never "none" and never a skill from a command's output.
+func TestScanInventoryResponsesUnreadListingIsUnknown(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"function_call_output","call_id":"c","output":"` + skills.Header + `\n- dataviz: charts\n"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var marker *Decl
+	for i, d := range inv.Decls {
+		if d.Kind == KindSkillListing {
+			marker = &inv.Decls[i]
+		}
+		if d.Kind == KindSkill {
+			t.Errorf("a skill row %q from a tool result", d.Name)
+		}
+	}
+	if marker == nil || marker.Server != SkillsUnknown {
+		t.Errorf("listing marker = %+v, want state %q", marker, SkillsUnknown)
+	}
+}
+
+// Deferred tools in a Responses `input` item are read with internal/deferred.
+func TestScanInventoryResponsesReadsDeferredTools(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"message","role":"user","content":"` + deferred.Header + `\nmcp__ctx__query-docs\nmcp__ctx__resolve\n\nnext"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var names []string
+	for _, d := range inv.Decls {
+		if d.Kind == KindDeferredListing {
+			t.Errorf("deferred marker %+v on a list that was read", d)
+		}
+		if d.Kind == KindMCPTool {
+			names = append(names, d.Name)
+		}
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "mcp__ctx__query-docs,mcp__ctx__resolve" {
+		t.Errorf("deferred tools = %v, want both", names)
+	}
+}
+
+// A deferred header in a tool result is not a list: the page says "unknown", not "none".
+func TestScanInventoryResponsesUnreadDeferredIsUnknown(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"Bash","parameters":{}}],
+	  "input":[{"type":"function_call_output","call_id":"c","output":"` + deferred.Header + `\nmcp__ctx__query-docs\n\nnext"}]}`)
+	inv := ScanInventory(schema.WireResponses, body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	var marker *Decl
+	for i, d := range inv.Decls {
+		if d.Kind == KindDeferredListing {
+			marker = &inv.Decls[i]
+		}
+		if d.Kind == KindMCPTool {
+			t.Errorf("an MCP row %q from a tool result", d.Name)
+		}
+	}
+	if marker == nil || marker.Server != SkillsUnknown {
+		t.Errorf("deferred marker = %+v, want state %q", marker, SkillsUnknown)
+	}
+}
+
+// The marker reaches the report as a state, and is not counted as a tool.
+func TestToolReportShowsDeferredUnknown(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(1000, "s1", "gpt", 100, 90)
+	e.TenantID, e.Tools, e.DeclDigest = "t1", 1, "d1"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: &Inventory{Digest: "d1",
+		Decls: []Decl{{Kind: KindTool, Name: "Bash", Tokens: 10},
+			{Kind: KindDeferredListing, Server: SkillsUnknown}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	bothPaths(t, func(t *testing.T, path string) {
+		rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.DeferredState != SkillsUnknown || rep.DeferredUnknownSessions != 1 {
+			t.Errorf("%s: deferred state = %q (%d sessions), want unknown (1)", path, rep.DeferredState, rep.DeferredUnknownSessions)
+		}
+		for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+			if s.Kind == KindDeferredListing {
+				t.Errorf("%s: the marker is listed as a tool: %+v", path, s)
+			}
+		}
+	})
 }

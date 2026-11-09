@@ -61,12 +61,15 @@ type Pricing struct {
 // The documented Anthropic-family multiples, as named defaults rather than literals spread
 // across a cost function. Overridable per deployment through Multipliers.
 const (
-	// DefaultCacheReadMultiple is a cache hit's rate as a multiple of base input.
-	DefaultCacheReadMultiple = 0.1
+	// DefaultCacheReadMultiple is a cache hit's rate as a multiple of base input: the standard
+	// 0.1x. The simulator knows the model of each row, so FromPrice fills a blank read rate with
+	// modelinfo.CacheReadFracFor(model) unless the caller set Multipliers.CacheRead. This constant
+	// stays the answer for a caller with no model and the value Multipliers.WithDefaults reports.
+	DefaultCacheReadMultiple = modelinfo.AnthropicCacheReadFrac
 	// DefaultWrite5mMultiple is a 5-minute cache write as a multiple of base input.
-	DefaultWrite5mMultiple = 1.25
+	DefaultWrite5mMultiple = modelinfo.AnthropicCacheWrite5mFrac
 	// DefaultWrite1hMultiple is a 1-hour cache write as a multiple of base input.
-	DefaultWrite1hMultiple = 2.0
+	DefaultWrite1hMultiple = modelinfo.AnthropicCacheWrite1hFrac
 	// DefaultPingOutputTokens is the smallest generation Anthropic's Messages API accepts.
 	DefaultPingOutputTokens = 1
 	// DefaultPingInputTokens is the fresh input a ping carries beyond the cached prefix —
@@ -111,7 +114,16 @@ func DefaultMultipliers() Multipliers { return Multipliers{}.WithDefaults() }
 // A Price with no rates at all yields Known=false, and every dollar figure downstream is
 // then omitted rather than computed as zero.
 func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pricing {
+	// The caller's multiples ride on the price, and Price decides each blank tier for this model:
+	// a multiple the caller set wins, and an unset read multiple follows the model. An unset
+	// 1-hour multiple follows the price list's entry. The 5-minute multiple always carries a
+	// default here, as before.
+	userRead, userW1h := m.CacheRead, m.Write1h
 	m = m.WithDefaults()
+	if userW1h <= 0 && p.Write1hFrac > 0 {
+		m.Write1h = p.Write1hFrac
+	}
+	p.ReadFrac, p.WriteFrac, p.Write1hFrac = userRead, m.Write5m, m.Write1h
 	out := Pricing{
 		Model: model, Input: p.Input, Output: p.Output, CacheRead: p.CacheRead,
 		Write5m: p.CacheWrite, Source: source,
@@ -124,19 +136,14 @@ func FromPrice(model string, p modelinfo.Price, m Multipliers, source string) Pr
 	out.Known = true
 	// A price list that omitted a cache tier: fill from the multiplier rather than leave a
 	// cached request priced as free.
-	if out.CacheRead == 0 {
-		out.CacheRead = out.Input * m.CacheRead
-	}
-	if out.Write5m == 0 {
-		out.Write5m = out.Input * m.Write5m
-	}
+	out.CacheRead, out.Write5m = p.CacheReadFor(model), p.CacheWrite5mFor(model)
 	// The 1-hour rate. Derived from base input where that is known — the multiplier is
 	// against INPUT, not against the 5m rate, because that is how the provider documents it.
 	// Where input is unknown but a 5m rate is not, scale the 5m rate by the ratio of the two
 	// multipliers, which is the same number by a longer route.
 	switch {
 	case out.Input > 0:
-		out.Write1h = out.Input * m.Write1h
+		out.Write1h = p.CacheWrite1hFor(model)
 	case out.Write5m > 0 && m.Write5m > 0:
 		out.Write1h = out.Write5m * (m.Write1h / m.Write5m)
 	}
@@ -222,8 +229,12 @@ const OverrideAll = "*"
 // per-model rate always wins over a blanket one.
 func NewPriceList(ctx context.Context, models []string, p modelinfo.Pricer, m Multipliers,
 	overrides map[string]Override) *PriceList {
+	userMult := m
 	m = m.WithDefaults()
-	out := &PriceList{Multipliers: m, Models: []Pricing{}, byModel: map[string]Pricing{}}
+	// The read multiple is stored as the caller set it: 0 means "each model's own tier", so one
+	// payload never states 0.1 beside a row priced at 0.05. The write multiples carry their defaults.
+	out := &PriceList{Multipliers: Multipliers{CacheRead: userMult.CacheRead, Write5m: m.Write5m,
+		Write1h: m.Write1h}, Models: []Pricing{}, byModel: map[string]Pricing{}}
 	seen := map[string]bool{}
 	uniq := make([]string, 0, len(models))
 	for _, name := range models {
@@ -242,7 +253,7 @@ func NewPriceList(ctx context.Context, models []string, p modelinfo.Pricer, m Mu
 				pr, source = got, SourcePriceList
 			}
 		}
-		row := FromPrice(name, pr, m, source)
+		row := FromPrice(name, pr, userMult, source)
 		if ov, ok := overrides[OverrideAll]; ok {
 			row = ov.Apply(row)
 		}

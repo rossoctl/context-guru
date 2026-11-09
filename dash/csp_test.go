@@ -9,7 +9,7 @@ import (
 
 // Finding D. The dashboard's cookie is SameSite=Lax, so a cross-site frame renders the
 // UNAUTHENTICATED sign-in gate — a ready-made UI-redress phishing target for anyone on
-// 9.0.0.0/8. frame-ancestors, base-uri and form-action do NOT inherit from default-src,
+// the corporate network. frame-ancestors, base-uri and form-action do NOT inherit from default-src,
 // and nginx sets no X-Frame-Options, so a self-only default-src leaves all three open.
 func TestDashboardCSPForbidsFramingAndFormHijacking(t *testing.T) {
 	a, _ := newTestAPI(t, Options{})

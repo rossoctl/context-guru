@@ -8,10 +8,12 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -126,7 +129,7 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 func sandboxEnv(t *testing.T, extra ...string) []string {
 	t.Helper()
 	sandboxed := map[string]bool{
-		"HOME": true, "XDG_STATE_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
+		"HOME": true, "XDG_STATE_HOME": true, "XDG_CONFIG_HOME": true, "CONTEXT_GURU_STATE": true, "CLAUDE_CONFIG_DIR": true,
 		"CONTEXT_GURU_BIN": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_UPSTREAM": true,
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_CUSTOM_HEADERS": true,
 	}
@@ -148,6 +151,8 @@ func sandboxEnv(t *testing.T, extra ...string) []string {
 	env = append(env,
 		"HOME="+root,
 		"XDG_STATE_HOME="+filepath.Join(root, "xdg-state"),
+		"XDG_CONFIG_HOME="+filepath.Join(root, "xdg-config"),
+		leakMark(t), // whatever these commands leave running is stopped when t ends (leak_test.go)
 	)
 	return append(env, extra...)
 }
@@ -218,8 +223,11 @@ func TestSettingsAddPreservesEverythingElse(t *testing.T) {
 	if env["SOME_OTHER_VAR"] != "keep me" || env["ANTHROPIC_SMALL_FAST"] != "also keep me" {
 		t.Errorf("the user's own env vars were lost: %v", env)
 	}
-	if len(env) != 3 {
+	if len(env) != 4 { // the 2 originals, the base URL, and the manual-ping opt-in header
 		t.Errorf("env has %d keys, want the 2 originals plus ours: %v", len(env), env)
+	}
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-context-guru-ping: 1" {
+		t.Errorf("env.ANTHROPIC_CUSTOM_HEADERS = %q, want the manual-ping opt-in", env["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
 
@@ -329,9 +337,16 @@ func TestSettingsRefusesToRewriteABrokenFile(t *testing.T) {
 // CONTEXT_GURU_BIN points at a sentinel script: if the hook decides to launch a proxy, the
 // sentinel file appears. That is how "did it start something?" is asserted, rather than by
 // looking for a process.
+//
+// Bounded at one minute (#297): a start-proxy.sh that hangs (a stuck child holding the output
+// pipe, a port wedged by leftovers from an earlier killed run on the shared box) used to hang the
+// test binary until its own 10-minute timeout, ending the whole run with a panic and no result for
+// any test after this one. A deadline turns that into a fast failure with the output so far.
 func runStart(t *testing.T, env map[string]string) (out string, code int, startedSentinel string) {
 	t.Helper()
 	requireTool(t, "bash")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "started")
 	fake := filepath.Join(dir, "fake-proxy")
@@ -339,7 +354,7 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_BIN="+fake, "TMPDIR="+dir)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -352,6 +367,23 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 	}
 	t.Logf("start-proxy.sh env=%v -> exit %d, output:\n%s", env, code, b)
 	return string(b), code, sentinel
+}
+
+// waitWritten polls until a background fake proxy has published `path` (its argv, or a sentinel),
+// and returns the content. start-proxy.sh returns on ITS own clock — the health budget — and under
+// load that can beat the fork of the fake that writes the file, so reading the file once races that
+// fork (#314). A fake that holds the port answers /healthz only after its write, which orders the
+// write before the script's return; the fakes that never answer give no such order, and theirs are
+// the files this must wait for. Returns ("", false) after ~10 s so the caller fails with its own
+// diagnosis of WHY nothing was launched.
+func waitWritten(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b), true
+		}
+	}
+	return "", false
 }
 
 // TestHookIsSilentAndInertWhereRoutingIsNotConfigured is the property that makes a user-scope
@@ -403,11 +435,12 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if code != 0 {
 				t.Errorf("exit %d; the hook must never fail a session", code)
 			}
-			_, started := os.Stat(sentinel)
 			if c.routed {
-				if started != nil {
+				// The sentinel is touched by the background fake, which under load can trail this
+				// script's return (#314) — so the control waits for it rather than reading once.
+				if _, ok := waitWritten(t, sentinel); !ok {
 					t.Errorf("the hook did NOT start a proxy in a routed project — so every "+
-						"silent row above proves nothing: %v\noutput:\n%s", started, out)
+						"silent row above proves nothing\noutput:\n%s", out)
 				}
 				if strings.TrimSpace(out) == "" {
 					t.Errorf("the hook said nothing in a routed project where the proxy never " +
@@ -418,7 +451,7 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if strings.TrimSpace(out) != "" {
 				t.Errorf("the hook printed output in an unrouted project: %q", out)
 			}
-			if started == nil {
+			if _, err := os.Stat(sentinel); err == nil {
 				t.Error("the hook started a proxy in a project that is not routed to it")
 			}
 		})
@@ -519,7 +552,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	// Bounded (#297): this test once hung to the binary's own 10-minute timeout on the shared box,
+	// taking the whole run's result with it; a deadline turns that into a fast failure.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t),
 		"CLAUDE_PLUGIN_OPTION_PORT="+port,
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
@@ -533,8 +570,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 	if !strings.Contains(string(b), "proxy up on 127.0.0.1:"+port) {
 		t.Fatalf("the hook returned without reporting a healthy proxy:\n%s", b)
 	}
-	// The claim is that it returned only AFTER /healthz answered, so it must answer now.
-	resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+	// The claim is that it returned only AFTER /healthz answered, so it must answer now. Bounded
+	// (#297): an unbounded Get against a port left half-open by an earlier killed run hangs this
+	// test to the binary timeout; a short client timeout fails it with the connection state named.
+	probe := &http.Client{Timeout: 5 * time.Second}
+	resp, err := probe.Get("http://127.0.0.1:" + port + "/healthz")
 	if err != nil {
 		t.Fatalf("the hook reported the proxy up, but /healthz does not answer: %v", err)
 	}
@@ -766,8 +806,13 @@ func TestInstallRefusesAnUnverifiedDownload(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "install.sh"))
+	// A hermetic PATH, not the ambient one (#235): install.sh short-circuits with result=present
+	// when it finds context-guru-proxy already on PATH, and a machine with the product installed
+	// (a shared eval box, a developer laptop) has one — the stub curl shadows nothing there, so the
+	// download-and-verify path this test exists to guard was silently never reached. /usr/bin and
+	// /bin carry the coreutils the script needs and no install of ours.
 	cmd.Env = append(sandboxEnv(t),
-		"PATH="+bin+":"+os.Getenv("PATH"),
+		"PATH="+bin+":/usr/bin:/bin",
 		"CONTEXT_GURU_DEST="+dest,
 		"HOME="+dir,
 	)
@@ -1280,7 +1325,10 @@ func TestInstallReportsPATHFromTheSourceFallbackToo(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	run := func(pathHasDest bool) map[string]string {
-		path := bin + ":" + os.Getenv("PATH")
+		// Hermetic for the same reason as TestInstallRefusesAnUnverifiedDownload (#235): an ambient
+		// PATH can hold a real context-guru-proxy, and result=present would bypass the source
+		// fallback this test is about. $DEST is prepended only in the on_path=true row, by design.
+		path := bin + ":/usr/bin:/bin"
 		if pathHasDest {
 			path = dest + ":" + path
 		}
@@ -1787,12 +1835,17 @@ func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
 			} else if !strings.Contains(said, c.wantSaid) {
 				t.Errorf("did not report the discarded argument (want %q):\n%s", c.wantSaid, said)
 			}
-			launched, _ := os.ReadFile(argv)
+			// The fake never answers /healthz, so the script returns on its 1 s budget — which under
+			// load can beat the fake's fork. Wait for the file instead of reading it once (#314).
+			launched, ok := waitWritten(t, argv)
+			if !ok {
+				t.Fatalf("the proxy was never launched, so its argv says nothing:\n%s", out)
+			}
 			if c.wantUp == "" {
-				if strings.Contains(string(launched), "--anthropic-upstream") {
+				if strings.Contains(launched, "--anthropic-upstream") {
 					t.Errorf("an upstream reached argv from a malformed argument: %s", launched)
 				}
-			} else if !strings.Contains(string(launched), "--anthropic-upstream "+c.wantUp) {
+			} else if !strings.Contains(launched, "--anthropic-upstream "+c.wantUp) {
 				t.Errorf("argv missing the upstream: %s", launched)
 			}
 		})
@@ -1846,9 +1899,11 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 	}
 	t.Logf("output:\n%s", out)
 
-	// The positive: --bin was honoured, so the proxy actually started from that path.
-	launched, _ := os.ReadFile(argv)
-	if len(launched) == 0 {
+	// The positive: --bin was honoured, so the proxy actually started from that path. Waited for,
+	// not read once: the fake never answers /healthz, so the script's return does not order the
+	// fake's write (#314), and the absence of the file is itself the finding below.
+	launched, ok := waitWritten(t, argv)
+	if !ok {
 		t.Errorf("--bin was eaten as --upstream's rejected value, so the binary fell back to name "+
 			"resolution and nothing started. Output was:\n%s", out)
 	}
@@ -1861,7 +1916,7 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 		t.Errorf("the path after --bin was treated as a stray argument, which means --bin was "+
 			"consumed by the rejected --upstream:\n%s", out)
 	}
-	if strings.Contains(string(launched), "--anthropic-upstream") {
+	if strings.Contains(launched, "--anthropic-upstream") {
 		t.Errorf("an upstream reached argv from a rejected value: %s", launched)
 	}
 }
@@ -1896,6 +1951,17 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("re-adding the same statusline should be unchanged: exit %d, %v", code, facts)
 	}
+	// It still records that the line is asked for: a line installed before 0.6.1 carries no record, and the
+	// SessionStart migration would otherwise remove it (a GLM round-2 point on #735).
+	data := readJSON(t, path)
+	delete(data["$context-guru"].(map[string]any), "statusline_asked")
+	writeJSON(t, path, data)
+	if facts, _ = settings(t, "add", "--file", path, "--url", ourURL, "--statusline", cmdPath); facts["result"] != "unchanged" {
+		t.Fatalf("re-add: %v", facts)
+	}
+	if m, _ := readJSON(t, path)["$context-guru"].(map[string]any); m["statusline_asked"] != true {
+		t.Errorf("a re-ask with --url on a complete install did not record statusline_asked: %v", m)
+	}
 
 	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
 	if code != 0 || facts["result"] != "removed" {
@@ -1906,6 +1972,18 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	}
 	if readJSON(t, path)["theme"] != "dark" {
 		t.Error("removal took more than its own keys")
+	}
+	if meta, still := readJSON(t, path)["$context-guru"]; still {
+		t.Errorf("our bookkeeping outlived the uninstall: %v", meta)
+	}
+
+	// A file context-guru created holds nothing of the user's: uninstall deletes it.
+	fresh := filepath.Join(dir, "fresh.json")
+	if _, code := settings(t, "add", "--file", fresh, "--url", ourURL, "--statusline", cmdPath); code != 0 {
+		t.Fatal("add on a new file failed")
+	}
+	if facts, _ := settings(t, "remove", "--file", fresh, "--url", ourURL); facts["file_deleted"] != "true" {
+		t.Errorf("remove left a file context-guru created: %v", facts)
 	}
 }
 
@@ -2076,7 +2154,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir())
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2176,7 +2254,9 @@ func statsStubCapturingQuery(t *testing.T, body string, gotQuery *string) (port 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		*gotQuery = r.URL.RawQuery
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the "day" read is asserted elsewhere
+			*gotQuery = r.URL.RawQuery
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(body))
 	})
@@ -2255,7 +2335,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2269,23 +2349,23 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 
 	// Priming call: the stub is still answering, so this both renders the live figure and
 	// writes it to this script's own on-disk /api/stats cache.
-	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
-	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (2s) so the next call actually
+	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (30s) so the next call actually
 	// attempts a fresh fetch instead of serving the just-written in-TTL copy — but still well
 	// inside STALE_STATS_MAX_AGE_SECONDS (600s), matching "a cache a few renders old", not "a
 	// cache from an hour ago".
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
-	old := time.Now().Add(-5 * time.Second)
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
+	old := time.Now().Add(-40 * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
 	}
 
 	stall() // same port, same cache key — now it accepts and never answers
 	got := run()
-	if !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if !strings.Contains(got, "saved $0.03") {
 		t.Errorf("got %q; want the cached savings figure still rendered from the earlier fetch", got)
 	}
 	if !strings.Contains(got, "⏳") {
@@ -2313,7 +2393,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2325,14 +2405,14 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := run(); !strings.Contains(got, "$0.03 of $0.41 (-12.0k)") {
+	if got := run(); !strings.Contains(got, "saved $0.03") {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
 	// Backdate well past STALE_STATS_MAX_AGE_SECONDS (read from the script itself, not retyped
 	// here, so the two cannot silently drift apart).
 	maxAge := statslineConstInt(t, "STALE_STATS_MAX_AGE_SECONDS")
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
 	old := time.Now().Add(-time.Duration(maxAge+60) * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
@@ -2369,32 +2449,32 @@ print(int(getattr(m, sys.argv[2])))
 	return n
 }
 
-// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown is the review's third finding,
-// first half: a timeout during urlopen's CONNECT phase reaches Python wrapped as
-// urllib.error.URLError(reason=socket.timeout(...)) rather than raised directly the way a
-// READ-phase timeout is (the shape every other test in this file exercises, via toggleStub/
-// stallingPort, both of which accept the TCP connection first). Reproducing a genuine
-// connect-phase timeout needs an unroutable network path, which is not reliable to construct in
-// a test — so this drives the real _fetch_stats function with urlopen replaced by a stub that
-// raises exactly the shape urllib actually raises there, and checks the real except clauses
-// route it to STATS_TIMEOUT rather than STATS_DOWN.
+// TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown: a timeout while CONNECTING (a
+// saturated accept queue on a healthy-but-overloaded proxy) is raised by socket.create_connection
+// itself, a different place from a READ-phase timeout (the shape every other test here exercises
+// via toggleStub/stallingPort, which accept the TCP connection first). A genuine connect timeout
+// needs an unroutable network path, which is not reliable to construct in a test, so this drives
+// the real _fetch_stats with create_connection replaced by one that raises it, and checks the real
+// except clauses route it to STATS_TIMEOUT rather than STATS_DOWN.
 func TestStatuslineTreatsAConnectPhaseTimeoutAsATimeoutNotDown(t *testing.T) {
 	py := requireTool(t, "python3")
 	script := `
-import importlib.util, sys, socket, urllib.error
+import importlib.util, sys, socket
 spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-def fake_urlopen(url, timeout=None):
-    raise urllib.error.URLError(socket.timeout("timed out"))
+def fake_connect(addr, timeout=None):
+    raise socket.timeout("timed out")
 
-m.urllib.request.urlopen = fake_urlopen
+m.socket.create_connection = fake_connect
 stats, status = m._fetch_stats("9", None)
 assert stats is None, stats
 print(status)
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the stub: %v\n%s", err, out)
 	}
@@ -2414,8 +2494,8 @@ func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if strings.TrimSpace(out) != "cg!" {
-		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg!")
+	if strings.TrimSpace(out) != "cg ✕ proxy offline" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg ✕ proxy offline")
 	}
 }
 
@@ -2449,7 +2529,7 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(out), "cache 1:") {
+	if !strings.HasPrefix(strings.TrimSpace(out), "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
 	}
 	if strings.Contains(out, " of $") {
@@ -2463,11 +2543,13 @@ func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 // flaky by construction, not a property of the script.
 func parseCacheSeconds(t *testing.T, seg string) int {
 	t.Helper()
-	m, s := 0, 0
-	if _, err := fmt.Sscanf(seg, "cache %d:%d", &m, &s); err != nil {
+	var bar string
+	var m, sec int
+	// `● ██████ 4:48` (warm) or `◐ ░░░░░░ 0:42` (last minute): a six-cell draining bar, then M:SS.
+	if _, err := fmt.Sscanf(seg, "%s %s %s %d:%d", new(string), new(string), &bar, &m, &sec); err != nil {
 		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
 	}
-	return m*60 + s
+	return m*60 + sec
 }
 
 // TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
@@ -2495,21 +2577,27 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
-			got := strings.SplitN(strings.TrimSpace(out), " | ", 2)[0]
-			if c.wantCold {
-				if got != "cache cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache cold")
+			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
+			if c.wantCold { // cold is drawn, dim: `cache ○ cold` (a client-only answer does not know since when)
+				if got != "cache ○ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ cold")
 				}
 				return
 			}
-			if got == "cache cold" {
+			if got == "cache ○ ░░░░░░ cold" {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
 			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
 			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
 			// value, never ahead of it.
-			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-2 {
+			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
+			// tolerance there is a whole minute, rounded down.
+			tol := 2
+			if c.remainingSec > 60 {
+				tol = 60
+			}
+			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
 				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
 			}
 		})
@@ -2534,16 +2622,19 @@ spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0}}))        # remaining == 0
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.5}}))        # remaining +0.5s
-print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0 - 0.5}}))  # remaining -0.5s
+seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
+print(seg(1_700_000_000.0))        # remaining == 0: cold, drawn dim
+print(seg(1_700_000_000.5))        # remaining +0.5s
+print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
-	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache cold", "cache 0:00", "cache cold"}
+	want := []string{"cache ○ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ cold"} // cold is drawn (dim; NO_COLOR here)
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2561,8 +2652,8 @@ func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
-		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "cache –")
+	if strings.TrimSpace(out) != "◌ no cache yet" {
+		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "◌ no cache yet")
 	}
 }
 
@@ -2577,7 +2668,7 @@ func TestStatuslineOmitsZeroSavings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "cache –" {
+	if strings.TrimSpace(out) != "◌ no cache yet" {
 		t.Errorf("got %q, want only the neutral cache placeholder (no session totals to show, no "+
 			"keep-alive pings to report)", out)
 	}
@@ -2596,8 +2687,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a zero session total is a fresh session, not a fault", out)
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a zero session total is a fresh session, not a fault", out)
 	}
 	if strings.Contains(strings.ToLower(out), "nan") || strings.Contains(strings.ToLower(out), "inf") {
 		t.Fatalf("a zero-total render produced %q — this must never divide by the total at all", out)
@@ -2605,8 +2696,8 @@ func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
 }
 
 // TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
-// session totals (matching the live capture) paired with a real savings figure, and — with
-// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// session totals (matching the live capture) paired with a real savings figure, and no
+// detailed-only segment. The session's keep-alive pings are part of the default since #510's PR. This is also the
 // positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
 // that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
 // reason — a statusline.py that rendered NO segment ever would look identical.
@@ -2618,17 +2709,20 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	got := strings.TrimSpace(out)
-	if got != "$0.03 of $0.41 (-12.0k)" {
-		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
+	if !strings.HasPrefix(got, "saved $0.03") {
+		t.Errorf("got %q, want the labelled, estimated saving first", got)
 	}
-	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
-		t.Errorf("got %q — an extra segment appeared without its flag", got)
+	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
+		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
+	}
+	if strings.Contains(got, "ka ") || strings.Contains(got, "keep-alive") {
+		t.Errorf("got %q, want no keep-alive count in the balanced layout (users did not understand it)", got)
 	}
 }
 
 // TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
 // would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
-// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// stats) must produce NEITHER of them once --hide turns them off — proven alongside
 // TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
 // because the segment is broken.
 func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
@@ -2637,15 +2731,15 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--hide=cache,ka")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Contains(out, "cache") {
-		t.Errorf("got %q — the cache segment showed without --cache", out)
+	if strings.Contains(out, "warm") {
+		t.Errorf("got %q — the cache segment showed despite --hide=cache", out)
 	}
 	if strings.Contains(out, "ka ") {
-		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+		t.Errorf("got %q — the keep-alive segment showed despite --hide=ka", out)
 	}
 }
 
@@ -2654,23 +2748,22 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 // would be indistinguishable from "permanently broken".
 func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
-		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
+		"keepalive_ping_usd": 0.02, "keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--layout=minimal", "--cache", "--keepalive")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "cache 1:") {
+	if !strings.Contains(out, "cache ● ██") || !strings.Contains(out, " 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
-	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
-	// raw ping count — see statusline.py's _keepalive_segment.
-	if !strings.Contains(out, "ka ≤4miss $0.07") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
+	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
+	if !strings.Contains(out, "keep-alive 4 pings · $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "keep-alive 4 pings · $0.02")
 	}
-	if !strings.Contains(out, "$0.03 of $0.41 (-12.0k)") {
+	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
@@ -2687,7 +2780,7 @@ func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$-0.05 of $1.00 (-0)") {
+	if !strings.Contains(out, "saved -$0.05") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
@@ -2710,11 +2803,10 @@ func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
 	}
 }
 
-// TestStatuslineAlwaysRequestsTheLeanPath proves ?lean=1 is sent even with no session_id to
-// scope to — the fast path (dash/api.go's statsLean) answers from Overview() alone, skipping
-// the three priced aggregates that measured 38-45s on a production-sized dashboard DB and were
-// the actual cause of this script's timeouts, and there is no reason this script would ever
-// want the slow, full response: it reads nothing those three aggregates add.
+// TestStatuslineAlwaysRequestsTheLeanPath: with no session_id to scope to, the status line makes
+// no /api/stats read at all. The only unscoped read is the whole proxy's total, which the full
+// handler answers since #510: no session's number, and the dearest read there is. It probes
+// /healthz instead, so the offline notices still work.
 func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	var gotQuery string
 	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
@@ -2724,8 +2816,8 @@ func TestStatuslineAlwaysRequestsTheLeanPath(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want %q", gotQuery, "lean=1")
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read without a session to scope it to", gotQuery)
 	}
 }
 
@@ -2751,8 +2843,8 @@ func TestStatuslineDefaultSegmentRequiresStats(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("got %q, want nothing — a real session total with no savings figure to pair "+
+	if strings.Contains(out, "saved") {
+		t.Errorf("got %q, want no saving claim — a real session total with no savings figure to pair "+
 			"it with must not render half a claim", out)
 	}
 }
@@ -2773,9 +2865,8 @@ func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
 	if strings.Contains(gotQuery, "someone-elses-session") {
 		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
 	}
-	if gotQuery != "lean=1" {
-		t.Errorf("got query %q, want an unscoped request (just lean=1, no &session=) for a "+
-			"session_id this script does not trust", gotQuery)
+	if gotQuery != "" {
+		t.Errorf("got /api/stats?%s, want no stats read for a session_id this script does not trust", gotQuery)
 	}
 }
 
@@ -2798,6 +2889,8 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
 		case "lean=1&session=sess-b":
 			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
+		case "lean=1&since=" + r.URL.Query().Get("since"): // the unscoped "day" and lifetime (since=0) reads
+			w.Write([]byte(`{"total_saved_usd": 0}`))
 		default:
 			t.Errorf("unexpected query %q", r.URL.RawQuery)
 		}
@@ -2811,7 +2904,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
 	run := func(sessionID string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
@@ -2823,11 +2916,11 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	}
 	a := run("sess-a")
 	b := run("sess-b")
-	if !strings.Contains(a, "$0.01 of $1.00 (-100)") {
-		t.Errorf("session a: got %q, want its own $0.01 of $1.00 (-100)", a)
+	if !strings.Contains(a, "saved $0.01") {
+		t.Errorf("session a: got %q, want its own saved $0.01", a)
 	}
-	if !strings.Contains(b, "$9.99 of $1.00 (-9.0k)") {
-		t.Errorf("session b: got %q, want its own $9.99 of $1.00 (-9.0k) — not session a's cached figure", b)
+	if !strings.Contains(b, "saved $9.99") {
+		t.Errorf("session b: got %q, want its own saved $9.99 — not session a's cached figure", b)
 	}
 }
 
@@ -2841,8 +2934,10 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt64(&hits, 1)
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "since=") { // the day and lifetime reads have their own caches
+			atomic.AddInt64(&hits, 1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 1}`))
 	})
@@ -2858,10 +2953,10 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	tmp := t.TempDir()
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
-		cmd.Stdin = strings.NewReader("{}")
+		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("statusline.py: %v (%s)", err, b)
@@ -2913,29 +3008,258 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["default"] != "5-min-ping" {
-		t.Errorf("default strategy is %q, want 5-min-ping: this is the value the install writes, and "+
+	if facts["default"] != "auto" {
+		t.Errorf("default strategy is %q, want auto: this is the value the install writes, and "+
 			"plugin.json's cache_strategy default has to agree with it", facts["default"])
 	}
-	for _, k := range []string{"strategy_none", "strategy_5_min_ping", "strategy_1_hour_head"} {
+	for _, k := range []string{"strategy_none", "strategy_auto", "strategy_1_ping", "strategy_2_ping", "strategy_1_hour_head"} {
 		if facts[k] == "" {
 			t.Errorf("`strategy list` does not describe %s; a name the picker offers but list omits "+
 				"cannot be discovered", k)
 		}
 	}
 	// The honesty that matters most: exactly one strategy spends the caller's money, and it must be
-	// the one that says so. A `spends=false` on 5-min-ping would make the install's one-line
+	// the one that says so. A `spends=false` on auto would make the install's one-line
 	// disclosure wrong.
-	if facts["spends_5_min_ping"] != "true" {
-		t.Errorf("5-min-ping reports spends=%q; it pings on idle turns with the caller's own "+
+	if facts["spends_auto"] != "true" || facts["spends_1_ping"] != "true" || facts["spends_2_ping"] != "true" {
+		t.Errorf("auto reports spends=%q; it pings on idle turns with the caller's own "+
 			"credential, and the install's disclosure is generated from this",
-			facts["spends_5_min_ping"])
+			facts["spends_auto"])
 	}
 	for _, k := range []string{"spends_none", "spends_1_hour_head"} {
 		if facts[k] != "false" {
 			t.Errorf("%s reports spends=%q, want false: neither sends a ping, and claiming they "+
 				"spend would push users off the free strategies for no reason", k, facts[k])
 		}
+	}
+}
+
+// TestOldStrategyNamesStillResolve. `5-min-ping` was the default name before strategies were named by
+// ping count. An existing install, a saved plugin option and a marker already on disk all carry it.
+// Set stores the new name, show and sync read an old marker under the new name, and the written file
+// gains the 1-hour keys, so a pre-rename install picks up the per-TTL schedule on its next start.
+func TestOldStrategyNamesStillResolve(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	list, code := settingsIn(t, state, home, "strategy", "list")
+	if code != 0 || !strings.Contains(list["aliases"], "5-min-ping:auto") {
+		t.Fatalf("strategy list does not publish the alias map: %v", list)
+	}
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 || facts["strategy"] != "auto" {
+		t.Fatalf("set --name 5-min-ping: exit %d, %v; want it stored as auto", code, facts)
+	}
+	body, err := os.ReadFile(facts["file"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 240", "keepalive_max_pings: 2"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("auto config lacks %q:\n%s", want, body)
+		}
+	}
+	// The 1-hour defaults are the proxy's own, so they are not written: an older proxy binary's strict
+	// loader rejects a key it does not know, and the plugin ships separately from the binary.
+	if strings.Contains(string(body), "_1h") {
+		t.Errorf("auto config writes a 1-hour key an older proxy binary would reject:\n%s", body)
+	}
+	// A marker written by the old version.
+	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
+	if err := os.WriteFile(facts["file"], []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort)
+	if show["strategy"] != "auto" {
+		t.Errorf("show reports %q for an old 5-min-ping marker, want auto: %v", show["strategy"], show)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if sync["result"] != "synced" || sync["strategy"] != "auto" {
+		t.Errorf("sync did not migrate the old marker: %v", sync)
+	}
+}
+
+// TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault. `2-ping` is the one strategy that
+// needs a key; `--legacy-binary` (what start-proxy.sh uses after an old binary rejected it) drops it,
+// and `strategy sync` keeps it dropped on later starts.
+func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	body := readFileString(t, facts["file"])
+	if !strings.Contains(body, "keepalive_max_pings_1h: 2") || strings.Contains(body, "keepalive_idle_seconds_1h") {
+		t.Fatalf("2-ping should write only keepalive_max_pings_1h:\n%s", body)
+	}
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if sync["result"] != "synced" {
+		t.Fatalf("legacy sync: %v", sync)
+	}
+	body = readFileString(t, facts["file"])
+	if strings.Contains(body, "_1h:") || !strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("legacy render still carries a 1-hour key, or lacks its marker:\n%s", body)
+	}
+	again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if again["result"] != "unchanged" {
+		t.Errorf("a plain sync undid the legacy render: %v", again)
+	}
+	if show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort); show["strategy"] != "2-ping" {
+		t.Errorf("the legacy marker line hid the strategy name: %v", show)
+	}
+}
+
+// TestTheLegacyMarkerEndsWhenTheProxyIsUpdated. The marker means "this proxy version rejected the
+// 1-hour keys". After an update (install.sh records the new version) a plain `strategy sync` must put
+// them back, or `2-ping` would stay at one ping on a 1-hour cache for good.
+func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	version := func(v string) {
+		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	version("v0.4.2")
+	settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); again["result"] != "unchanged" {
+		t.Fatalf("the same binary lost the legacy render: %v", again)
+	}
+	version("v0.5.0")
+	up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	body := readFileString(t, facts["file"])
+	if up["result"] != "synced" || !strings.Contains(body, "keepalive_max_pings_1h: 2") ||
+		strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("after the proxy update the 1-hour key did not come back (%v):\n%s", up, body)
+	}
+}
+
+// TestAStaleLogLineDoesNotTriggerTheOneHourRecovery. The proxy log is append-only across starts. A
+// rejection logged by an earlier run must not make this run drop the keys; only this attempt's own
+// output counts.
+func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	// The log now lives in the state directory start-proxy.sh itself resolves (#251), so the stale
+	// line is planted there: the test must forge what the run will actually read.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
+	stale := "level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "broken-proxy")
+	script := "#!/usr/bin/env bash\nif [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.5.0'; exit 0; fi\n" +
+		"echo 'level=ERROR msg=\"listen failed for an unrelated reason\"' >&2; exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("a rejection from an earlier run triggered the recovery:\n%s", out)
+	}
+	cfg := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if !strings.Contains(cfg, "keepalive_max_pings_1h: 2") {
+		t.Errorf("the keys were dropped on the strength of a stale line:\n%s", cfg)
+	}
+}
+
+// TestAFailureReportShowsOnlyThisRunsLogLines (#251). The log is append-only across starts, and the
+// failure report used to `tail -n 5` the whole file from TMPDIR — a location no state dir scoping
+// reaches — so a fresh failure with nothing written yet reported whatever an earlier run left, worst
+// case a previous SUCCESSFUL run's lines read as "the proxy is fine" during a failure.
+func TestAFailureReportShowsOnlyThisRunsLogLines(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	// The stale evidence an earlier run left behind, including the base URL that made #251 a
+	// disclosure and not just a misleading report. The preset and strategy rejections are there so
+	// this test also holds the two whole-log reads that used to sit beside the tail: an earlier
+	// run's "unknown preset"/"unknown strategy" must not make this run fall back to preset off or
+	// name a cause this run never hit, which is why this run asks for a preset other than off.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
+	stale := "STALE LINE from a previous run, ANTHROPIC_BASE_URL=https://user:secret@gateway.corp.example/v1\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown preset \\\"house\\\"\" from an earlier run\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown strategy \\\"ghost\\\"\" from an earlier run\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A proxy that exits at once: the failure report is the path under test, and nothing of this
+	// run's own is written to the log, which is exactly the state that used to print the stale tail.
+	bin := filepath.Join(dir, "fails-at-once")
+	if err := os.WriteFile(bin, []byte("#!/usr/bin/env bash\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir, "CLAUDE_PLUGIN_OPTION_PRESET=medium")
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if !strings.Contains(out, "the proxy did not come up") {
+		t.Fatalf("the failure report never ran, so this test asserted nothing:\n%s", out)
+	}
+	if strings.Contains(out, "STALE LINE") || strings.Contains(out, "gateway.corp.example") {
+		t.Errorf("the failure report showed an earlier run's lines as this run's evidence:\n%s", out)
+	}
+	// The two whole-log reads the report sits between: a stale preset rejection must not fall this
+	// run back to `off` (this run asked for medium), and a stale strategy rejection must not name a
+	// cause this run never hit.
+	for _, stale := range []string{"house", "ghost", "does not know preset", "rejected the configuration"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("an earlier run's rejection reached this run's diagnosis (%q):\n%s", stale, out)
+		}
+	}
+	// The report points at the log where this run actually writes it: the state directory, so
+	// CONTEXT_GURU_STATE isolates it (the TMPDIR pin above is the location it must NOT name).
+	if !strings.Contains(out, logPath) {
+		t.Errorf("the report does not name the state-dir log %s:\n%s", logPath, out)
+	}
+	if strings.Contains(out, filepath.Join(dir, "context-guru-proxy-"+port+".log")) {
+		t.Errorf("the report still names a TMPDIR log:\n%s", out)
+	}
+}
+
+// TestAnOldProxyThatRejectsTheOneHourKeysStillStarts. A new plugin with an old binary: the binary's
+// strict loader exits on `keepalive_max_pings_1h`. start-proxy.sh must re-render without it and retry.
+func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
+	requireTool(t, "python3")
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
+		"--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("set: %d %v", code, f)
+	}
+	sentinel := filepath.Join(dir, "started")
+	// Behaves like an old binary: a config naming a 1-hour key is a parse error; any other serves.
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.4.2 (commit none)'; exit 0; fi\n" +
+		"cfg=; while [ $# -gt 0 ]; do [ \"$1\" = --config ] && cfg=$2; shift; done\n" +
+		"if [ -n \"$cfg\" ] && grep -q '_1h:' \"$cfg\"; then\n" +
+		"  echo 'level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"' >&2; exit 1; fi\n" +
+		"touch \"" + sentinel + "\"\n" +
+		"exec python3 -c '\nimport sys, http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' " + port + "\n"
+	bin := filepath.Join(dir, "old-proxy")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("the old proxy never came up after the 1-hour keys were dropped: %s", out)
+	}
+	if !strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("the fallback did not say what it did: %s", out)
 	}
 }
 
@@ -2947,11 +3271,11 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "codesmart")
+		"--name", "auto", "--port", keepalivePort, "--preset", "codesmart")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["strategy"] != "5-min-ping" || facts["spends"] != "true" {
+	if facts["strategy"] != "auto" || facts["spends"] != "true" {
 		t.Errorf("set reported strategy=%q spends=%q; the caller reports both to the user",
 			facts["strategy"], facts["spends"])
 	}
@@ -2969,7 +3293,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	}
 	// The name has to be IN the file, not merely in the command that wrote it: `strategy show` and
 	// start-proxy.sh both read it back, and the whole point of a name is that it survives.
-	if !strings.Contains(body, "strategy=5-min-ping") {
+	if !strings.Contains(body, "strategy=auto") {
 		t.Errorf("the strategy name was not recorded in the file, so nothing can report it back and "+
 			"the user cannot be told what to switch back to:\n%s", body)
 	}
@@ -2987,7 +3311,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 func TestStrategySplitIsTheAbsenceOfAConfig(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	if _, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache"); code != 0 {
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache"); code != 0 {
 		t.Fatal("could not arm the strategy this test then switches away from")
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
@@ -3028,7 +3352,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 			}
 			args := []string{"strategy", op, "--port", keepalivePort}
 			if op == "set" {
-				args = append(args, "--name", "5-min-ping", "--preset", "cache")
+				args = append(args, "--name", "auto", "--preset", "cache")
 			}
 			facts, code := settingsIn(t, state, home, args...)
 			if code != 2 {
@@ -3072,7 +3396,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 func TestStrategySetRefusesAnEmptyPreset(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "")
+		"--name", "auto", "--port", keepalivePort, "--preset", "")
 	if code == 0 {
 		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
 			"compaction off while the strategy keeps paying for pings: %v", facts)
@@ -3110,7 +3434,7 @@ func TestStrategySetRefusesAnUnknownName(t *testing.T) {
 func TestStrategyRequiresThePortRatherThanDefaultingIt(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	for _, op := range [][]string{
-		{"strategy", "set", "--name", "5-min-ping", "--preset", "cache"},
+		{"strategy", "set", "--name", "auto", "--preset", "cache"},
 		{"strategy", "show"},
 		{"strategy", "clear"},
 	} {
@@ -3143,13 +3467,13 @@ func TestStrategyStillRecognisesTheOldKeepaliveMarker(t *testing.T) {
 			"it carries no name, and inventing one would misreport what is armed", shown["strategy"])
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache")
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache")
 	if code != 0 {
 		t.Fatalf("a pre-rename config could not be re-set, which strands its owner: exit %d %v",
 			code, facts)
 	}
 	b, _ := os.ReadFile(strategyCfg(state))
-	if !strings.Contains(string(b), "strategy=5-min-ping") {
+	if !strings.Contains(string(b), "strategy=auto") {
 		t.Errorf("re-setting a pre-rename config did not give it a name:\n%s", b)
 	}
 }
@@ -3235,6 +3559,10 @@ func TestPickerSkillOffersOnlyRealStrategies(t *testing.T) {
 	for _, m := range regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+){1,3})`").FindAllStringSubmatch(body, -1) {
 		tok := m[1]
 		if strings.Contains(tok, ".") || strings.HasSuffix(tok, ".py") {
+			continue
+		}
+		// An alias is a real name the script accepts; the skill documents the old one.
+		if strings.Contains(","+strings.ReplaceAll(facts["aliases"], ":", ",")+",", ","+tok+",") {
 			continue
 		}
 		if !real[strings.ReplaceAll(tok, "-", "_")] && isStrategyShaped(tok) {
@@ -3716,7 +4044,8 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	dir := t.TempDir()
 	argvFile := filepath.Join(dir, "argv")
 	fake := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+	body := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n%s\\n' \"$*\" \"$PRESET\" > " + argvFile + ".tmp && mv " + argvFile + ".tmp " +
 		argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -3739,7 +4068,16 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("must never fail a session: %v\n%s", err, out)
 	}
-	got, rerr := os.ReadFile(argvFile)
+	// start-proxy.sh returns once the proxy has been LAUNCHED, not once the fake has written its file.
+	// The fake publishes argv and PRESET in one rename, so a reader sees both lines or no file; wait
+	// for the file instead of reading it once (#560).
+	var got []byte
+	var rerr error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, rerr = os.ReadFile(argvFile); rerr == nil {
+			break
+		}
+	}
 	if rerr != nil {
 		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
 	}
@@ -3857,7 +4195,7 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// The NAME is the whole reason strategies are named: it is the only thing a user can say
 			// back to us. It has to survive from the file into the note, or "switch it back to
-			// 5-min-ping" is not a sentence anybody can act on.
+			// auto" is not a sentence anybody can act on.
 			//
 			// THE PRESET HALF OF THIS ROW FLIPPED, deliberately. It used to assert that the file's
 			// `preset: house` was reported and the plugin option was NOT — the file being the source
@@ -3898,11 +4236,11 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// A config we own but that predates named strategies, or one we do not own at all: report
 			// it as unnamed rather than guessing. Naming the DEFAULT here would be the worst answer —
-			// it would tell the user 5-min-ping is armed when the file might say anything.
+			// it would tell the user auto is armed when the file might say anything.
 			name:     "a config with no strategy marker is unnamed, never guessed",
 			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
 			wantIn:    []string{"cache strategy unnamed"},
-			wantNotIn: []string{"cache strategy 5-min-ping", "cache strategy none"},
+			wantNotIn: []string{"cache strategy auto", "cache strategy none"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -4063,8 +4401,13 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if err != nil {
 			t.Fatalf("must never fail a session: %v\n%s", err, out)
 		}
-		launched, _ := os.ReadFile(argv)
-		if !strings.Contains(string(launched), "--listen 127.0.0.1:"+port) {
+		// The fake never answers /healthz, so the script returns on its 1 s budget, which under load
+		// can beat the fake's write — wait for the file instead of reading it once (#314).
+		launched, ok := waitWritten(t, argv)
+		if !ok {
+			t.Fatalf("the proxy was never launched, so --port was never honoured:\n%s", out)
+		}
+		if !strings.Contains(launched, "--listen 127.0.0.1:"+port) {
 			t.Errorf("the proxy did not listen on the port passed as an argument: %s\n%s", launched, out)
 		}
 		// The pidfile is what uninstall uses, and it is named after the port — so a port that reached
@@ -4072,8 +4415,11 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); err != nil {
 			t.Errorf("no pidfile for the configured port, so uninstall could not find this proxy: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
-			t.Errorf("the log is not named after the configured port: %v", err)
+		// The log is named after the port and scoped to the state directory, like the pidfile (#251):
+		// a log in TMPDIR is shared by every run on the machine, so a failure report can show
+		// another run's lines as this one's evidence.
+		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".log")); err != nil {
+			t.Errorf("the log is not in the state dir, named after the configured port: %v", err)
 		}
 	})
 
@@ -4798,9 +5144,12 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	const relPath = "./.claude/settings.local.json"
 	// Routed already, by a version of the plugin that kept no record — which is what an absent
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
-	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	// The opt-out is already on record: this test is about the hatch, and an install with no ping record
+	// gets its header (or its opt-out) written on a re-run.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"ping_header_opt_out": true}})
 
-	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
 	}
@@ -5450,9 +5799,34 @@ var portTestBaseCounter atomic.Int64
 // that both scan for a port cannot collide with EACH OTHER either.
 func portScanBase(t *testing.T) {
 	t.Helper()
-	base := 39000 + int(portTestBaseCounter.Add(1))*100
-	t.Setenv("CONTEXT_GURU_PORT_BASE", strconv.Itoa(base))
+	t.Setenv("CONTEXT_GURU_PORT_BASE", nextPortBase())
 }
+
+// nextPortBase is the next scan base: a 64-port window that no other call in this process and no
+// other `go test` run on the same box (CI, another session) is scanning at the same time. Calls are
+// 400 ports apart, and each process holds one of four 100-port lanes for its lifetime (an exclusive
+// lock on a lane file, so two concurrent runs never share one), so windows never overlap; the 50
+// slots are reused in turn (-count runs), long after their test cleaned up. All of it stays below
+// 32768, the kernel's ephemeral range, so it never meets a port freePort or an outgoing connection
+// was just given.
+func nextPortBase() string {
+	return strconv.Itoa(10000 + int(portTestBaseCounter.Add(1)%50)*400 + portLane()*100)
+}
+
+var portLane = sync.OnceValue(func() int {
+	for lane := 0; lane < 4; lane++ {
+		f, err := os.OpenFile(filepath.Join(os.TempDir(), fmt.Sprintf("context-guru-plugin-test-lane-%d", lane)),
+			os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return lane // the file stays open, and so locked, until this test process exits
+		}
+		f.Close()
+	}
+	return os.Getpid() % 4 // more than four runs at once: share a lane, as before
+})
 
 // TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
 // scanning up from the default; re-running `alloc` for either one returns the SAME port rather
@@ -6004,6 +6378,60 @@ print(ns["PORT_SCAN_START"])
 	if got != want {
 		t.Errorf("plugin.json port.default=%v but settings.py PORT_SCAN_START=%s — the two "+
 			"sources of truth for the default port have drifted", portDefault.Default, got)
+	}
+}
+
+// Picking ultrahigh asks the routed proxy to run tool deferral's provider check (#485), and reports
+// it. Any other preset sends nothing.
+func TestPresetUltrahighAsksForAProbe(t *testing.T) {
+	asks := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stats" { // the proxy runs the preset being picked: the probe goes to it
+			w.Write([]byte(`{"preset":"ultrahigh"}`)) //nolint:errcheck
+			return
+		}
+		asks <- r.Method + " " + r.URL.Path + " " + r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := settingsInDir(t, state, home, proj, "add", "--file", projLocal, "--url", url); code != 0 {
+		t.Fatal("fixture: routing add failed")
+	}
+	py := requireTool(t, "python3")
+	run := func(name string) string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", name)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("preset set %s: %v\n%s", name, err, out)
+		}
+		return string(out)
+	}
+	// (the stub's /stats says ultrahigh, so `high` sees a gap; it still must send no probe)
+	if out := run("high"); strings.Contains(out, "probe=") {
+		t.Fatalf("high asked for a probe:\n%s", out)
+	}
+	if out := run("ultrahigh"); !strings.Contains(out, "probe=asked") {
+		t.Fatalf("ultrahigh did not ask for a probe:\n%s", out)
+	}
+	select {
+	case got := <-asks:
+		if got != "POST /tool-defer/probe application/json" {
+			t.Fatalf("ask = %q", got)
+		}
+	default:
+		t.Fatal("no ask reached the proxy")
+	}
+	if len(asks) != 0 {
+		t.Fatalf("%d extra requests", len(asks))
 	}
 }
 
@@ -6864,6 +7292,18 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 	path := os.Getenv("PATH")
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
+		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
+		// product's 15 (CONTEXT_GURU_HEALTH_BUDGET, which start-proxy.sh already honours).
+		if _, err := os.Stat(filepath.Join(extraPath, neverAnswers)); err == nil {
+			env = append(env, "CONTEXT_GURU_HEALTH_BUDGET=1")
+		}
+	}
+	// Every route test that installs scans for a port. Unpinned, the scan starts at the real 8787 on
+	// a box shared with live proxies, so a port taken between --plan and --route (by anything) fails
+	// the test with port_changed_since_plan, and one taken after it fails the healthz wait. A test that
+	// pinned its own base keeps it.
+	if os.Getenv("CONTEXT_GURU_PORT_BASE") == "" {
+		env = append(env, "CONTEXT_GURU_PORT_BASE="+nextPortBase())
 	}
 	return append(env,
 		"HOME="+home,
@@ -7146,11 +7586,19 @@ func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
 // It MUST answer --version and exit: install.sh probes the installed version by running the binary,
 // and the first version of this fixture served forever on that probe, hanging the run before a
 // single assertion could fail. A fake that does not exit where the real one does is not a fake.
+// neverAnswers marks a fakeProxyDir whose proxy starts and never answers /healthz.
+const neverAnswers = "never-answers"
+
 func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	t.Helper()
 	py := requireTool(t, "python3")
 	dir := t.TempDir()
 	body := "sleep 300\n"
+	if !listen { // routeEnv reads this: waiting the installer's full 15 s on it proves nothing more than 1 s
+		if err := os.WriteFile(filepath.Join(dir, neverAnswers), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if listen {
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
@@ -7227,21 +7675,41 @@ func TestRouteWritesRoutingOnlyAfterSomethingAnswers(t *testing.T) {
 	})
 }
 
-// TestRouteInstallsStatuslineByDefault: the status line install now rides along with a successful
-// route, IN WHATEVER FILE ROUTING ITSELF JUST USED — not unconditionally at user scope. That
-// scope-following is the fix for the reported incident: a default (project-scope) install used to
-// write and back up the user's machine-wide ~/.claude/settings.json as a side effect, every time.
-// --no-statusline is still the opt-out, and a statusline write failure never turns a successful
-// route into a reported failure — `statusline=skipped` alongside `result=routed`, not
-// `result=error`.
+// TestRouteInstallsStatuslineByDefault (the name kept for history): since 0.6.1 the install writes NO status line by
+// default, because the mod's band draws it. `--statusline` asks for it, IN WHATEVER FILE ROUTING ITSELF JUST USED —
+// not unconditionally at user scope (the fix for a default project-scope install that wrote and backed up the user's
+// machine-wide ~/.claude/settings.json). A statusline write failure never turns a successful route into a reported
+// failure — `statusline=skipped` alongside `result=routed`, not `result=error`.
 func TestRouteInstallsStatuslineByDefault(t *testing.T) {
-	t.Run("default scope (project): the status line follows routing into the project, "+
-		"the machine-wide file is never created", func(t *testing.T) {
+	t.Run("default: routing succeeds and no statusLine is written (the mod's band draws it)", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
+		}
+		if got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json")); got["statusLine"] != nil {
+			t.Errorf("a default install wrote a statusLine: %v", got["statusLine"])
+		}
+	})
+
+	t.Run("--statusline, default scope (project): the status line follows routing into the project, "+
+		"the machine-wide file is never created", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7303,7 +7771,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, "--scope", "user", "--i-understand-machine-wide",
-			"--i-consent-to-traffic-interception")
+			"--i-consent-to-traffic-interception", "--statusline")
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7328,7 +7796,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		}
 	})
 
-	t.Run("--no-statusline: routing succeeds, nothing is written to statusLine", func(t *testing.T) {
+	t.Run("--no-statusline (now the default, still accepted): routing succeeds, nothing is written to statusLine", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
@@ -7342,8 +7810,8 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if code != 0 || facts["result"] != "routed" {
 			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
 		}
-		if facts["statusline"] != "skipped" {
-			t.Fatalf("statusline=%q, want skipped: %v", facts["statusline"], facts)
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
 		}
 		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
 		if _, has := got["statusLine"]; has {
@@ -7364,7 +7832,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 			"statusLine": map[string]any{"type": "command", "command": "my-own-thing"},
 		})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
-		facts, code := runRoute(t, proj, env, consentOK()...)
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7547,6 +8015,8 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	//
 	// Raised 235 -> 238 for `plugin_enabled=` (#318): a machine-wide install's outcome for the plugin's
 	// own enablement, which the skill relays and never decides.
+	//
+	// (Raised to 242 for `history_import=` and lowered back to 238 when the history import was removed.)
 	if n := strings.Count(body, "\n"); n > 238 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
 			"well under 238", n)
@@ -7741,11 +8211,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",
@@ -8112,7 +8583,7 @@ func TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything(t *testing.T) {
 	}
 	// The names have to be in the refusal, or the model guesses — and the names differ in whether they
 	// spend the user's money, which is not a thing to guess at.
-	if !strings.Contains(facts["note"], "5-min-ping") {
+	if !strings.Contains(facts["note"], "auto") {
 		t.Errorf("the refusal does not list the real strategy names: note=%q", facts["note"])
 	}
 }
@@ -8331,7 +8802,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	const port = "9391"
 
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
 		t.Fatalf("arming a real strategy: exit %d %v", code, facts)
 	}
@@ -8358,7 +8829,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 	// And `clear`, invoked as itself, keeps its own vocabulary — the fix must not have flattened the
 	// distinction, only stopped one op borrowing the other's word.
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 {
 		t.Fatalf("re-arming: exit %d %v", code, facts)
 	}
@@ -8375,7 +8846,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 // TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed.
 //
-// `1-hour-head` ships `head_ttl_min_tokens: 50000`, and that number is the difference between the
+// `1-hour-head` ships `head_ttl_min_tokens: 50000` (the deprecated key, on purpose: see settings.py), and that number is the difference between the
 // strategy doing something and doing nothing. It was disclosed in none of the three places a user
 // reads before choosing it.
 //
@@ -8515,7 +8986,7 @@ func stopFakeProxy2(t *testing.T, pidfile string) {
 
 // TestRouteDistinguishesAnUnreadableStrategyListFromABadName. An empty strategy list is not an unknown
 // name, and conflating them made the script state a false thing about the caller's input: with
-// settings.py unavailable, `--cache-strategy 5-min-ping` — the default, and obviously a strategy — came
+// settings.py unavailable, `--cache-strategy auto` — the default, and obviously a strategy — came
 // back as "is not a strategy. Known: unavailable", burying the one fault the user could act on inside a
 // sentence about a typo. The skill's next move is to ask which name they meant, about a correct name.
 func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
@@ -8541,7 +9012,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", filepath.Join(broken, "install.sh"), "--route", "--plan",
-		"--cache-strategy", "5-min-ping")
+		"--cache-strategy", "auto")
 	cmd.Dir = proj
 	cmd.Env = routeEnv(t, home, t.TempDir(), "")
 	out, _ := cmd.CombinedOutput()
@@ -8549,7 +9020,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	body := string(out)
 
 	if strings.Contains(body, "is not a strategy") {
-		t.Errorf("`5-min-ping` is the default strategy and was reported as not being one, because the "+
+		t.Errorf("`auto` is the default strategy and was reported as not being one, because the "+
 			"LIST could not be read. A false statement about the caller's input:\n%s", body)
 	}
 	if !strings.Contains(body, "strategy_list_unavailable") {
@@ -8839,7 +9310,7 @@ func TestStrategySetSplitNeedsNoPreset(t *testing.T) {
 
 	// The control, because the guard is right where it applies: a strategy that DOES write a file must
 	// still refuse an empty preset, or compaction is silently off while pings keep being paid for.
-	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", keepalivePort, "--preset", "")
 	if code == 0 || facts["reason"] != "empty_preset" {
 		t.Errorf("the empty-preset guard was lost where it matters: exit %d %v", code, facts)
@@ -9659,7 +10130,7 @@ func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
 	// survived adopt's teardown while .owner/.fingerprint were correctly removed, so the next
 	// project handed this port silently inherited a dead install's cache strategy.
 	otherKeepalive := filepath.Join(state, "context-guru", "keepalive-"+otherPort+".yaml")
-	if err := os.WriteFile(otherKeepalive, []byte("strategy=5-min-ping\n"), 0o600); err != nil {
+	if err := os.WriteFile(otherKeepalive, []byte("strategy=auto\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -11570,7 +12041,7 @@ func TestTheSpendClauseIsAnswerableByAPersonWhoDoesNotKnowWhatACacheStrategyIs(t
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	q := facts["consent_question"]
-	for _, want := range []string{spendClauseMarker, "5-min-ping", "keep-alive"} {
+	for _, want := range []string{spendClauseMarker, "auto", "keep-alive"} {
 		if !strings.Contains(q, want) {
 			t.Errorf("the question drops %q, so what it costs is no longer in it: %q", want, q)
 		}
@@ -12006,12 +12477,57 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
 	}
-	log := filepath.Join(os.TempDir(), "context-guru-proxy-8841.log")
+	// The decline breadcrumb now lands in the state dir this fixture pins (#251), so that is where
+	// "declined" would be read from — and must not be.
+	log := filepath.Join(dir, "state", "proxy-8841.log")
 	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
 		t.Errorf("declined a project it is routed to: %s", b)
 	}
 	if strings.Contains(out, "8787") {
 		t.Errorf("output names 8787 for a project routed to 8841: %s", out)
+	}
+}
+
+// TestTheDeclineBreadcrumbCarriesNoCredentials (#251, review round 1). The gate's decline branch
+// logs ANTHROPIC_BASE_URL so a silent decline stays diagnosable — but the URL can carry credentials
+// in its userinfo and in its query, and this log is the file a user pastes into an issue. The
+// breadcrumb must keep the diagnostic part (the host and port that explain the mismatch) and drop
+// everything that can carry a credential.
+func TestTheDeclineBreadcrumbCarriesNoCredentials(t *testing.T) {
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+	dir, env := portRoutedProject(t, "8841")
+	// This session points somewhere else, with credentials in both places a URL can hide them: the
+	// userinfo and a query value. CLAUDE_PLUGIN_OPTION_PORT stays pinned so PORT resolves to 8841 —
+	// a URL this foreign leaves the delegate with no port to confirm, which declines one branch
+	// earlier ("no install routes this directory") and never logs a URL at all.
+	env = append(env,
+		"CLAUDE_PLUGIN_OPTION_PORT=8841",
+		"ANTHROPIC_BASE_URL=https://user:hunter2@gw.example.com:9443/v1?api_key=TOPSECRET&trace=1")
+	out, code := runIn(t, dir, env, "", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if code != 0 {
+		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("the decline must stay silent on stdout, got %q", out)
+	}
+	log := filepath.Join(dir, "state", "proxy-8841.log")
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the decline left no breadcrumb in %s: %v", log, err)
+	}
+	if !strings.Contains(string(b), "declined:") {
+		t.Fatalf("the decline left no breadcrumb:\n%s", b)
+	}
+	// What must survive: the endpoint that explains the mismatch.
+	if !strings.Contains(string(b), "gw.example.com:9443") {
+		t.Errorf("the breadcrumb lost the diagnostic host and port:\n%s", b)
+	}
+	// What must not: the credentials, from either place the URL carried them.
+	for _, secret := range []string{"user:hunter2", "hunter2", "TOPSECRET", "api_key"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("the breadcrumb logged the credential %q:\n%s", secret, b)
+		}
 	}
 }
 

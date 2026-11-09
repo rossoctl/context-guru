@@ -15,7 +15,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
@@ -92,33 +92,7 @@ func (responsesEnvelopeAdapter) pendingCallFor(body []byte, names, servers map[s
 }
 
 func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
-	if !bytes.Contains(body, []byte(skills.Header)) {
-		return "", ""
-	}
-	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.Contains(instructions.String(), skills.Header) {
-		return "instructions", instructions.String()
-	}
-	path, text := "", ""
-	gjson.GetBytes(body, "input").ForEach(func(idx, item gjson.Result) bool {
-		if role := item.Get("role").String(); role != "system" && role != "developer" {
-			return true
-		}
-		content := item.Get("content")
-		if content.Type == gjson.String && strings.Contains(content.String(), skills.Header) {
-			path, text = "input."+idx.String()+".content", content.String()
-			return false
-		}
-		content.ForEach(func(bidx, block gjson.Result) bool {
-			v := block.Get("text")
-			if v.Type == gjson.String && strings.Contains(v.String(), skills.Header) {
-				path, text = "input."+idx.String()+".content."+bidx.String()+".text", v.String()
-				return false
-			}
-			return true
-		})
-		return path == ""
-	})
-	return path, text
+	return skills.LocateResponses(body) // the one rule, shared with dash's reader
 }
 
 // responseInputIndex resolves a normalized slot to its containing wire item.
@@ -285,12 +259,13 @@ func rebuildResponsesCountChanged(body []byte, norm []bschemas.ChatMessage, slot
 	if len(out) > len(norm) || len(out) <= start {
 		return body, false
 	}
-	// Only summarize currently changes count, and its wrapper identifies the
-	// inserted message without relying on retained text staying unchanged.
+	// A summarizer's header identifies the inserted message without relying on
+	// retained text staying unchanged. The same test as the equal-count gate
+	// (isSummaryHeader), so the gate never sends a splice here that cannot be found.
 	head := -1
 	for i := start; i < len(out); i++ {
 		text := schema.MessageText(out[i])
-		if strings.HasPrefix(text, "=== History Summary ===") {
+		if isSummaryHeader(text) {
 			if head >= 0 {
 				return body, false
 			}
@@ -515,7 +490,15 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		return res
 	}
 	sys, first := schema.SessionHead(norm)
-	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	res.Session = session.Scoped(o.Tenant, ExplicitSession(o.Session, o.Body), sys, first)
+	// The cold clock's key (the bare content hash), derived once. It is also the Trace's TouchAlias,
+	// so a keep-alive ping touches the key this request reads even when our own tool search puts
+	// the names list at the head afterwards (#902).
+	alias := session.Scoped(o.Tenant, "", sys, first)
+	res.TouchAlias = alias
+	loadSessionState(st, res.Session)
+	o.resolveThread(&res.Trace, res.Session)
+	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
 	// A previous_response_id request contains only this turn's delta, not a
 	// cumulatively growing transcript. Boundary/TurnAt would interpret a smaller
@@ -523,14 +506,34 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
 	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
+	// lifetime below are one fact — this request's cache lifetime.
+	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	maxCachedIdx, idleMs := -1, int64(-1)
 	if cacheAware && !serverHeldHistory {
 		nowMs := o.nowMs()
+		turnKey := thread.Key(res.Session, res.Thread.ID) // per thread, as in BodyOpts (#484)
+		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnAt(res.Session, len(norm), nowMs)
+			// The alias session id (the headerless twin of res.Session, see apply.go's clock
+			// note): the restart grace asks the lookup for the thread's keys under BOTH ids,
+			// because a refresh under either one kept the provider's single entry warm (#766).
+			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
+			// metadata id when the body carries one, else the content hash. alias below stays
+			// the bare content hash for the cold decision's own clock (aliasSeen).
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// wrote it — the store's alias keys use that id.
+			if alias != res.Session {
+				loadSessionState(st, alias)
+			}
+			graceAlias := graceAliasID(o.Tenant, o.Body, norm)
+			graceAliasKey := thread.Key(graceAlias, res.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
-			alias := session.Scoped(o.Tenant, "", sys, first)
 			if at := aliasSeen(st, alias, nowMs); at > prevAt {
 				prevAt = at
 			}
@@ -538,8 +541,8 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 				idleMs = nowMs - prevAt
 			}
 		} else {
-			maxCachedIdx = modes.Boundary(prevLen(st, res.Session), len(norm)) - 1
-			defer putLen(st, res.Session, len(norm))
+			maxCachedIdx = storeBoundary(st, turnKey, parentKey, len(norm)) - 1
+			defer putLen(st, turnKey, len(norm))
 		}
 	}
 	res.CacheAware, res.MaxCachedIdx = cacheAware, maxCachedIdx
@@ -550,13 +553,20 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	if mode == "" {
 		mode = components.ModeSync
 	}
-	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	if !cacheAware {
 		ttl, ttlKind = 0, CacheLifetimeUnknown
 	}
 	chat := &bschemas.BifrostChatRequest{Provider: bschemas.OpenAI, Input: append([]bschemas.ChatMessage(nil), norm...)}
 	restore := planRestore(pipe, st, res.Session, "responses", client, gjson.GetBytes(client, "input").Array())
-	c := &components.Ctx{Ctx: ctx, Session: res.Session, Store: st, Model: o.Models,
+	// The pre-pipeline snapshot the stale-prefix guards hash (components.Ctx.RawInput), taken
+	// exactly as on the Messages route in BodyOpts: a separate slice, so a component's rewrite of
+	// chat.Input cannot change it.
+	rawInput := append([]bschemas.ChatMessage(nil), norm...)
+	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, ThreadParent: threadParent, ThreadInherits: threadInherits,
+		DeclaresTools: gjson.GetBytes(o.Body, "tools.#").Int() > 0, Store: st, Model: o.Models,
+		RawInput: rawInput,
+		// No explicit breakpoint on this route, and no anchor write (#730).
+		NoCacheBreakpoint: !explicitBreakpointProvider(bschemas.OpenAI),
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
 		// A previous_response_id points to upstream-held history that this
@@ -573,9 +583,10 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		CtxWindow: o.Window, CtxWindowExact: o.WindowExact, CompactionPoint: o.CompactionPoint,
 		CompactionPointSource: o.CompactionPointSource, ModelName: gjson.GetBytes(o.Body, "model").String(),
 		Mode: mode, CacheAware: cacheAware, MaxCachedIdx: maxCachedIdx, IdleMs: idleMs,
-		PrefixAsk:  o.PrefixAsk,
-		CacheTTLMs: ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
-		PrevBilledInput: prevBilledInput(st, res.Session), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
+		PrefixAsk:    o.PrefixAsk,
+		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
+		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
+		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)
 	start := 0

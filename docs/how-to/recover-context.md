@@ -56,7 +56,7 @@ easy to miss, because the in-turn behaviour is deliberately cache-safe and the c
 behaviour is not the same thing.
 
 **An expand permanently un-compacts that content.** The handler marks the restored original
-kept-verbatim (`cg:keep:`), and every offloader then skips it — otherwise re-compacting would
+kept-verbatim for that session (`cg:keep:<session>:`), and every offloader then skips it in that session — otherwise re-compacting would
 bounce the agent straight into another expand, which is the loop that mark exists to prevent. So
 from the next turn onward the original goes upstream **in full, at its original position**.
 

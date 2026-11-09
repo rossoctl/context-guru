@@ -33,12 +33,10 @@ components:
       # to be near expiry or already expired. That default was withdrawn — the wait cost more
       # than it saved — so the opt-out is now the default and the line is gone.
       min_request_frac: 0
+    # Endpoint and credential come from the host's CHEAP_MODEL_* env (README §5).
     model:
       source: config
-      provider: openai
-      base_url: http://your-llm-endpoint:8000
       model: gpt-4o-mini
-      api_key: ""
 
 store:
   enabled: false

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // The keep-alive tab's arithmetic and its attribution, and the tests are mostly about the
@@ -424,11 +425,11 @@ func TestCalculatorPricesFromTheRowsModelNotABlend(t *testing.T) {
 		}
 		return modelinfo.Price{}, false
 	}
-	a, err := fx.db.KeepAliveCalc(f, 280, 300_000, "cheap", price, 2)
+	a, err := fx.db.KeepAliveCalc(f, 280, 300_000, "cheap", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := fx.db.KeepAliveCalc(f, 280, 300_000, "dear", price, 2)
+	b, err := fx.db.KeepAliveCalc(f, 280, 300_000, "dear", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +447,7 @@ func TestCalculatorPricesFromTheRowsModelNotABlend(t *testing.T) {
 			"miss", a.AvoidedUSDEach)
 	}
 	// The unpriced model: no dollar figure at all, and it says so.
-	un, err := fx.db.KeepAliveCalc(f, 280, 300_000, "nobody-prices-me", price, 2)
+	un, err := fx.db.KeepAliveCalc(f, 280, 300_000, "nobody-prices-me", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +482,7 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	}
 	fx := newKAFixture(t, evs...)
 	price := func(string) (modelinfo.Price, bool) { return ibmSonnet, true }
-	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2)
+	out, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 300_000, "aws/claude-sonnet-5", price, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,9 +508,18 @@ func TestCalculatorGoldenAgainstTheProductionBands(t *testing.T) {
 	if g3 > g1 {
 		t.Errorf("the ladder does not flatten: K1->K2 gains %d, K3->K4 gains %d", g1, g3)
 	}
-	// And the current row is marked, which is what the panel emphasises.
-	if !out.Rows[1].Current {
-		t.Error("K=2 was not marked as the current policy")
+	// With the plan off (the zero Policy), the model is fixed K, every rung says so, and the rung with
+	// K = the account's base is the current one (#868).
+	for _, r := range out.Rows {
+		if r.Plan != PlanFixed {
+			t.Errorf("K=%d plan = %q, want fixed_k", r.MaxPings, r.Plan)
+		}
+		if r.Current != (r.MaxPings == 2) {
+			t.Errorf("K=%d current = %v", r.MaxPings, r.Current)
+		}
+	}
+	if out.Plan != PlanFixed {
+		t.Errorf("plan = %q, want fixed_k", out.Plan)
 	}
 }
 
@@ -557,7 +567,7 @@ func TestKeepAlivePanelsStateTheirCoverage(t *testing.T) {
 // below it.
 func TestRecommendationRefusesThinHistory(t *testing.T) {
 	fx := newKAFixture(t, kaSpread(t, 19, 700, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +595,7 @@ func TestRecommendationRefusesWhenTheIntervalCrossesZero(t *testing.T) {
 	// any coverage at X=280 — so nothing converts, the pings cost money, and the interval sits
 	// on or below zero rather than excluding it above.
 	fx := newKAFixture(t, kaSpread(t, 30, 40_000, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +618,7 @@ func TestRecommendationRefusesAnIntervalEntirelyBelowZero(t *testing.T) {
 	// 30 expiries whose gaps are far past any coverage at X=280 (2.8 hours), on sessions that
 	// nevertheless have plenty of idle spans to be pinged through. Cost with no conversion.
 	fx := newKAFixture(t, kaSpread(t, 30, 10_000, 2.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +645,7 @@ func TestRecommendationRefusesAnIntervalEntirelyBelowZero(t *testing.T) {
 // does not exist, because a field that exists gets rendered.
 func TestRecommendationPayloadCarriesNoPointEstimate(t *testing.T) {
 	fx := newKAFixture(t, kaSpread(t, 25, 700, 1.0)...)
-	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +682,7 @@ func TestRecommendationNeverSuggestsOnePing(t *testing.T) {
 		gap float64
 	}{{25, 400}, {40, 700}, {25, 1100}, {30, 5000}} {
 		fx := newKAFixture(t, kaSpread(t, tc.n, tc.gap, 1.0)...)
-		rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+		rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true}, keepalive.Policy{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -822,11 +832,11 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	sec := func(n int64) int64 { return n * 1000 }
 	evs := []*Event{
-		// A gated session: prefix 50k throughout. turn 0, then a 300 s gap, then a 1000 s gap,
+		// A gated session: prefix 100k throughout (above the 20k floor). turn 0, then a 300 s gap, then a 1000 s gap,
 		// then nothing — the last request opens a span a live policy pings in and never closes.
-		kaAgent(t0, "big", 0.10),
-		kaAgent(t0+sec(300), "big", 0.10),
-		kaAgent(t0+sec(1300), "big", 0.10),
+		bigPrefix(kaAgent(t0, "big", 0.10)),
+		bigPrefix(kaAgent(t0+sec(300), "big", 0.10)),
+		bigPrefix(kaAgent(t0+sec(1300), "big", 0.10)),
 		// Below the 20k prefix floor: the shipped gate never pings this session at all.
 		smallPrefix(kaAgent(t0, "small", 0.10)),
 		smallPrefix(kaAgent(t0+sec(1000), "small", 0.10)),
@@ -835,7 +845,7 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 	calc, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, "aws/claude-sonnet-5",
 		func(string) (modelinfo.Price, bool) {
 			return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
-		}, 2)
+		}, 2, keepalive.Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -866,6 +876,11 @@ func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
 }
 
 // smallPrefix drops a fixture row's billed prefix below the replay gate's floor.
+func bigPrefix(e *Event) *Event {
+	e.CacheRead = 100_000
+	return e
+}
+
 func smallPrefix(e *Event) *Event {
 	e.CacheRead, e.CacheWrite = 1_000, 0
 	return e
@@ -980,6 +995,12 @@ func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
 		if math.Abs(c.got-c.want) > 1e-9 {
 			t.Errorf("%s = %.9f, want %.9f: %s", c.name, c.got, c.want, c.why)
 		}
+	}
+	// The one-hour row: the entry lives 3600 s, so the same 11 pings reach 11 x 280 s + 3600 s
+	// (it was 11 x 280 + 300 before the row's own lifetime was used).
+	if h := rows["hour"]; math.Abs(h.BreakevenMinutes-(11*280+3600)/60.0) > 1e-9 {
+		t.Errorf("hour: breakeven_minutes = %.6f, want %.6f: reach is K x X + the lifetime in force",
+			h.BreakevenMinutes, (11*280+3600)/60.0)
 	}
 	if r.BreakevenPings != 11 {
 		t.Errorf("breakeven_pings = %d, want 11: one lapse costs $%.6f and one ping $%.6f, so "+
@@ -1197,4 +1218,187 @@ func TestLedgerRefusesCreditFromAPingThatRefreshedNothing(t *testing.T) {
 			t.Errorf("%s: SavedUSD = %v, want 0 — that ping refreshed nothing", name, led.SavedUSD)
 		}
 	}
+}
+
+// The tab's COST half is summed inside the filter's window, so the SAVING half must stop at the
+// window start: a ping just before `since` that kept a row just after it warm brought a saving
+// in with no cost beside it, and the net at the window edge read too high (#678). The exporter's
+// per-tenant series must land on the same net, or the two answers to one question disagree.
+func TestLedgerStopsThePingSavingAtTheWindowStart(t *testing.T) {
+	const m = int64(60_000)
+	t0 := int64(1_700_000_000_000)
+	fx := newKAFixture(t,
+		kaPing(t0+4*m, "early", 0.002, 50_000, 0), // before the window
+		kaCredit(t0+8*m, "early", 0.05),
+		kaPing(t0+7*m, "late", 0.003, 50_000, 0), // inside it
+		kaCredit(t0+9*m, "late", 0.03),
+	)
+	f := Filter{TenantAll: true, Since: t0 + 5*m}
+	led, err := fx.db.KeepAliveLedger(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(led.SavedUSD, 0.03) {
+		t.Errorf("SavedUSD = %v, want 0.03 — the early ping cost this window nothing, so it must "+
+			"not credit it either (0.08 is the unbounded look-back)", led.SavedUSD)
+	}
+	if !near(led.PingUSD, 0.003) {
+		t.Errorf("PingUSD = %v, want 0.003 (the in-window ping only)", led.PingUSD)
+	}
+	if led.MissesAvoided != 1 {
+		t.Errorf("MissesAvoided = %d, want 1", led.MissesAvoided)
+	}
+	if !near(led.NetUSD, 0.03-0.003) {
+		t.Errorf("NetUSD = %v, want 0.027", led.NetUSD)
+	}
+	grouped, err := fx.db.KeepAliveNetUSDByTenant(t0 + 5*m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(grouped[""], led.NetUSD) {
+		t.Errorf("the grouped per-tenant net = %v, want the ledger's %v — same rows, same window",
+			grouped[""], led.NetUSD)
+	}
+}
+
+// medianPingUSD turns a row's miss cost into a read cost with the ROW'S model. The same $1.25
+// miss reads as $0.10 on a standard model, $0.05 on Opus 5.5 and $0.025 on Fable 5.1.
+func TestMedianPingUSDFollowsTheRowsModelTier(t *testing.T) {
+	for model, want := range map[string]float64{
+		"aws/claude-sonnet-5":   0.10,
+		"aws/claude-opus-5-5":   0.05,
+		"claude-sonnet-5-5[1m]": 0.05,
+		"claude-fable-5-1":      0.025,
+	} {
+		evs := kaExpiry(2_000_000, "s1", 700, 1.25, 300_000)
+		for _, e := range evs {
+			e.Model = model
+		}
+		fx := newKAFixture(t, evs...)
+		got, err := fx.db.medianPingUSD(Filter{TenantAll: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s: median ping = %v, want %v", model, got, want)
+		}
+	}
+}
+
+// A row with no model keeps the 1.25x write multiple the back-derivation always used.
+func TestMedianPingUSDEmptyModelKeepsTheOldWriteMultiple(t *testing.T) {
+	evs := kaExpiry(2_000_000, "s1", 700, 1.25, 300_000)
+	for _, e := range evs {
+		e.Model = ""
+	}
+	got, err := newKAFixture(t, evs...).db.medianPingUSD(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-0.10) > 1e-9 {
+		t.Errorf("median ping with no model = %v, want 0.10", got)
+	}
+}
+
+// A ping that found the entry gone re-created it: it WROTE, it did not read. The accountant library
+// credits the rescue on the next request, because that request read the entry the ping wrote
+// (accountant case keepalive/ping-miss-restarts-clock/5m). The reachability gate asked for
+// cache_read > 0 on the ping, so it zeroed that credit and kept the ping's cost: the session read
+// -$0.01146 where the hand value is -$0.00094, 12x too negative (context-guru#768 B4).
+func TestTheGateKeepsTheRescueOfAPingThatWroteTheEntry(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = []CompRow{{Component: "mask", PricedBy: PricedByAccountant}}
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *SessionRow
+	for _, r := range rows {
+		if r.SessionID == "s1" {
+			got = r
+		}
+	}
+	if got == nil {
+		t.Fatal("session s1 is missing from the list")
+	}
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
+
+// A keep-alive-only setup stores no component rows, so the rescue the library credited has nothing for the
+// gate to find and was zeroed by the strict probe: the original B4 symptom, left in the case the keep-alive
+// is mostly used for (context-guru#912). The request itself must say the library priced it.
+func TestTheGateKeepsTheRescueOfALibraryPricedRequestWithNoComponentRows(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = nil
+	rescued.AccountantPriced = true
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	got := kaSession(t, fx, "s1")
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
+
+// The library's decision is trusted for a library-priced request even when the SQL model finds no ping that
+// reached the entry, and a row without the marker keeps the SQL gate (context-guru#919).
+func TestTheGateTrustsTheLibraryForPricedRowsAndKeepsSQLForLegacyRows(t *testing.T) {
+	priced := kaCredit(1_100_000, "lib", 0.01)
+	priced.AccountantPriced = true
+	legacy := kaCredit(1_100_000, "old", 0.01)
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "lib", 0.10), kaPing(1_050_000, "lib", 0.001, 0, 0), priced, // the ping read and wrote nothing
+		kaAgent(1_000_000, "old", 0.10), kaPing(1_050_000, "old", 0.001, 0, 0), legacy,
+	)
+	if got := kaSession(t, fx, "lib"); math.Abs(got.KeepAliveSavedUSD-0.01) > 1e-9 {
+		t.Errorf("library-priced saved = %.6f, want 0.01: the stored decision is trusted", got.KeepAliveSavedUSD)
+	}
+	if got := kaSession(t, fx, "old"); got.KeepAliveSavedUSD != 0 {
+		t.Errorf("legacy saved = %.6f, want 0: the SQL gate still judges a row with no marker", got.KeepAliveSavedUSD)
+	}
+}
+
+// The credited-row guard must come before every probe (a 197x slowdown, see
+// kaSavedGate), so the marker test sits inside the same AND after `col > 0`.
+func TestKaSavedGateKeepsTheCreditGuardFirst(t *testing.T) {
+	g := kaSaved("r.")
+	if !strings.HasPrefix(g, "(CASE WHEN r.keepalive_saved_usd > 0 AND (r.acc_priced = 1 OR ") {
+		t.Fatalf("the guard order changed: %.120s", g)
+	}
+	db := openTestDB(t)
+	// The probe must still seek the ping by its session index, and the marker must be a plain column read.
+	plan := explainPlan(t, db, "SELECT SUM("+g+") FROM requests r WHERE r.ts >= ?", []any{0})
+	if !strings.Contains(strings.Join(plan, "\n"), "idx_requests_tenant_session") {
+		t.Errorf("the ping probe no longer seeks idx_requests_tenant_session:\n%v", plan)
+	}
+}
+
+func kaSession(t *testing.T, fx *kaFixture, id string) *SessionRow {
+	t.Helper()
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.SessionID == id {
+			return r
+		}
+	}
+	t.Fatalf("session %s is missing from the list", id)
+	return nil
 }

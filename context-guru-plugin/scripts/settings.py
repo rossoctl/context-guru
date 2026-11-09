@@ -40,6 +40,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 KEY = "ANTHROPIC_BASE_URL"
 # The second key, written only when the proxy has to chain behind an existing gateway. It lives in
@@ -54,6 +55,36 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
+# The header that opts a session in to MANUAL pings (the Ping button) when keep-alive is
+# off: the proxy holds that session's cache request for a manual ping only: at most 300 s on a 5-minute cache, at most 59 min on a 1-hour cache. It rides in
+# ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
+# 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
+# `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.
+HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
+PING_HEADER = "x-context-guru-ping: 1"
+PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+PING_OPT_OUT_META = "ping_header_opt_out"    # true when the install was made with --no-ping-header: SessionStart must not heal it
+
+
+def _ping_line(line: str) -> bool:
+    return line.strip().lower().startswith("x-context-guru-ping")
+
+
+def with_ping_header(value: object) -> tuple[str, bool]:
+    """(the headers with our line in, whether WE added it). An existing x-context-guru-ping line, whatever its
+    value, is the user's to keep: nothing is added or changed, and the second item is False."""
+    text = value if isinstance(value, str) else ""
+    lines = [ln for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    if any(_ping_line(ln) for ln in lines):
+        return text, False
+    return "\n".join([*lines, PING_HEADER]), True
+
+
+def without_ping_header(value: object) -> str:
+    """The headers with the line we added taken out and every other line kept. "" when nothing else is left."""
+    text = value if isinstance(value, str) else ""
+    return "\n".join(ln for ln in text.replace("\r", "").split("\n") if ln.strip() and ln.strip() != PING_HEADER)
+
 # statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
 # own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
 # installs never pass it, and every add/remove call that omits it must behave exactly as it did
@@ -63,6 +94,8 @@ STATUSLINE_META = "installed_statusline"      # the command string we wrote, so 
                                                # recognises its own work even if it is about to
                                                # write a DIFFERENT command (the plugin moved).
 STATUSLINE_PREV_META = "previous_statusline"  # what we replaced, so uninstall can hand it back.
+STATUSLINE_ASKED_META = "statusline_asked"     # true when the user asked for the line by name (0.6.1+); the
+                                               # SessionStart migration then leaves it, see retire_statusline.
 
 # enabledPlugins is the THIRD surface, and the one that decides whether this plugin's commands, skills
 # and hooks exist in a session at all (#318). `/plugin` writes it, into whichever scope the user
@@ -77,6 +110,46 @@ PLUGIN_ID = "context-guru@context-guru"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
+
+
+def user_env_keys(env: dict) -> int:
+    """How many env keys are the USER's: not ours, and not ANTHROPIC_CUSTOM_HEADERS when our line is all it holds."""
+    return len([k for k in env if k not in OURS and not (k == HEADERS_KEY and without_ping_header(env[k]) == "")])
+
+
+def add_ping_header(env: dict, meta: dict) -> bool:
+    """Put our line into env's ANTHROPIC_CUSTOM_HEADERS and record that we did. True when it changed."""
+    new, added = with_ping_header(env.get(HEADERS_KEY))
+    if not added:
+        return False
+    env[HEADERS_KEY] = new
+    meta[PING_HEADER_META] = PING_HEADER
+    return True
+
+
+def record_ping_choice(env: dict, meta: dict, ping_on: bool) -> bool:
+    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone.
+    An opt-out also takes back the line WE added earlier (an install or a heal): the opt-out text promises
+    that a re-run with --no-ping-header stops the header. True when a line was removed."""
+    if ping_on:
+        meta.pop(PING_OPT_OUT_META, None)
+        return False
+    meta[PING_OPT_OUT_META] = True
+    removed = remove_ping_header(env, meta)
+    meta.pop(PING_HEADER_META, None)
+    return removed
+
+
+def remove_ping_header(env: dict, meta: object) -> bool:
+    """Take back the line WE added (and only that one); the user's other headers stay. True when it changed."""
+    if not isinstance(meta, dict) or meta.get(PING_HEADER_META) != PING_HEADER or HEADERS_KEY not in env:
+        return False
+    rest = without_ping_header(env[HEADERS_KEY])
+    if rest:
+        env[HEADERS_KEY] = rest
+    else:
+        del env[HEADERS_KEY]
+    return True
 
 
 def is_ours(data: dict, url: str) -> bool:
@@ -96,6 +169,16 @@ def is_ours(data: dict, url: str) -> bool:
     return False
 
 
+# Re-run the status line this often (seconds), on top of Claude Code's own event-driven redraws,
+# so the cache countdown keeps draining while nothing is happening. Claude Code 2.1.296 honours
+# `refreshInterval` (minimum 1); an older one ignores the key and only redraws on events.
+STATUSLINE_REFRESH_SECONDS = 1
+
+
+def _statusline_value(command: str) -> dict:
+    return {"type": "command", "command": command, "refreshInterval": STATUSLINE_REFRESH_SECONDS}
+
+
 def is_ours_statusline(data: dict, current: object) -> bool:
     """Did WE write the CURRENT statusLine value? Same shape as is_ours() above and for the same
     reason: answered from a record of what we wrote, never from guessing at the value's shape —
@@ -104,7 +187,10 @@ def is_ours_statusline(data: dict, current: object) -> bool:
     """
     meta = data.get(META)
     if isinstance(meta, dict) and meta.get(STATUSLINE_META):
-        return current == {"type": "command", "command": meta[STATUSLINE_META]}
+        # Ours whatever refreshInterval says: older installs wrote none, and a user may tune it.
+        return (isinstance(current, dict) and current.get("type") == "command"
+                and current.get("command") == meta[STATUSLINE_META]
+                and set(current) <= {"type", "command", "refreshInterval"})
     return False
 
 
@@ -116,15 +202,106 @@ def apply_statusline(data: dict, command: str) -> None:
     """
     if not command:
         return
-    desired = {"type": "command", "command": command}
+    desired = _statusline_value(command)
     current = data.get(STATUSLINE_KEY)
+    if is_ours_statusline(data, current) and isinstance(current, dict) and "refreshInterval" in current:
+        desired["refreshInterval"] = current["refreshInterval"]  # keep a value the user tuned
     if current == desired:
+        if is_ours_statusline(data, current):
+            data.setdefault(META, {})[STATUSLINE_ASKED_META] = True  # asked again for the same line: keep it
         return
     meta = data.setdefault(META, {})
     if current is not None and not is_ours_statusline(data, current):
         meta[STATUSLINE_PREV_META] = current
     data[STATUSLINE_KEY] = desired
     meta[STATUSLINE_META] = command
+    # Since 0.6.1 nothing writes the line unless the user asked for it (the install's default is off), so a line
+    # written now is wanted: the SessionStart migration (retire_statusline) must leave it.
+    meta[STATUSLINE_ASKED_META] = True
+
+
+# The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
+# <marketplace>/<plugin>/<version>/scripts/statusline.py`, inside the double quotes install.sh wraps
+# around it. Anything else (a dev checkout, a hand-written path) does not match and is left alone.
+_CACHED_STATUSLINE = re.compile(
+    r'"(?P<path>[^"]*/plugins/cache/(?P<market>[^/"]+)/(?P<plugin>[^/"]+)/(?P<version>[^/"]+)/scripts/statusline\.py)"')
+
+
+def _version_tuple(text: str) -> tuple | None:
+    """`0.5.1` -> (0, 5, 1). None for anything that is not dotted digits: a version we cannot order
+    is a version we do not move a status line away from."""
+    parts = text.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def repoint_statusline(data: dict, running: str) -> bool:
+    """Move OUR statusLine to the running plugin's `statusline.py`, in place. True if it changed.
+
+    install.sh writes the absolute, versioned path of the plugin that ran the install (a settings
+    file cannot use ${CLAUDE_PLUGIN_ROOT}), and the old version stays in the cache, so after a
+    plugin update the old path keeps working and nothing ever reports that it is stale (#551).
+
+    Moves only when ALL of these hold; anything else returns False and changes nothing:
+      * the current value is ours by record (is_ours_statusline), never by the look of the path;
+      * it names a cached `statusline.py` of the SAME plugin (marketplace and name) as the running one;
+      * that version is strictly OLDER than the running one, so an older session (or a second
+        Claude Code install) never drags a newer status line back.
+    Only the path inside the command changes: flags and `refreshInterval` stay as they were.
+    """
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    new = _CACHED_STATUSLINE.fullmatch('"' + running + '"')
+    old = _CACHED_STATUSLINE.search(current["command"])
+    if not new or not old or (old.group("market"), old.group("plugin")) != (new.group("market"), new.group("plugin")) or old.group("path") == running:
+        return False
+    old_v, new_v = _version_tuple(old.group("version")), _version_tuple(new.group("version"))
+    if old_v is None or new_v is None or not old_v < new_v:
+        return False
+    command = current["command"].replace('"' + old.group("path") + '"', '"' + running + '"')
+    current["command"] = command
+    data[META][STATUSLINE_META] = command
+    return True
+
+
+def mark_statusline_asked(data: dict) -> bool:
+    """Record that OUR current statusLine was asked for by name, in place. True if it changed.
+
+    A line installed before 0.6.1 carries no record, so the SessionStart migration (retire_statusline) would remove it.
+    A call that asks for the same line again changes nothing else, and must still record that the line is wanted."""
+    meta = data.get(META)
+    if not isinstance(meta, dict) or meta.get(STATUSLINE_ASKED_META) is True \
+            or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
+        return False
+    meta[STATUSLINE_ASKED_META] = True
+    return True
+
+
+# The one command the 0.4.x to 0.6.0 install wrote by default (install.sh: `python3 "<scripts>/statusline.py"`).
+_DEFAULT_STATUSLINE = re.compile(r'python3 "[^"]*/scripts/statusline\.py"')
+
+
+def retire_statusline(data: dict) -> bool:
+    """Remove OUR statusLine that an install wrote by default (0.4.x to 0.6.0), in place. True if it changed.
+
+    The mod's band draws what the line drew since 0.6.1, so the default line is retired once. Before 0.6.1 nothing
+    recorded whether the user asked for a line, so only the exact DEFAULT form is retired: the bare command install.sh
+    wrote, no flags, refreshInterval 1. A line with flags (a layout the user picked) or a tuned interval was chosen:
+    it is kept, and marked asked so it is never looked at again. Never a line asked for since 0.6.1
+    (STATUSLINE_ASKED_META), and never one that is not ours by record. A line we replaced comes back, as `off` does."""
+    meta = data.get(META)
+    if isinstance(meta, dict) and meta.get(STATUSLINE_ASKED_META) is True:
+        return False
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    if not _DEFAULT_STATUSLINE.fullmatch(current.get("command", "")) or current.get("refreshInterval", 1) != 1:
+        meta[STATUSLINE_ASKED_META] = True
+        return True  # changed: the record is written, the line stays
+    changed, _ = remove_statusline_only(data)
+    return changed
 
 
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
@@ -134,7 +311,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """
     meta = data.get(META)
     recorded = meta.get(STATUSLINE_META) if isinstance(meta, dict) else None
-    if not recorded or data.get(STATUSLINE_KEY) != {"type": "command", "command": recorded}:
+    if not recorded or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         return False, ""
     restored = ""
     del data[STATUSLINE_KEY]
@@ -143,6 +320,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
         restored = json.dumps(meta[STATUSLINE_PREV_META], sort_keys=True)
     meta.pop(STATUSLINE_META, None)
     meta.pop(STATUSLINE_PREV_META, None)
+    meta.pop(STATUSLINE_ASKED_META, None)
     if not meta:
         data.pop(META, None)
     return True, restored
@@ -700,6 +878,36 @@ def state_dir() -> str:
         return override
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "context-guru")
+
+
+RECORDED_COMMANDS = ("save-more", "remove-mcp-and-skills")
+
+
+def cmd_record_run(args: argparse.Namespace) -> int:
+    """Record that one of the commands the status line's weekly tip names just ran: its epoch
+    seconds under its name in `<state dir>/last-run.json`, merged into what is there and replaced
+    atomically. The status line only reads the file (statusline.py _tip_segment).
+
+    Silent on success: the commands chain this after their own report, which the skill shows the
+    user verbatim, so it must add nothing to it. A failure goes to stderr with exit 1."""
+    path = os.path.join(state_dir(), "last-run.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            runs = json.load(fh)
+    except (OSError, ValueError):
+        runs = {}
+    runs = runs if isinstance(runs, dict) else {}
+    runs[args.name] = int(time.time())
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"record-run: could not write {path}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def user_scope_files() -> list[str]:
@@ -2519,7 +2727,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
+        other_env_keys=user_env_keys(data.get("env") or {}),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
         # Provenance, from the record rather than the URL's shape. install.sh decided "already
@@ -2699,7 +2907,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     # the WHOLE call, including the base_url side, rather than writing half an install and
     # reporting success. It is a TOP-LEVEL key (see apply_statusline), so it cannot join
     # `desired`/`env` above; this is its own gate.
-    sl_desired = {"type": "command", "command": sl_command} if sl_command else None
+    sl_desired = _statusline_value(sl_command) if sl_command else None
     if sl_command:
         existing_sl = data.get(STATUSLINE_KEY)
         if existing_sl is not None and not is_ours_statusline(data, existing_sl) and not args.force:
@@ -2718,6 +2926,10 @@ def cmd_add(args: argparse.Namespace) -> int:
     # with an empty string neither the user nor this call asked to set.
     if not args.url:
         if sl_unchanged:
+            # The same line, asked for again by name: record that it is wanted, or the SessionStart migration
+            # (retire_statusline) would remove a line installed before 0.6.1 that the user just asked to keep.
+            if sl_command and existed and mark_statusline_asked(data):
+                save(args.file, data)
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
             return 0
@@ -2737,7 +2949,15 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 0
 
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+    ping_on = not getattr(args, "no_ping_header", False)
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
+            and (ping_on or ((data.get(META) or {}).get(PING_OPT_OUT_META) is True
+                             and (data.get(META) or {}).get(PING_HEADER_META) != PING_HEADER)):
+        # The same line asked for again by name, on a complete install: record that it is wanted (see
+        # mark_statusline_asked), as the statusline-only path above does.
+        if sl_command and existed and mark_statusline_asked(data):
+            save(args.file, data)
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2753,6 +2973,10 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on and add_ping_header(env, meta):
+            changed.append(HEADERS_KEY)
+        if record_ping_choice(env, meta, ping_on):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2773,6 +2997,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on:
+            add_ping_header(env, meta)
+        record_ping_choice(env, meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2837,6 +3064,9 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Record what we wrote, so a re-run can recognise its own work, and what we took over, so
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
+    if ping_on:
+        add_ping_header(env, meta)
+    record_ping_choice(env, meta, ping_on)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -2849,7 +3079,208 @@ def cmd_add(args: argparse.Namespace) -> int:
     record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k not in OURS]))
+         other_env_keys=user_env_keys(env))
+    return 0
+
+
+def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
+    """SessionStart step: retire the status line an install wrote by default (the mod's band draws it since 0.6.1),
+    else point one the user asked for at the plugin that is running now (#551).
+
+    Looks at the three scopes the plugin installs into, but only at files that already hold our
+    ownership record, and rewrites only that record and the command. Never fails: a file that is
+    missing, unreadable, malformed or unwritable stays as it was, and the exit code is always 0.
+    """
+    running = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline.py")
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [user_scope_files()[0],
+             os.path.join(base, ".claude", "settings.json"),
+             os.path.join(base, ".claude", "settings.local.json")]
+    try:
+        scopes = _read_install_scopes()
+        for key in (user_scope_key(), project_key(base)):
+            row = scopes.get(key)
+            if isinstance(row, dict) and isinstance(row.get("file"), str):
+                files.append(row["file"])
+    except Exception:
+        pass
+    seen: set = set()
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            kept = data.get(STATUSLINE_KEY)
+            if retire_statusline(data):
+                if data.get(STATUSLINE_KEY) is kept:
+                    # A line the user customised: kept, now marked as asked for, and repointed in the same run.
+                    repoint_statusline(data, running)
+                    save(real, data)
+                    continue
+                backup(real)  # as `off` does before the same removal
+                save(real, data)
+                if data.get(STATUSLINE_KEY) is not None:
+                    # remove_statusline_only gave back the status line the install had replaced.
+                    print("context-guru: your own status line is back; the Context Guru figures are now in the band "
+                          f"above the prompt ({real})")
+                else:
+                    print("context-guru: the status line moved into the Context Guru band above the prompt; "
+                          f"/context-guru:statusline brings the line back too ({real})")
+                continue
+            if not repoint_statusline(data, running):
+                continue
+            save(real, data)
+            print(f"context-guru: status line updated to this plugin version ({real})")
+        except Exception:
+            continue
+    return 0
+
+
+# The first build that could write --no-ping-header (#667, 328064e3, 2026-10-22 16:58:53 +0300). An install
+# made with that flag on such a build left no record of the choice. A file is healed only when the
+# install-scope row for it was recorded BEFORE this moment: every `add` rewrites the row, so a row older than
+# the cutoff proves nobody ran a flagged install since. Anything else gets a note, never a write.
+PING_FLAG_SHIPPED = "2026-10-22T13:58:53+00:00"
+PING_NOTE_SEEN = "ping-header-note.json"
+
+
+def predates_ping_flag(real: str) -> bool:
+    """True only when EVERY install-scope row that names this file was recorded before --no-ping-header existed.
+    One newer row (a flagged re-run under another key, say a machine-wide row beside a legacy project row)
+    or one row that cannot be read means the install may be an opt-out: then the answer is False."""
+    try:
+        cutoff = _dt.datetime.fromisoformat(PING_FLAG_SHIPPED)
+        found = False
+        for row in _read_install_scopes().values():
+            if not (isinstance(row, dict) and isinstance(row.get("file"), str)
+                    and os.path.realpath(row["file"]) == real):
+                continue
+            found = True
+            when = _dt.datetime.fromisoformat(row.get("recorded_at"))
+            if when.tzinfo is None or when >= cutoff:
+                return False
+        return found
+    except Exception:
+        return False
+
+
+def _note_seen_path() -> str:
+    return os.path.join(state_dir(), PING_NOTE_SEEN)
+
+
+def ping_note_seen(real: str) -> bool:
+    try:
+        with open(_note_seen_path(), encoding="utf-8") as fh:
+            return real in json.load(fh)
+    except Exception:
+        return False
+
+
+def mark_ping_note_seen(real: str) -> None:
+    try:
+        try:
+            with open(_note_seen_path(), encoding="utf-8") as fh:
+                seen = json.load(fh)
+        except Exception:
+            seen = []
+        if real not in seen:
+            ensure_state_dir(state_dir())
+            _write_atomic(_note_seen_path(), (json.dumps([*seen, real]) + "\n").encode("utf-8"), mode=0o600)
+    except Exception:
+        pass
+
+
+def ping_header_state(data: dict) -> str:
+    """Where one settings file stands on the ping header: "not-ours" (no routing record of ours),
+    "opted-out" (--no-ping-header), "removed" (we added the line and the user took it out), "present",
+    "user-off" (the user's own x-context-guru-ping line is not 1) or "missing". Only "missing" can be healed."""
+    env = data.get("env")
+    meta = data.get(META)
+    if not isinstance(env, dict) or not isinstance(meta, dict):
+        return "not-ours"
+    url = meta.get("installed_base_url")
+    if not url or env.get(KEY) != url:
+        return "not-ours"
+    if meta.get(PING_OPT_OUT_META) is True:
+        return "opted-out"
+    lines = [ln.strip() for ln in str(env.get(HEADERS_KEY, "")).replace("\r", "").split("\n") if _ping_line(ln)]
+    if lines:
+        return "present" if any(ln == PING_HEADER for ln in lines) else "user-off"
+    if meta.get(PING_HEADER_META) == PING_HEADER:
+        return "removed"
+    return "missing"
+
+
+PING_CONSENT = ("Ping enabled for this install; it works from your next session. The Context Guru server keeps your "
+                "latest request and key in memory so the Ping button can work: for 5 minutes "
+                "after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never "
+                "pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, "
+                "re-run the install with --no-ping-header.")
+PING_OFF_NOTE = "Ping is off for this install. Run /context-guru:install to turn it on."
+
+
+def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
+    """SessionStart step (#685): an install from before the header existed never got
+    `x-context-guru-ping: 1`, so the Ping button cannot work and a restart cannot change that.
+
+    The header makes the server keep the latest request and key in memory, so it is never written without
+    consent. It is written only for a file with our routing record AND an install-scope row older than
+    --no-ping-header (so no opt-out can exist). Any other install without a record gets `note=1` once and
+    no write. An opt-out, a line the user removed and a ping line the user set are left alone. Never fails:
+    exit code is 0. With --check it only reports.
+    """
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [args.file] if args.file else [
+        user_scope_files()[0],
+        os.path.join(base, ".claude", "settings.json"),
+        os.path.join(base, ".claude", "settings.local.json")]
+    if not args.file:
+        try:
+            scopes = _read_install_scopes()
+            for key in (user_scope_key(), project_key(base)):
+                row = scopes.get(key)
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    files.append(row["file"])
+        except Exception:
+            pass
+    rank = {"not-ours": 0, "opted-out": 1, "removed": 1, "user-off": 2, "present": 2, "missing": 3, "healed": 4}
+    seen: set = set()
+    state, where, notify = "not-ours", "", False
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            st = ping_header_state(data)
+            if st == "not-ours":
+                continue
+            if st == "missing" and not args.check:
+                if predates_ping_flag(real):
+                    if add_ping_header(data["env"], data[META]):
+                        save(real, data)
+                        st = "healed"
+                elif not ping_note_seen(real):
+                    notify = True
+                    mark_ping_note_seen(real)
+            if rank[st] >= rank[state]:
+                state, where = st, real
+        except Exception:
+            continue
+    emit(result=state, file=where)
+    if state == "healed":
+        emit(note=PING_CONSENT)
+    elif notify:
+        emit(note=PING_OFF_NOTE)
     return 0
 
 
@@ -3010,6 +3441,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    remove_ping_header(env, _meta)
     recorded_bin = ""
     if isinstance(_meta, dict):
         recorded_bin = _meta.get("installed_bin") or ""
@@ -3024,7 +3456,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     if isinstance(_meta, dict):
         recorded_sl = _meta.get(STATUSLINE_META) or ""
     restored_sl = ""
-    if recorded_sl and data.get(STATUSLINE_KEY) == {"type": "command", "command": recorded_sl}:
+    if recorded_sl and is_ours_statusline(data, data.get(STATUSLINE_KEY)):
         del data[STATUSLINE_KEY]
         if isinstance(_meta, dict) and _meta.get(STATUSLINE_PREV_META):
             data[STATUSLINE_KEY] = _meta[STATUSLINE_PREV_META]
@@ -3045,8 +3477,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(PING_HEADER_META, None)
+        meta.pop(PING_OPT_OUT_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
+        meta.pop(STATUSLINE_ASKED_META, None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that
@@ -3176,7 +3611,30 @@ def cmd_config(args: argparse.Namespace) -> int:
 STRATEGY_MARKER_PREFIX = "# context-guru:"
 STRATEGY_MARKER_TAIL = "written by"
 
-DEFAULT_STRATEGY = "5-min-ping"
+# Strategies are named by PING COUNT, never by minutes: the proxy reads each session's cache lifetime
+# (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
+# sessions it governs. The proxy picks the timing; the strategy picks how many pings.
+#
+#   strategy   5-minute cache                   1-hour cache
+#   auto       2 pings, first at 240 s          1 ping at 59 min
+#   1-ping     1 ping, at 240 s                 1 ping at 59 min
+#   2-ping     2 pings, first at 240 s          2 pings, 59 min apart
+#
+# `auto` is the default and is the per-TTL table: a 5-minute session behaves exactly as `5-min-ping`
+# always did. The 1-hour numbers are config.DefaultKeepAliveIdle1h / DefaultKeepAliveMaxPings1h in
+# the proxy; they are written out below so the file says what it does.
+DEFAULT_STRATEGY = "auto"
+
+# Names that existed before the rename. They keep working everywhere a name is read: `strategy set`
+# and `--cache-strategy` store the new name, and `strategy sync` rewrites an old marker under the
+# new one, so an existing install or settings file does not break. `5-min-ping` was the default.
+STRATEGY_ALIASES = {"5-min-ping": "auto"}
+
+
+def canonical_strategy(name: str) -> str:
+    """The current name for `name`: itself, or what an alias maps to."""
+    return STRATEGY_ALIASES.get(name, name)
+
 
 # The default PRESET, in the one place that decides it. It is `off` - the passthrough pipeline, no
 # components at all - and that is a deliberate product claim rather than a conservative guess:
@@ -3185,7 +3643,8 @@ DEFAULT_STRATEGY = "5-min-ping"
 #   byte-for-byte, and the only thing that happens is that your prompt cache is kept warm.
 #
 # It used to be `cache`, i.e. cachesplit alone, on the strength of a -34.1% figure that came from
-# SWE-bench CLI traffic and does not describe interactive use (#263). The measurements that do:
+# a Terminal-Bench task on Claude Code CLI traffic and does not describe interactive use (#263).
+# The measurements that do:
 # with cachesplit OFF a real session's first request still read 45,805 tokens from cache and only
 # 8,499 more moved when it was on (apply/prefixsplit_test.go), and its production credit over the
 # measured window was $0.03 against keep-alive's +$125. So the component that earns the install is
@@ -3227,17 +3686,55 @@ STRATEGIES: dict[str, dict] = {
         # cannot silently re-tune an already-armed install.
         "cache": {
             "keepalive": True,
-            "keepalive_idle_seconds": 280,
+            "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.25,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
         },
         "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (280s, at most 2 per "
-                "idle span, >=20k-token prefix, <=$0.25/ping). SPENDS THE CALLER'S CREDENTIAL "
-                "while nobody is at the keyboard.",
+        "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
+                "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
+                ">=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
+                "is at the keyboard.",
+    },
+    "1-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 240,
+            "keepalive_max_pings": 1,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 1,
+        },
+        "spends": True,
+        "desc": "at most 1 idle ping per idle span, whichever cache lifetime the session was "
+                "billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
+                "THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+    },
+    "2-ping": {
+        "cache": {
+            "keepalive": True,
+            "keepalive_idle_seconds": 240,
+            "keepalive_max_pings": 2,
+            "keepalive_max_usd_per_ping": 0.50,
+            "keepalive_min_prefix_tokens": 80000,
+            "keepalive_idle_seconds_1h": 3540,
+            "keepalive_max_pings_1h": 2,
+        },
+        "spends": True,
+        "desc": "at most 2 idle pings per idle span, whichever cache lifetime the session was "
+                "billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). "
+                "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-hour-head": {
+        # Keep the deprecated token key on purpose. The plugin updates through the marketplace and the
+        # proxy binary is released on its own, so this file can run against an OLDER proxy, and that
+        # proxy rejects an unknown key (strict YAML). Every proxy accepts head_ttl_min_tokens; a new
+        # proxy reads 50000 as the 200000-byte gate. Write head_ttl_min_bytes from the plugin only in
+        # a later release, once the oldest proxy in use knows it (#798).
         "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
         "spends": False,
         # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
@@ -3278,7 +3775,37 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _render_strategy(name: str, preset: str) -> str:
+# What the proxy does for a 1-hour cache when the `_1h` keys are absent (config.DefaultKeepAliveIdle1h
+# and DefaultKeepAliveMaxPings1h). A key equal to its default is NOT written, and that is load-bearing:
+# the plugin and the proxy binary ship separately, and an OLD binary's strict loader rejects an
+# unknown key and exits. Omitting the defaults keeps `auto` and `1-ping` loadable by every binary;
+# only a non-default value (`2-ping`) writes a `_1h` key.
+ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1}
+
+# A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
+# it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
+# `strategy set` renders afresh without it, and so does the next one after a proxy update.
+#
+# The marker records the proxy version it was written for. `strategy sync` keeps the keys out only
+# while the installed version is still that one: after a proxy update the keys go back in, and an old
+# binary that is still installed simply rejects them once more and takes the recovery path again.
+LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+
+
+def _installed_proxy_version() -> str:
+    """The version install.sh recorded for the proxy binary, or "" when none is recorded."""
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
+def _legacy_marker() -> str:
+    return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
+
+
+def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
     spec = STRATEGIES[name]
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
@@ -3296,7 +3823,10 @@ def _render_strategy(name: str, preset: str) -> str:
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
     ]
-    cache = spec["cache"]
+    cache = {k: v for k, v in spec["cache"].items()
+             if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
+    if legacy:
+        lines.insert(1, _legacy_marker())
     if cache:
         lines.append("cache:")
         for k, v in cache.items():
@@ -3398,7 +3928,8 @@ def cmd_strategy(args) -> int:
         # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
         # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
         # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
-        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES))
+        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES),
+             aliases=",".join(f"{old}:{new}" for old, new in STRATEGY_ALIASES.items()))
         for name, spec in STRATEGIES.items():
             emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
                     f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
@@ -3422,7 +3953,7 @@ def cmd_strategy(args) -> int:
             emit(result="ok", strategy="(foreign)", file=path, port=port,
                  note="a config exists at our path that we did not write; left alone")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         # A name we do not recognise is reported AS RECORDED, with a note saying so. Two wrong
         # answers were available here and both were worse: mapping it to a current name would claim
         # the file does something it does not, and reporting "(unnamed)" would hide that the file
@@ -3475,7 +4006,7 @@ def cmd_strategy(args) -> int:
             emit(result="skipped", reason="not_ours", file=path,
                  note="a config we did not write is at this path; its preset is its owner's business")
             return 0
-        name = _strategy_name_in(text)
+        name = canonical_strategy(_strategy_name_in(text))
         if not name:
             emit(result="skipped", reason="unnamed", file=path,
                  note="written before strategies had names, so there is no name to re-render from; "
@@ -3493,7 +4024,8 @@ def cmd_strategy(args) -> int:
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset)
+        want = _render_strategy(name, args.preset,
+                                legacy=args.legacy_binary or _legacy_marker() in text.splitlines())
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -3541,9 +4073,9 @@ def cmd_strategy(args) -> int:
         return 0
 
     # op == "set"
-    name = args.name
+    name = canonical_strategy(args.name)
     if name not in STRATEGIES:
-        emit(result="error", reason="unknown_strategy", requested=name,
+        emit(result="error", reason="unknown_strategy", requested=args.name,
              known=",".join(STRATEGIES))
         return 2
     # `none` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
@@ -3599,13 +4131,59 @@ PRESETS: dict[str, str] = {
     "conservative": "trims obvious waste from tool output (repeats, dead runs) — deterministic, "
                      "no model calls, the safe first step into carrying less",
     "medium": "conservative plus a cheap model that keeps only what looks relevant in recent "
-              "tool output — the first tier that can spend on its own",
-    "high": "medium plus a summarizer that compacts older turns once the context window is "
+              "tool output, and a summary prepared in the background that is used only if you "
+              "come back after the cache expired — the first tier that can spend on its own",
+    "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
-             "already gone cold — the deepest cut this picker offers",
+             "already gone cold",
+    "ultrahigh": "xhigh plus tool deferral: tools your own last sessions never used are sent as "
+                 "names only and loaded through search when needed — experimental, opt-in",
 }
 DEFAULT_PRESET = "off"
+
+
+def saved_preset(plugin: str = "context-guru@context-guru") -> tuple[str, str]:
+    """(preset, file) as saved in the first settings file that names one; ("", "") when none does."""
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and "preset" in opts:
+            return str(opts["preset"]), path
+    return "", ""
+
+
+def running_preset(port: str) -> str | None:
+    """The preset the proxy on `port` runs, from its /stats. None when nothing answers; "" when it
+    answers without a `preset` key (a proxy from before that field existed)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as resp:
+            doc = json.loads(resp.read())
+    except Exception:  # noqa: BLE001 - no proxy, or an unreadable answer: unknown, not an error
+        return None
+    got = doc.get("preset") if isinstance(doc, dict) else ""
+    return got if isinstance(got, str) else ""
+
+
+def preset_gap_note(saved: str, running: str | None) -> str:
+    """`preset: xhigh (ultrahigh after a restart)` when the saved preset differs from the running
+    one, else "". Nothing when the running preset is unknown: a guess would show a false gap."""
+    if not saved or not running or saved == running:
+        return ""
+    return f"preset: {running} ({saved} after a restart)"
+
+
+def _gap_facts(saved: str) -> dict:
+    port, _src = resolve_routed_port()
+    running = running_preset(port) if port else None
+    facts: dict = {"running": running if running is not None else "no_proxy"}
+    note = preset_gap_note(saved, running)
+    if note:
+        facts["gap"] = note
+    return facts
 
 
 def cmd_preset(args: argparse.Namespace) -> int:
@@ -3616,17 +4194,16 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 0
 
     if args.op == "show":
-        for path in _option_file_candidates(args.plugin):
-            if not os.path.exists(path):
-                continue
-            data, _ = load(path)
-            opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options") or {})
-            if isinstance(opts, dict) and "preset" in opts:
-                emit(result="ok", preset=opts["preset"], file=path)
-                return 0
-        emit(result="ok", preset=DEFAULT_PRESET, file="(none)",
+        saved, path = saved_preset(args.plugin)
+        if path:
+            emit(result="ok", preset=saved, file=path, **_gap_facts(saved))
+            return 0
+        emit(result="ok", preset=DEFAULT_PRESET, file="(none)", **_gap_facts(DEFAULT_PRESET),
              note="no preset configured; the plugin default applies")
         return 0
+
+    if args.op == "restart":
+        return _preset_restart(args)
 
     # op == "set"
     name = args.name
@@ -3674,17 +4251,109 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 3
 
     if options.get("preset") == name:
-        emit(result="unchanged", preset=name, file=target)
+        facts = _gap_facts(name)
+        # The probe goes only to a proxy that runs the preset already.
+        emit(result="unchanged", preset=name, file=target, **facts,
+             **(_ask_defer_probe(name) if facts["running"] == name else {}))
         return 0
 
     if existed:
         backup(target)
     options["preset"] = name
     save(target, data)
-    emit(result="set", preset=name, file=target,
-         note="takes effect the next time the proxy starts, not this session — stop and restart "
-              "it, or start a new session, to pick it up")
+    facts = _gap_facts(name)
+    if facts["running"] == name:
+        emit(result="set", preset=name, file=target, **facts, **_ask_defer_probe(name))
+    elif facts["running"] == "no_proxy":
+        emit(result="set", preset=name, file=target, **facts, restart_needed="false",
+             note="no proxy answers on this port; the next proxy start runs this preset")
+    else:
+        # The probe waits: the running proxy would take it and do nothing with it (#887).
+        emit(result="set", preset=name, file=target, **facts, restart_needed="true",
+             note="saved, but the running proxy does not run it yet. A restart applies it, and every "
+                  "open session on this port then pays one cache rewrite. Ask the user. On yes run "
+                  f"`preset restart --name {name}`. On no, the old preset runs until the next session start.")
     return 0
+
+
+def _preset_restart(args: argparse.Namespace) -> int:
+    """Restart the proxy on this directory's port with preset `--name`, through start-proxy.sh.
+
+    There is ONE restart path: start-proxy.sh runs `strategy sync`, compares the fingerprint, stops
+    the proxy by its pidfile and starts a new one. This only hands it the values a Bash call does not
+    carry (`CLAUDE_PLUGIN_OPTION_*` reaches hooks only), then reads /stats to confirm. Call it only
+    after the user said yes: every open session on the port pays one cache rewrite.
+    """
+    name = args.name
+    if name not in PRESETS:
+        emit(result="error", reason="unknown_preset", requested=name, known=",".join(PRESETS))
+        return 2
+    port, why = resolve_routed_port(plugin=args.plugin)
+    if not port:
+        emit(result="error", reason="not_routed", why=why)
+        return 3
+    # --unrouted: the port was resolved just above, so start-proxy.sh's own routing gate (which reads
+    # ANTHROPIC_BASE_URL, absent from some Bash calls) has nothing left to check.
+    cmd = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "start-proxy.sh"),
+           "--unrouted", "--no-update-check", "--port", port, "--preset", name]
+    for flag, key in (("--upstream", "upstream"), ("--idle-exit", "idle_exit")):
+        value = _configured_option(args.plugin, key)
+        if value:
+            cmd += [flag, value]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        emit(result="error", reason="start_failed", detail=str(exc))
+        return 4
+    for line in out.splitlines():
+        if line.strip():
+            emit(starter=line.strip())
+    running = running_preset(port)
+    if running == name:
+        emit(result="restarted", preset=name, port=port, running=running, **_ask_defer_probe(name))
+        return 0
+    emit(result="not_applied", preset=name, port=port, running=running if running is not None else "no_proxy",
+         note="the proxy does not run the new preset yet; the lines above say why. The saved preset "
+              "applies at the next session start.")
+    return 5
+
+
+def _configured_option(plugin: str, key: str) -> str:
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and opts:
+            return str(opts.get(key) or "")
+    return ""
+
+
+def _ask_defer_probe(preset: str) -> dict:
+    """For `ultrahigh`: ask the routed proxy to run tool deferral's provider check (#485).
+
+    POST /tool-defer/probe. The proxy runs the check in the background at this account's next
+    request, with that request's own model and credential, so it has a verdict before the first
+    session that could be deferred. Returns at once (1 s ceiling); any failure is reported as
+    `probe=<reason>`, never raised. {} (no output line) for every other preset.
+    """
+    if preset != "ultrahigh":
+        return {}
+    return {"probe": _post_defer_probe()}
+
+
+def _post_defer_probe() -> str:
+    port, _src = resolve_routed_port()
+    if not port:
+        return "not_routed"
+    import urllib.request
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return "asked" if resp.status == 202 else f"status_{resp.status}"
+    except Exception:  # noqa: BLE001 - an older proxy, or none running: the probe runs later anyway
+        return "unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -3882,6 +4551,9 @@ def main() -> int:
         p.add_argument("--bin", default="",
                        help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
                             "machines where its directory is not on PATH")
+        p.add_argument("--no-ping-header", action="store_true",
+                       help="do not add `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS (the opt-in "
+                            "for manual pings when keep-alive is off)")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
@@ -3906,6 +4578,12 @@ def main() -> int:
              "--statusline`, for when both were installed together and only the statusline "
              "should come back off")
     off.add_argument("--file", required=True)
+
+    ep = sub.add_parser("ensure-ping-header",
+        help="SessionStart: add the ping header to the settings file that holds our routing when an older "
+             "install left it out. Skips --no-ping-header installs and files that are not ours.")
+    ep.add_argument("--file", default="", help="check this file only, instead of the three scopes")
+    ep.add_argument("--check", action="store_true", help="report only; write nothing")
 
     en = sub.add_parser("enable-plugin",
         help="set enabledPlugins[<plugin>] = true in --file when it is absent, recorded so `remove` "
@@ -3950,6 +4628,9 @@ def main() -> int:
              "with no question asked (see the module comment above cmd_gitignore_ensure)")
     gi.add_argument("--file", required=True)
 
+    sub.add_parser("statusline-repoint",
+                   help="SessionStart: point a status line we installed at the running plugin version")
+
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
     st.add_argument("--name", default="",
@@ -3961,11 +4642,14 @@ def main() -> int:
                     help="the preset to state in the file. Required for `set` and `sync`, because "
                          "--config REPLACES --preset rather than layering over it.")
 
+    st.add_argument("--legacy-binary", action="store_true",
+                    help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
+
     pr = sub.add_parser("preset")
-    pr.add_argument("op", choices=("list", "show", "set"))
+    pr.add_argument("op", choices=("list", "show", "set", "restart"))
     pr.add_argument("--plugin", default="context-guru@context-guru")
     pr.add_argument("--name", default="",
-                    help="preset name for `set`; one of " + ", ".join(PRESETS))
+                    help="preset name for `set` and `restart`; one of " + ", ".join(PRESETS))
     pr.add_argument("--user-scope", action="store_true",
                     help="only used when no options file exists yet: write the machine-wide "
                          "settings file (~/.claude/settings.json) instead of the project-local "
@@ -4020,6 +4704,9 @@ def main() -> int:
 
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
+    rr = sub.add_parser("record-run", help="note that a command the status line tip names just ran")
+    rr.add_argument("name", choices=RECORDED_COMMANDS)
+
     uc = sub.add_parser("update-check")
     uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
     uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
@@ -4039,14 +4726,14 @@ def main() -> int:
             ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
-    rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
-          "enable-plugin": cmd_enable_plugin,
+    rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
+          "enable-plugin": cmd_enable_plugin, "ensure-ping-header": cmd_ensure_ping_header,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
-          "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
+          "gitignore-ensure": cmd_gitignore_ensure, "record-run": cmd_record_run}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

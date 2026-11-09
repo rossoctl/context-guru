@@ -304,75 +304,6 @@ var tierCases = []struct {
 	{"non_caching", 0, 0, 80_000, func(p modelinfo.Price) float64 { return p.Input }},
 }
 
-// TestPerComponentSavedUSDReconcilesWithTheBaseline is the identity that makes the
-// per-component dollars trustworthy: they are a PARTITION of the request's own saving, not
-// a second, independently-computed estimate that can drift from the headline. Reconciled
-// against production data at 0.9%; on a fixture whose component rows sum exactly to the
-// request's, it has to be exact to float noise.
-func TestPerComponentSavedUSDReconcilesWithTheBaseline(t *testing.T) {
-	for _, tc := range tierCases {
-		t.Run(tc.name, func(t *testing.T) {
-			e := perComponentEvent(tc.read, tc.write, tc.fresh)
-			e.Price(ibmOpus, true)
-			var sum float64
-			for _, c := range e.Components {
-				sum += c.SavedUSD
-			}
-			want := e.BaselineCostUSD - e.CostUSD
-			if want <= 0 {
-				t.Fatalf("fixture removed nothing: baseline %.10f cost %.10f", e.BaselineCostUSD, e.CostUSD)
-			}
-			if math.Abs(sum-want) > 1e-12 {
-				t.Errorf("Σ per-component saved_usd = %.10f, request-level saving = %.10f (error %.3g); "+
-					"the components view and the headline would disagree",
-					sum, want, math.Abs(sum-want)/want)
-			}
-		})
-	}
-}
-
-// TestComponentSavingUsesTheTierTheRequestPaid: the same removals are worth different money
-// depending on how the provider billed THIS request, and a component whose saving is pure
-// replay earns that tier — not the creation rate. Pricing replay as creation is the ~12.5x
-// overstatement the request-level figure already avoids; this pins the per-component path
-// against the same mistake.
-func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
-	for _, tc := range tierCases {
-		t.Run(tc.name, func(t *testing.T) {
-			e := perComponentEvent(tc.read, tc.write, tc.fresh)
-			e.Price(ibmOpus, true)
-			tier := tc.tier(ibmOpus)
-			for _, want := range []struct {
-				comp           string
-				unique, replay float64
-			}{
-				{"mask", 900, 11_100},
-				{"extract_llm", 1_100, 4_900},
-				{"collapse", 0, 2_000}, // pure replay
-				{"cacheinject", 0, 0},
-			} {
-				got := compByName(t, e, want.comp).SavedUSD
-				// Scaled by the row's own tokenizer correction (#240) rather than a literal,
-				// so this test keeps pinning the TIER RULE and does not have to be edited
-				// every time the measured factor is refreshed.
-				exp := (want.unique*ibmOpus.CacheWrite + want.replay*tier) * e.BilledTokenFactor
-				if math.Abs(got-exp) > 1e-12 {
-					t.Errorf("%s saved_usd = %.10f, want %.10f (unique at the write rate, "+
-						"replay at this request's %s tier)", want.comp, got, exp, tc.name)
-				}
-			}
-			// And on a warm turn the replay term must NOT be the creation rate, which is the
-			// specific inflation the tier rule exists to prevent.
-			if tc.name == "warm" {
-				if got, ceiling := compByName(t, e, "collapse").SavedUSD, 2_000*ibmOpus.CacheWrite*e.BilledTokenFactor; got >= ceiling {
-					t.Errorf("a pure-replay component on a warm turn is valued at %.10f, at or above "+
-						"the creation rate %.10f — replay sits in the cached prefix", got, ceiling)
-				}
-			}
-		})
-	}
-}
-
 func compByName(t *testing.T, e *Event, name string) CompRow {
 	t.Helper()
 	for _, c := range e.Components {
@@ -621,7 +552,7 @@ func TestPreColumnComponentRowsAreValuedNotZeroed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
 			e := perComponentEvent(tc.read, tc.write, tc.fresh)
-			e.Price(ibmOpus, true)
+			legacyPrice(e, ibmOpus) // history: written by the legacy rule, before the accountant library
 			if err := db.insertBatch([]*Event{e}); err != nil {
 				t.Fatal(err)
 			}

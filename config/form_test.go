@@ -556,7 +556,7 @@ func perturbations(fd components.Field, cur any) []any {
 		// so a junk entry is a 400 on the settings page rather than a filter that silently
 		// matches nothing). Keyed by the field, because a value valid for both would have to
 		// satisfy two grammars that share nothing.
-		if fd.Key == "remove" {
+		if fd.Key == "remove" || fd.Key == "keep" || fd.Key == "always_defer" { // toolfilter's name lists
 			return []any{[]string{"cg-form-sentinel"}}
 		}
 		return []any{[]string{"schema_version: 1\nfilters:\n  cgsentinel:\n    description: sentinel\n    match: 'cg-form-sentinel'\n"}}
@@ -770,17 +770,16 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 	}
 }
 
-// A credential is write-only. It is declared (the form has to be able to SET it) but never
-// echoed back, and "absent from the form" therefore cannot mean "cleared" — otherwise every
-// save would delete the stored key.
-func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
+// A credential is no longer a component setting: the model: block names a source, and the
+// endpoint and key live on the host (CHEAP_MODEL_*). A stored document that still carries one
+// keeps loading — a removed setting must not stop the proxy or lock the settings page — but the
+// value is never used: the form declares no such field, so it never reaches the payload, and a
+// save validates through the same path the proxy builds with, which drops it.
+func TestAStoredCredentialIsNeverEchoedAndASaveStillWorks(t *testing.T) {
 	const secret = "sk-do-not-echo-me"
 	doc := "pipeline: [extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
 		"    strategy: code\n    model:\n      model: claude-haiku-4-5\n      api_key: " + secret + "\n"
 	f := mustParse(t, doc)
-	if _, ok := f.Components["extract_llm"]["model.api_key"]; ok {
-		t.Error("the parsed form carries the stored api_key")
-	}
 	blob, err := json.Marshal(f)
 	if err != nil {
 		t.Fatal(err)
@@ -788,21 +787,11 @@ func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
 	if strings.Contains(string(blob), secret) {
 		t.Errorf("the api_key reached the settings payload: %s", blob)
 	}
-	out, err := ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := ApplyForm(doc, f); err != nil {
+		t.Fatalf("a save over a document that stores model.api_key was refused: %v", err)
 	}
-	if !strings.Contains(out, secret) {
-		t.Errorf("saving the form deleted the stored credential:\n%s", out)
-	}
-	// An explicit empty string is how it gets cleared.
-	f.Components["extract_llm"]["model.api_key"] = ""
-	out, err = ApplyForm(doc, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out, secret) {
-		t.Errorf("an explicit clear left the credential in place:\n%s", out)
+	if err := Validate([]byte(doc)); err != nil {
+		t.Errorf("stored-document validation refused model.api_key: %v", err)
 	}
 }
 
@@ -823,5 +812,39 @@ func TestAComponentTheFormDoesNotSendIsUntouched(t *testing.T) {
 	if back := mustParse(t, out); back.Components["collapse"]["max_tokens"] != 3000 {
 		t.Errorf("a component the form did not send lost its configuration (%v):\n%s",
 			back.Components["collapse"], out)
+	}
+}
+
+// The settings form round-trips the new byte gate, and keeps a deprecated token gate from an old document.
+func TestFormRoundTripsHeadTTLMinBytes(t *testing.T) {
+	doc := "preset: off\ncache:\n  head_ttl_1h: true\n  head_ttl_min_tokens: 50000\n"
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Cache == nil || f.Cache.HeadTTLMinTokens != 50000 || f.Cache.HeadTTLMinBytes != 0 {
+		t.Fatalf("old document read wrong: %+v", f.Cache)
+	}
+	f.Cache.HeadTTLMinBytes = 300000
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "head_ttl_min_bytes: 300000") {
+		t.Errorf("the saved document lacks head_ttl_min_bytes:\n%s", out)
+	}
+	back, err := ParseForm(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Cache.HeadTTLMinBytes != 300000 {
+		t.Errorf("round trip lost head_ttl_min_bytes: %+v", back.Cache)
+	}
+	c, err := LoadBytes([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Cache.Resolved().HeadTTLMinBytes; got != 300000 {
+		t.Errorf("the new key must win over the old one: gate = %d", got)
 	}
 }

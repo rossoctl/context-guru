@@ -1,0 +1,31 @@
+╭─ Save more: config ─────────────────────────────────────────────────────────────────────────────╮
+│ So far: your current config saved $9.40 in 30 days (observed).                                  │
+│ Change: preset conservative -> medium. Over the last 30 days it would have saved about $1.49 a  │
+│ week (range $0.40 to $2.70).                                                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+medium would have saved $6.40 more than your current conservative preset on the requests that could
+be replayed.
+
+     option                                       saved  spent      net
+  ★  medium        + cheap-model relevance pass  $17.90  $2.10  ≈$15.80  ████████████
+     high          + summary near a full window  $18.40  $3.50  ≈$14.90  ███████████░
+  ▸  current       Your config (conservative)     $9.60  $0.20    $9.40  ███████░░░░░
+  ◦  conservative  Trim obvious waste             $9.60  $0.20    $9.40  ███████░░░░░
+     off           No compaction                     $0     $0       $0  ░░░░░░░░░░░░
+  ★ recommended   ▸ yours now   ◦ the default   ≈ partly estimated
+  xhigh: not evaluated: too few cold turns in the window to replay
+  saved: what it avoided paying · spent: what it paid itself · net = saved - spent, on your past
+  sessions
+
+  medium: the relevance model's choices are estimated from the stored rewrites
+  high: summaries are estimated, not re-run
+
+  counterfactual · every shipped preset replayed on your stored requests · 2026-09-08..2026-10-08 ·
+  40 sessions, 3,100 requests
+  ! The replay covers 14% of requests; on the rest the presets were not compared.
+  ! medium and high include model components whose output is estimated, not re-run.
+
+Recommended: preset conservative -> medium (takes effect now).
+Why: highest net on your own sessions, after its own model spend
+Apply it? Say yes, or run: /context-guru:save-more apply config medium@a1b2c3d4
+
