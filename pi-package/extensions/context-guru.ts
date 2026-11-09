@@ -58,6 +58,12 @@ export function parseFacts(text: string): Record<string, string> {
   return out;
 }
 
+/** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
+export function parseArgs(args: string): { sub: string; value: string } {
+  const [sub = "status", value = ""] = args.trim().split(/\s+/).filter(Boolean);
+  return { sub, value };
+}
+
 /** Pi's shutdown reason as the proxy's SessionEnd kind. `reload` keeps the session, so it sends nothing. */
 export function endKind(reason: string): string | undefined {
   return ({ quit: "prompt_input_exit", new: "clear", resume: "resume", fork: "other" } as Record<string, string>)[reason];
@@ -181,15 +187,20 @@ export default function contextGuru(pi: ExtensionAPI) {
     return ctx.hasUI ? ctx.ui.select(title, options) : undefined;
   };
 
-  const configure = async (ctx: ExtensionCommandContext, flag: "--preset" | "--cache-strategy", value: string) => {
-    if (ctx.hasUI) {
-      const ok = await ctx.ui.confirm("Restart the proxy?",
-        "The new setting applies after a restart. A restart costs one cache rewrite in every open Pi session.");
-      if (!ok) {
-        say(ctx, "Nothing changed.");
-        return;
-      }
+  /** One yes for a command that writes or restarts. Print mode has no dialog, and no answer is a no. */
+  const agree = async (ctx: ExtensionCommandContext, title: string, message: string) => {
+    if (!ctx.hasUI) {
+      say(ctx, `${title} needs an interactive yes, so nothing changed. ${message}`, "warning");
+      return false;
     }
+    if (await ctx.ui.confirm(title, message)) return true;
+    say(ctx, "Nothing changed.");
+    return false;
+  };
+
+  const configure = async (ctx: ExtensionCommandContext, flag: "--preset" | "--cache-strategy", value: string) => {
+    if (!(await agree(ctx, "Restart the proxy?",
+      "The new setting applies after a restart. A restart costs one cache rewrite in every open Pi session."))) return;
     const out = await run(["configure", flag, value], 30_000);
     install = readInstall();
     const f = out.facts;
@@ -207,7 +218,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       return values.filter((v) => v.startsWith(rest)).map((v) => ({ value: `${sub} ${v}`, label: v }));
     },
     handler: async (args, ctx) => {
-      const [sub = "status", value = ""] = args.trim().split(/\s+/);
+      const { sub, value } = parseArgs(args);
       switch (sub) {
         case "setup":
           return setup(ctx);
@@ -226,14 +237,14 @@ export default function contextGuru(pi: ExtensionAPI) {
         case "update": {
           const check = (await run(["update", "--check"], 30_000)).facts;
           if (check.update_available !== "true") return say(ctx, `context-guru proxy ${check.installed_version ?? "?"} is current.`);
-          if (ctx.hasUI && !(await ctx.ui.confirm("Update the proxy?",
-            `Install ${check.latest_version} (now ${check.installed_version}) and restart the proxy?`))) return say(ctx, "Nothing changed.");
-          const f = (await run(["update", "--install"])).facts;
+          if (!(await agree(ctx, "Update the proxy?",
+            `Install ${check.latest_version} (now ${check.installed_version}) and restart the proxy?`))) return;
+          const f = (await run(["update", "--install"], 300_000)).facts;
           return say(ctx, `context-guru update: ${f.result} ${f.version ?? f.reason ?? ""}`.trim());
         }
         case "uninstall": {
-          if (ctx.hasUI && !(await ctx.ui.confirm("Remove context-guru?",
-            "Restore models.json, stop and remove the proxy service, and delete the downloaded binary."))) return say(ctx, "Nothing changed.");
+          if (!(await agree(ctx, "Remove context-guru?",
+            "Restore models.json, stop and remove the proxy service, and delete the downloaded binary."))) return;
           const f = (await run(["uninstall"], 60_000)).facts;
           await reloadModels(ctx);
           return say(ctx, `context-guru removed (models.json: ${f.models_restore}, service: ${f.service}). ` +

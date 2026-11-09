@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { endKind, isRouted, parseFacts, readInstall } from "../extensions/context-guru.ts";
+import { endKind, isRouted, parseArgs, parseFacts, readInstall } from "../extensions/context-guru.ts";
 
 const install = { port: 8800, base_urls: { anthropic: "http://127.0.0.1:8800/anthropic" }, cache_strategy: "auto" };
 
@@ -37,4 +37,11 @@ test("the install record is read from disk, and a missing or broken one is undef
   assert.equal(readInstall(dir), undefined);
   writeFileSync(join(dir, "install.json"), JSON.stringify(install));
   assert.deepEqual(readInstall(dir), install);
+});
+
+test("a bare /context-guru runs status, and the first two words are the subcommand and its value", () => {
+  assert.deepEqual(parseArgs(""), { sub: "status", value: "" });
+  assert.deepEqual(parseArgs("   "), { sub: "status", value: "" });
+  assert.deepEqual(parseArgs("preset"), { sub: "preset", value: "" });
+  assert.deepEqual(parseArgs("  preset   medium "), { sub: "preset", value: "medium" });
 });

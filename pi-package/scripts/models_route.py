@@ -51,6 +51,11 @@ def _dump(document):
     return json.dumps(document, indent=2) + "\n"
 
 
+def _same(a, b):
+    """URLs compare without trailing slashes, as Pi joins paths onto them."""
+    return a is not None and b is not None and a.rstrip("/") == b.rstrip("/")
+
+
 def current(models_path, provider):
     """The baseUrl models.json sets for this provider, or None."""
     try:
@@ -63,7 +68,7 @@ def current(models_path, provider):
 
 
 def is_routed(models_path, port, provider="anthropic"):
-    return bool(port) and current(models_path, provider) == base_url(port, provider)
+    return bool(port) and _same(current(models_path, provider), base_url(port, provider))
 
 
 def conflicts(models_path, port, providers):
@@ -72,7 +77,7 @@ def conflicts(models_path, port, providers):
     found = {}
     for provider in providers:
         url = current(models_path, provider)
-        if url is not None and url != base_url(port, provider):
+        if url is not None and not _same(url, base_url(port, provider)):
             found[provider] = url
     return found
 
@@ -99,6 +104,7 @@ def install(models_path, state_path, port, providers):
             keys[provider] = {"previous": entry.get("baseUrl"), "created_entry": created_entry}
         entry["baseUrl"] = base_url(port, provider)
     if not state_path.exists():
+        # For a person only: restore() works from the routing record, never from this copy.
         backup = state_path.with_name("models.json.before-context-guru")
         if existed:
             _atomic(backup, models_path.read_text())
@@ -124,7 +130,7 @@ def restore(state_path):
     restored, changed = 0, 0
     for provider, saved in record.get("keys", {}).items():
         entry = table.get(provider)
-        if not isinstance(entry, dict) or entry.get("baseUrl") != base_url(port, provider):
+        if not isinstance(entry, dict) or not _same(entry.get("baseUrl"), base_url(port, provider)):
             changed += 1
             continue
         if saved.get("previous") is None:

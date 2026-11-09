@@ -78,6 +78,12 @@ class ModelsRoute(Sandbox):
         self.assertEqual(models_route.restore(self.state), "routing_already_changed")
         self.assertEqual(json.loads(self.models.read_text())["providers"]["anthropic"]["baseUrl"], "https://mine.example")
 
+    def test_a_trailing_slash_on_our_url_is_still_ours(self):
+        self.models.parent.mkdir(parents=True)
+        self.models.write_text(json.dumps({"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:8800/anthropic/"}}}))
+        self.assertTrue(models_route.is_routed(self.models, 8800))
+        self.assertEqual(models_route.conflicts(self.models, 8800, ["anthropic"]), {})
+
     def test_a_broken_file_is_refused_not_overwritten(self):
         self.models.parent.mkdir(parents=True)
         self.models.write_text("{not json")
@@ -142,6 +148,20 @@ class Controller(Sandbox):
         self.assertTrue(pi_plugin.reset_hatch().exists())
         self.assertTrue((pi_plugin.state_dir() / "models_route.py").exists())
 
+    def test_a_fact_never_spans_two_lines(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pi_plugin.facts(detail="first line\nresult=routed")
+        self.assertEqual(out.getvalue(), "detail=first line result=routed\n")
+
+    def test_a_taken_recorded_port_is_replaced(self):
+        with mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", side_effect=lambda p: p != 8800), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8801):
+            self.assertEqual(pi_plugin.choose_port({"port": 8800}), 8801)
+        with mock.patch.object(pi_plugin, "healthy", return_value=True):
+            self.assertEqual(pi_plugin.choose_port({"port": 8800}), 8800)
+
     def test_config_render(self):
         text = pi_plugin.render_config("medium", "auto")
         self.assertTrue(text.startswith(pi_plugin.MARKER + "\n"))
@@ -174,6 +194,12 @@ class Controller(Sandbox):
                              env=dict(os.environ))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("result=planned", out.stdout)
+
+    def test_reset_hatch_with_closed_stdin_is_a_no(self):
+        out = subprocess.run(["sh", str(HERE / "reset.sh")], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, env=dict(os.environ))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("result=cancelled", out.stdout)
 
     def test_reset_hatch_restores_routing(self):
         models_route.install(self.models, self.state, 8800, ["anthropic"])

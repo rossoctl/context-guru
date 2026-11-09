@@ -120,7 +120,8 @@ def facts(**values):
     for key, value in values.items():
         if isinstance(value, (dict, list)):
             value = json.dumps(value, separators=(",", ":"))
-        print(f"{key}={value}")
+        # One fact per line: an error text with a newline must not start a second, false fact.
+        print(f"{key}=" + " ".join(str(value).split("\n")).replace("\r", " "))
 
 
 def healthy(port):
@@ -140,6 +141,24 @@ def first_free_port():
             except OSError:
                 pass
     raise RuntimeError("no free port in 8787..8887")
+
+
+def port_free(port):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def choose_port(record):
+    """The recorded port while it is ours to use (our proxy answers there, or nothing holds it).
+    Another program on it means a new port, so setup does not fail on every retry."""
+    port = int(record.get("port") or 0)
+    if port and (healthy(port) or port_free(port)):
+        return port
+    return first_free_port()
 
 
 def read_record():
@@ -401,7 +420,7 @@ def consent_question(port, strategy):
 
 def setup(args):
     record = read_record()
-    port = int(record.get("port") or 0) or first_free_port()
+    port = choose_port(record)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     preset = record.get("preset") or DEFAULT_PRESET
     if strategy not in STRATEGIES:

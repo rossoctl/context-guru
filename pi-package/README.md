@@ -44,6 +44,9 @@ After setup, re-select the model with `/model`, or restart Pi.
 | `/context-guru update` | Checks for a newer proxy release and installs it after a yes |
 | `/context-guru uninstall` | Restores `models.json`, stops and removes the service, deletes the downloaded binary |
 
+`/context-guru` alone runs `status`. Every command that writes or restarts asks for a yes first. In print
+mode (`pi -p`) there is no dialog, so these commands change nothing.
+
 The presets and the cache strategies are the same as in the Claude Code plugin. See
 [docs/reference/presets.md](../docs/reference/presets.md).
 
@@ -86,7 +89,7 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
 | Path | Owner |
 |---|---|
 | `~/.pi/agent/models.json` | Yours. Setup changes only `providers.anthropic.baseUrl`, and uninstall puts back the old value |
-| `~/.local/state/context-guru-pi/` | context-guru: install record, routing record, proxy config, log, dashboard database, binary |
+| `~/.local/state/context-guru-pi/` | context-guru: install record, routing record, proxy config, log, dashboard database, binary. `models.json.before-context-guru` is a copy for you only; uninstall uses the routing record |
 | `~/Library/LaunchAgents/io.rossoctl.context-guru-pi.plist` | context-guru (macOS) |
 | `~/.config/systemd/user/context-guru-pi.service` | context-guru (Linux) |
 

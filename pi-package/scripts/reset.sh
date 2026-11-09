@@ -36,7 +36,8 @@ MARKER='# Managed by the context-guru Pi package.'
 if [ "$DRY" = 1 ]; then echo "result=planned"; exit 0; fi
 if [ "$YES" != 1 ]; then
   printf "Remove context-guru's route from Pi's models.json and stop its proxy? [y/N] "
-  read -r answer
+  answer=
+  read -r answer || true   # closed stdin is a no, not a silent exit under set -e
   case "$answer" in y|Y|yes|YES) ;; *) echo "result=cancelled"; exit 0 ;; esac
 fi
 
