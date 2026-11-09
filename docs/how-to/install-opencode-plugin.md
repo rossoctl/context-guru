@@ -55,12 +55,32 @@ credential while you are away. Set other values with the tuple form:
 
 ## Change the preset or strategy in a session
 
-- `/context-guru-preset` shows the saved and running preset. It lists the choices.
+- `/context-guru-preset` shows the saved preset. It lists the choices.
 - `/context-guru-strategy` shows the cache strategy. It lists the choices.
 - Both ask before they switch. Both save the choice first.
 - A restart applies the choice now. It costs one cache rewrite in every open session of the project.
 - If you say no, the choice applies at the next OpenCode start.
 - A saved choice wins over the plugin options.
+
+### Native dialogs (TUI)
+
+In the OpenCode TUI, the two commands open a select list. The current choice is marked.
+Two confirm dialogs follow: one to save the choice, one to restart the proxy.
+This needs a second plugin entry, because OpenCode loads TUI plugins from `tui.json`.
+Add this to `~/.config/opencode/tui.json` (or the project `tui.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"]
+}
+```
+
+Restart OpenCode after the change.
+
+Where the dialogs do not exist (`opencode run`, web, desktop, or no `tui.json` entry), the same commands
+run in chat. The agent shows the choices and asks for your yes in the conversation.
+Both ways run the same script, so the result is the same.
 
 ## Other commands
 

@@ -545,7 +545,6 @@ case "\${1:-}" in
       grep -v '^preset=\\|^strategy=' "$STATE/install.env" > "$STATE/install.env.new" || true
       printf '%s\\n' "preset=$new_preset" "strategy=$new_strategy" >> "$STATE/install.env.new" && mv "$STATE/install.env.new" "$STATE/install.env"
       printf '%s\\n' "result=restarted"
-      [ "$KIND" = preset ] && [ "$new_preset" = ultrahigh ] && printf '%s\\n' "probe=$(curl -fsS --max-time 1 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:\${port:-1}/tool-defer/probe" 2>/dev/null || echo unavailable)"
     else
       printf '%s\\n' "result=not_applied" "note=see $STATE/proxy.log"
       exit 1
@@ -645,14 +644,38 @@ function registerCommands(config, state) {
   }
 }
 
-function runCommandScript(state, name) {
+// The one way any host runs a command script: the v2 chat path and the native TUI dialogs both
+// call this, so a switch cannot differ between them.
+export function runCommandScript(state, name, args = []) {
   return new Promise((resolve) => {
-    const child = spawn("sh", [join(state, name)])
+    const child = spawn("sh", [join(state, name), ...args])
     let output = ""
     child.stdout.on("data", (chunk) => { output += chunk })
     child.stderr.on("data", (chunk) => { output += chunk })
-    child.on("close", (status) => resolve(output + (status === 0 ? "" : `\nexit=${status}\n`)))
+    child.on("error", (error) => resolve({ status: 127, output: String(error.message) }))
+    child.on("close", (status) => resolve({ status, output }))
   })
+}
+
+// Text form used by the v2 chat path.
+async function runCommandScriptText(state, name) {
+  const { status, output } = await runCommandScript(state, name)
+  return output + (status === 0 ? "" : `\nexit=${status}\n`)
+}
+
+// Parses the key=value and "choice NAME: text" lines a picker script prints.
+export function parsePickerOutput(text) {
+  const facts = {}
+  const choices = []
+  for (const line of String(text).split("\n")) {
+    const choice = /^choice ([A-Za-z0-9_-]+): (.*)$/.exec(line)
+    if (choice) choices.push({ name: choice[1], help: choice[2] })
+    else {
+      const fact = /^([a-z_]+)=(.*)$/.exec(line)
+      if (fact) facts[fact[1]] = fact[2]
+    }
+  }
+  return { facts, choices }
 }
 
 function modelProviderIds(config) {
@@ -981,7 +1004,7 @@ async function setupV2(ctx) {
           name: spec.name,
           description: spec.description,
           execute: async ({ sessionID, prompt, delivery }) => {
-            const output = await runCommandScript(state, spec.script)
+            const output = await runCommandScriptText(state, spec.script)
             await ctx.session.prompt({ ...prompt, sessionID, text: commandText(spec, output, JSON.stringify(join(state, spec.script))), delivery })
           },
         })
