@@ -34,8 +34,9 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
   `bob-PORT.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
   before the first change (`backup/`), and the reset script `context-guru-reset`.
 
-The proxy runs only lossless components (`format`, `toon`, `cachesplit`). The lossy ones need the
-expand step, which does not yet work on Bob's streams.
+The proxy runs only lossless components: `format`, `toon` and `cachesplit`, and with the
+`lossless-defer` preset also `toolfilter` (tool deferral). The lossy ones need the expand step,
+which does not yet work on Bob's streams.
 
 ## Install
 
