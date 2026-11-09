@@ -1003,3 +1003,42 @@ func TestReplayCapUsesAClientDefaultCompactionPoint(t *testing.T) {
 		t.Errorf("ledger C = %v / %v", got.CeilingConfigured, got.CeilingFrac)
 	}
 }
+
+// A small compaction point: when C is at or below the assumed summary, the baseline cannot restart
+// from S, or every later row reaches C at once and closes again. Claude Code reaches it with
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW=100k, which gives C = 67,000. The summary is capped at half of C, so
+// the counterfactual closes once per real cycle and books one avoided compaction for it.
+func TestReplayCapASmallCompactionPointClosesOncePerCycle(t *testing.T) {
+	var rows []capRow
+	for i := int64(1); i <= 10; i++ { // 10 rows that grow by 1,000 tokens each, all above C
+		r := epochRow(i, 60_000+i*1_000, 0, 70_000+i*1_000, 0, 0)
+		r.CPoint, r.CPointSource = 67_000, "configured"
+		rows = append(rows, r)
+	}
+	l := walkReplayCap(rows, fixedWindow(200_000))
+	if l.ClosedCounterfactual != 1 || l.ReopenedEpochs != 1 {
+		t.Errorf("cf closes=%d reopened=%d, want 1/1: the summary restart must stay below C", l.ClosedCounterfactual, l.ReopenedEpochs)
+	}
+	l.priceAvoided(func(string) (modelinfo.Price, bool) { return modelinfo.Price{Output: 15e-6, CacheRead: 0.3e-6}, true })
+	// One compaction: C = 67,000 read, and a summary of C/2 = 33,500 written.
+	nearEq(t, "avoided", l.AvoidedCompactionUSD, 67_000*0.3e-6+33_500*15e-6)
+}
+
+// The summary of a close is capped at half of C, and it grows again from there. The next close comes when
+// that summary plus the growth since the close reaches C: 33,500 + 33,500 = 67,000.
+func TestReplayCapASmallCompactionPointClosesAgainAfterItsSummaryGrowsToC(t *testing.T) {
+	mk := func(ts, before int64) capRow {
+		r := epochRow(ts, before, 0, before+10_000, 0, 0)
+		r.CPoint, r.CPointSource = 67_000, "configured"
+		return r
+	}
+	rows := []capRow{
+		mk(1, 60_000), // billed 70,000 >= 67,000: close 1, closedAt 60,000
+		mk(2, 93_000), // 33,500 + 33,000 = 66,500: open
+		mk(3, 93_500), // 33,500 + 33,500 = 67,000: close 2
+		mk(4, 94_000), // 33,500 + 500: open
+	}
+	if l := walkReplayCap(rows, fixedWindow(200_000)); l.ClosedCounterfactual != 2 {
+		t.Errorf("cf closes = %d, want 2", l.ClosedCounterfactual)
+	}
+}

@@ -157,6 +157,15 @@ type ReplayLedger struct {
 type avoidedCompactions struct {
 	n        int64
 	ceilingT float64 // the ceiling in tokens, the sum over the closes
+	summaryT float64 // the summary each close wrote (summaryFor), in tokens, the sum over the closes
+}
+
+// summaryFor is S for a conversation whose compaction point is limit tokens: assumedSummaryTokens, but
+// never more than half of C. A client whose C is at or below 80,000 cannot keep an 80,000-token summary,
+// and a baseline restarted from it would reach C on the next row and close on every row after it
+// (#940, round 8). Half of C is a guess as well; it only keeps the restart below C.
+func summaryFor(limit float64) float64 {
+	return math.Min(assumedSummaryTokens, limit/2)
 }
 
 // DeltaUSD is the total correction across components.
@@ -354,7 +363,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 		} else if r.Billed > 0 {
 			var cf float64
 			if summarized {
-				cf = assumedSummaryTokens + f*float64(max(r.TokensBefore-closedAt, 0))
+				cf = summaryFor(limit) + f*float64(max(r.TokensBefore-closedAt, 0))
 			} else {
 				cf = float64(r.Billed) + f*math.Max(float64(r.TokensBefore-r.TokensAfter), 0)
 			}
@@ -415,7 +424,7 @@ func walkCapConversation(conv []capRow, window windowFn, compactionTS []int64, o
 }
 
 // addAvoided records one counterfactual close of model at ceiling tokens, for pricing at the end.
-func (l *ReplayLedger) addAvoided(model string, ceiling float64) {
+func (l *ReplayLedger) addAvoided(model string, ceiling float64) { // its summary is summaryFor(ceiling)
 	if l.avoided == nil {
 		l.avoided = map[string]*avoidedCompactions{}
 	}
@@ -426,6 +435,7 @@ func (l *ReplayLedger) addAvoided(model string, ceiling float64) {
 	}
 	a.n++
 	a.ceilingT += ceiling
+	a.summaryT += summaryFor(ceiling)
 }
 
 // --- SQL ---------------------------------------------------------------------
@@ -589,7 +599,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 
 // priceAvoided prices the compaction requests the baseline paid at its counterfactual closes. One request
 // reads C tokens from the cache (the transcript it summarizes) and writes S tokens of summary at the output
-// rate. A model with no price adds nothing: the figure is a lower bound there, not a guess.
+// rate, with S from summaryFor. A model with no price adds nothing: the figure is a lower bound there, not a guess.
 func (l *ReplayLedger) priceAvoided(price rePriceFn) {
 	if len(l.avoided) == 0 || price == nil {
 		return
@@ -599,7 +609,7 @@ func (l *ReplayLedger) priceAvoided(price rePriceFn) {
 		if !ok {
 			continue
 		}
-		l.AvoidedCompactionUSD += a.ceilingT*pr.CacheReadFor(model) + float64(a.n)*assumedSummaryTokens*pr.Output
+		l.AvoidedCompactionUSD += a.ceilingT*pr.CacheReadFor(model) + a.summaryT*pr.Output
 		l.SummaryAssumed = true
 	}
 }

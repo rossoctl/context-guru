@@ -236,6 +236,9 @@ Limits:
   - A counterfactual compaction: the point where the baseline (the transcript that the provider billed
     plus what we removed) reaches the compaction point. The baseline then restarts from a summary of
     80,000 tokens. That size is an assumption: it is the median of the first turn after 34 real compactions.
+    When the compaction point is 160,000 tokens or less, the summary is half of the compaction point
+    instead. A smaller compaction point cannot keep an 80,000-token summary, and a restart at or above it
+    would close an epoch on every request.
     The next close is when the summary plus the growth since the close reaches the compaction point again.
 
   Inside an epoch after a close, the replay credit of a row counts up to the first-removal tokens seen
