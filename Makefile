@@ -50,6 +50,15 @@ cover: ## Run all tests with race + cross-package coverage; write coverage.out a
 	go test -race -timeout 20m -coverpkg=./... -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -1
 
+# NPM_REGISTRY overrides the npm registry for this build only, e.g. when the default one rejects
+# the stored login: make bob-statusbar NPM_REGISTRY=https://registry.npmjs.org/
+NPM_REGISTRY ?=
+.PHONY: bob-statusbar
+bob-statusbar: ## Build the Bob status bar extension into bob-plugin/context-guru/statusbar/context-guru-bob.vsix
+	# --ignore-scripts: no dependency's install script runs; the build and the .vsix do not need one.
+	cd bob-plugin/statusbar && npm ci --ignore-scripts --no-audit --no-fund $(if $(NPM_REGISTRY),--registry=$(NPM_REGISTRY)) \
+		&& npm run build && npm run package
+
 .PHONY: fmt
 fmt: ## Format all Go source
 	gofmt -w .
