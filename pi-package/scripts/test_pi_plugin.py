@@ -99,6 +99,55 @@ class ModelsRoute(Sandbox):
         self.assertEqual(models_route.restore(self.state), "restored")
         self.assertEqual(json.loads(self.models.read_text()), {"providers": {"anthropic": {"headers": {"x": "y"}}}})
 
+    def test_openai_goes_to_the_proxy_responses_path(self):
+        self.assertEqual(models_route.base_url(8800, "openai"), "http://127.0.0.1:8800/openai/v1")
+        models_route.install(self.models, self.state, 8800, ["anthropic", "openai"])
+        doc = json.loads(self.models.read_text())
+        self.assertEqual(doc["providers"]["openai"], {"baseUrl": "http://127.0.0.1:8800/openai/v1"})
+        self.assertTrue(models_route.is_routed(self.models, 8800, "openai"))
+
+    def test_restore_undoes_each_provider_by_its_own_record(self):
+        self.models.parent.mkdir(parents=True)
+        self.models.write_text(json.dumps({"providers": {"openai": {"headers": {"h": "1"}}}}))
+        models_route.install(self.models, self.state, 8800, ["anthropic", "openai"])
+        doc = json.loads(self.models.read_text())
+        doc["providers"]["openai"]["baseUrl"] = "https://mine.example/v1"
+        self.models.write_text(json.dumps(doc))
+        self.assertEqual(models_route.restore(self.state), "routing_already_changed")
+        # Anthropic was ours and goes; OpenAI was changed by the user and stays.
+        self.assertEqual(json.loads(self.models.read_text()),
+                         {"providers": {"openai": {"headers": {"h": "1"}, "baseUrl": "https://mine.example/v1"}}})
+
+    def test_adding_openai_to_an_anthropic_install_keeps_the_first_records(self):
+        self.models.parent.mkdir(parents=True)
+        original = {"providers": {"anthropic": {"headers": {"x": "y"}}, "openai": {"headers": {"o": "p"}}}}
+        self.models.write_text(json.dumps(original))
+        models_route.install(self.models, self.state, 8800, ["anthropic"])
+        models_route.install(self.models, self.state, 8800, ["anthropic", "openai"])
+        keys = json.loads(self.state.read_text())["keys"]
+        self.assertEqual(keys["anthropic"], {"previous": None, "created_entry": False})
+        self.assertEqual(keys["openai"], {"previous": None, "created_entry": False})
+        self.assertEqual(models_route.restore(self.state), "restored")
+        self.assertEqual(json.loads(self.models.read_text()), original)
+
+    def test_an_old_port_url_we_wrote_is_ours_not_a_conflict(self):
+        models_route.install(self.models, self.state, 8800, ["anthropic"])
+        old = [models_route.base_url(8800, "anthropic")]
+        self.assertEqual(models_route.conflicts(self.models, 8801, ["anthropic"]),
+                         {"anthropic": "http://127.0.0.1:8800/anthropic"})
+        self.assertEqual(models_route.conflicts(self.models, 8801, ["anthropic"], old), {})
+        models_route.install(self.models, self.state, 8801, ["anthropic"], old)
+        record = json.loads(self.state.read_text())
+        self.assertEqual((record["port"], record["keys"]["anthropic"]["previous"]), (8801, None))
+        self.assertEqual(models_route.restore(self.state), "restored")
+        self.assertFalse(self.models.exists())
+
+    def test_without_a_record_our_old_url_is_never_saved_as_the_users_value(self):
+        self.models.parent.mkdir(parents=True)
+        self.models.write_text(json.dumps({"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:8800/anthropic"}}}))
+        models_route.install(self.models, self.state, 8801, ["anthropic"], ["http://127.0.0.1:8800/anthropic"])
+        self.assertIsNone(json.loads(self.state.read_text())["keys"]["anthropic"]["previous"])
+
 
 class Controller(Sandbox):
     def test_plan_writes_nothing_and_asks_one_question(self):
@@ -110,6 +159,15 @@ class Controller(Sandbox):
         self.assertFalse(self.models.exists())
         self.assertFalse(pi_plugin.state_dir().exists())
 
+    def test_the_one_question_names_both_providers_and_what_spends_quota(self):
+        _, facts = self.run_main("setup", "--plan")
+        question = facts["consent_question"]
+        self.assertIn("Anthropic and OpenAI", question)
+        self.assertIn("/anthropic, forwarding to api.anthropic.com", question)
+        self.assertIn("/openai/v1, forwarding to api.openai.com", question)
+        self.assertIn("after 4 minutes idle", question)
+        self.assertIn("after 28 minutes idle", question)
+
     def test_plan_with_strategy_none_does_not_mention_spend(self):
         _, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
         self.assertNotIn("quota", facts["consent_question"])
@@ -119,6 +177,18 @@ class Controller(Sandbox):
         self.models.write_text(json.dumps({"providers": {"anthropic": {"baseUrl": "https://gw.example"}}}))
         code, facts = self.run_main("setup", "--plan")
         self.assertEqual((code, facts["result"], facts["reason"]), (0, "needs_decision", "base_url_already_set"))
+        self.assertNotIn("reset_hatch", facts)  # no earlier install, so no hatch to name
+
+    def test_a_refusal_names_the_reset_hatch_when_one_exists(self):
+        self.models.parent.mkdir(parents=True)
+        self.models.write_text(json.dumps({"providers": {"openai": {"baseUrl": "https://gw.example/v1"}}}))
+        pi_plugin.reset_hatch().parent.mkdir(parents=True)
+        pi_plugin.reset_hatch().write_text("#!/bin/sh\n")
+        _, plan = self.run_main("setup", "--plan")
+        self.assertEqual(plan["reset_hatch"], str(pi_plugin.reset_hatch()))
+        self.assertIn("gw.example", plan["existing_base_url"])
+        code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["reason"], facts["reset_hatch"]), (2, "base_url_already_set", str(pi_plugin.reset_hatch())))
 
     def test_setup_without_consent_refuses_and_writes_nothing(self):
         code, facts = self.run_main("setup")
@@ -143,10 +213,59 @@ class Controller(Sandbox):
         port = int(facts["port"])
         self.assertTrue(models_route.is_routed(self.models, port))
         record = pi_plugin.read_record()
-        self.assertEqual(record["base_urls"], {"anthropic": f"http://127.0.0.1:{port}/anthropic"})
+        self.assertTrue(models_route.is_routed(self.models, port, "openai"))
+        self.assertEqual(record["base_urls"], {"anthropic": f"http://127.0.0.1:{port}/anthropic",
+                                               "openai": f"http://127.0.0.1:{port}/openai/v1"})
         self.assertEqual(record["cache_strategy"], "auto")
         self.assertTrue(pi_plugin.reset_hatch().exists())
         self.assertTrue((pi_plugin.state_dir() / "models_route.py").exists())
+
+    def setup_on(self, port, taken=()):
+        """Run setup with the service mocked, on `port`, while the ports in `taken` belong to someone else."""
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "start_service", return_value=True), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", side_effect=lambda p: p not in taken), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=port):
+            return self.run_main("setup", "--i-consent-to-traffic-interception")
+
+    def uninstall(self):
+        with mock.patch.object(pi_plugin, "stop_service", return_value="stopped"):
+            return self.run_main("uninstall")
+
+    def test_setup_on_an_anthropic_only_install_adds_openai(self):
+        self.models.parent.mkdir(parents=True)
+        original = {"providers": {"anthropic": {"headers": {"x": "y"}}}}
+        self.models.write_text(json.dumps(original))
+        # The install as the Anthropic-only version left it: one provider in each record.
+        with mock.patch.object(pi_plugin, "PROVIDERS", ("anthropic",)):
+            self.assertEqual(self.setup_on(8800)[0], 0)
+        self.assertNotIn("openai", json.loads(self.models.read_text())["providers"])
+        code, facts = self.setup_on(8800)
+        self.assertEqual((code, facts["result"], facts["port"]), (0, "routed", "8800"))
+        self.assertTrue(models_route.is_routed(self.models, 8800, "anthropic"))
+        self.assertTrue(models_route.is_routed(self.models, 8800, "openai"))
+        self.assertEqual(set(json.loads(self.state.read_text())["keys"]), {"anthropic", "openai"})
+        self.assertEqual(self.uninstall()[1]["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), original)
+
+    def test_a_taken_recorded_port_moves_the_route_without_a_refusal(self):
+        self.models.parent.mkdir(parents=True)
+        original = {"providers": {"anthropic": {"headers": {"x": "y"}}}, "other": 1}
+        self.models.write_text(json.dumps(original))
+        self.assertEqual(self.setup_on(8800)[1]["port"], "8800")
+        code, facts = self.setup_on(8801, taken=(8800,))
+        self.assertEqual((code, facts["result"], facts["port"]), (0, "routed", "8801"))
+        for provider in pi_plugin.PROVIDERS:
+            self.assertTrue(models_route.is_routed(self.models, 8801, provider))
+        routing = json.loads(self.state.read_text())
+        self.assertEqual(routing["port"], 8801)
+        self.assertEqual({p: k["previous"] for p, k in routing["keys"].items()}, {"anthropic": None, "openai": None})
+        self.assertEqual(pi_plugin.read_record()["base_urls"]["openai"], "http://127.0.0.1:8801/openai/v1")
+        _, removed = self.uninstall()
+        self.assertEqual(removed["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), original)
 
     def test_a_fact_never_spans_two_lines(self):
         out = io.StringIO()

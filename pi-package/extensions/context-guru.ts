@@ -9,7 +9,9 @@
 //      is pinged by one owner, not two;
 //   3. tells the proxy when a session ends or compacts (content-free: id, event, reason), so the
 //      keep-alive stops pinging a cache no later request will read; sent after the fact, never awaited;
-//   4. adds /context-guru <setup|status|preset|cache-strategy|update|uninstall>.
+//   4. keeps Sign in with ChatGPT working on a routed `openai` model: Pi leaves out the request fields
+//      ChatGPT tokens reject only when the baseUrl is api.openai.com, so the extension does it here;
+//   5. adds /context-guru <setup|status|preset|cache-strategy|update|uninstall>.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -46,6 +48,22 @@ export function isRouted(install: Install | undefined, baseUrl: string | undefin
   if (!install?.base_urls || !baseUrl) return false;
   const want = baseUrl.replace(/\/+$/, "");
   return Object.values(install.base_urls).some((url) => url.replace(/\/+$/, "") === want);
+}
+
+// The fields Pi's openai-responses API leaves out for a Sign in with ChatGPT token (pi-ai 1.5.0,
+// api/openai-responses.js `omitUnsupportedFields`). Pi decides that by `baseUrl === api.openai.com/v1`,
+// which a routed model no longer has.
+const CHATGPT_REJECTED = ["prompt_cache_retention", "prompt_cache_options", "max_output_tokens", "temperature"];
+
+/** The payload without the fields a Sign in with ChatGPT token rejects, or undefined when it has none.
+ *  A new object: the request Pi built stays as it was. */
+export function forChatGPTSignIn(payload: unknown): Record<string, unknown> | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const body = payload as Record<string, unknown>;
+  if (!CHATGPT_REJECTED.some((key) => key in body)) return undefined;
+  const out = { ...body };
+  for (const key of CHATGPT_REJECTED) delete out[key];
+  return out;
 }
 
 /** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
@@ -97,6 +115,16 @@ export default function contextGuru(pi: ExtensionAPI) {
     if (SESSION_ID.test(session)) event.headers[SESSION_HEADER] = session;
   });
 
+  // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
+  // to that same model. An API key (or any other provider) passes through unchanged.
+  pi.on("before_provider_request", (event, ctx) => {
+    const model = ctx.model;
+    if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
+    const payload = event.payload as { model?: unknown } | undefined;
+    if (payload?.model !== model.id || !ctx.modelRegistry.isUsingOAuth(model)) return undefined;
+    return forChatGPTSignIn(payload);
+  });
+
   pi.on("cache_warming_decision", (_event, ctx) => {
     if (routed(ctx) && install?.cache_strategy && install.cache_strategy !== "none") return { action: "stop" as const };
     return undefined;
@@ -132,8 +160,10 @@ export default function contextGuru(pi: ExtensionAPI) {
     const plan = await run(["setup", "--plan"]);
     const f = plan.facts;
     if (f.result === "needs_decision") {
-      say(ctx, `models.json already sends ${f.existing_base_url} somewhere else. context-guru did not change it. ` +
-        "Remove that baseUrl first, or wait for chain support.", "warning");
+      say(ctx, `models.json already sends a provider somewhere else: ${f.existing_base_url}. ` +
+        "context-guru did not change it. Remove that baseUrl first, or wait for chain support." +
+        (f.reset_hatch ? ` If an earlier context-guru install wrote it, run ${f.reset_hatch} from a shell, then setup again.` : ""),
+        "warning");
       return;
     }
     if (f.result !== "planned") {
@@ -159,7 +189,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     }
     await reloadModels(ctx);
     say(ctx, [
-      `context-guru routes Pi's Anthropic models through port ${r.port}.`,
+      `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}.`,
       `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
       "Re-select the model with /model (or restart Pi) so this session uses the new route.",
       `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
@@ -179,6 +209,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       `preset ${f.preset}${f.running_preset && f.running_preset !== f.preset ? ` (proxy runs ${f.running_preset})` : ""}` +
         ` · cache strategy ${f.cache_strategy} · requests ${f.requests ?? "?"}`,
       `dashboard: ${f.dashboard}`,
+      ...(f.proxy_up === "true" && f.routed?.includes("false") ? ["A provider is not routed. Run /context-guru setup to route it."] : []),
     ].join("\n"), f.result === "ok" ? "info" : "warning");
   };
 
