@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -229,4 +230,50 @@ func bobObserveHandler(t *testing.T) (*httptest.Server, *Handler) {
 	srv := httptest.NewServer(h.Mux())
 	t.Cleanup(srv.Close)
 	return srv, h
+}
+
+// The expand repair on Bob's route marks the restored content kept-verbatim under the Bob IDE
+// session (X-Task-Id), the id the pipeline uses. Under any other id the pipeline cannot see the
+// mark, so it compacts the restored content back into the marker the model just expanded.
+func TestBobExpandRepairKeysItsMarkByTheXTaskIDSession(t *testing.T) {
+	original := strings.Repeat("the original tool output line that had to come back\n", 200)
+	const probe = "the original tool output line that had to come back"
+	const perCopy = 200
+
+	var forwarded []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		forwarded = append(forwarded, string(b))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer up.Close()
+	h, _ := dashHandler(t, up.URL, dash.Options{})
+	h.opts.BobUpstream = up.URL
+	h.store.Put("HASH", []byte(original))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body := `{"model":"premium-ide","messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{` +
+		`"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"Tool does not exist: context_guru_expand"}]}`
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest("POST", srv.URL+bobModelPath, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Task-Id", "bob-task-7")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(forwarded) < 2 {
+		t.Fatalf("expected at least 2 upstream requests, got %d", len(forwarded))
+	}
+	if n := strings.Count(forwarded[len(forwarded)-1], probe); n != perCopy {
+		t.Fatalf("turn 2 sent %d probe hits, want %d: the repair marked the content under a "+
+			"session the pipeline does not use, so it was compacted again", n, perCopy)
+	}
 }
