@@ -1,11 +1,13 @@
 package metricspush
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,4 +138,21 @@ func TestHangingCollectorDoesNotBlockRecording(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_ = shutdown(ctx)
+}
+
+// There is no default URL. With none, Start warns once, makes no connection and returns a no-op.
+func TestNoURLWarnsAndMakesNoConnection(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	p, shutdown, err := Start(context.Background(), Config{Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := p.Meter("t").Int64Counter("llm.test")
+	c.Add(context.Background(), 1) // must not panic
+	_ = shutdown(context.Background())
+	out := buf.String()
+	if strings.Count(out, "level=WARN") != 1 || !strings.Contains(out, "no collector URL") {
+		t.Fatalf("want exactly one warning about the missing URL, got: %q", out)
+	}
 }

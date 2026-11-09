@@ -22,11 +22,22 @@ import (
 // and leaves the sink nil: the proxy then runs with no metrics. The dashboard does not depend on
 // this (R8).
 //
-// The push needs the accountant, which needs the dashboard, so a run with no dashboard has no sink
-// and makes no connection.
+// There is no default collector URL. With no URL, or with the push off, it logs one line and returns
+// a nil sink: no machine-ID file is made, no provider starts, and no request pays for a sink. The
+// push needs the accountant, which needs the dashboard, so a run with no dashboard has no sink.
 func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset string) (acmetrics.Observer, func()) {
 	nop := func() {}
-	if !cfg.dashboard {
+	switch {
+	case cfg.off:
+		slog.Info("context-guru: metrics push is off (--metrics-push=false); no connection is made")
+		return nil, nop
+	case strings.TrimSpace(cfg.url) == "":
+		// No default URL: nothing is sent unless the operator names a collector.
+		slog.Warn("context-guru: no collector URL is set (--metrics-push-url or METRICS_PUSH_URL); " +
+			"no metrics are reported")
+		return nil, nop
+	case !cfg.dashboard:
+		slog.Warn("context-guru: metrics need --dashboard, which is off; no metrics are reported")
 		return nil, nop
 	}
 	// The flags already read the environment (METRICS_PUSH_*), so there is one reader, and an explicit

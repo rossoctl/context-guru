@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,5 +105,32 @@ func TestMachineIDPath(t *testing.T) {
 		if got := machineIDPath(db); got != want {
 			t.Errorf("machineIDPath(%q) = %q, want %q", db, got, want)
 		}
+	}
+}
+
+// No default URL: with none set, the proxy warns, reports nothing, and writes no machine ID.
+func TestStartMetricsPushWithoutURLReportsNothing(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	s := settings(t, "", false)
+	sink, stop := startMetricsPush(s, onePrice{}, "x")
+	defer stop()
+	if sink != nil {
+		t.Fatal("a sink was built with no collector URL")
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "no collector URL") {
+		t.Fatalf("want one warning that names the missing URL, got: %q", logs.String())
+	}
+	if _, err := os.Stat(machineIDPath(s.dashboardDB)); err == nil {
+		t.Fatal("a machine ID was written although nothing is reported")
+	}
+}
+
+func TestStartMetricsPushWhitespaceURLIsNoURL(t *testing.T) {
+	if sink, _ := startMetricsPush(settings(t, "   ", false), onePrice{}, "x"); sink != nil {
+		t.Fatal("a blank URL built a sink")
 	}
 }

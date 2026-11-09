@@ -26,11 +26,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-// DefaultURL is the collector a proxy pushes to when the user sets nothing (R19). Data leaves the
-// machine from the first run, so the host names this in its release notes.
-// TODO: replace with the real collector address before release.
-const DefaultURL = "https://metrics.example.invalid"
-
 // Defaults.
 const (
 	DefaultInterval = 30 * time.Second
@@ -39,7 +34,8 @@ const (
 
 // Config is what a proxy gives [Start].
 type Config struct {
-	// URL is the collector base URL. Empty means "use DefaultURL" unless Disabled is set.
+	// URL is the collector base URL. There is no default: with no URL, Start logs one warning and
+	// makes no connection.
 	URL string
 	// Token is the per-install access token, sent as a bearer token (R44).
 	Token string
@@ -61,20 +57,22 @@ type Config struct {
 // Shutdown flushes the last totals and stops the exporter. Give it a short timeout.
 type Shutdown func(context.Context) error
 
-// Start builds the provider. It returns a no-op provider when the push is off, so a caller never
-// needs a nil check. It never returns an error for a bad collector: that is a runtime failure, and
+// Start builds the provider. It returns a no-op provider when the push is off or has no URL, so a
+// caller never needs a nil check. It never returns an error for a bad collector: that is a runtime failure, and
 // it is counted in llm_proxy_export_failures_total (R20, fail open).
 func Start(ctx context.Context, cfg Config) (metric.MeterProvider, Shutdown, error) {
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
-	endpoint := cfg.URL
-	if endpoint == "" && !cfg.Disabled {
-		endpoint = DefaultURL
-	}
-	if cfg.Disabled || endpoint == "" {
+	endpoint := strings.TrimSpace(cfg.URL)
+	switch {
+	case cfg.Disabled:
 		log.Info("metrics push is off: no connection will be made")
+		return noopmetric.NewMeterProvider(), func(context.Context) error { return nil }, nil
+	case endpoint == "":
+		log.Warn("metrics push is off: no collector URL is set (--metrics-push-url or METRICS_PUSH_URL); " +
+			"no metrics are reported")
 		return noopmetric.NewMeterProvider(), func(context.Context) error { return nil }, nil
 	}
 	if err := checkURL(endpoint); err != nil {
