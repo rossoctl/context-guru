@@ -203,3 +203,92 @@ test("v2 setup recovers the recorded upstream when a provider points at this plu
     delete process.env.CONTEXT_GURU_BIN
   }
 })
+
+test("v2: a routed provider keeps its base URL when the proxy cannot start", async () => {
+  const { deadProxyBinary } = await import("./helpers.mjs")
+  const directory = "/tmp/context-guru-project-v2-failopen"
+  process.env.CONTEXT_GURU_BIN = deadProxyBinary()
+  try {
+    const providers = [{ id: "anthropic", name: "Anthropic", settings: { baseURL: "https://api.anthropic.com" } }]
+    const { ctx, registered } = mockV2(directory, providers)
+    await plugin.setup(ctx)
+    assert.equal(providers[0].settings.baseURL, "https://api.anthropic.com")
+    // No provider was routed, so no hook may add a header.
+    for (const hook of registered.hooks) {
+      const event = { sessionID: "s", request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
+      await hook.callback(event)
+      assert.equal(event.request.headers.get("x-context-guru-session"), null)
+    }
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("v2: two upstreams for one dialect leave every base URL unchanged", async () => {
+  const directory = "/tmp/context-guru-project-v2-two-upstreams"
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  try {
+    const providers = [
+      { id: "anthropic", name: "A", settings: { baseURL: "https://gw-one.example.test" } },
+      { id: "my-anthropic", name: "B", settings: { baseURL: "https://gw-two.example.test" } },
+    ]
+    const { ctx } = mockV2(directory, providers)
+    await plugin.setup(ctx)
+    assert.equal(providers[0].settings.baseURL, "https://gw-one.example.test")
+    assert.equal(providers[1].settings.baseURL, "https://gw-two.example.test")
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("v2: hooks work when the provider callback runs after transform() has resolved", async () => {
+  const directory = "/tmp/context-guru-project-v2-late"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  try {
+    const providers = [{ id: "anthropic", name: "Anthropic", settings: { baseURL: "https://api.anthropic.com" } }]
+    const { ctx, registered } = mockV2(directory, providers)
+    let run
+    // The host stores the callback and runs it later, not before transform() returns.
+    ctx.provider.transform = async (callback) => { run = () => callback({
+      list: () => providers,
+      get: (id) => providers.find((provider) => provider.id === id),
+      update: (id, update) => update(providers.find((provider) => provider.id === id)),
+    }) }
+    const done = plugin.setup(ctx)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    await run()
+    await done
+    const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+    assert.equal(providers[0].settings.baseURL, `http://127.0.0.1:${record.port}/anthropic/v1`)
+    const hook = registered.hooks.find((candidate) => candidate.options.providerID === "anthropic")
+    assert.ok(hook, "no hook was registered for the routed provider")
+    const event = { sessionID: "late", request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
+    await hook.callback(event)
+    assert.equal(event.request.headers.get("x-context-guru-session"), "late")
+    process.kill(record.pid, "SIGTERM")
+    await waitUntilUnhealthy(record.port)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("v2: the session hook adds no header when the host gives no session id", async () => {
+  const directory = "/tmp/context-guru-project-v2-nosession"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  try {
+    const providers = [{ id: "anthropic", name: "Anthropic", settings: { baseURL: "https://api.anthropic.com" } }]
+    const { ctx, registered } = mockV2(directory, providers)
+    await plugin.setup(ctx)
+    const hook = registered.hooks.find((candidate) => candidate.options.providerID === "anthropic")
+    const event = { request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
+    await hook.callback(event)
+    assert.equal(event.request.headers.get("x-context-guru-session"), null)
+    const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+    process.kill(record.pid, "SIGTERM")
+    await waitUntilUnhealthy(record.port)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})

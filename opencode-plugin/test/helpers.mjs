@@ -48,3 +48,15 @@ createServer((request, response) => {
   chmodSync(stub, 0o755)
   return stub
 }
+
+// A proxy that lists its strategies like the real one, then exits at once when asked to serve.
+export function deadProxyBinary() {
+  const dir = mkdtempSync(join(tmpdir(), "context-guru-dead-"))
+  const path = join(dir, "context-guru-proxy")
+  writeFileSync(path, `#!/bin/sh
+if [ "$1" = strategies ]; then echo '${JSON.stringify(FAKE_STRATEGIES)}'; exit 0; fi
+exit 1
+`)
+  chmodSync(path, 0o755)
+  return path
+}

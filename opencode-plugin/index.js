@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { spawn, spawnSync } from "node:child_process"
@@ -84,11 +84,20 @@ function shQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
 }
 
+function isExecutable(path) {
+  try {
+    accessSync(path, constants.X_OK)
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
+
 function executableOnPath(name) {
-  if (name.includes("/")) return existsSync(name) ? name : undefined
+  if (name.includes("/")) return isExecutable(name) ? name : undefined
   for (const directory of (process.env.PATH || "").split(":").filter(Boolean)) {
     const candidate = join(directory, name)
-    if (existsSync(candidate)) return candidate
+    if (isExecutable(candidate)) return candidate
   }
   return undefined
 }
@@ -128,7 +137,7 @@ async function downloadBinary(state) {
   // Extract under the state directory, not os.tmpdir(): the renameSync onto the
   // destination must stay on one filesystem, or it fails with EXDEV wherever /tmp
   // is tmpfs and the state directory is on disk (common on Linux).
-  const workDirectory = join(state, `download-${process.pid}`)
+  const workDirectory = join(state, `download-${process.pid}-${randomBytes(3).toString("hex")}`)
   const archivePath = join(workDirectory, "archive.tar.gz")
   const extractDirectory = join(workDirectory, "extract")
   const destination = join(state, "bin", "context-guru-proxy")
@@ -156,6 +165,8 @@ async function downloadBinary(state) {
   }
   return { path: destination, version, managed: true }
 }
+
+export function findBinaryForTest(state) { return findBinary(state) }
 
 function findBinary(state) {
   const configured = process.env.CONTEXT_GURU_BIN
@@ -203,18 +214,19 @@ function resetScript(state) {
 set -u
 PID_FILE=${JSON.stringify(join(state, "proxy.pid"))}
 BIN_FILE=${JSON.stringify(join(state, "bin", "context-guru-proxy"))}
+if [ -f ${JSON.stringify(join(state, "install.env"))} ]; then . ${JSON.stringify(join(state, "install.env"))}; fi
 if [ -f "$PID_FILE" ]; then
   pid=$(tr -cd '0-9' < "$PID_FILE")
   case "$pid" in
     '' ) ;;
     * )
       command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-      case "$command" in *context-guru-proxy*) kill "$pid" 2>/dev/null || true ;; esac
+      case "$command" in *"\${binary:-context-guru-proxy}"*) kill "$pid" 2>/dev/null || true ;; esac
       ;;
   esac
 fi
 rm -f "$PID_FILE"
-if [ -f ${JSON.stringify(join(state, "managed-binary"))} ]; then rm -f "$BIN_FILE"; fi
+if [ "$(head -1 ${JSON.stringify(join(state, "managed-binary"))} 2>/dev/null)" = yes ]; then rm -f "$BIN_FILE"; fi
 printf '%s\\n' 'context-guru: proxy stopped; remove the plugin entry and restart OpenCode to unroute.'
 `
 }
@@ -320,10 +332,9 @@ if [ "\${managed:-no}" != "yes" ]; then
   exit 0
 fi
 latest=$(curl -fsSI --max-time 10 "$RELEASES/latest" 2>/dev/null | tr -d '\\r' | sed -n 's/^[Ll]ocation:.*\\/tag\\///p' | head -1)
-if [ -z "$latest" ]; then
-  printf '%s\\n' "result=lookup-failed"
-  exit 1
-fi
+case "$latest" in
+  ''|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
+esac
 printf '%s\\n' "installed=\${version:-unknown}" "latest=$latest"
 if [ "$latest" = "\${version:-}" ]; then
   printf '%s\\n' "result=latest"
@@ -360,7 +371,7 @@ if [ -f "$STATE/proxy.pid" ]; then
   case "$pid" in
     '' ) ;;
     * ) command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-      case "$command" in *context-guru-proxy*) kill "$pid" 2>/dev/null || true ;; esac ;;
+      case "$command" in *"\${binary:-context-guru-proxy}"*) kill "$pid" 2>/dev/null || true ;; esac ;;
   esac
   rm -f "$STATE/proxy.pid"
 fi
@@ -408,15 +419,21 @@ if [ -f "$STATE/proxy.pid" ]; then
   case "$pid" in
     '' ) ;;
     * ) command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-      case "$command" in *context-guru-proxy*) kill "$pid" 2>/dev/null || true ;; esac ;;
+      case "$command" in *"\${binary:-context-guru-proxy}"*) kill "$pid" 2>/dev/null || true ;; esac ;;
   esac
   rm -f "$STATE/proxy.pid"
 fi
 printf 'disabled by context-guru-uninstall\\n' > "$STATE/disabled"
 if [ "$purge" -eq 1 ]; then
-  [ -f "$STATE/managed-binary" ] && rm -f "\${binary:-/nonexistent}" 2>/dev/null
+  # Remove a binary only when the plugin downloaded it: the marker file says "yes" AND the binary
+  # lives in this project's state directory. A binary from PATH or CONTEXT_GURU_BIN is never removed.
+  if [ "$(head -1 "$STATE/managed-binary" 2>/dev/null)" = yes ]; then
+    case "\${binary:-}" in "$STATE"/bin/*) rm -f "$binary" 2>/dev/null ;; esac
+  fi
   rm -rf "$STATE/bin"
   rm -f "$STATE/install.json" "$STATE/install.env" "$STATE/proxy.yaml" "$STATE/proxy.log" "$STATE/dashboard.db" "$STATE/managed-binary" "$STATE/context-guru-start"
+  rm -f "$STATE/settings.env" "$STATE/options.env" "$STATE/strategies.tsv" "$STATE/strategies.aliases" "$STATE/strategies.default"
+  rm -f "$STATE/context-guru-reset" "$STATE/context-guru-status" "$STATE/context-guru-update" "$STATE/context-guru-uninstall" "$STATE/context-guru-preset" "$STATE/context-guru-strategy"
   printf '%s\\n' "result=uninstalled" "purged=yes"
 else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
@@ -496,8 +513,11 @@ else
 fi
 [ -f "$STATE/install.env" ] && . "$STATE/install.env"
 saved_value() { sed -n "s/^$1=//p" "$STATE/settings.env" 2>/dev/null | head -1; }
-cur_preset=$(saved_value preset); [ -n "$cur_preset" ] || cur_preset=\${preset:-${DEFAULT_PRESET}}
-cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=\${strategy:-$DEFAULT}
+# Effective value = what the user saved with a picker, else what the plugin options say, else the default.
+# options.env holds the plugin options; the plugin writes it at every start.
+opt_value() { sed -n "s/^$1=//p" "$STATE/options.env" 2>/dev/null | head -1; }
+cur_preset=$(saved_value preset); [ -n "$cur_preset" ] || cur_preset=$(opt_value preset); [ -n "$cur_preset" ] || cur_preset=${DEFAULT_PRESET}
+cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=$(opt_value strategy); [ -n "$cur_strategy" ] || cur_strategy=$DEFAULT
 running_preset=
 if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ]; then
   running_preset=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/stats" 2>/dev/null | tr ',' '\\n' | sed -n 's/.*"preset": *"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -1)
@@ -536,9 +556,10 @@ case "\${1:-}" in
     if ! valid "$name"; then printf '%s\\n' "result=error" "reason=unknown_${kind}" "known=$VALID"; exit 2; fi
     restart=0; [ "\${3:-}" = "--restart" ] && restart=1
     mkdir -p "$STATE"
+    # Save ONLY the key that changed. The other key stays as it was, so a plugin option keeps working.
     if [ "$KIND" = preset ]; then new_preset=$name; new_strategy=$cur_strategy; else new_preset=$cur_preset; new_strategy=$name; fi
     umask 077
-    printf 'preset=%s\\nstrategy=%s\\n' "$new_preset" "$new_strategy" > "$STATE/settings.env.new" && mv "$STATE/settings.env.new" "$STATE/settings.env"
+    { grep -v "^$KIND=" "$STATE/settings.env" 2>/dev/null || true; printf '%s\\n' "$KIND=$name"; } > "$STATE/settings.env.new" && mv "$STATE/settings.env.new" "$STATE/settings.env"
     printf '%s\\n' "result=saved" "$KIND=$name"
     if [ "$KIND" = strategy ] && [ "$(awk -F '\\t' -v n="$name" '$1 == n {print $2; exit}' "$STATE/strategies.tsv")" = yes ]; then printf '%s\\n' "cost=this spends a little of your own credential on pings while nobody is at the keyboard, on every session routed through this proxy"; fi
     if [ "$restart" -ne 1 ]; then
@@ -549,7 +570,7 @@ case "\${1:-}" in
     if [ -f "$STATE/proxy.pid" ]; then
       pid=$(tr -cd '0-9' < "$STATE/proxy.pid")
       case "$pid" in '') ;; *) command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-        case "$command" in *context-guru-proxy*) kill "$pid" 2>/dev/null || true ;; esac ;; esac
+        case "$command" in *"\${binary:-context-guru-proxy}"*) kill "$pid" 2>/dev/null || true ;; esac ;; esac
       rm -f "$STATE/proxy.pid"
     fi
     n=0; while [ "$n" -lt 30 ] && curl -fsS --max-time 1 "http://127.0.0.1:\${port:-1}/healthz" >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
@@ -568,13 +589,18 @@ esac
 `
 }
 
+// A release tag becomes a value in a file the scripts source. Only plain tag characters are kept.
+function safeVersion(version) {
+  return typeof version === "string" && /^v?[A-Za-z0-9._-]+$/.test(version) ? version : "external"
+}
+
 function writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes }) {
   writeAtomic(join(state, "install.env"), [
     `state=${shQuote(state)}`,
     `port=${port}`,
     `binary=${shQuote(binary.path)}`,
     `managed=${binary.managed ? "yes" : "no"}`,
-    `version=${binary.version || "external"}`,
+    `version=${safeVersion(binary.version)}`,
     `preset=${preset}`,
     `strategy=${cacheStrategy}`,
     `dialects=${routes.map((route) => route.dialect).join(",") || "none"}`,
@@ -582,7 +608,16 @@ function writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes 
   ].join("\n") + "\n", 0o600)
 }
 
-function writeCommandScripts(state) {
+// The raw plugin options, for the picker scripts. The pickers show "saved, else option, else default",
+// so they need the options even when nothing is routed and no proxy has ever started.
+function writeOptionsFile(state, options) {
+  const optionStrategy = options?.cacheStrategy ?? options?.cache_strategy
+  const safe = (value) => (typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value) ? value : "")
+  writeAtomic(join(state, "options.env"), `preset=${safe(options?.preset)}\nstrategy=${safe(optionStrategy)}\n`)
+}
+
+function writeCommandScripts(state, options) {
+  writeOptionsFile(state, options)
   writeAtomic(join(state, "context-guru-status"), statusScript(state), 0o700)
   writeAtomic(join(state, "context-guru-install"), installScript(state), 0o700)
   writeAtomic(join(state, "context-guru-update"), updateScript(state), 0o700)
@@ -643,9 +678,9 @@ function commandText(spec, block, path) {
   return spec.intro + "\n\n" + block + "\n\n" + spec.outro(path)
 }
 
-function registerCommands(config, state) {
+function registerCommands(config, state, options) {
   mkdirSync(state, { recursive: true, mode: 0o700 })
-  writeCommandScripts(state)
+  writeCommandScripts(state, options)
   const embed = (name) => "!`sh " + JSON.stringify(join(state, name)) + "`"
   const path = (name) => JSON.stringify(join(state, name))
   config.command ||= {}
@@ -788,43 +823,56 @@ function upstreamFor(routes, dialect) {
   return routes.find((route) => route.dialect === dialect)?.upstream || defaultUpstream(dialect)
 }
 
-// One lock for every project on this machine. It covers picking a free port, starting the
-// proxy and writing the records, so two OpenCode instances cannot pick one port or write one
-// pid file at the same time. A lock older than 60 s is stale and the next caller removes it.
-async function withLock(root, fn) {
+// One lock for every project on this machine. It covers picking a free port, starting the proxy
+// and writing the records, so two OpenCode instances cannot pick one port or write one pid file at
+// the same time. The holder touches the lock every few seconds. A lock nobody has touched for
+// staleMs belongs to a holder that is gone, and the next caller removes it. The download is not
+// done under this lock (it can take minutes), so a live holder never looks stale.
+export async function withLock(root, fn, { heartbeatMs = 5000, staleMs = 30000, waitMs = 45000 } = {}) {
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const lock = join(root, ".lock")
-  const deadline = Date.now() + 45000
+  const deadline = Date.now() + waitMs
   for (;;) {
     try {
       mkdirSync(lock, { mode: 0o700 })
       break
     } catch (error) {
       if (error?.code !== "EEXIST") throw error
+      if (Date.now() > deadline) throw new Error(`could not take ${lock}`)
       try {
-        if (Date.now() - statSync(lock).mtimeMs > 60000) { rmSync(lock, { recursive: true, force: true }); continue }
+        if (Date.now() - statSync(lock).mtimeMs > staleMs) { rmSync(lock, { recursive: true, force: true }); continue }
       } catch {
+        // The lock vanished between mkdir and stat: try again, the deadline above still bounds the loop.
         continue
       }
-      if (Date.now() > deadline) throw new Error(`could not take ${lock}`)
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
   }
+  const beat = setInterval(() => {
+    const now = new Date()
+    try { utimesSync(lock, now, now) } catch {}
+  }, heartbeatMs)
+  beat.unref?.()
   try {
     return await fn()
   } finally {
+    clearInterval(beat)
     rmSync(lock, { recursive: true, force: true })
   }
 }
 
-// Stops the proxy this plugin recorded. It checks the process name first, so a reused pid is safe.
+// Stops the proxy this plugin recorded. The pid file may be missing, and a pid may have been reused,
+// so the process must be running the binary this plugin recorded before it gets a signal.
 async function stopRecordedProxy(state, port) {
-  const pid = Number(String(readFileSync(join(state, "proxy.pid"), "utf8")).replace(/\D/g, ""))
-  if (!pid) return
+  let pid = 0
+  try { pid = Number(String(readFileSync(join(state, "proxy.pid"), "utf8")).replace(/\D/g, "")) } catch {}
+  if (!pid) return false
+  const binary = readJSON(join(state, "install.json"))?.binary
   const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout || ""
-  if (!command.includes("context-guru-proxy")) return
-  try { process.kill(pid, "SIGTERM") } catch { return }
+  if (!binary || !command.includes(binary)) return false
+  try { process.kill(pid, "SIGTERM") } catch { return false }
   for (let attempt = 0; attempt < 40 && await healthy(port); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100))
+  return true
 }
 
 export function settingsFile(state) {
@@ -851,12 +899,18 @@ export function effectiveSettings(state, options = {}) {
   return { preset, requestedStrategy }
 }
 
-async function startProxy({ directory, preset, requestedStrategy, routes, client }) {
+async function startProxy({ directory, preset, requestedStrategy, options, routes, client }) {
   const state = stateDirectory(directory)
   mkdirSync(state, { recursive: true, mode: 0o700 })
+  // The download can take minutes. It runs before the lock: it writes a temp name and renames it, so
+  // two instances that both download only replace the file with the same bytes.
+  let binary = findBinary(state)
+  if (!binary) binary = await downloadBinary(state)
   return withLock(dirname(state), async () => {
-    let binary = findBinary(state)
-    if (!binary) binary = await downloadBinary(state)
+    // Another instance may have put a binary in place while this one waited. Keep the version we
+    // know: the file on disk does not carry it until install.json is written.
+    const found = findBinary(state)
+    if (found) binary = { ...found, version: found.version || binary?.version }
     const dialects = [...new Set(routes.map((route) => route.dialect))]
     const table = loadStrategyTable(binary.path)
     const resolved = resolveStrategy(table, requestedStrategy, dialects)
@@ -884,11 +938,15 @@ async function startProxy({ directory, preset, requestedStrategy, routes, client
     const log = openSync(logPath, "a", 0o600)
     const args = ["--listen", `127.0.0.1:${port}`, "--config", configPath, "--dashboard", "--dashboard-db", join(state, "dashboard.db"), "--idle-exit", "24h", "--anthropic-upstream", upstreamFor(routes, "anthropic"), "--openai-upstream", upstreamFor(routes, "openai")]
     const child = spawn(binary.path, args, { detached: true, stdio: ["ignore", log, log] })
+    const exited = new Promise((resolve) => { child.once("exit", (code, signal) => resolve({ code, signal })); child.once("error", (error) => resolve({ error })) })
     child.unref()
     closeSync(log)
-    if (!(await waitForHealthy(port))) {
+    // Healthy counts only while OUR child is alive. A stranger that holds the port also answers
+    // /healthz, so a child that exited means the answer is not ours.
+    const outcome = await Promise.race([waitForHealthy(port).then((ok) => ({ ok })), exited.then((result) => ({ exited: result }))])
+    if (!outcome.ok || (await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(undefined), 50))]))) {
       try { process.kill(child.pid, "SIGTERM") } catch {}
-      throw new Error(`proxy did not become healthy; see ${logPath}`)
+      throw new Error(outcome.exited ? `proxy exited at start (${outcome.exited.error?.message ?? `code ${outcome.exited.code}`}); see ${logPath}` : `proxy did not become healthy; see ${logPath}`)
     }
     writeRecoveryFiles(state, child.pid, binary.managed)
     writeInstallFacts(state, { binary, port, preset, cacheStrategy, routes })
@@ -961,7 +1019,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
     config: async (config) => {
       const state = stateDirectory(directory)
       try {
-        registerCommands(config, state)
+        registerCommands(config, state, options)
       } catch (error) {
         await safeLog(client, "error", `command registration failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -977,7 +1035,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
           await safeLog(client, "debug", "no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
           return
         }
-        const proxy = await startProxy({ directory, preset, requestedStrategy, routes, client })
+        const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client })
         routeProviders(config, proxy.port, own)
         routedIds = new Set(routes.map((route) => route.id))
       } catch (error) {
@@ -993,7 +1051,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
       } catch {
         // Recovery must never break the request it is trying to save.
       }
-      output.headers["x-context-guru-session"] = input.sessionID
+      if (input.sessionID) output.headers["x-context-guru-session"] = input.sessionID
     },
   }
 }
@@ -1012,10 +1070,29 @@ async function setupV2(ctx) {
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
+  // Hooks are registered from inside the provider callback, as soon as the routed ids are known, and
+  // each hook checks the routed set at request time. So the order of "callback runs" and
+  // "transform() resolves" does not matter: a callback that runs late still gets its hooks, and
+  // setup waits for them.
+  const hooked = new Set()
+  const pendingHooks = []
+  const hookProvider = (id) => {
+    if (hooked.has(id)) return
+    hooked.add(id)
+    pendingHooks.push(ctx.session.hook("http.request", async (event) => {
+      if (!routedIds.includes(id)) return
+      try {
+        await ensureProxyRunning(directory, log)
+      } catch {
+        // Recovery must never break the request it is trying to save.
+      }
+      if (event.sessionID) event.request.headers.set("x-context-guru-session", event.sessionID)
+    }, { providerID: id }))
+  }
 
   try {
     mkdirSync(state, { recursive: true, mode: 0o700 })
-    writeCommandScripts(state)
+    writeCommandScripts(state, options)
     await ctx.command.transform((editor) => {
       for (const spec of COMMAND_SPECS) {
         editor.add({
@@ -1052,28 +1129,20 @@ async function setupV2(ctx) {
         if (upstreams.size > 1) throw new Error(`multiple ${dialect} upstreams are configured; route them through one gateway first`)
       }
       if (!routes.length) return
-      const proxy = await startProxy({ directory, preset, requestedStrategy, routes, client: log })
+      const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client: log })
       for (const target of targets) {
         editor.update(target.id, (provider) => {
           provider.settings = { ...provider.settings, baseURL: `http://127.0.0.1:${proxy.port}/${target.dialect}/v1` }
         })
       }
       routedIds = targets.map((target) => target.id)
+      for (const id of routedIds) hookProvider(id)
     })
-    if (!routedIds.length) {
-      console.log("opencode-context-guru: no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
-      return
-    }
-    for (const id of routedIds) {
-      await ctx.session.hook("http.request", async (event) => {
-        try {
-          await ensureProxyRunning(directory, log)
-        } catch {
-          // Recovery must never break the request it is trying to save.
-        }
-        event.request.headers.set("x-context-guru-session", event.sessionID)
-      }, { providerID: id })
-    }
+    // The transform callback may run after transform() resolves, so do not read routedIds here.
+    // Register one hook per provider id that could be routed, and decide inside the hook, when a
+    // request comes, whether this provider was routed.
+    await Promise.all(pendingHooks)
+    if (!hooked.size) console.log("opencode-context-guru: no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
   } catch (error) {
     console.error(`opencode-context-guru: proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
   }

@@ -100,7 +100,8 @@ export both `server` and `tui`. Add it to `~/.config/opencode/tui.json`:
 ## Safety
 
 - Only a provider the plugin routed gets the `x-context-guru-session` header.
-- Two OpenCode instances share one lock. They cannot pick the same port or write the same pid file.
+- Two OpenCode instances share one lock for choosing a port, starting the proxy, and writing the records. The holder refreshes the lock every 5 s, and a lock nobody refreshed for 30 s is broken. The download of the release does not hold the lock. The plugin counts a proxy as started only while its own child process is alive.
+- A stop or reset signals a process only when it runs the binary path the plugin recorded.
 - Your own gateway (for example `localhost:4000`) stays the upstream. The plugin does not replace it.
 
 ## Not ported yet

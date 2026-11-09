@@ -59,7 +59,7 @@ Choose your setup. Each button opens only the instructions for that path.
     <tr>
       <th>OpenCode</th>
       <td align="center">
-        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logo=openai&amp;logoColor=white"></a>
+        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
       </td>
     </tr>
     <tr>

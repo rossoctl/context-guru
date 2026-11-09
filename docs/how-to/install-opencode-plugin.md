@@ -103,8 +103,13 @@ Remove the local plugin path from the OpenCode config and restart OpenCode. The 
 its idle timeout. To stop it immediately, run the `context-guru-reset` command from the project state
 directory shown in the log, then restart OpenCode.
 
-The reset command only stops a proxy recorded by this plugin. It does not remove a proxy found on
-`PATH`, provider credentials, or unrelated OpenCode configuration.
+The reset command only stops a proxy recorded by this plugin. It checks that the process runs the
+**binary path the plugin recorded**, so a binary with any file name is stopped, and a reused process
+id is not. It does not remove a proxy found on `PATH`, provider credentials, or unrelated OpenCode
+configuration.
+
+`/context-guru-uninstall --yes --purge` also removes the saved choices (`settings.env`), the strategy
+files, the logs, and the command scripts, except `context-guru-install`, which undoes the uninstall.
 
 ## Troubleshooting
 
@@ -114,6 +119,10 @@ the `anthropic` or `openai` provider. Other providers are left untouched by desi
 **Requests fail with a connection error.** Read `proxy.log` in the project state directory. The
 plugin does not rewrite provider configuration when the proxy health check fails, so restarting
 OpenCode restores the original provider endpoint.
+
+**A gateway stops working after the plugin routes it.** The plugin adds `/v1` to the proxy path, and
+the proxy appends the rest to your gateway `baseURL`. A gateway `baseURL` must therefore end in `/v1`,
+or in no path at all. A gateway that serves at `baseURL/messages` without `/v1` returns 404.
 
 **The proxy is not on PATH.** The plugin downloads a release automatically. Set `CONTEXT_GURU_BIN`
 to an executable path to use a locally installed binary, or set `CONTEXT_GURU_VERSION` to pin a
