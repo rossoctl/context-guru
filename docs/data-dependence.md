@@ -135,13 +135,18 @@ These are the presets in the Claude Code plugin picker.
 
 ### Cache strategies
 
-| Strategy | Off | Metadata only | Everything |
-|---|---|---|---|
-| `none` | ✅ Works | ✅ Works | ✅ Works |
-| `5-min-ping` | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works |
-| `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works |
+| Strategy | Off | Metadata only | Everything | Decided by |
+|---|---|---|---|---|
+| `none` | ✅ Works | ✅ Works | ✅ Works | David Amid, #569 |
+| `auto` (was `5-min-ping`; `5-min-ping` is now an alias) | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works | David Amid, #569 |
+| `1-ping`, `2-ping`, `30-min-ping` (the same ping mechanism as `auto`; they differ only in how many pings and when) | ❌ The same as `auto` | ❌ The same as `auto` | ✅ Works | David Amid, #569 |
+| `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works | David Amid, #569 |
 
-**Why `5-min-ping` needs storage and `1-hour-head` does not:** a ping is a **new** request that
+The named strategies are one table in the proxy (`config/strategy.go`, #980). That change only gives
+the existing strategies one home and a `cache.strategy` key. It does not change what any strategy
+keeps.
+
+**Why `auto` (and the other ping strategies) needs storage and `1-hour-head` does not:** a ping is a **new** request that
 Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
 exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
 that the client sends anyway. The client supplies the bytes, so Context Guru keeps nothing.
@@ -150,7 +155,7 @@ that the client sends anyway. The client supplies the bytes, so Context Guru kee
 runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
 Dispatcher keeps the credential in memory, masked, until the hold ends.
 
-`medium` makes its summary in the idle time that `5-min-ping` keeps warm. Without `5-min-ping`,
+`medium` makes its summary in the idle time that `auto` keeps warm. Without a ping strategy,
 `medium` almost never makes a summary, at any level.
 
 ### Other presets
