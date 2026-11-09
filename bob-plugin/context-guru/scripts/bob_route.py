@@ -41,16 +41,29 @@ class RouteRefused(Exception):
     """The rc file has something we must not change. The message says what and why."""
 
 
-def block(port):
-    """The block, as bytes. One function, so install and remove cannot disagree."""
+def _block(port, unset_safe):
     url = f"http://127.0.0.1:{int(port)}"
+    # ${VAR:-}: under `set -u` or zsh's `setopt nounset`, a bare unset $VAR stops the shell reading
+    # the rest of the user's startup file. The legacy form is the one setup wrote before 2026-11-09.
+    env, bundle = (b"${VSCODE_RESOLVING_ENVIRONMENT:-}", b"${__CFBundleIdentifier:-}") if unset_safe \
+        else (b"$VSCODE_RESOLVING_ENVIRONMENT", b"$__CFBundleIdentifier")
     return (b"\n" + START + b"\n"
             b"# IBM Bob reads this when it starts. Remove it with the context-guru-uninstall skill.\n"
-            b'if [ "$VSCODE_RESOLVING_ENVIRONMENT" = 1 ] && '
-            b'[ "$__CFBundleIdentifier" = ' + BUNDLE_ID.encode() + b" ]; then\n"
+            b'if [ "' + env + b'" = 1 ] && '
+            b'[ "' + bundle + b'" = ' + BUNDLE_ID.encode() + b" ]; then\n"
             b"  export " + IDE_VAR.encode() + b"=" + url.encode() + b"\n"
             b"fi\n"
             b"export " + SHELL_VAR.encode() + b"=" + url.encode() + b"\n" + END + b"\n")
+
+
+def block(port):
+    """The block setup writes, as bytes. One function, so install and remove cannot disagree."""
+    return _block(port, unset_safe=True)
+
+
+def our_blocks(port):
+    """Every exact form of our block: the one setup writes now, and the legacy one."""
+    return (block(port), _block(port, unset_safe=False))
 
 
 def _port_of(text):
@@ -71,7 +84,7 @@ def ownership(content):
         return "duplicate", None
     if len(found) == 1 and markers == 2:
         port = _port_of(found[0])
-        if port is not None and found[0] == block(port):
+        if port is not None and found[0] in our_blocks(port):
             return "ours", port
     return "cannot_tell", None
 
@@ -196,10 +209,15 @@ def _read(path):
         return None
 
 
+def _present(content, port):
+    """The exact form of our block that content holds. Call it only when ownership said ours."""
+    return next(b for b in our_blocks(port) if b in content)
+
+
 def _writable_state(content):
     """Return (state, port), with not_ours when the user also sets a variable outside our block."""
     state, port = ownership(content)
-    if state == "ours" and _USER_SETS.search(content.replace(block(port), b"", 1)):
+    if state == "ours" and _USER_SETS.search(content.replace(_present(content, port), b"", 1)):
         return "not_ours", None
     return state, port
 
@@ -216,10 +234,11 @@ def install(path, port):
     content = _read(path)
     current = content or b""
     state, old_port = _writable_state(current)
-    if state == "ours" and old_port == int(port):
+    # A legacy block on the same port is not "already": it is replaced by the unset-safe form.
+    if state == "ours" and old_port == int(port) and block(port) in current:
         return "already"
     if state == "ours":
-        updated = current.replace(block(old_port), block(port), 1)
+        updated = current.replace(_present(current, old_port), block(port), 1)
     elif state == "absent":
         updated = current + block(port)
     else:
@@ -242,7 +261,7 @@ def remove(path, created=False):
         return "absent"
     if state != "ours":
         _refuse(path, state)
-    updated = content.replace(block(port), b"", 1)
+    updated = content.replace(_present(content, port), b"", 1)
     if created and not updated:
         os.unlink(path)
     else:

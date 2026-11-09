@@ -203,13 +203,15 @@ class RouteTest(TempHome):
         self.assertEqual(ROUTE.block(8891), (
             b"\n# >>> context-guru (bob) >>>\n"
             b"# IBM Bob reads this when it starts. Remove it with the context-guru-uninstall skill.\n"
-            b'if [ "$VSCODE_RESOLVING_ENVIRONMENT" = 1 ] && '
-            b'[ "$__CFBundleIdentifier" = com.ibm.software.bob ]; then\n'
+            b'if [ "${VSCODE_RESOLVING_ENVIRONMENT:-}" = 1 ] && '
+            b'[ "${__CFBundleIdentifier:-}" = com.ibm.software.bob ]; then\n'
             b"  export VITE_GATEWAY_BASE_URL=http://127.0.0.1:8891\n"
             b"fi\n"
             b"export BOB_GATEWAY_URL=http://127.0.0.1:8891\n"
             b"# <<< context-guru (bob) <<<\n"))
         self.assertNotIn(b"CUSTOM_BASE_URL", ROUTE.block(8891))
+        # The legacy form is still recognized, so an installed block can be removed.
+        self.assertEqual(ROUTE.our_blocks(8891), (ROUTE.block(8891), self.LEGACY_BLOCK))
 
     def test_zsh_round_trip_is_byte_identical(self):
         rc = self.home / ".zshrc"
@@ -223,6 +225,45 @@ class RouteTest(TempHome):
                 self.assertEqual(ROUTE.remove(rc), "removed")
                 self.assertEqual(rc.read_bytes(), original)
                 self.assertFalse(ROUTE.is_routed(rc))
+
+    # The block as setup wrote it before 2026-11-09, on Macs that have it installed now.
+    LEGACY_BLOCK = (b'\n# >>> context-guru (bob) >>>\n'
+                    b'# IBM Bob reads this when it starts. Remove it with the context-guru-uninstall skill.\n'
+                    b'if [ "$VSCODE_RESOLVING_ENVIRONMENT" = 1 ] && [ "$__CFBundleIdentifier" = com.ibm.software.bob ]; then\n'
+                    b'  export VITE_GATEWAY_BASE_URL=http://127.0.0.1:8891\n'
+                    b'fi\n'
+                    b'export BOB_GATEWAY_URL=http://127.0.0.1:8891\n'
+                    b'# <<< context-guru (bob) <<<\n')
+
+    @unittest.skipUnless(shutil.which("zsh"), "needs zsh")
+    def test_the_block_survives_nounset_and_the_rest_of_zshrc_still_runs(self):
+        # With `setopt nounset`, an unset variable stops zsh reading .zshrc at that line, so every
+        # line of the user's after the block would be skipped too.
+        rc = self.home / ".zshrc"
+        rc.write_bytes(b"setopt nounset\n")
+        ROUTE.install(rc, 8891)
+        with rc.open("ab") as f:
+            f.write(b"echo USER-LINE-RAN\n")
+        done = subprocess.run(["zsh", "-i", "-c", 'echo "url=${BOB_GATEWAY_URL:-unset}"'],
+                              env={"HOME": str(self.home), "ZDOTDIR": str(self.home),
+                                   "PATH": "/usr/bin:/bin"},
+                              capture_output=True, text=True, timeout=30)
+        self.assertNotIn("parameter not set", done.stderr)
+        self.assertIn("USER-LINE-RAN", done.stdout)
+        self.assertIn("url=http://127.0.0.1:8891", done.stdout)
+
+    def test_a_legacy_block_is_still_ours_and_remove_is_byte_identical(self):
+        rc = self.home / ".zshrc"
+        rc.write_bytes(b"alias ll='ls -l'\n" + self.LEGACY_BLOCK)
+        self.assertEqual(ROUTE.ownership(rc.read_bytes()), ("ours", 8891))
+        self.assertEqual(ROUTE.remove(rc), "removed")
+        self.assertEqual(rc.read_bytes(), b"alias ll='ls -l'\n")
+
+    def test_install_on_a_legacy_block_writes_the_new_block_once(self):
+        rc = self.home / ".zshrc"
+        rc.write_bytes(b"x=1\n" + self.LEGACY_BLOCK)
+        ROUTE.install(rc, 8891)
+        self.assertEqual(rc.read_bytes(), b"x=1\n" + ROUTE.block(8891))
 
     def test_install_twice_writes_one_block(self):
         rc = self.home / ".zshrc"
@@ -629,6 +670,48 @@ class SetupTest(TempHome):
         self.assertIn("rc_probe=miss", out)
 
 
+class LoopbackNeverUsesTheUserProxyTest(TempHome):
+    """A corporate Mac sets HTTP_PROXY with no NO_PROXY for 127.0.0.1. The plugin's calls to its
+    own local proxy must still go straight to it: through the corporate proxy they fail, and the
+    signal hook would send the Bob session id off the machine."""
+
+    def setUp(self):
+        super().setUp()
+        self.corp = FakeProxy()
+        self.corp.__enter__()
+        self.addCleanup(self.corp.__exit__, None, None, None)
+        env = {"HTTP_PROXY": f"http://127.0.0.1:{self.corp.port}",
+               "http_proxy": f"http://127.0.0.1:{self.corp.port}"}
+        patch = mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in ("NO_PROXY", "no_proxy"):
+            os.environ.pop(name, None)
+
+    def assert_nothing_reached_the_user_proxy(self):
+        self.assertEqual((self.corp.paths, self.corp.signals), ([], []),
+                         "a call to 127.0.0.1 went through the user's HTTP_PROXY")
+
+    def test_status_reaches_the_local_proxy_directly(self):
+        import time
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000) - 60_000) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("proxy_up=true", out)
+        self.assertIn("/api/requests?limit=1&agent=bob", proxy.paths)
+        self.assert_nothing_reached_the_user_proxy()
+
+    def test_signal_reaches_the_local_proxy_directly(self):
+        payload = {"session_id": "task-123", "hook_event_name": "SessionStart", "source": "compact"}
+        with FakeProxy() as proxy:
+            self.write_record(proxy.port)
+            self.assertEqual(self.run_main("signal", stdin=json.dumps(payload)), (0, "", ""))
+        self.assertEqual(len(proxy.signals), 1)
+        self.assert_nothing_reached_the_user_proxy()
+
+
 class StatusTest(TempHome):
     def test_status_reports_route_health_and_recent_bob_traffic(self):
         import time
@@ -863,6 +946,40 @@ class ResetScriptTest(TempHome):
     def reset(self, *args):
         return subprocess.run(["/bin/sh", str(PLUGIN.state_dir() / "context-guru-reset"), *args],
                               env=os.environ.copy(), text=True, capture_output=True, timeout=30)
+
+    def test_reset_keeps_a_proxy_config_the_user_wrote(self):
+        # uninstall deletes the config only when it starts with our marker; reset must too.
+        with FakeProxy() as proxy:
+            self.install(proxy, b"x\n", b"{}\n")
+            config = PLUGIN.state_dir() / f"bob-{proxy.port}.yaml"
+            config.write_text("pipeline: [format]\n# mine\n")
+            done = self.reset("--yes")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(config.read_text(), "pipeline: [format]\n# mine\n")
+
+    def test_reset_uses_the_same_config_marker_as_the_plugin(self):
+        # reset.sh needs no Python, so it repeats the marker. The two must not drift.
+        self.assertIn(f'= "{PLUGIN.CONFIG_MARKER}" ]', (HERE / "reset.sh").read_text())
+
+    def test_reset_removes_our_own_proxy_config(self):
+        with FakeProxy() as proxy:
+            self.install(proxy, b"x\n", b"{}\n")
+            config = PLUGIN.state_dir() / f"bob-{proxy.port}.yaml"
+            self.assertTrue(config.read_text().startswith(PLUGIN.CONFIG_MARKER))
+            done = self.reset("--yes")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(config.exists())
+
+    def test_reset_removes_a_legacy_block(self):
+        with FakeProxy() as proxy:
+            self.install(proxy, b"alias g=git", b"{}\n")
+            # The block as setup wrote it before 2026-11-09.
+            self.rc.write_bytes(b"alias g=git" + RouteTest.LEGACY_BLOCK.replace(
+                b"8891", str(proxy.port).encode()))
+            done = self.reset("--yes")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("rc_block=removed", done.stdout)
+        self.assertEqual(self.rc.read_bytes(), b"alias g=git")
 
     def test_dry_run_changes_nothing(self):
         with FakeProxy() as proxy:

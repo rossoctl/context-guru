@@ -17,7 +17,7 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
   ```sh
   # >>> context-guru (bob) >>>
   # IBM Bob reads this when it starts. Remove it with the context-guru-uninstall skill.
-  if [ "$VSCODE_RESOLVING_ENVIRONMENT" = 1 ] && [ "$__CFBundleIdentifier" = com.ibm.software.bob ]; then
+  if [ "${VSCODE_RESOLVING_ENVIRONMENT:-}" = 1 ] && [ "${__CFBundleIdentifier:-}" = com.ibm.software.bob ]; then
     export VITE_GATEWAY_BASE_URL=http://127.0.0.1:PORT
   fi
   export BOB_GATEWAY_URL=http://127.0.0.1:PORT

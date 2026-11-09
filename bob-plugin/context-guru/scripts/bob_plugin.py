@@ -225,9 +225,15 @@ def unsafe_path(path):
     return '"' in text or "\\" in text or "\n" in text
 
 
+# Calls to the local proxy never use the user's HTTP_PROXY. On a corporate Mac it is often set with
+# no NO_PROXY entry for 127.0.0.1: the calls then fail, and the signal hook would send the Bob
+# session id off the machine. Downloads from GitHub keep the user's proxy (fetch, latest_release_tag).
+LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def healthy(port, timeout=1):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as reply:
+        with LOOPBACK.open(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as reply:
             return reply.status == 200
     except Exception:
         return False
@@ -1172,7 +1178,7 @@ def doctor(args):
 def last_bob_request_ms(port):
     """The time (epoch ms) of the newest Bob request in the dashboard, or None."""
     url = f"http://127.0.0.1:{port}/api/requests?limit=1&agent=bob"
-    with urllib.request.urlopen(url, timeout=2) as reply:
+    with LOOPBACK.open(url, timeout=2) as reply:
         rows = json.load(reply).get("requests") or []
     return rows[0].get("ts") if rows else None
 
@@ -1271,7 +1277,7 @@ def signal_hook(_args):
         request = urllib.request.Request(f"http://127.0.0.1:{port}/signal", data=body,
                                          method="POST",
                                          headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(request, timeout=HOOK_HTTP_TIMEOUT_S).close()
+        LOOPBACK.open(request, timeout=HOOK_HTTP_TIMEOUT_S).close()
     except Exception:
         pass
     return 0

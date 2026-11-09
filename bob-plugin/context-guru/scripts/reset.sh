@@ -3,7 +3,8 @@
 #
 # It needs no Python. It removes our rc-file block, our hooks in Bob's settings and our launchd
 # agent, so Bob talks to IBM directly again. It keeps the dashboard data.
-#   - The rc block: perl (in macOS) removes the exact block, the same bytes setup wrote.
+#   - The rc block: perl (in macOS) removes the exact block, the same bytes setup wrote. It
+#     accepts both forms: ${VAR:-} (from 2026-11-09) and the legacy bare $VAR.
 #   - The hooks: when the settings file still has the bytes we wrote, we copy back the user's
 #     original bytes. Else osascript (JavaScript, in macOS) removes only the groups with our tag.
 # macOS only (plan D14).
@@ -99,7 +100,7 @@ if [ -n "$RC_FILE" ] && [ -f "$RC_FILE" ]; then
     my $n = () = $text =~ /\Q$start\E/g; my $m = () = $text =~ /\Q$end\E/g;
     exit 3 if $n == 0 && $m == 0;
     exit 4 unless $n == 1 && $m == 1;
-    my $re = qr/\n\Q$start\E\n# IBM Bob reads this when it starts\. Remove it with the context-guru-uninstall skill\.\nif \[ "\$VSCODE_RESOLVING_ENVIRONMENT" = 1 \] && \[ "\$__CFBundleIdentifier" = com\.ibm\.software\.bob \]; then\n  export VITE_GATEWAY_BASE_URL=http:\/\/127\.0\.0\.1:(\d{1,5})\nfi\nexport BOB_GATEWAY_URL=http:\/\/127\.0\.0\.1:(\d{1,5})\n\Q$end\E\n/;
+    my $re = qr/\n\Q$start\E\n# IBM Bob reads this when it starts\. Remove it with the context-guru-uninstall skill\.\nif \[ "(?:\$VSCODE_RESOLVING_ENVIRONMENT|\$\{VSCODE_RESOLVING_ENVIRONMENT:-\})" = 1 \] && \[ "(?:\$__CFBundleIdentifier|\$\{__CFBundleIdentifier:-\})" = com\.ibm\.software\.bob \]; then\n  export VITE_GATEWAY_BASE_URL=http:\/\/127\.0\.0\.1:(\d{1,5})\nfi\nexport BOB_GATEWAY_URL=http:\/\/127\.0\.0\.1:(\d{1,5})\n\Q$end\E\n/;
     $text =~ $re or exit 4; exit 4 unless $1 eq $2;
     $text =~ s/$re//;
     open(my $o, ">:raw", $out) or exit 5; print $o $text; close $o or exit 5; exit 0;
@@ -240,7 +241,10 @@ else
   echo "service=absent"
 fi
 
-[ -n "$PORT" ] && rm -f "$STATE_DIR/bob-$PORT.yaml"
+# Only a config of ours (its first line is our marker), as uninstall does. A file the user wrote stays.
+if [ -n "$PORT" ] && [ "$(head -n 1 "$STATE_DIR/bob-$PORT.yaml" 2>/dev/null)" = "# Managed by the context-guru Bob plugin." ]; then
+  rm -f "$STATE_DIR/bob-$PORT.yaml"
+fi
 if [ "$clean" = 1 ]; then
   rm -f "$RECORD"
   echo "result=removed"
