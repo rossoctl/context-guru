@@ -41,7 +41,8 @@
 #
 # Exit codes:
 #   0  both reviews are posted (or --cleanup is done)
-#   1  a reviewer failed, or the input is wrong
+#   1  a reviewer failed, or the input is wrong, or the PR head is not in refs/pull/N/head yet
+#      (run again in a minute)
 #   2  the round budget is used; only the user can grant more (OFFLOAD_MAX_ROUNDS)
 #   3  this head already has both reviews of its round; push the fixes first (or --same-head)
 #
@@ -128,7 +129,6 @@ review_timeout=${OFFLOAD_REVIEW_TIMEOUT:-1800}
 [[ $review_timeout =~ ^[0-9]+$ ]] || { echo "OFFLOAD_REVIEW_TIMEOUT must be whole seconds, not '$review_timeout'" >&2; exit 1; }
 
 pr_json=$(gh pr view "$pr" --repo "$repo" --json headRefName,headRefOid,baseRefName)
-head_ref=$(jq -r .headRefName <<<"$pr_json")
 sha=$(jq -r .headRefOid <<<"$pr_json")
 base_ref=$(jq -r .baseRefName <<<"$pr_json")
 
@@ -167,7 +167,14 @@ if [ "$round" -gt "$max_rounds" ]; then
   exit 2
 fi
 
-git -C "$main" fetch -q origin "$head_ref" "$base_ref"
+# Fetch the head through the PR ref: a fork PR's branch is not on origin, but refs/pull/N/head
+# exists for every PR. The plain base_ref fetch keeps origin/$base_ref current for the merge base.
+git -C "$main" fetch -q origin "refs/pull/$pr/head" "$base_ref"
+# The PR ref can lag the head that gh reported (a push in between). Do not review another commit.
+git -C "$main" cat-file -e "$sha^{commit}" 2>/dev/null || {
+  echo "Head $sha of PR #$pr is not in refs/pull/$pr/head yet. Run again in a minute." >&2
+  exit 1
+}
 
 wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$1-r$2"; } # <backend> <reviewer>
 
