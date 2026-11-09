@@ -556,6 +556,7 @@ class InstallTest(Release):
                                env=self.env, cwd=str(self.root), start_new_session=True)
         run.stdin.write("y\n")
         run.stdin.close()
+        run.stdin = None  # Python 3.13: communicate() would flush the closed file
         deadline = time.monotonic() + 30
         while not self.plist().exists() and time.monotonic() < deadline:
             time.sleep(0.05)
