@@ -78,6 +78,12 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	o.TotalReducedUSD = o.TotalSavedUSD
+	// The same arithmetic as the full Overview(), from the same agent-only columns, so a lean read gives the status
+	// line's `rd` (replay_tokens) and not 0 (#990).
+	o.SavedGross = o.TokensBefore - o.TokensAfter
+	if o.ReplayTokens = o.SavedGross - o.SavedUnique; o.ReplayTokens < 0 {
+		o.ReplayTokens = 0
+	}
 	return o, nil
 }
 
