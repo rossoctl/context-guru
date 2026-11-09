@@ -263,3 +263,21 @@ test("two projects started together get different ports", async () => {
     delete process.env.CONTEXT_GURU_BIN
   }
 })
+
+test("a table row without a boolean spends or a string desc is rejected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "context-guru-badtable-"))
+  const row = (extra) => ({ name: "auto", providers: ["anthropic"], spends: true, desc: "d", cache: {}, ...extra })
+  const bins = {
+    "no-desc": { default: "auto", aliases: {}, strategies: [row({ desc: undefined })] },
+    "spends-string": { default: "auto", aliases: {}, strategies: [row({ spends: "yes" })] },
+    "desc-number": { default: "auto", aliases: {}, strategies: [row({ desc: 5 })] },
+  }
+  for (const [name, table] of Object.entries(bins)) {
+    const path = join(dir, name)
+    writeFileSync(path, `#!/bin/sh\necho '${JSON.stringify(table)}'\n`, { mode: 0o755 })
+    assert.throws(() => loadStrategyTable(path), /cannot list cache strategies/, name)
+  }
+  const good = join(dir, "good")
+  writeFileSync(good, `#!/bin/sh\necho '${JSON.stringify({ default: "auto", aliases: {}, strategies: [row({})] })}'\n`, { mode: 0o755 })
+  assert.equal(loadStrategyTable(good).strategies.length, 1)
+})

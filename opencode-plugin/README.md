@@ -34,6 +34,7 @@ first startup downloads release v0.7.1 when `context-guru-proxy` is not already 
 verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.
+If `auto` does not fit the routed providers (an OpenAI-only setup), the plugin runs `none` and logs why.
 Set other values with the tuple form:
 
 ```json
@@ -53,9 +54,11 @@ On OpenCode 2, options use the entry-object form:
 Presets: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`.
 Cache strategies: the proxy owns the list. The plugin reads it with `context-guru-proxy strategies` and keeps no copy.
 The plugin offers only the strategies that fit a provider it routes. The default is the proxy default, `auto`.
+If `auto` does not fit the routed providers, the plugin runs `none` and logs why.
 The old name `5-min-ping` still works. The proxy reads it as `auto`.
 The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
 **The proxy must be v0.7.1 or later.** An older binary cannot list strategies, so the plugin does not start it and logs an error.
+Until v0.7.1 is released, a fresh install cannot download its proxy. `/context-guru-update` also answers "latest" for a v0.7.0 binary. Use a v0.7.1 binary from `PATH` or `CONTEXT_GURU_BIN` until then.
 Pings spend your own credential while you are away. `none` sends no pings.
 
 A choice saved by `/context-guru-preset` or `/context-guru-strategy` wins over these options.

@@ -55,6 +55,7 @@ credential while you are away. Set other values with the tuple form:
 - The old name `5-min-ping` still works. The proxy reads it as `auto`.
 - The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
 - **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy.
+- Until v0.7.1 is released, a fresh install cannot download its proxy, and `/context-guru-update` answers "latest" for a v0.7.0 binary. Use a v0.7.1 binary from `PATH` or `CONTEXT_GURU_BIN` until then.
 - `none` sends no keep-alive requests.
 
 ## Change the preset or strategy in a session

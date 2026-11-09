@@ -9,7 +9,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-review
 process.env.CONTEXT_GURU_PORT_START = "9300"
 
 import plugin, { stateDirectory, effectiveSettings, withLock } from "../index.js"
-import { stubProxyBinary, deadProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, deadProxyBinary, pickyProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
 
 const context = (directory, logs = []) => ({ directory, client: { app: { log: async ({ body }) => { logs.push(body.message) } } } })
 const anthropic = (baseURL = "https://api.anthropic.com") => ({ anthropic: { options: { baseURL } } })
@@ -96,6 +96,33 @@ test("a lock whose holder is gone is broken after the stale age", async () => {
   let ran = false
   await withLock(root, async () => { ran = true }, { heartbeatMs: 100, staleMs: 1000 })
   assert.equal(ran, true)
+})
+
+test("a pinned release that is not published gives an error that says so", async () => {
+  const directory = "/tmp/context-guru-r2-unpublished"
+  const previousBin = process.env.CONTEXT_GURU_BIN
+  const previousPath = process.env.PATH
+  const previousReleases = process.env.CONTEXT_GURU_RELEASES_URL
+  delete process.env.CONTEXT_GURU_BIN
+  process.env.PATH = "/usr/bin:/bin"
+  const { createServer } = await import("node:http")
+  const server = createServer((request, response) => { response.statusCode = 404; response.end() })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  process.env.CONTEXT_GURU_RELEASES_URL = `http://127.0.0.1:${server.address().port}/releases`
+  const logs = []
+  try {
+    const hooks = await plugin.server(context(directory, logs))
+    const config = { provider: anthropic() }
+    await hooks.config(config)
+    assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
+    assert.ok(logs.some((message) => /v0\.7\.1 is not published yet/.test(message)), logs.join("|"))
+  } finally {
+    server.close()
+    process.env.PATH = previousPath
+    if (previousBin !== undefined) process.env.CONTEXT_GURU_BIN = previousBin
+    if (previousReleases === undefined) delete process.env.CONTEXT_GURU_RELEASES_URL
+    else process.env.CONTEXT_GURU_RELEASES_URL = previousReleases
+  }
 })
 
 test("the download runs outside the lock", async () => {
@@ -374,6 +401,117 @@ test("reset keeps a binary the plugin did not download", async () => {
     await run(join(state, "context-guru-reset"))
     assert.ok(existsSync(join(state, "bin", "context-guru-proxy")), "reset removed a file for an external binary")
     assert.ok(existsSync(external))
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+// ---- Round 2, blocking: a restart must not write the other setting without the check startup does.
+const openai = (baseURL = "https://api.openai.com/v1") => ({ openai: { options: { baseURL } } })
+const stopAll = async (state) => {
+  const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+  let pid = record.pid
+  try { pid = Number(readFileSync(join(state, "proxy.pid"), "utf8")) } catch {}
+  for (const p of new Set([pid, record.pid])) { try { process.kill(p, "SIGTERM") } catch {} }
+  await waitUntilUnhealthy(record.port)
+}
+
+test("OpenAI-only: a preset switch with restart keeps the resolved strategy none, not the raw default auto", async () => {
+  const directory = "/tmp/context-guru-r2-openai-restart"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = pickyProxyBinary()
+  try {
+    const hooks = await plugin.server(context(directory))
+    await hooks.config({ provider: openai() })
+    assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /strategy: none/)
+    const done = await run(join(state, "context-guru-preset"), ["set", "high", "--restart"])
+    assert.match(done.out, /result=restarted/, done.out)
+    const yaml = readFileSync(join(state, "proxy.yaml"), "utf8")
+    assert.match(yaml, /preset: high/)
+    assert.match(yaml, /strategy: none/, `the restart wrote an unfit strategy:\n${yaml}`)
+    assert.ok(!yaml.includes("strategy: auto"))
+    await stopAll(state)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("a typo in the preset option does not stop a strategy switch with restart", async () => {
+  const directory = "/tmp/context-guru-r2-typo-preset"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = pickyProxyBinary()
+  const logs = []
+  try {
+    const hooks = await plugin.server(context(directory, logs), { preset: "hgh" })
+    await hooks.config({ provider: anthropic() })
+    assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /preset: off/)
+    const done = await run(join(state, "context-guru-strategy"), ["set", "2-ping", "--restart"])
+    assert.match(done.out, /result=restarted/, done.out)
+    const yaml = readFileSync(join(state, "proxy.yaml"), "utf8")
+    assert.match(yaml, /preset: off/, yaml)
+    assert.match(yaml, /strategy: 2-ping/)
+    assert.equal((await fetch(`http://127.0.0.1:${JSON.parse(readFileSync(join(state, "install.json"), "utf8")).port}/healthz`)).status, 200)
+    await stopAll(state)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("a typo in the strategy option does not stop a preset switch with restart", async () => {
+  const directory = "/tmp/context-guru-r2-typo-strategy"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = pickyProxyBinary()
+  try {
+    const hooks = await plugin.server(context(directory), { cacheStrategy: "aut0" })
+    await hooks.config({ provider: anthropic() })
+    const done = await run(join(state, "context-guru-preset"), ["set", "high", "--restart"])
+    assert.match(done.out, /result=restarted/, done.out)
+    const yaml = readFileSync(join(state, "proxy.yaml"), "utf8")
+    assert.match(yaml, /preset: high/)
+    assert.ok(!yaml.includes("aut0"), yaml)
+    await stopAll(state)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("a new proxy that fails to start leaves the old proxy running, with the old file", async () => {
+  const directory = "/tmp/context-guru-r2-rollback"
+  const state = stateDirectory(directory)
+  // The proxy refuses the name 2-ping, as a real proxy would refuse a name it does not know.
+  process.env.CONTEXT_GURU_BIN = pickyProxyBinary(undefined, { refuse: ["2-ping"] })
+  try {
+    const hooks = await plugin.server(context(directory))
+    await hooks.config({ provider: anthropic() })
+    const before = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+    const oldYaml = readFileSync(join(state, "proxy.yaml"), "utf8")
+    const done = await run(join(state, "context-guru-strategy"), ["set", "2-ping", "--restart"])
+    assert.match(done.out, /result=not_applied/, done.out)
+    assert.match(done.out, /old_proxy=restored/, done.out)
+    assert.equal(readFileSync(join(state, "proxy.yaml"), "utf8"), oldYaml, "the old file was not put back")
+    const health = await fetch(`http://127.0.0.1:${before.port}/healthz`)
+    assert.equal(health.status, 200, "no proxy is running after a failed switch")
+    assert.ok(!existsSync(join(state, "proxy.yaml.old")))
+    await stopAll(state)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
+test("a name that is not in the table is refused by the script, and the old proxy is not touched", async () => {
+  const directory = "/tmp/context-guru-r2-precheck"
+  const state = stateDirectory(directory)
+  process.env.CONTEXT_GURU_BIN = pickyProxyBinary()
+  try {
+    const hooks = await plugin.server(context(directory))
+    await hooks.config({ provider: anthropic() })
+    const before = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+    // A name that is not in the table is refused by the script itself.
+    const done = await run(join(state, "context-guru-strategy"), ["set", "30-min-ping", "--restart"])
+    assert.equal(done.status, 2)
+    assert.equal((await fetch(`http://127.0.0.1:${before.port}/healthz`)).status, 200)
+    assert.equal(JSON.parse(readFileSync(join(state, "install.json"), "utf8")).pid, before.pid)
+    await stopAll(state)
   } finally {
     delete process.env.CONTEXT_GURU_BIN
   }

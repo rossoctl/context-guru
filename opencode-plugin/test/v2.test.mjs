@@ -255,8 +255,13 @@ test("v2: hooks work when the provider callback runs after transform() has resol
       get: (id) => providers.find((provider) => provider.id === id),
       update: (id, update) => update(providers.find((provider) => provider.id === id)),
     }) }
+    const logs = []
+    const originalLog = console.log
+    console.log = (...args) => { logs.push(args.join(" ")) }
     const done = plugin.setup(ctx)
     await new Promise((resolve) => setTimeout(resolve, 100))
+    console.log = originalLog
+    assert.ok(!logs.some((line) => /no Anthropic or OpenAI provider is configured/.test(line)), `wrong verdict logged: ${logs.join("|")}`)
     await run()
     await done
     const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))

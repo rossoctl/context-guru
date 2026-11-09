@@ -153,6 +153,22 @@ test("choosing the current value shows no confirm", async () => {
   delete process.env.CONTEXT_GURU_BIN
 })
 
+test("with the script but no strategy table, the toast names the table, not the script", async () => {
+  const directory = "/tmp/context-guru-tui-notable"
+  const state = stateDirectory(directory)
+  const hooks = await plugin.server(server(directory))
+  // Nothing routed: the scripts exist, the table was never written.
+  await hooks.config({ provider: { custom: { options: { baseURL: "https://example.test" } } } })
+  const { api, shown, toasts } = fakeApi(directory)
+  await pickAndSwitch(api, directory, "strategy")
+  assert.equal(shown.length, 0)
+  assert.match(toasts.at(-1).message, /strategy table is missing/)
+  assert.ok(!/script found/.test(toasts.at(-1).message))
+  const gone = fakeApi("/tmp/context-guru-tui-missing")
+  await pickAndSwitch(gone.api, "/tmp/context-guru-tui-missing", "strategy")
+  assert.match(gone.toasts.at(-1).message, /script found/)
+})
+
 test("without an installed script the picker shows a toast and no dialog", async () => {
   const { api, shown, toasts } = fakeApi("/tmp/context-guru-tui-missing")
   await pickAndSwitch(api, "/tmp/context-guru-tui-missing", "preset")

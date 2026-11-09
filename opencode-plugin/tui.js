@@ -32,7 +32,11 @@ export async function pickAndSwitch(api, directory, kind) {
   const shown = await runCommandScript(state, spec.script)
   const { facts, choices } = parsePickerOutput(shown.output)
   if (shown.status !== 0 || !choices.length) {
-    toast(api, "error", `No ${spec.what} script found. Start OpenCode once with the Context Guru plugin enabled.`)
+    // Two different causes: the script is missing, or it exists and says the strategy table is missing.
+    const noTable = /reason=no-strategy-table/.test(shown.output)
+    toast(api, "error", noTable
+      ? "The strategy table is missing. Restart OpenCode with a routed Anthropic or OpenAI provider, so the plugin reads it from the proxy."
+      : `No ${spec.what} script found. Start OpenCode once with the Context Guru plugin enabled.`)
     return
   }
   const current = facts.saved

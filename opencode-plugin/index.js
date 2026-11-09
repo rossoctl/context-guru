@@ -27,7 +27,7 @@ export function loadStrategyTable(binaryPath) {
   let table
   try { table = JSON.parse(run.stdout) } catch {}
   const valid = table && typeof table.default === "string" && Array.isArray(table.strategies) && table.strategies.length &&
-    table.strategies.every((row) => row && typeof row.name === "string" && Array.isArray(row.providers))
+    table.strategies.every((row) => row && typeof row.name === "string" && Array.isArray(row.providers) && typeof row.spends === "boolean" && typeof row.desc === "string")
   if (run.status !== 0 || !valid) throw new Error(`${binaryPath} cannot list cache strategies; ${update}`)
   return { default: table.default, aliases: table.aliases ?? {}, strategies: table.strategies, presets: table.presets ?? [] }
 }
@@ -125,6 +125,7 @@ async function downloadBinary(state) {
     fetch(`${base}/${archiveName}`),
     fetch(`${base}/checksums.txt`),
   ])
+  if (archiveResponse.status === 404) throw new Error(`release ${version} is not published yet (HTTP 404); put a ${PINNED_VERSION} or later context-guru-proxy on PATH, or set CONTEXT_GURU_BIN`)
   if (!archiveResponse.ok) throw new Error(`binary download failed: HTTP ${archiveResponse.status}`)
   if (!checksumResponse.ok) throw new Error(`checksum download failed: HTTP ${checksumResponse.status}`)
   const archive = Buffer.from(await archiveResponse.arrayBuffer())
@@ -511,13 +512,37 @@ else
   VALID=$(cut -f1 "$STATE/strategies.tsv" | tr '\\n' ' ')
   DEFAULT=$(head -1 "$STATE/strategies.default" 2>/dev/null)
 fi
+
 [ -f "$STATE/install.env" ] && . "$STATE/install.env"
 saved_value() { sed -n "s/^$1=//p" "$STATE/settings.env" 2>/dev/null | head -1; }
 # Effective value = what the user saved with a picker, else what the plugin options say, else the default.
 # options.env holds the plugin options; the plugin writes it at every start.
 opt_value() { sed -n "s/^$1=//p" "$STATE/options.env" 2>/dev/null | head -1; }
-cur_preset=$(saved_value preset); [ -n "$cur_preset" ] || cur_preset=$(opt_value preset); [ -n "$cur_preset" ] || cur_preset=${DEFAULT_PRESET}
-cur_strategy=$(saved_value strategy); [ -n "$cur_strategy" ] || cur_strategy=$(opt_value strategy); [ -n "$cur_strategy" ] || cur_strategy=$DEFAULT
+# A value counts only if the plugin would accept it at startup. The preset must be in the preset list.
+# The strategy must be in strategies.tsv: the proxy table, filtered to the routed providers, after the alias map.
+valid_in() { for v in $2; do [ "$v" = "$1" ] && return 0; done; return 1; }
+PRESET_LIST=${shQuote(PRESETS.join(" "))}
+if [ -f "$STATE/strategies.tsv" ]; then STRATEGY_LIST=$(cut -f1 "$STATE/strategies.tsv" | tr '\n' ' '); else STRATEGY_LIST=; fi
+alias_of() { [ -f "$STATE/strategies.aliases" ] && awk -F '\t' -v n="$1" '$1 == n {print $2; exit}' "$STATE/strategies.aliases"; }
+# First candidate that checks out wins: saved choice, plugin option, what the running proxy was started with.
+pick_preset() {
+  for c in "$(saved_value preset)" "$(opt_value preset)" "\${preset:-}"; do
+    [ -n "$c" ] && valid_in "$c" "$PRESET_LIST" && { printf '%s' "$c"; return; }
+  done
+  printf '%s' ${shQuote(DEFAULT_PRESET)}
+}
+pick_strategy() {
+  for c in "$(saved_value strategy)" "$(opt_value strategy)" "\${strategy:-}"; do
+    [ -n "$c" ] || continue
+    m=$(alias_of "$c"); [ -n "$m" ] && c=$m
+    valid_in "$c" "$STRATEGY_LIST" && { printf '%s' "$c"; return; }
+  done
+  # The proxy default, if it fits the routed providers. Else none, which fits all.
+  d=$(head -1 "$STATE/strategies.default" 2>/dev/null)
+  if [ -n "$d" ] && valid_in "$d" "$STRATEGY_LIST"; then printf '%s' "$d"; else printf '%s' none; fi
+}
+cur_preset=$(pick_preset)
+if [ "$KIND" = strategy ]; then cur_strategy=$(pick_strategy); else cur_strategy=$(pick_strategy 2>/dev/null || printf none); fi
 running_preset=
 if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ]; then
   running_preset=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/stats" 2>/dev/null | tr ',' '\\n' | sed -n 's/.*"preset": *"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -1)
@@ -567,6 +592,11 @@ case "\${1:-}" in
       exit 0
     fi
     if [ ! -f "$STATE/context-guru-start" ] || [ ! -f "\${binary:-}" ]; then printf '%s\\n' "result=not_applied" "reason=no-install" "note=restart OpenCode to start the proxy with the saved setting"; exit 1; fi
+    # Both keys come from pick_preset / pick_strategy, which return only names the plugin accepts at
+    # startup. The new file is rendered BEFORE the old proxy is touched.
+    render "$new_strategy" "$new_preset" > "$STATE/proxy.yaml.new" || { printf '%s\\n' "result=not_applied" "reason=render"; exit 1; }
+    # Keep the old file. If the new proxy does not start, it goes back and the old proxy starts again.
+    cp "$STATE/proxy.yaml" "$STATE/proxy.yaml.old" 2>/dev/null || rm -f "$STATE/proxy.yaml.old"
     if [ -f "$STATE/proxy.pid" ]; then
       pid=$(tr -cd '0-9' < "$STATE/proxy.pid")
       case "$pid" in '') ;; *) command=$(ps -p "$pid" -o command= 2>/dev/null || true)
@@ -574,12 +604,18 @@ case "\${1:-}" in
       rm -f "$STATE/proxy.pid"
     fi
     n=0; while [ "$n" -lt 30 ] && curl -fsS --max-time 1 "http://127.0.0.1:\${port:-1}/healthz" >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
-    render "$new_strategy" "$new_preset" > "$STATE/proxy.yaml.new" && mv "$STATE/proxy.yaml.new" "$STATE/proxy.yaml"
+    mv "$STATE/proxy.yaml.new" "$STATE/proxy.yaml"
     if sh "$STATE/context-guru-start"; then
+      rm -f "$STATE/proxy.yaml.old"
       grep -v '^preset=\\|^strategy=' "$STATE/install.env" > "$STATE/install.env.new" || true
       printf '%s\\n' "preset=$new_preset" "strategy=$new_strategy" >> "$STATE/install.env.new" && mv "$STATE/install.env.new" "$STATE/install.env"
       printf '%s\\n' "result=restarted"
     else
+      # The new proxy did not start. Put the old file back and start the old proxy again.
+      if [ -f "$STATE/proxy.yaml.old" ]; then
+        mv "$STATE/proxy.yaml.old" "$STATE/proxy.yaml"
+        if sh "$STATE/context-guru-start" >/dev/null 2>&1; then printf '%s\\n' "old_proxy=restored"; else printf '%s\\n' "old_proxy=not_restored"; fi
+      fi
       printf '%s\\n' "result=not_applied" "note=see $STATE/proxy.log"
       exit 1
     fi
@@ -1142,7 +1178,9 @@ async function setupV2(ctx) {
     // Register one hook per provider id that could be routed, and decide inside the hook, when a
     // request comes, whether this provider was routed.
     await Promise.all(pendingHooks)
-    if (!hooked.size) console.log("opencode-context-guru: no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
+    // If the host runs the provider callback later, nothing is hooked yet and this line is not a verdict:
+    // the callback registers its own hooks when it runs. So the wording says "so far".
+    if (!hooked.size) console.log("opencode-context-guru: no Anthropic or OpenAI provider routed so far; hooks are added if the host lists one later")
   } catch (error) {
     console.error(`opencode-context-guru: proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
   }

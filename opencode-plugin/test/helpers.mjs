@@ -60,3 +60,33 @@ exit 1
   chmodSync(path, 0o755)
   return path
 }
+
+// A stub proxy like the real one in one way: it reads --config, and it exits at once, as the real proxy does
+// for an unknown preset or strategy name, when the file holds a name the real proxy would refuse.
+export function pickyProxyBinary(table = FAKE_STRATEGIES, { refuse = [] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "context-guru-picky-"))
+  const path = join(dir, "context-guru-proxy")
+  const presets = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
+  writeFileSync(path, `#!/usr/bin/env node
+const { createServer } = require("node:http")
+const { readFileSync } = require("node:fs")
+if (process.argv[2] === "strategies") { console.log(${JSON.stringify(JSON.stringify(table))}); process.exit(0) }
+const arg = (name) => process.argv[process.argv.indexOf(name) + 1]
+const text = readFileSync(arg("--config"), "utf8")
+const preset = /^preset: (.+)$/m.exec(text)?.[1]
+const strategy = /^  strategy: (.+)$/m.exec(text)?.[1]
+const names = ${JSON.stringify(table.strategies.map((row) => row.name))}
+const refuse = ${JSON.stringify(refuse)}
+if (!${JSON.stringify(presets)}.includes(preset) || (strategy && !names.includes(strategy)) || refuse.includes(strategy) || refuse.includes(preset)) {
+  console.error("config: unknown preset or strategy: " + preset + " " + strategy)
+  process.exit(2)
+}
+const port = Number(arg("--listen").split(":")[1])
+createServer((request, response) => {
+  if (request.url === "/healthz") response.end("ok")
+  else { response.statusCode = 404; response.end() }
+}).listen(port, "127.0.0.1")
+`)
+  chmodSync(path, 0o755)
+  return path
+}
