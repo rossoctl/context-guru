@@ -431,8 +431,8 @@ func TestSavings_ASplitBooksItsEffectOnAShortConversationWhenTheTailMoves(t *tes
 
 // R53 (issue 702): two overlapping requests of ONE thread, each reporting its own operation on different content
 // (message 1 and message 3). Both are begun and ended before either is computed. Each EndRequest that reports a
-// change bumps the ThreadState version, so A starts at version 1 and B at version 2, and every Compute then sees a
-// moved version (Recomputed is true by construction, which this test does not claim to prove). Both forwarded bodies carry both masks: the library ends a change that the forwarded body does not hold, so a
+// change bumps the ThreadState version, so A starts at version 1 and B at version 2. A's Compute always sees a
+// moved version. B's does only when A's Compute replaced the state first, so the test asserts nothing on Recomputed. Both forwarded bodies carry both masks: the library ends a change that the forwarded body does not hold, so a
 // body without the other request's mask would end that change in whichever Compute ran second (library rule, not a
 // proxy bug). No operation may be lost or priced twice: each ChangeID is priced once in the result of the request that reported it, the sum check (R15, spec 6.5) must not
 // fire, and the thread keeps both changes. The Computes run in goroutines so -race sees the Tracker's locking.

@@ -330,7 +330,7 @@ not a report on live traffic.
 
 - **Covered:** the 63 cases of the `rossoctl/accountant` case library as it was when this report was
   written (accountant v0.1.0). Each of the 27 differences has a reason in sections 3 to 8. The
-  library has grown since: the version this repo pins (`5181d50c`, 2026-11-08) holds 145 case files.
+  library has grown since: the version this repo pins (`5181d50c`, 2026-11-08) holds 143 case files.
   The newer differences are in `cg-differences-root-causes.md` (causes 9 to 14; cause 14 is "cases
   not yet traced"). Its 2026-11-08 run played 114 cases, and 58 differ. This section does not cover
   those.
