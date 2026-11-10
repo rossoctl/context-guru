@@ -46,13 +46,41 @@ test("the TUI module exports id and tui, and no server", () => {
   assert.equal(tuiModule.server, undefined)
 })
 
-test("registers both slash commands through keymap.registerLayer", async () => {
+// What the OpenCode 1.19.5 host does with a keymap command (read from its bundled code, function Mt):
+// a command is listed in the palette only when its namespace is "palette", and its slash name is the
+// string slashName. A command with `slash: { name }` and no namespace registers without error and is
+// invisible. That is the defect the first real-host test found.
+function hostVisible(layers) {
+  const visible = []
+  for (const layer of layers) for (const command of layer.commands ?? []) {
+    if (command.namespace === "palette" && typeof command.title === "string") {
+      visible.push({ name: command.name, title: command.title, category: command.category, slash: command.slashName })
+    }
+  }
+  return visible
+}
+
+test("registers both commands the way the OpenCode host lists them", async () => {
   const { api, registered } = fakeApi("/tmp/context-guru-tui-reg")
   await tuiModule.tui(api)
   assert.equal(registered.layers.length, 1)
-  const commands = registered.layers[0].commands
-  assert.deepEqual(commands.map((command) => command.slash.name).sort(), ["context-guru-preset", "context-guru-strategy"])
-  for (const command of commands) assert.equal(typeof command.run, "function")
+  const visible = hostVisible(registered.layers)
+  assert.deepEqual(visible.map((command) => command.slash).sort(), ["context-guru-preset", "context-guru-strategy"])
+  assert.deepEqual(visible.map((command) => command.title).sort(), ["Context Guru: cache strategy", "Context Guru: preset"])
+  for (const command of visible) assert.equal(command.category, "Context Guru")
+  for (const command of registered.layers[0].commands) assert.equal(typeof command.run, "function")
+})
+
+test("the legacy form carries the fields the host converts: title, value, slash.name, onSelect", () => {
+  const legacy = fakeApi("/tmp/x", { keymap: false, legacy: true })
+  registerPickerCommands(legacy.api, "/tmp/x")
+  const items = legacy.registered.legacy[0]()
+  for (const item of items) {
+    assert.equal(typeof item.title, "string")
+    assert.equal(typeof item.value, "string")
+    assert.equal(typeof item.slash?.name, "string")
+    assert.equal(typeof item.onSelect, "function")
+  }
 })
 
 test("falls back to the legacy api.command when there is no keymap, and to nothing when neither exists", () => {

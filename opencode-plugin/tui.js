@@ -103,15 +103,23 @@ function confirmRestart(api, state, kind, name) {
 // keymap.registerLayer is the current API. api.command.register is deprecated and is the
 // fallback for a host that has no keymap. With neither, the chat commands from the server
 // plugin stay the only path.
+//
+// The field names below are what OpenCode 1.19.5 reads. The published types do not list them.
+// They come from the host: its api.command shim turns a legacy item into a keymap command with
+// { namespace: "palette", name, title, desc, category, slashName, run }. A command without
+// namespace "palette", or with `slash: { name }` instead of `slashName`, registers without an
+// error and never shows in the palette or the slash menu.
 export function registerPickerCommands(api, directory) {
   const entries = Object.entries(KINDS)
   if (typeof api.keymap?.registerLayer === "function") {
     api.keymap.registerLayer({
       commands: entries.map(([kind, spec]) => ({
+        namespace: "palette",
         name: `context-guru.${kind}`,
         title: spec.title,
+        desc: spec.what,
         category: "Context Guru",
-        slash: { name: spec.slash },
+        slashName: spec.slash,
         run: () => { pickAndSwitch(api, directory, kind).catch(() => toast(api, "error", "Picker failed.")) },
       })),
     })
