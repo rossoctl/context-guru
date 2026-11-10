@@ -3573,9 +3573,6 @@ function attributionChips(c, components) {
   return box;
 }
 
-function kv(k, v) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })); }
-
-
 /**
  * kvUnset prints a value the client never set as the WORD "unset", styled as absent.
  *
