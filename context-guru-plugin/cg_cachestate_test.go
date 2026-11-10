@@ -32,6 +32,9 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	if doc["window_saved"] != "saved 85.0k wr · 12.0k in · cost 40.0k rd" {
 		t.Errorf("window_saved = %v, want this session's tokens by tier (window asked since=%v, want %d)", doc["window_saved"], doc["window_asked"], cachestateWindowStart)
 	}
+	if doc["window_asked"] != fmt.Sprint(cachestateWindowStart) {
+		t.Errorf("the window read asked since=%v, want the window's start %d", doc["window_asked"], cachestateWindowStart)
+	}
 }
 
 // The band's token figure by case: a tier at 0 is left out, `cost` only when a tier was paid, and a proxy before #999

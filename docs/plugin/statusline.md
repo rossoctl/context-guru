@@ -210,6 +210,7 @@ The band's token figure is not the status line's `rd / wr`. It comes from `/api/
 
 - **Every feature counts:** compaction, the cache split, the keep-alive rescue and the 1-hour cache. The status line's `rd / wr` counts compaction only.
 - **`saved`** lists the tokens the requests did not send or write. **`cost`** lists the tokens the changes made them pay. A feature can save in one tier and pay in another: the keep-alive rescue saves a cache write and pays cache reads.
+- **`cost` leaves out the keep-alive pings.** A ping is not agent traffic, so its own billed tokens are not in `cost`, though on a subscription they also count toward the 5-hour limit.
 - **One figure per tier.** The band never adds tiers into one number. Labels: `wr` 5-minute cache write, `wr1h` 1-hour cache write, `rd` cache read, `in` fresh input. They show in that order.
 - A tier at 0 is left out. `cost …` shows only when a tier was paid. With nothing in any tier, the row shows `5h 34%` only.
 - Requests the proxy did not measure in tokens (`tokens_unmeasured_requests`: rows from before the measure, or rows it could not price) count as nothing here. The band does not say how many there are.

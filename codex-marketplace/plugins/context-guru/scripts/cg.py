@@ -251,7 +251,7 @@ def name_agents(doc: dict, transcript: str) -> None:
             t["name"] = rows[t["id"]]
 
 
-# The tiers of /api/stats `tokens.saved` / `tokens.caused`, in the order every screen shows them, with their labels.
+# The tiers of /api/stats `tokens.saved` / `tokens.caused`, in the order the band shows them, with their labels.
 TOKEN_TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
 
 
