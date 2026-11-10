@@ -134,6 +134,8 @@ the package's marker. The second line names the cache strategy.
   `update` (with the new binary) and the session-start `restart`. It comes from the install record:
   the preset, the cache strategy and any chained upstream. A proxy that already answers is not
   restarted for it. It reads the new file at its next start.
+- **A hand edit inside a file with the marker does not stay.** The next `restart`, `update`,
+  `preset` or `cache-strategy` writes the file again. To keep your edits, remove the marker line.
 - **A file without the marker is yours.** The package never writes it. `restart` and `update` report
   `config=not_owned` and start the proxy with your file. `setup` and `configure` refuse.
 

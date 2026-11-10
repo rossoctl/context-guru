@@ -515,6 +515,18 @@ class Restart(Sandbox):
         supports.assert_not_called()
         self.assertEqual(pi_plugin.proxy_config().read_text(), "preset: xhigh\n")
 
+    def test_restart_asks_find_binary_when_the_record_has_no_binary(self):
+        self.our_unit()
+        self.write_config()
+        record = pi_plugin.read_record()
+        del record["binary"]
+        pi_plugin.write_record(record)
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/found/proxy"), \
+                mock.patch.object(pi_plugin, "names_strategies", return_value=True) as supports:
+            code, facts = self.restart("systemd", [False, True])
+        self.assertEqual((code, facts["config"]), (0, "rendered"))
+        supports.assert_called_once_with("/found/proxy")
+
     def test_a_missing_config_is_not_created_by_restart(self):
         self.our_unit()
         code, facts = self.restart("systemd", [False, True])
@@ -614,7 +626,8 @@ class ConfigByName(Sandbox):
 
     def test_support_comes_from_the_version_the_binary_prints(self):
         cases = {"context-guru-proxy 0.7.1 (commit ac68a7a0)": True, "context-guru-proxy v0.8.0 (commit x)": True,
-                 "context-guru-proxy 0.7.1-rc1 (commit x)": True, "context-guru-proxy 0.7.0 (commit x)": False,
+                 "context-guru-proxy 0.7.2-rc1 (commit x)": True, "context-guru-proxy 0.7.1-rc1 (commit x)": False,
+                 "context-guru-proxy v0.7.1-rc1 (commit x)": False, "context-guru-proxy 0.7.0 (commit x)": False,
                  "context-guru-proxy dev (commit x)": False, "Usage of context-guru-proxy:": False}
         for output, want in cases.items():
             self.assertEqual(pi_plugin.names_strategies(self.fake_binary(output)), want, output)
@@ -649,6 +662,54 @@ class ConfigByName(Sandbox):
         pi_plugin.write_record({"port": 8800, "preset": "medium", "cache_strategy": strategy, "binary": binary,
                                 "upstreams": {"anthropic": "https://gw.example/anthropic"}})
         pi_plugin.write_proxy_config("medium", strategy, {"anthropic": "https://gw.example/anthropic"}, by_name)
+
+    def test_an_invalid_record_leaves_the_file_alone(self):
+        self.installed()
+        before = pi_plugin.proxy_config().read_text()
+        for record in ({"preset": "huge", "cache_strategy": "auto"}, {"preset": "medium", "cache_strategy": "9-ping"}):
+            with mock.patch.object(pi_plugin, "names_strategies") as supports:
+                self.assertEqual(pi_plugin.rerender_config(record, "/bin/proxy"), "invalid_record")
+            supports.assert_not_called()
+        self.assertEqual(pi_plugin.proxy_config().read_text(), before)
+
+    def test_update_check_reads_the_version_the_binary_prints(self):
+        binary = self.fake_binary("context-guru-proxy 0.7.0 (commit abc)")
+        pi_plugin.write_record({"port": 8800, "binary": binary})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
+            code, facts = self.run_main("update", "--check")
+        self.assertEqual((code, facts["installed_version"], facts["latest_version"], facts["update_available"]),
+                         (0, "0.7.0", "v0.7.1", "true"))
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.1 (commit abc)")})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
+            _, facts = self.run_main("update", "--check")
+        self.assertEqual((facts["installed_version"], facts["update_available"]), ("0.7.1", "false"))
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("Usage of context-guru-proxy:")})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
+            _, facts = self.run_main("update", "--check")
+        self.assertEqual((facts["installed_version"], facts["update_available"]), ("unknown", "true"))
+
+    def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
+        self.installed()
+        held = {}
+        real_write = pi_plugin.write_proxy_config
+
+        def write(*args, **kwargs):
+            # A restart that tries to take the lock now must wait.
+            import fcntl
+            with open(pi_plugin.state_dir() / "restart.lock", "a") as other:
+                try:
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held["locked"] = False
+                except BlockingIOError:
+                    held["locked"] = True
+            return real_write(*args, **kwargs)
+        with mock.patch.object(pi_plugin, "write_proxy_config", side_effect=write), \
+                mock.patch.object(pi_plugin, "names_strategies", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=True):
+            code, _ = self.run_main("configure", "--cache-strategy", "1-ping")
+        self.assertEqual((code, held["locked"]), (0, True))
+        self.assertEqual(pi_plugin.read_record()["cache_strategy"], "1-ping")
+        self.assertIn("  strategy: 1-ping\n", pi_plugin.proxy_config().read_text())
 
     def test_update_re_renders_with_the_new_binary_before_the_start(self):
         self.installed(binary=str(pi_plugin.managed_binary()))  # an old install: literal keys

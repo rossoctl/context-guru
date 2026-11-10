@@ -292,12 +292,17 @@ def binary_version_text(executable):
 
 def names_strategies(executable):
     """True when the binary reads `cache: strategy: <name>`. A version we cannot read is False, so
-    the config gets the literal keys, which every binary accepts."""
+    the config gets the literal keys, which every binary accepts. A pre-release (`0.7.1-rc1`) counts
+    as older than its release: it may have been cut before #987."""
     text = binary_version_text(executable) if executable else None
+    if text is None:
+        return False
     try:
-        return text is not None and release_version(text) >= NAMED_STRATEGY_RELEASE
+        version = release_version(text)
     except RuntimeError:  # a dev build, for example
         return False
+    prerelease = "-" in text.removeprefix("v")
+    return version > NAMED_STRATEGY_RELEASE or (version == NAMED_STRATEGY_RELEASE and not prerelease)
 
 
 def install_release_binary(version=None):
@@ -860,13 +865,17 @@ def configure(args):
     preset = args.preset or preset
     strategy = args.cache_strategy or strategy
     upstreams = recorded_upstreams(record)
-    try:
-        write_proxy_config(preset, strategy, upstreams, names_strategies(record.get("binary")))
-    except Exception as error:
-        facts(result="refused", detail=error)
-        return 2
-    record.update(preset=preset, cache_strategy=strategy)
-    write_record(record)
+    by_name = names_strategies(record.get("binary"))
+    # The config and the record change together under the restart lock, so a session-start restart
+    # cannot re-render the old record over the new file between the two writes.
+    with restart_lock():
+        try:
+            write_proxy_config(preset, strategy, upstreams, by_name)
+        except Exception as error:
+            facts(result="refused", detail=error)
+            return 2
+        record.update(preset=preset, cache_strategy=strategy)
+        write_record(record)
     restarted = start_service(record["binary"], int(record["port"]), upstreams)
     extra = {}
     if restarted and preset == "ultrahigh":
