@@ -19,6 +19,26 @@ PLUGIN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLUGIN)
 
 
+REAL_LOAD_STRATEGY_TABLE = PLUGIN.load_strategy_table
+TABLE = {
+    "default": "auto", "aliases": {"5-min-ping": "auto"},
+    "presets": ["off", "conservative", "medium", "high", "xhigh", "ultrahigh", "house"],
+    "strategies": [
+        {"name": "none", "spends": False, "desc": "no pings", "providers": ["any"], "cache": {}},
+        {"name": "auto", "spends": True, "desc": "anthropic pings", "providers": ["anthropic"],
+         "cache": {"keepalive": True}},
+        {"name": "30-min-ping", "spends": True, "desc": "openai pings", "providers": ["openai"],
+         "cache": {"keepalive": True}},
+    ],
+}
+
+
+def write_script(path, body):
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return str(path)
+
+
 class CodexPluginTest(unittest.TestCase):
     def test_proxy_lifecycle_does_not_depend_on_a_sandboxed_session_hook(self):
         hooks_path = MODULE_PATH.parent.parent / "hooks.json"
@@ -84,8 +104,11 @@ class CodexPluginTest(unittest.TestCase):
             "XDG_STATE_HOME": str(root / "state"),
         }, clear=False)
         self.env.start()
+        self.table = mock.patch.object(PLUGIN, "load_strategy_table", return_value=TABLE)
+        self.table.start()
 
     def tearDown(self):
+        self.table.stop()
         self.env.stop()
         self.temp.cleanup()
 
@@ -109,11 +132,11 @@ class CodexPluginTest(unittest.TestCase):
         self.assertEqual(command[3:5], ["--config", str(PLUGIN.proxy_config())])
         self.assertEqual(command[-2:], ["--openai-upstream", "https://gateway.example.test"])
 
-    def test_proxy_config_uses_off_preset_and_cache_keepalive(self):
+    def test_proxy_config_uses_off_preset_and_the_30_min_ping_strategy(self):
         path = PLUGIN.write_proxy_config()
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.read_text(),
-                         f"{PLUGIN.CONFIG_MARKER}\npreset: off\ncache:\n  keepalive: true\n")
+                         f"{PLUGIN.CONFIG_MARKER}\npreset: off\ncache:\n  strategy: 30-min-ping\n")
 
     def test_linux_proxy_is_started_by_user_service_not_child_process(self):
         with mock.patch.object(PLUGIN.platform, "system", return_value="Linux"), \
@@ -455,22 +478,22 @@ screen_reader_detection_done = true
     def test_configure_preset_preserves_cache_and_restarts(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)
         PLUGIN.routing_state().write_text("{}")
-        PLUGIN.save_proxy_options("off", False)
+        PLUGIN.save_proxy_options("off", "none")
         args = type("Args", (), {"show": False, "preset": "high", "cache_strategy": None})()
         with mock.patch.object(PLUGIN, "restart_proxy", return_value=True) as restart:
             self.assertEqual(PLUGIN.configure(args), 0)
-        self.assertEqual(PLUGIN.read_proxy_options(), ("high", False))
+        self.assertEqual(PLUGIN.read_proxy_options(), ("high", "none"))
         restart.assert_called_once()
 
     def test_configure_cache_preserves_preset(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)
         PLUGIN.routing_state().write_text("{}")
-        PLUGIN.save_proxy_options("medium", False)
+        PLUGIN.save_proxy_options("medium", "none")
         args = type("Args", (), {"show": False, "preset": None,
                                   "cache_strategy": "30-min-ping"})()
         with mock.patch.object(PLUGIN, "restart_proxy", return_value=True):
             self.assertEqual(PLUGIN.configure(args), 0)
-        self.assertEqual(PLUGIN.read_proxy_options(), ("medium", True))
+        self.assertEqual(PLUGIN.read_proxy_options(), ("medium", "30-min-ping"))
 
     def test_configure_refuses_unmanaged_options(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)
@@ -484,7 +507,7 @@ screen_reader_detection_done = true
     def test_configure_show_is_read_only(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)
         PLUGIN.routing_state().write_text("{}")
-        PLUGIN.save_proxy_options("xhigh", True)
+        PLUGIN.save_proxy_options("xhigh", "30-min-ping")
         before = PLUGIN.proxy_config().read_bytes()
         args = type("Args", (), {"show": True, "preset": None, "cache_strategy": None})()
         with mock.patch.object(PLUGIN, "restart_proxy") as restart:
@@ -495,7 +518,7 @@ screen_reader_detection_done = true
     def test_configure_ultrahigh_asks_for_a_probe(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)
         PLUGIN.routing_state().write_text("{}")
-        PLUGIN.save_proxy_options("xhigh", True)
+        PLUGIN.save_proxy_options("xhigh", "30-min-ping")
         args = type("Args", (), {"show": False, "preset": "ultrahigh", "cache_strategy": None})()
         with mock.patch.object(PLUGIN, "restart_proxy", return_value=True), \
                 mock.patch.object(PLUGIN, "read_record", return_value={"port": 8799}), \
@@ -516,6 +539,115 @@ screen_reader_detection_done = true
         with mock.patch.object(PLUGIN, "healthy", return_value=True):
             self.assertEqual(PLUGIN.ask_defer_probe(1), "unavailable")
         self.assertLess(time.monotonic() - start, 2)
+
+
+    def real_table(self, binary):
+        with mock.patch.object(PLUGIN, "load_strategy_table", REAL_LOAD_STRATEGY_TABLE):
+            return PLUGIN.load_strategy_table(binary)
+
+    def test_reads_the_table_from_the_binary(self):
+        binary = write_script(Path(self.temp.name) / "ok", "cat <<'EOF'\n" + json.dumps(TABLE) + "\nEOF\n")
+        self.assertEqual(self.real_table(binary), TABLE)
+
+    def test_old_binary_that_serves_gets_the_update_error_within_the_timeout(self):
+        # v0.7.0 given `strategies` starts serving and prints no JSON.
+        binary = write_script(Path(self.temp.name) / "old", "echo 'listening on 127.0.0.1:0'\nexec sleep 30\n")
+        start = time.monotonic()
+        with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1), \
+             self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+            self.real_table(binary)
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_old_binary_that_exits_with_an_error_gets_the_update_error(self):
+        binary = write_script(Path(self.temp.name) / "err", "echo 'flag provided but not defined' >&2\nexit 2\n")
+        with self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+            self.real_table(binary)
+        with self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+            self.real_table(None)
+
+    def test_strategies_command_gets_a_loopback_port_and_no_config(self):
+        out = Path(self.temp.name) / "env.txt"
+        binary = write_script(Path(self.temp.name) / "env",
+                              f'echo "$LISTEN_ADDR|$CONFIG|$1" > {out}\ncat <<\'EOF\'\n' + json.dumps(TABLE) + "\nEOF\n")
+        with mock.patch.dict(os.environ, {"CONFIG": "/etc/mine.yaml"}):
+            self.real_table(binary)
+        self.assertEqual(out.read_text().strip(), "127.0.0.1:0||strategies")
+
+    def test_a_missing_preset_is_a_clear_error(self):
+        table = dict(TABLE, presets=["off", "conservative", "medium", "high", "xhigh"])
+        binary = write_script(Path(self.temp.name) / "short", "cat <<'EOF'\n" + json.dumps(table) + "\nEOF\n")
+        with self.assertRaisesRegex(RuntimeError, "does not know preset.*ultrahigh"):
+            self.real_table(binary)
+
+    def test_only_openai_and_any_strategies_are_offered(self):
+        self.assertEqual([r["name"] for r in PLUGIN.offered_strategies(TABLE)], ["none", "30-min-ping"])
+        self.assertEqual(PLUGIN.resolve_strategy(TABLE, "none"), "none")
+        with self.assertRaisesRegex(RuntimeError, "not offered for Codex"):
+            PLUGIN.resolve_strategy(TABLE, "auto")
+        with self.assertRaisesRegex(RuntimeError, "not offered for Codex"):
+            PLUGIN.resolve_strategy(TABLE, "5-min-ping")
+
+    def test_both_write_forms_read_back(self):
+        PLUGIN.proxy_config().parent.mkdir(parents=True)
+        cases = [
+            ("cache:\n  keepalive: true\n", "30-min-ping"),
+            ("cache:\n  keepalive: false\n", "none"),
+            ("cache:\n  strategy: 30-min-ping\n", "30-min-ping"),
+            ("cache:\n  strategy: none\n", "none"),
+            ("cache:\n  strategy: \"none\"\n", "none"),
+            ("", "30-min-ping"),
+        ]
+        for body, want in cases:
+            PLUGIN.proxy_config().write_text(f"{PLUGIN.CONFIG_MARKER}\npreset: high\n{body}")
+            self.assertEqual(PLUGIN.read_proxy_options(), ("high", want), body)
+        for name in ("none", "30-min-ping"):
+            PLUGIN.save_proxy_options("medium", name)
+            self.assertEqual(PLUGIN.read_proxy_options(), ("medium", name))
+
+    def test_an_old_keepalive_file_keeps_its_meaning_through_configure(self):
+        PLUGIN.routing_state().parent.mkdir(parents=True)
+        PLUGIN.routing_state().write_text("{}")
+        PLUGIN.proxy_config().write_text(f"{PLUGIN.CONFIG_MARKER}\npreset: high\ncache:\n  keepalive: false\n")
+        args = type("Args", (), {"show": False, "preset": "medium", "cache_strategy": None})()
+        with mock.patch.object(PLUGIN, "restart_proxy", return_value=True):
+            self.assertEqual(PLUGIN.configure(args), 0)
+        self.assertEqual(PLUGIN.read_proxy_options(), ("medium", "none"))
+
+    def test_there_is_one_preset_list(self):
+        source = MODULE_PATH.read_text()
+        self.assertEqual(source.count('"conservative"'), 1)
+        self.assertEqual(PLUGIN.PRESETS, ("off", "conservative", "medium", "high", "xhigh", "ultrahigh"))
+        with self.assertRaisesRegex(RuntimeError, "unknown preset"):
+            PLUGIN.save_proxy_options("house", "none")
+
+    def test_configure_show_lists_the_choices_from_the_proxy(self):
+        PLUGIN.routing_state().parent.mkdir(parents=True)
+        PLUGIN.routing_state().write_text("{}")
+        args = type("Args", (), {"show": True, "preset": None, "cache_strategy": None})()
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.configure(args), 0)
+        text = out.getvalue()
+        self.assertIn("preset=off", text)
+        self.assertIn("cache_strategy=30-min-ping", text)
+        self.assertIn('"name":"none"', text)
+        self.assertIn('"desc":"openai pings"', text)
+        self.assertNotIn("anthropic pings", text)
+
+    def test_configure_with_an_old_binary_says_to_update(self):
+        PLUGIN.routing_state().parent.mkdir(parents=True)
+        PLUGIN.routing_state().write_text("{}")
+        args = type("Args", (), {"show": True, "preset": None, "cache_strategy": None})()
+        error = RuntimeError("x cannot list cache strategies; update the proxy to v0.7.1 or later")
+        with mock.patch.object(PLUGIN, "load_strategy_table", side_effect=error), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.configure(args), 2)
+        self.assertIn("result=refused", out.getvalue())
+        self.assertIn("v0.7.1", out.getvalue())
+
+    def test_skills_read_the_choices_from_show(self):
+        skills = MODULE_PATH.parent.parent / "skills"
+        for name in ("cache-strategy-picker", "preset-picker"):
+            self.assertIn("configure --show", (skills / name / "SKILL.md").read_text())
 
 
 if __name__ == "__main__":
