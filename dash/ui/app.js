@@ -3071,14 +3071,41 @@ function showScopeCol(tableSel, wide) {
   return wide;
 }
 
+/**
+ * True on a Claude subscription (GET /api/me/limits, isSubscription): the Sessions tab then shows
+ * tokens, not dollars. A manager (readsLimits), an API key and hosted mode (#997: `{}`) keep the
+ * dollars, and so does any failure. One request is shared for a minute.
+ */
+function onSubscription() {
+  if (!readsLimits(account && account.tenant)) return Promise.resolve(false);
+  const now = Date.now();
+  if (!state.subLimitsP || now - state.subLimitsAt > 60000) {
+    state.subLimitsAt = now;
+    state.subLimitsP = ctl('/api/me/limits').catch(() => null);
+  }
+  return state.subLimitsP.then((l) => isSubscription(l, Date.now()));
+}
+
+/** The Sessions headers that name dollars take their token label (data-sub-label) on a subscription. */
+function sessionHeaders(sub) {
+  for (const th of $$('thead th[data-sub-label]', $('[data-testid=sessions-table]'))) {
+    if (th.dataset.usdLabel === undefined) { th.dataset.usdLabel = th.textContent; th.dataset.usdTitle = th.title; }
+    th.textContent = sub ? th.dataset.subLabel : th.dataset.usdLabel;
+    th.title = sub ? th.dataset.subTitle : th.dataset.usdTitle;
+  }
+}
+
 async function loadSessions() {
   const body = clear($('#sessions-body'));
   const wide = showScopeCol('[data-testid=sessions-table]', wideScope());
   const cols = wide ? 15 : 14;
   loadingRows(body, cols);
   try {
-    const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset, sort: state.sessSort === 'cost' ? 'cost' : '' });
+    const [{ sessions, total }, sub] = await Promise.all([
+      api('sessions', { limit: 25, offset: state.sessOffset, sort: state.sessSort === 'cost' ? 'cost' : '' }),
+      onSubscription()]);
     clear(body);
+    sessionHeaders(sub);
     if (!sessions.length) {
       if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
       else {
@@ -3104,7 +3131,7 @@ async function loadSessions() {
         wide ? el('td', { class: 'narrow-hide' }, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
         el('td', { class: 'narrow-hide', text: whenShort(s.start) }),
         el('td', { class: 'num', text: num(s.turns) }),
-        el('td', { class: 'num' },
+        sub ? sessionTokenCost(s) : el('td', { class: 'num' },
           usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
         // A dollar figure over a session whose turns are not all priced is a figure with
         // a different denominator from the token columns beside it: it covers the priced
@@ -3113,7 +3140,7 @@ async function loadSessions() {
         // same way it rules out `$0`: neither carries a reason, and a dash reads as "nothing
         // here" rather than "we cannot say". Routed through the same helper as the Components
         // dollar cells so there is one answer to this in the codebase.
-        el('td', { class: 'num' },
+        sub ? sessionTokenSaved(s) : el('td', { class: 'num' },
           usdOrNA(s.saved_usd, !!s.baseline_cost_usd,
             'no turn in this session reported the provider usage a baseline cost needs, so there '
             + 'is nothing to subtract an actual cost from'),
@@ -3143,7 +3170,7 @@ async function loadSessions() {
         // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
         // where it never ran — a zero would read as "it broke even here", which it did not do —
         // and rather than the `—` that was here, which carried the reason only in a title.
-        el('td', {
+        sub ? sessionTokenKeepAlive(s) : el('td', {
           class: 'num more ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
           title: s.keepalive_pings || s.keepalive_saved_usd
             ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
@@ -3170,6 +3197,45 @@ async function loadSessions() {
     if (aborted(err)) return;
     tableMessage(body, cols, 'Could not load sessions', String(err.message || err), { error: true });
   }
+}
+
+// The three Sessions cells that show dollars, in tokens on a subscription (#1023, sessionTokenCells).
+function sessionTokenCost(s) {
+  const c = sessionTokenCells(s, compact);
+  return el('td', {
+    class: 'num', 'data-testid': 'session-used-tok',
+    title: 'Input tokens this session was billed, by kind: wr cache write, rd cache read, in fresh input. '
+      + num(s.output_tokens) + ' output tokens are not in it. context-guru’s own model calls have no token figure here.',
+  }, c.cost || '0');
+}
+function sessionTokenSaved(s) {
+  const c = sessionTokenCells(s, compact);
+  return el('td', {
+    class: 'num', 'data-testid': 'session-saved-tok',
+    title: 'Tokens context-guru saved, by kind. "cost" is what the savings made the session pay. '
+      + 'Kinds are never added: Anthropic does not say how the limit weights them. The keep-alive is in its own column.',
+  }, c.saved,
+  c.unmeasured > 0 && c.saved !== 'not measured' ? el('span', {
+    class: 'na small', 'data-testid': 'session-unmeasured',
+    title: num(c.unmeasured) + (c.unmeasured === 1 ? ' request' : ' requests') + ' of this session not measured in tokens: '
+      + 'from before the token count, or not priced. That is not "saved nothing".',
+  }, ' †') : null);
+}
+function sessionTokenKeepAlive(s) {
+  const c = sessionTokenCells(s, compact);
+  if (!c.keepalive && !c.pings) {
+    return el('td', { class: 'num more' }, el('span', {
+      class: 'na', text: 'n/a',
+      title: 'your cache strategy did not run on this session, so it neither spent nor avoided anything here',
+    }));
+  }
+  return el('td', {
+    class: 'num more', 'data-testid': 'session-keepalive-tok',
+    title: num(s.keepalive_pings) + ' pings. The first line is the cache rewrites the pings avoided (a ceiling). '
+      + 'The second is what the pings paid: it is on its own line, not in any cost.',
+  },
+  el('div', { text: c.keepalive || 'saved 0' }),
+  c.pings ? el('div', { class: 'small', 'data-testid': 'session-pings-tok', text: PING_LABEL + ': ' + c.pings }) : null);
 }
 
 // ── requests ───────────────────────────────────────────────────────────────

@@ -47,7 +47,9 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
   [On a subscription, the Overview shows tokens](#on-a-subscription-the-overview-shows-tokens).
 - **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)), Cleanup (what to remove, with one command) and Usage over time.
 - **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
-  Requests, including a git-style diff of exactly what was rewritten on the wire.
+  Requests, including a git-style diff of exactly what was rewritten on the wire. On a Claude
+  subscription the Sessions tab shows tokens, not dollars. See
+  [On a subscription, the Sessions tab shows tokens](#on-a-subscription-the-sessions-tab-shows-tokens).
 - **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
   (some of these appear only in a [hosted service](hosted.md)).
 - **Advanced** — Preset steps (per-component economics), [Cache detail](#kv-cache-panel) (the KV-cache view),
@@ -486,6 +488,33 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   without context-guru the limit would have been hit.
 - **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
   how many requests have no token figure.
+
+### On a subscription, the Sessions tab shows tokens
+
+The Sessions tab uses the same test and the same display rule as the Overview (#1023). Managers,
+API-key users and hosted mode keep dollars. Three columns change:
+
+| Column (dollars) | On a subscription | Source in `/api/sessions` |
+|---|---|---|
+| Cost | **Tokens used**: the session's billed input tokens by tier, for example `1.6k wr · 20.0k rd · 400 in`. Output tokens are not in it. context-guru's own model calls (`cg_llm_cost_usd`) have no token form, so they do not show. | `used_tokens` |
+| Net saved $ | **Tokens saved**: `saved … · cost …`. A † marks a session with requests that have no token figure. | `tokens`, `tokens_unmeasured_requests` |
+| Keep-alive net | **Keep-alive**: the rescue on one line, and the pings on a line of their own (`Keep-alive pings (not in the total): cost …`). The pings are never added into the rescue's cost. `n/a` when the cache strategy did not run. | `keepalive_tokens`, `keepalive_ping_tokens` |
+
+Each session row in `/api/sessions` has these fields for every caller:
+
+- **`tokens`.** The session's accountant figure (`tok_total_*`) less the keep-alive rescue. It is the
+  token form of `saved_usd`, and it also has the split, the 1-hour head and the ended-change break.
+- **`keepalive_tokens`.** The keep-alive rescue (`tok_ka_*`). `tokens` plus `keepalive_tokens` is the
+  session's `/api/stats` `tokens.saved` and `tokens.caused`, tier by tier.
+- **`keepalive_ping_tokens`.** What the session's pings paid, in billed tokens by tier.
+- **`used_tokens`.** The agent requests' billed input tokens by tier (`fresh_input`, `cache_read`,
+  and `cache_write` split into 5-minute and 1-hour).
+- **`tokens_unmeasured_requests`.** The session's agent requests with no token figure.
+
+**Query cost.** A second query reads these figures for the sessions on the page only
+(`session_id IN (…)`, on a session index). The list's own aggregate does not change. On a test
+database of 20,000 requests (no `-race`), the list takes 103 ms and the token read 2.5 ms of it
+(`TestSessionTokens_StaysCheapOnALargeWindow`).
 
 ## KV-cache panel
 

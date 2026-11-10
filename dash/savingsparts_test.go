@@ -59,3 +59,28 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 		}
 	}
 }
+
+// On a Claude subscription the Sessions tab shows tokens in its three dollar columns (#1023). The
+// cells are tested in savings.test.mjs (sessionTokenCells). This checks the wiring: the tab asks for
+// the limits, a manager keeps dollars, each dollar cell has its token form, and the headers change.
+func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
+	app := stripComments(readUI(t, "ui/app.js"))
+	for _, want := range []string{
+		"if (!readsLimits(account && account.tenant)) return Promise.resolve(false);", // a manager keeps dollars
+		"state.subLimitsP = ctl('/api/me/limits').catch(() => null);",
+		"return state.subLimitsP.then((l) => isSubscription(l, Date.now()));",
+		"sessionHeaders(sub);",
+		"sub ? sessionTokenCost(s) :",
+		"sub ? sessionTokenSaved(s) :",
+		"sub ? sessionTokenKeepAlive(s) :",
+		"'data-testid': 'session-pings-tok', text: PING_LABEL + ': ' + c.pings", // the pings: a line of their own
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+	html := readUI(t, "ui/index.html")
+	if n := strings.Count(html, "data-sub-label="); n != 3 {
+		t.Errorf("index.html has %d Sessions headers with a token label, want 3", n)
+	}
+}

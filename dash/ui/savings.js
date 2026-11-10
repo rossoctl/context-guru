@@ -203,6 +203,26 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
   return { main, pings, estimate };
 }
 
+// One Sessions row in tokens, on a subscription (#1023), from /api/sessions' token fields. The
+// columns that show dollars elsewhere:
+//   cost       the session's billed input tokens (used_tokens). context-guru's own model calls
+//              (cg_llm_cost_usd) have no token form, so they are not in it.
+//   saved      the accountant's figure less the keep-alive rescue (tokens): `saved … · cost …`.
+//   keepalive  the rescue (keepalive_tokens), and the pings on a line of their own (pingLine),
+//              never added into the rescue's cost.
+// `unmeasured` counts the session's requests with no token figure. Each field is '' when empty.
+function sessionTokenCells(s, fmt) {
+  const unmeasured = (s && s.tokens_unmeasured_requests) || 0;
+  const all = unmeasured > 0 && unmeasured >= ((s && s.turns) || 0);
+  return {
+    cost: tierText(s && s.used_tokens, fmt),
+    saved: tokenLine(s && s.tokens, fmt) || (all ? 'not measured' : 'saved 0'),
+    keepalive: tokenLine(s && s.keepalive_tokens, fmt),
+    pings: pingLine(s, fmt),
+    unmeasured,
+  };
+}
+
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL };
+  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells };

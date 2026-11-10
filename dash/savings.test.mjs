@@ -225,3 +225,31 @@ test('the capped note leaves the dollars out on a subscription', () => {
   assert.equal(capNote({ replay_cap_correction_usd: -1.5 }, null),
     'Capped: replay credit earned after the client would have compacted is not counted.');
 });
+
+test('a Sessions row in tokens: saved less the keep-alive, the pings on their own line (#1023)', () => {
+  const { sessionTokenCells } = createRequire(import.meta.url)('./ui/savings.js');
+  const s = {
+    turns: 4,
+    used_tokens: { input: 400, cache_read: 20000, cache_write_5m: 1600, cache_write_1h: 0 },
+    tokens: { saved: { cache_write_5m: 3600, input: 900 }, caused: { cache_read: 800 } },
+    keepalive_tokens: { saved: { cache_write_5m: 4000 }, caused: { cache_read: 4000 } },
+    keepalive_ping_tokens: { input: 3, cache_read: 9000, cache_write_5m: 20, cache_write_1h: 10 },
+    tokens_unmeasured_requests: 2,
+  };
+  assert.deepEqual(sessionTokenCells(s, String), {
+    cost: '1600 wr · 20000 rd · 400 in',
+    saved: 'saved 3600 wr · 900 in · cost 800 rd',
+    keepalive: 'saved 4000 wr · cost 4000 rd',
+    // Never added into the keep-alive's cost.
+    pings: 'cost 20 wr · 10 wr1h · 9000 rd · 3 in',
+    unmeasured: 2,
+  });
+  // No keep-alive, no pings: empty, so the cell says n/a.
+  const quiet = sessionTokenCells({ turns: 1, tokens: { saved: { input: 5 } } }, String);
+  assert.equal(quiet.keepalive, '');
+  assert.equal(quiet.pings, '');
+  assert.equal(quiet.saved, 'saved 5 in');
+  // Every request unmeasured: not "saved 0". A server from before #1023: no NaN.
+  assert.equal(sessionTokenCells({ turns: 3, tokens_unmeasured_requests: 3 }, String).saved, 'not measured');
+  assert.deepEqual(sessionTokenCells({ turns: 3 }, String), { cost: '', saved: 'saved 0', keepalive: '', pings: '', unmeasured: 0 });
+});
