@@ -507,7 +507,7 @@ API-key users and hosted mode keep dollars. Three columns change:
 |---|---|---|
 | Cost | **Tokens used**: the session's billed input tokens by tier, for example `1.6k wr · 20.0k rd · 400 in`. `n/a` with the reason when no turn reported usage, as the dollar cell. Output tokens are not in it. context-guru's own model calls (`cg_llm_cost_usd`) have no token form, so they do not show. | `used_tokens` |
 | Net saved $ | **Tokens saved**: `saved … · cost …`. The shared rule for zero: an all-zero figure reads `saved 0 tokens` when every request of the session was priced, and `not measured` when any was not, or when the row has no `tokens`. A † marks a measured figure on a session with requests that have no token figure. | `tokens`, `tokens_unmeasured_requests` |
-| Keep-alive net | **Keep-alive**: the rescue on one line, and the pings on a line of their own (`Keep-alive pings (not in the total): cost …`). The pings are never added into the rescue's cost. `n/a` when the cache strategy did not run. | `keepalive_tokens`, `keepalive_ping_tokens` |
+| Keep-alive net | **Keep-alive**: the rescue on one line, through the same rule for zero (`not measured` when the session has unpriced requests), and the pings on a line of their own (`Keep-alive pings (not in the total): cost …`). The pings are never added into the rescue's cost. `n/a` when the cache strategy did not run. | `keepalive_tokens`, `keepalive_ping_tokens` |
 
 Each session row in `/api/sessions` has these fields for every caller:
 
@@ -523,8 +523,9 @@ Each session row in `/api/sessions` has these fields for every caller:
 - **`tokens_unmeasured_requests`.** The session's agent requests with no token figure.
 
 The table paints on the sessions answer and does not wait for `/api/me/limits`. When the limits
-answer changes the view, the table paints again. A failed limits read keeps dollars and is asked
-again on the next load. **Costliest first** still orders by the dollar cost, labelled "at API
+answer changes the view, the table paints again. The Overview and the Sessions tab share one
+limits request while it is in flight, and the Sessions tab reuses a good answer for a minute. A
+failed limits read keeps dollars and is asked again on the next load. **Costliest first** still orders by the dollar cost, labelled "at API
 prices": one order in tokens would add the tiers.
 
 **Query cost.** A second query reads these figures for the sessions on the page only

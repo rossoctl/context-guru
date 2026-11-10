@@ -241,14 +241,24 @@ test('a Sessions row in tokens: saved less the keep-alive, the pings on their ow
     saved: 'saved 3600 wr · 900 in · cost 800 rd',
     measured: true,
     keepalive: 'saved 4000 wr · cost 4000 rd',
+    keepaliveRan: true,
     // Never added into the keep-alive's cost.
     pings: 'cost 20 wr · 10 wr1h · 9000 rd · 3 in',
     unmeasured: 2,
   });
-  // No keep-alive, no pings: empty, so the cell says n/a.
+  // No keep-alive, no pings: the cell says n/a (the strategy did not run).
   const quiet = sessionTokenCells({ turns: 1, tokens: { saved: { input: 5 } } }, String);
-  assert.equal(quiet.keepalive, '');
+  assert.equal(quiet.keepaliveRan, false);
   assert.equal(quiet.pings, '');
+  // Unpriced rows, and pings that ran: the rescue is "not measured", not "saved 0"; the pings
+  // line still shows, from the ping rows' own usage.
+  const old = sessionTokenCells({ turns: 2, tokens: { saved: {}, caused: {} }, keepalive_tokens: { saved: {}, caused: {} },
+    tokens_unmeasured_requests: 2, keepalive_ping_tokens: { cache_read: 9000 } }, String);
+  assert.equal(old.keepalive, 'not measured');
+  assert.equal(old.pings, 'cost 9000 rd');
+  // Every request priced, pings ran, no rescue: a measured zero.
+  assert.equal(sessionTokenCells({ turns: 2, tokens: { saved: {} }, keepalive_tokens: { saved: {} },
+    keepalive_ping_tokens: { cache_read: 9000 } }, String).keepalive, 'saved 0 tokens');
   assert.equal(quiet.saved, 'saved 5 in');
   // The shared rule (tokenFigure), scoped to the session: all zero and every request priced is a
   // zero; all zero with any unpriced request, or a row with no `tokens` (a server from before
@@ -258,7 +268,7 @@ test('a Sessions row in tokens: saved less the keep-alive, the pings on their ow
   assert.equal(sessionTokenCells({ turns: 3, tokens: zero, tokens_unmeasured_requests: 1 }, String).saved, 'not measured');
   assert.equal(sessionTokenCells({ turns: 3, tokens: zero, tokens_unmeasured_requests: 3 }, String).measured, false);
   assert.deepEqual(sessionTokenCells({ turns: 3 }, String),
-    { cost: '', saved: 'not measured', measured: false, keepalive: '', pings: '', unmeasured: 0 });
+    { cost: '', saved: 'not measured', measured: false, keepalive: 'not measured', keepaliveRan: false, pings: '', unmeasured: 0 });
 });
 
 // One rule for zero against "not measured" (tokenFigure), for every screen (#988 round 2).

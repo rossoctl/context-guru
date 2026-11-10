@@ -1933,7 +1933,7 @@ async function loadOverviewLimits() {
   if (!readsLimits(account && account.tenant)) { done(null); return; }
   let sub = null;
   try {
-    const limits = await ctl('/api/me/limits');
+    const limits = await meLimits(0);
     if (isSubscription(limits, Date.now())) {
       sub = { limits, win: null };
       // The estimate needs an open 5-hour window and its spend and saving. Without them the tokens still show.
@@ -3085,21 +3085,32 @@ function showScopeCol(tableSel, wide) {
 }
 
 /**
+ * GET /api/me/limits, one request for the Overview and the Sessions tab. A request in flight is
+ * always shared. A good answer is reused while it is at most `maxAgeMs` old: the Overview passes 0
+ * (it always asks for a fresh answer, as before), the Sessions tab a minute. A failed answer is not
+ * kept, so the next caller asks again.
+ */
+function meLimits(maxAgeMs) {
+  const now = Date.now();
+  const reuse = state.limitsP && (state.limitsAt === null || now - state.limitsAt <= maxAgeMs);
+  if (!reuse) {
+    state.limitsAt = null; // null: in flight
+    const p = ctl('/api/me/limits');
+    state.limitsP = p;
+    p.then(() => { if (state.limitsP === p) state.limitsAt = Date.now(); },
+      () => { if (state.limitsP === p) state.limitsP = null; });
+  }
+  return state.limitsP;
+}
+
+/**
  * True on a Claude subscription (GET /api/me/limits, isSubscription): the Sessions tab then shows
  * tokens, not dollars. A manager (readsLimits), an API key and hosted mode (#997: `{}`) keep the
- * dollars, and so does any failure. A good answer is shared for a minute; a failed one is not kept,
- * so the next load asks again.
+ * dollars, and so does any failure.
  */
 function onSubscription() {
   if (!readsLimits(account && account.tenant)) return Promise.resolve(false);
-  const now = Date.now();
-  if (!state.subLimitsP || now - state.subLimitsAt > 60000) {
-    state.subLimitsAt = now;
-    const p = ctl('/api/me/limits');
-    state.subLimitsP = p;
-    p.catch(() => { if (state.subLimitsP === p) state.subLimitsP = null; });
-  }
-  return state.subLimitsP.then((l) => isSubscription(l, Date.now()), () => false);
+  return meLimits(60000).then((l) => isSubscription(l, Date.now()), () => false);
 }
 
 /** The Sessions headers that name dollars take their token label (data-sub-label) on a subscription. */
@@ -3232,7 +3243,7 @@ function sessionTokenCost(s) {
   const c = sessionTokenCells(s, compact);
   return el('td', {
     class: 'num', 'data-testid': 'session-used-tok',
-    title: 'Input tokens this session was billed, by kind: wr cache write, rd cache read, in fresh input. '
+    title: 'Input tokens this session was billed, by kind: wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input. '
       + num(s.output_tokens) + ' output tokens are not in it. context-guru’s own model calls have no token figure here.',
   }, s.baseline_cost_usd ? (c.cost || '0')
     : usdOrNA(0, false, 'no turn in this session reported the provider usage a cost needs'));
@@ -3252,7 +3263,7 @@ function sessionTokenSaved(s) {
 }
 function sessionTokenKeepAlive(s) {
   const c = sessionTokenCells(s, compact);
-  if (!c.keepalive && !c.pings) {
+  if (!c.keepaliveRan && !c.pings) {
     return el('td', { class: 'num more' }, el('span', {
       class: 'na', text: 'n/a',
       title: 'your cache strategy did not run on this session, so it neither spent nor avoided anything here',
@@ -3263,7 +3274,7 @@ function sessionTokenKeepAlive(s) {
     title: num(s.keepalive_pings) + ' pings. The first line is the cache rewrites the pings avoided (a ceiling). '
       + 'The second is what the pings paid: it is on its own line, not in any cost.',
   },
-  el('div', { text: c.keepalive || 'saved 0' }),
+  el('div', { text: c.keepalive }),
   c.pings ? el('div', { class: 'small', 'data-testid': 'session-pings-tok', text: PING_LABEL + ': ' + c.pings }) : null);
 }
 

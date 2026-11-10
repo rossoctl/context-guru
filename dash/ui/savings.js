@@ -223,8 +223,9 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered) {
 //   cost       the session's billed input tokens (used_tokens). context-guru's own model calls
 //              (cg_llm_cost_usd) have no token form, so they are not in it.
 //   saved      the accountant's figure less the keep-alive rescue (tokens): `saved … · cost …`.
-//   keepalive  the rescue (keepalive_tokens), and the pings on a line of their own (pingLine),
-//              never added into the rescue's cost.
+//   keepalive  the rescue (keepalive_tokens) through the same shared rule, and the pings on a line
+//              of their own (pingLine), never added into the rescue's cost. The caller shows `n/a`
+//              when neither has tokens: the strategy did not run.
 // `saved` follows the shared rule for zero against "not measured" (tokenFigure), scoped to the
 // session row: an all-zero figure with any unpriced request of the session, or a row with no
 // `tokens`, reads "not measured". `measured` is that rule's answer. `unmeasured` counts the session's
@@ -235,7 +236,8 @@ function sessionTokenCells(s, fmt) {
     cost: tierText(s && s.used_tokens, fmt),
     saved: saved.text,
     measured: saved.measured,
-    keepalive: tokenLine(s && s.keepalive_tokens, fmt),
+    keepalive: tokenFigure(s && s.keepalive_tokens, s, fmt).text,
+    keepaliveRan: hasTokens(s && s.keepalive_tokens),
     pings: pingLine(s, fmt),
     unmeasured: (s && s.tokens_unmeasured_requests) || 0,
   };
