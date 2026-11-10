@@ -1,0 +1,29 @@
+name: OpenCode plugin
+
+# Node tests for opencode-plugin/. Decoupled from ci.yaml, like docs.yaml: no Go, no CGO. It runs
+# only when the plugin, its test, or this file changes. The tests use stub proxies and no network.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - opencode-plugin/**
+      - .github/workflows/opencode-plugin.yaml
+  pull_request:
+    paths:
+      - opencode-plugin/**
+      - .github/workflows/opencode-plugin.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check opencode-plugin/index.js && node --check opencode-plugin/tui.js
+      - run: node --test opencode-plugin/test/*.test.mjs

@@ -239,6 +239,13 @@ type sweepPingCandidate struct {
 	// asked is set once a question has been sent for this conversation, so a second ping in the same
 	// idle span sends a plain ping instead of paying for the same answer twice.
 	asked atomic.Bool
+	// warm marks a question asked on the WARM path (#491). Its answer is held in process memory only
+	// and never written to the Store, its counters are the warm path's own, and its cost is deferred
+	// onto the next real request (there is no ping row to book it on).
+	warm bool
+	// minAge, when > 0, is the warm path's age floor: an output with fewer model turns after it is not
+	// offered (sweep_warm_too_new). 0 for the ping.
+	minAge int
 }
 
 var (
@@ -269,6 +276,23 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		clearSweepPing(thread.Key(c.Session, c.Thread))
 		return
 	}
+	cand := e.snapshotCandidate(c, req)
+	key := thread.Key(c.Session, c.Thread)
+	sweepPingMu.Lock()
+	defer sweepPingMu.Unlock()
+	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after
+	// maxSweepPingAge however few threads there are. The scan is over at most maxSweepPingCandidates
+	// entries and takes only a timestamp from each.
+	pruneSweepPingLocked(cand.registeredAt)
+	if _, exists := sweepPingCand[key]; !exists && len(sweepPingCand) >= maxSweepPingCandidates {
+		return // fail toward not remembering a new thread; its pings stay pings
+	}
+	sweepPingCand[key] = cand
+}
+
+// snapshotCandidate copies the conversation and the minimal context a question needs, detached from
+// the request that made them. The ping registry and the warm path (extract_sweep_warm.go) both use it.
+func (e *ExtractSweep) snapshotCandidate(c *components.Ctx, req *bschemas.BifrostChatRequest) *sweepPingCandidate {
 	baseCtx := c.Ctx
 	if baseCtx == nil {
 		baseCtx = context.Background()
@@ -296,17 +320,7 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		cc.RawInput = raw
 	}
 	cand := &sweepPingCandidate{e: e, ctx: cc, input: input, raw: raw, registeredAt: time.Now()}
-	key := thread.Key(c.Session, c.Thread)
-	sweepPingMu.Lock()
-	defer sweepPingMu.Unlock()
-	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after
-	// maxSweepPingAge however few threads there are. The scan is over at most maxSweepPingCandidates
-	// entries and takes only a timestamp from each.
-	pruneSweepPingLocked(cand.registeredAt)
-	if _, exists := sweepPingCand[key]; !exists && len(sweepPingCand) >= maxSweepPingCandidates {
-		return // fail toward not remembering a new thread; its pings stay pings
-	}
-	sweepPingCand[key] = cand
+	return cand
 }
 
 // mayHaveCandidate is the cheap test registerPing runs before it copies a conversation: is there any
@@ -474,6 +488,10 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 	e, c := cand.e, cand.ctx
 	req := &bschemas.BifrostChatRequest{Input: cand.input}
 	var cands []sweepCand
+	var fe *fileEvidence
+	if cand.warm {
+		fe = newFileEvidence(req)
+	}
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
@@ -499,9 +517,16 @@ func (cand *sweepPingCandidate) collect(rep *components.Report) []sweepCand {
 		// A lookup that missed: the result cache's hit rate is hits over all lookups, and this
 		// component records both sides (the replay in Offload records the hits).
 		metrics.RecordExtractionCacheLookup(rep.Component, false)
+		if cand.minAge > 0 && laterModelTurns(req, i) < cand.minAge {
+			rep.Gate("sweep_warm_too_new")
+			continue
+		}
 		cd, ok := e.admit(c, rep, req, i, content, id)
 		if !ok {
 			continue
+		}
+		if cand.warm {
+			cd.extra = fe.clause(i)
 		}
 		cands = append(cands, cd)
 	}
@@ -553,11 +578,14 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	req := &bschemas.BifrostChatRequest{Input: cand.input}
 	// THE QUESTIONS, in sequence, over the same cached prefix, under the one slot and claim this function and
 	// its caller already hold (extract_sweep_batch.go). A list of 12 or fewer is one question, as before.
-	br := e.askInBatches(req, &c, cands, askOpts{
-		trigger:      "ping",
-		gateReason:   "asked at the keep-alive ping, in place of the ping",
-		lastTurnRead: wait.LastTurnRead,
-	}, wait.MaxBatches)
+	// The warm path (#491) asks through this SAME function: only the label and the counters differ.
+	opt := askOpts{trigger: "ping", gateReason: "asked at the keep-alive ping, in place of the ping",
+		lastTurnRead: wait.LastTurnRead}
+	if cand.warm {
+		opt = askOpts{trigger: "warm", gateReason: "asked after a warm request was forwarded (#491)",
+			lastTurnRead: wait.LastTurnRead}
+	}
+	br := e.askInBatches(req, &c, cands, opt, wait.MaxBatches)
 	ms := br.ms
 	gates, events := map[string]int{}, map[string]int{}
 	for k, v := range collected.Gates {
@@ -572,8 +600,13 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	for k, v := range br.events {
 		events[k] += v
 	}
-	bumpSweepPingGates(gates)
-	bumpSweepPingGates(events)
+	if cand.warm {
+		bumpSweepWarmGates(gates)
+		bumpSweepWarmGates(events)
+	} else {
+		bumpSweepPingGates(gates)
+		bumpSweepPingGates(events)
+	}
 
 	in, out := br.prompt, br.completion
 	res := SweepPingResult{Model: sink.Model(), FreshInput: int(in), Output: int(out),
@@ -586,7 +619,11 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	// all a ping is for, so the keeper counts this as the ping.
 	res.Substituted = res.CacheRead > 0 || res.CacheWrite > 0
 	if res.Substituted || in > 0 || out > 0 || br.panicked > 0 {
-		sweepPingAsked.Add(1)
+		if cand.warm {
+			sweepWarmAsked.Add(1)
+		} else {
+			sweepPingAsked.Add(1)
+		}
 	} else {
 		// Nothing left the process (no stashed prefix, a stale one): not an ask. Allow the next ping
 		// to try again.
@@ -598,7 +635,11 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 		cand.asked.Store(false)
 	}
 	if br.answered == 0 {
-		sweepPingFailed.Add(1)
+		if cand.warm {
+			sweepWarmFailed.Add(1)
+		} else {
+			sweepPingFailed.Add(1)
+		}
 		cand.deferBilling(sink, ms, res.Substituted)
 		logging.From(c.Ctx).Debug("cg.sweep.ping_no_answer", "session", c.Session, "thread", c.Thread,
 			"gates", br.gateList)
@@ -612,8 +653,15 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 		sweepPingHoldNoToolID.Add(int64(unholdable))
 	}
 	if len(h.Outputs) > 0 {
-		putHeld(c.Store, h)
-		sweepPingHeld.Add(1)
+		if cand.warm {
+			// THE WARM ANSWER NEVER REACHES THE STORE (#491, the owner's rule): it waits in process
+			// memory for the thread's next warm request. A restart loses it, which fails open.
+			warmHold(key, h)
+			sweepWarmHeld.Add(1)
+		} else {
+			putHeld(c.Store, h)
+			sweepPingHeld.Add(1)
+		}
 		res.Held = true
 	}
 	res.Proposed, res.ProposedTokens = h.proposed()
@@ -632,6 +680,11 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 // would be booked nowhere.
 func (cand *sweepPingCandidate) deferBilling(sink *cheapmodel.Sink, ms float64, substituted bool) {
 	c := cand.ctx
+	if cand.warm {
+		// No ping row stands in for this call, so its whole usage goes onto the next real request.
+		deferUsage(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "warm_question", ms, sink)
+		return
+	}
 	if substituted {
 		deferDetailOnly(c.Store, c.Session, "extract_llm_sweep", "prefix_ask", "keepalive_substitute_billed", ms, sink)
 		return
