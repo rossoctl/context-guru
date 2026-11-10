@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 const { savedParts } = createRequire(import.meta.url)('./ui/savings.js');
 
 test('cache + compaction + filter equal total_saved_usd', () => {
@@ -243,4 +244,19 @@ test('the Cache strategy tab shows the rescue and the pings in tokens, never net
   // A ledger with no tokens yet, or an old server without the fields.
   assert.deepEqual(kaTokenLines({}, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
   assert.deepEqual(kaTokenLines(null, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
+});
+
+// A zero is a measurement only when the requests were priced (#1042 review).
+test('an all-zero rescue with unpriced requests says not measured; a priced zero says saved 0', () => {
+  const { kaTokenLines } = createRequire(import.meta.url)('./ui/savings.js');
+  const zero = { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 };
+  // The golden fixture's ledger (dash/testdata/golden/keepalive.json): no row priced.
+  const golden = JSON.parse(readFileSync(new URL('./testdata/golden/keepalive.json', import.meta.url), 'utf8'));
+  assert.equal(golden.tokens_unmeasured_requests, 591);
+  assert.equal(kaTokenLines(golden, String).rescue, 'not measured');
+  assert.equal(kaTokenLines(golden, String).pings, 'cost 720540 rd · 150 in');
+  // Every request priced, and nothing rescued: a true zero.
+  assert.equal(kaTokenLines({ tokens: { saved: zero, caused: zero }, tokens_unmeasured_requests: 0 }, String).rescue, 'saved 0 tokens');
+  // Some requests unpriced, but a rescue measured: the measured line shows.
+  assert.equal(kaTokenLines({ tokens: { saved: { cache_write_5m: 7 } }, tokens_unmeasured_requests: 3 }, String).rescue, 'saved 7 wr');
 });

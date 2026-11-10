@@ -9108,7 +9108,7 @@ function renderKAVerdict(o) {
   const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
-      ran ? num(o.sessions_touched) + ' sessions touched' + (tk ? ' (at API-price weights)' : '') + ' — see the decision row above'
+      ran ? (tk ? 'Ahead or behind at API-price weights · ' : '') + num(o.sessions_touched) + ' sessions touched — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
     tk ? tile('ka-net-tok', 'Cache strategy, measured', ran ? tk.rescue : '—',
       ran ? 'pings: ' + tk.pings + ' — on the sessions it fired on, an upper bound, not the decision' : 'none')
@@ -9116,7 +9116,7 @@ function renderKAVerdict(o) {
         'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
         ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
     tile('ka-pings', 'Cache-strategy requests sent', ran ? num(o.pings) : '—',
-      ran ? (tk ? tk.pings + ' of your limit' : usd(o.ping_usd) + ' spent on your key') : 'none'),
+      ran ? (tk ? tk.pings + ' of your limit, not counting the pings\u2019 output tokens' : usd(o.ping_usd) + ' spent on your key') : 'none'),
     tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? (tk ? tk.rescue : usd(o.saved_usd)) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),

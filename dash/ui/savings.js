@@ -206,8 +206,12 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
 // The Cache strategy tab in tokens (#1022), from the keep-alive ledger's `tokens` (the rescue) and
 // `keepalive_ping_tokens` (what the pings paid, read by pingLine). Two lines, never netted: the pings
 // are not added into the rescue's cost, and the tiers have no common unit. `fmt` formats a count.
+// An all-zero rescue is an absence when requests went unpriced (`tokens_unmeasured_requests`):
+// it says `not measured`, as the Overview card does. Only a priced zero says `saved 0 tokens`.
 function kaTokenLines(o, fmt) {
-  return { rescue: tokenLine(o && o.tokens, fmt) || 'saved 0 tokens', pings: pingLine(o, fmt) || 'cost 0 tokens' };
+  const rescue = tokenLine(o && o.tokens, fmt)
+    || ((o && o.tokens_unmeasured_requests) > 0 ? 'not measured' : 'saved 0 tokens');
+  return { rescue, pings: pingLine(o, fmt) || 'cost 0 tokens' };
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,

@@ -502,6 +502,10 @@ or a local proxy on a subscription. Managers, API-key users and hosted mode keep
 - **Two lines, never netted.** The measured figure is the rescue line, for example
   `saved 85.0k wr · cost 40.0k rd`. The pings show on their own line: `Pings: cost 900 wr · 410.0k rd`.
   The ping cost is never added into the rescue's cost.
+- **Not measured is not zero.** When the rescue is all zero and `tokens_unmeasured_requests` is more
+  than 0, the rescue line says `not measured`. Only a zero from priced requests says `saved 0 tokens`.
+- **Ping output tokens.** The pings line has the input-side tiers only. The pings tile says that it
+  leaves out the pings' output tokens.
 - **What changes.** The measured tiles, the facts list, the measured line under the forecast, and the
   head of "Which sessions gained and which lost". The count of expiries still worth acting on shows
   without its dollars.

@@ -322,7 +322,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	aCond, aArgs := addressable(f)
-	// Six independent reads, three of them a pass over every request (the saving, the per-session
+	// Seven independent reads, four of them a pass over every request (the saving, the per-session
 	// saving, the addressable CTE). They ran back to back; each goroutine fills its own fields.
 	var (
 		saved, spent map[string]float64
