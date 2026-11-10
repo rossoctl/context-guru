@@ -75,8 +75,8 @@ The plugin registers six commands:
 | `/context-guru-install` | Idempotent repair: clears a disable marker, restarts a stopped proxy |
 | `/context-guru-update` | Checks for a newer proxy binary; installs it after confirmation |
 | `/context-guru-uninstall` | Stops the proxy and disables routing after confirmation; `--purge` also removes the binary the plugin downloaded and the state files, except the `disabled` marker and the proxy's `dashboard.db.accountant-state.json` |
-| `/context-guru-preset` | Lists the presets (current one marked), switches after your yes. A native dialog in the TUI, a chat confirmation elsewhere |
-| `/context-guru-strategy` | Lists the cache strategies, switches after your yes. A native dialog in the TUI, a chat confirmation elsewhere |
+| `/context-guru-preset` | Chat command. Lists the presets, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
+| `/context-guru-strategy` | Chat command. Lists the cache strategies, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
 
 The two pickers save your choice first. A restart applies it. A restart costs one cache rewrite
 in every open session of this project, so the command asks first. If you say no, the choice
@@ -94,9 +94,9 @@ export both `server` and `tui`. Add it to `~/.config/opencode/tui.json`:
 }
 ```
 
-- `tui.js` registers the two commands with `api.keymap.registerLayer`. In OpenCode 1.19.5 they show in the `ctrl+p` palette under "Context Guru". The slash menu lists a chat entry and a native entry with the same name; use the palette for the native dialog.
+- `tui.js` registers two commands with `api.keymap.registerLayer`. In OpenCode 1.19.5 they show in the `ctrl+p` palette under "Context Guru". They have no slash name, so `/context-guru-preset` and `/context-guru-strategy` always open the chat commands.
 - A select list marks the current choice. Two confirm dialogs follow: save, then restart.
-- Without `tui.json`, or in `opencode run`, web and desktop, the same commands run in chat.
+- Without `tui.json`, or in `opencode run`, web and desktop, use the chat commands.
 - Both ways run the same `set NAME [--restart]` script.
 
 ## Safety

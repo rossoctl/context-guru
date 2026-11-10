@@ -7,13 +7,11 @@ import { parsePickerOutput, runCommandScript, stateDirectory } from "./index.js"
 const KINDS = {
   preset: {
     script: "context-guru-preset",
-    slash: "context-guru-preset",
     title: "Context Guru: preset",
     what: "preset",
   },
   strategy: {
     script: "context-guru-strategy",
-    slash: "context-guru-strategy",
     title: "Context Guru: cache strategy",
     what: "cache strategy",
   },
@@ -107,8 +105,11 @@ function confirmRestart(api, state, kind, name) {
 // The field names below are what OpenCode 1.19.5 reads. The published types do not list them.
 // They come from the host: its api.command shim turns a legacy item into a keymap command with
 // { namespace: "palette", name, title, desc, category, slashName, run }. A command without
-// namespace "palette", or with `slash: { name }` instead of `slashName`, registers without an
-// error and never shows in the palette or the slash menu.
+// namespace "palette" registers without an error and never shows in the palette.
+//
+// The native pickers have NO slash name (owner decision, option A). /context-guru-preset and
+// /context-guru-strategy open only the chat commands of the server plugin, so each slash name
+// shows once. The native dialogs are reached from the ctrl+p palette, under "Context Guru".
 export function registerPickerCommands(api, directory) {
   const entries = Object.entries(KINDS)
   if (typeof api.keymap?.registerLayer === "function") {
@@ -119,7 +120,6 @@ export function registerPickerCommands(api, directory) {
         title: spec.title,
         desc: spec.what,
         category: "Context Guru",
-        slashName: spec.slash,
         run: () => { pickAndSwitch(api, directory, kind).catch(() => toast(api, "error", "Picker failed.")) },
       })),
     })
@@ -130,7 +130,6 @@ export function registerPickerCommands(api, directory) {
       title: spec.title,
       value: `context-guru.${kind}`,
       category: "Context Guru",
-      slash: { name: spec.slash },
       onSelect: () => { pickAndSwitch(api, directory, kind).catch(() => toast(api, "error", "Picker failed.")) },
     })))
     return "legacy"

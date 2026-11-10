@@ -147,7 +147,7 @@ Install it:
    ```json
    { "$schema": "https://opencode.ai/tui.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"] }
    ```
-   In OpenCode 1.19.5, press `ctrl+p` and search "Context Guru".
+   For the native dialogs, press `ctrl+p` and search "Context Guru". `/context-guru-preset` and `/context-guru-strategy` are the chat commands.
 4. Restart OpenCode.
 
 Check it with `/context-guru-status`. Undo it with `/context-guru-uninstall`, then delete the plugin

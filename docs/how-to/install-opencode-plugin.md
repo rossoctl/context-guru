@@ -94,8 +94,9 @@ Restart OpenCode after the change.
 
 **Tested in OpenCode 1.19.5.** Press `ctrl+p` and search for "Context Guru". Two entries appear: "Context Guru: preset" and
 "Context Guru: cache strategy". Each one opens the select list, then the two confirm dialogs. The choice is saved only after the first yes.
-In the slash menu, `/context-guru-preset` and `/context-guru-strategy` each list two entries: the chat command and the native one.
-Use the palette to be sure you get the native dialog.
+
+The native dialogs have no slash name. `/context-guru-preset` and `/context-guru-strategy` are the chat commands.
+They always run in chat, also in the TUI.
 
 Where the dialogs do not exist (`opencode run`, web, desktop, or no `tui.json` entry), the same commands
 run in chat. The agent shows the choices and asks for your yes in the conversation.

@@ -47,39 +47,50 @@ test("the TUI module exports id and tui, and no server", () => {
 })
 
 // What the OpenCode 1.19.5 host does with a keymap command (read from its bundled code, function Mt):
-// a command is listed in the palette only when its namespace is "palette", and its slash name is the
-// string slashName. A command with `slash: { name }` and no namespace registers without error and is
-// invisible. That is the defect the first real-host test found.
+// a command is listed in the palette when its namespace is "palette". It gets a slash entry only when it
+// also has a string slashName. A command with `slash: { name }` and no namespace registers without error
+// and is invisible. That was the first defect the real-host test found.
+//
+// Owner decision (Option A): the native pickers are palette-only. /context-guru-preset and
+// /context-guru-strategy open ONLY the chat commands of the server plugin, so each slash name shows once.
 function hostVisible(layers) {
-  const visible = []
+  const palette = []
+  const slash = []
   for (const layer of layers) for (const command of layer.commands ?? []) {
     if (command.namespace === "palette" && typeof command.title === "string") {
-      visible.push({ name: command.name, title: command.title, category: command.category, slash: command.slashName })
+      palette.push({ name: command.name, title: command.title, category: command.category })
+      if (typeof command.slashName === "string") slash.push(command.slashName)
     }
   }
-  return visible
+  return { palette, slash }
 }
 
-test("registers both commands the way the OpenCode host lists them", async () => {
+test("registers both commands in the palette, and in no slash menu", async () => {
   const { api, registered } = fakeApi("/tmp/context-guru-tui-reg")
   await tuiModule.tui(api)
   assert.equal(registered.layers.length, 1)
-  const visible = hostVisible(registered.layers)
-  assert.deepEqual(visible.map((command) => command.slash).sort(), ["context-guru-preset", "context-guru-strategy"])
-  assert.deepEqual(visible.map((command) => command.title).sort(), ["Context Guru: cache strategy", "Context Guru: preset"])
-  for (const command of visible) assert.equal(command.category, "Context Guru")
-  for (const command of registered.layers[0].commands) assert.equal(typeof command.run, "function")
+  const { palette, slash } = hostVisible(registered.layers)
+  assert.deepEqual(palette.map((command) => command.title).sort(), ["Context Guru: cache strategy", "Context Guru: preset"])
+  for (const command of palette) assert.equal(command.category, "Context Guru")
+  assert.deepEqual(slash, [], "a native command has a slash name, so the slash menu would list the name twice")
+  for (const command of registered.layers[0].commands) {
+    assert.equal(typeof command.run, "function")
+    assert.equal("slashName" in command, false, `${command.name} has slashName`)
+    assert.equal("slash" in command, false, `${command.name} has slash`)
+  }
 })
 
-test("the legacy form carries the fields the host converts: title, value, slash.name, onSelect", () => {
+test("the legacy form carries the fields the host converts, with no slash name", () => {
   const legacy = fakeApi("/tmp/x", { keymap: false, legacy: true })
   registerPickerCommands(legacy.api, "/tmp/x")
   const items = legacy.registered.legacy[0]()
+  assert.equal(items.length, 2)
   for (const item of items) {
     assert.equal(typeof item.title, "string")
     assert.equal(typeof item.value, "string")
-    assert.equal(typeof item.slash?.name, "string")
     assert.equal(typeof item.onSelect, "function")
+    assert.equal("slash" in item, false, `${item.value} has slash`)
+    assert.equal("slashName" in item, false, `${item.value} has slashName`)
   }
 })
 
@@ -87,7 +98,7 @@ test("falls back to the legacy api.command when there is no keymap, and to nothi
   const legacy = fakeApi("/tmp/x", { keymap: false, legacy: true })
   assert.equal(registerPickerCommands(legacy.api, "/tmp/x"), "legacy")
   const items = legacy.registered.legacy[0]()
-  assert.deepEqual(items.map((item) => item.slash.name).sort(), ["context-guru-preset", "context-guru-strategy"])
+  assert.deepEqual(items.map((item) => item.title).sort(), ["Context Guru: cache strategy", "Context Guru: preset"])
   const none = fakeApi("/tmp/x", { keymap: false })
   assert.equal(registerPickerCommands(none.api, "/tmp/x"), "none")
 })
