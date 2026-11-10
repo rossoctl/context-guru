@@ -26,7 +26,14 @@ func warmDropEvent(removed, rewrite int, written int64) *Event {
 
 // netOver is the warm request's own credit plus the saving on `turns` later replays at the read rate.
 func netOver(e *Event, removed int, turns int) float64 {
-	return e.Components[0].SavedUSD + float64(removed)*sweepPrice.CacheRead*float64(turns)*factorOf()
+	return warmRow(e, removed) + float64(removed)*sweepPrice.CacheRead*float64(turns)*factorOf()
+}
+
+// warmRow is the legacy read-time figure of the warm row (Event.ComponentSavedUSD). Since #768 Price books
+// no saving at write time (the accountant library does), but this rule still values a stored row with no
+// priced_by, so the warm credit and the rewrite charge are pinned here.
+func warmRow(e *Event, removed int) float64 {
+	return e.ComponentSavedUSD(sweepPrice, SweepComponent, removed, removed)
 }
 
 func factorOf() float64 { f, _ := billedFactorForTest(); return f }
@@ -35,7 +42,7 @@ func TestAWarmDropIsCreditedAtTheReadRateNotTheWriteRate(t *testing.T) {
 	const removed = 10_000
 	e := warmDropEvent(removed, 0, 0)
 	want := float64(removed) * sweepPrice.CacheRead * factorOf()
-	if got := e.Components[0].SavedUSD; !approx(got, want) {
+	if got := warmRow(e, 10_000); !approx(got, want) {
 		t.Fatalf("warm credit = %v, want removed x READ rate x factor = %v", got, want)
 	}
 }
@@ -45,13 +52,13 @@ func TestTheRewriteIsChargedOnTheWarmRequestThatPaidIt(t *testing.T) {
 	e := warmDropEvent(removed, rewrite, 0)
 	credit := float64(removed) * sweepPrice.CacheRead * factorOf()
 	charge := float64(rewrite) * (sweepPrice.CacheWrite - sweepPrice.CacheRead)
-	if got := e.Components[0].SavedUSD; !approx(got, credit-charge) {
+	if got := warmRow(e, removed); !approx(got, credit-charge) {
 		t.Fatalf("warm row = %v, want credit %v minus rewrite charge %v", got, credit, charge)
 	}
 	// The provider's own write wins when it is smaller than the estimate.
 	e2 := warmDropEvent(removed, rewrite, 20_000)
 	charge2 := 20_000 * (sweepPrice.CacheWrite - sweepPrice.CacheRead)
-	if got := e2.Components[0].SavedUSD; !approx(got, credit-charge2) {
+	if got := warmRow(e2, removed); !approx(got, credit-charge2) {
 		t.Fatalf("with a reported write: row = %v, want %v", got, credit-charge2)
 	}
 }

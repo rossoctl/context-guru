@@ -94,7 +94,7 @@ func TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel(t
 	t.Cleanup(func() { rec.Close() })
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		AnthropicUpstream: upstream.URL, Dashboard: rec,
-		Cache: CachePolicy{KeepAlive: true, Idle: 6 * time.Second, MaxPings: 2, MaxUSDPerPing: 1, MinPrefixTokens: 0},
+		Cache: CachePolicy{KeepAlive: true, Idle: 10 * time.Second, MaxPings: 2, MaxUSDPerPing: 1, MinPrefixTokens: 0},
 	})
 	t.Cleanup(h.Close)
 	srv := httptest.NewServer(h.Mux())
@@ -140,7 +140,7 @@ func TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel(t
 	}
 	// Let the real keep-alive ticker run: it pings the idle thread, and the sweep's question may stand
 	// in for a ping.
-	time.Sleep(22 * time.Second)
+	time.Sleep(40 * time.Second)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -200,7 +200,7 @@ func TestANonClaudeModelOnARelayIsNotPingedUnlessNamed(t *testing.T) {
 	}
 	t.Cleanup(func() { rec.Close() })
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: upstream.URL, Dashboard: rec,
-		Cache: CachePolicy{KeepAlive: true, Idle: 6 * time.Second, MaxPings: 2, MaxUSDPerPing: 1}})
+		Cache: CachePolicy{KeepAlive: true, Idle: 10 * time.Second, MaxPings: 2, MaxUSDPerPing: 1}})
 	t.Cleanup(h.Close)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
