@@ -12,6 +12,11 @@ import (
 
 // topLevelName matches a top-level declaration at the start of a line: a function, a class, or
 // a const, let or var binding.
+//
+// It is a line pattern, not a parser. It misses a declaration that does not start a line, the
+// second name of `const a = 1, b = 2`, and destructuring. Those can only hide a duplicate, never
+// invent one. A line at column 0 inside a template literal or a block comment that starts with
+// one of these words would count as a declaration. No such line exists in ui/*.js today.
 var topLevelName = regexp.MustCompile(`^(?:async\s+)?(?:function\*?\s*|class\s+|const\s+|let\s+|var\s+)([A-Za-z_$][A-Za-z0-9_$]*)`)
 
 // The dashboard scripts are classic scripts, so they share one global scope. When a name is
