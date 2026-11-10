@@ -808,3 +808,30 @@ func TestStartProxyDoesNotRecordWhenAnotherProcessOwnsThePort(t *testing.T) {
 		t.Errorf("said nothing about another process holding the port:\n%s", out)
 	}
 }
+
+// TestStrategySyncLowersAnOldPrefixFloor: a file written before the floor moved from 80000 to 20000
+// keeps 80000 until sync re-renders it. An explicit value beats the default, so without this the
+// upgrade changes nothing for a user who armed a strategy earlier.
+func TestStrategySyncLowersAnOldPrefixFloor(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	port := "8787"
+	if facts, code := settingsIn(t, state, home,
+		"strategy", "set", "--name", "auto", "--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("arming failed: %v", facts)
+	}
+	cfg := filepath.Join(state, "keepalive-"+port+".yaml")
+	old := strings.Replace(readFileString(t, cfg), "keepalive_min_prefix_tokens: 20000", "keepalive_min_prefix_tokens: 80000", 1)
+	if !strings.Contains(old, "keepalive_min_prefix_tokens: 80000") {
+		t.Fatalf("the armed file has no prefix floor line:\n%s", old)
+	}
+	if err := os.WriteFile(cfg, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, code := settingsIn(t, state, home, "strategy", "sync", "--port", port, "--preset", "off")
+	if code != 0 || facts["result"] != "synced" {
+		t.Fatalf("sync = %q (exit %d), want synced: %v", facts["result"], code, facts)
+	}
+	if got := readFileString(t, cfg); !strings.Contains(got, "keepalive_min_prefix_tokens: 20000") || strings.Contains(got, "80000") {
+		t.Errorf("sync kept the old floor:\n%s", got)
+	}
+}

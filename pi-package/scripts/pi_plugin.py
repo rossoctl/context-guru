@@ -67,19 +67,19 @@ STRATEGIES = {
     "none": {"cache": {}, "spends": False,
              "desc": "no keep-alive pings. Pi's own cache warming runs as it would without context-guru."},
     "auto": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 2,
-                       "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
+                       "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 20000,
                        "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
              "spends": True,
              "desc": "idle pings that follow the cache lifetime of each session. Anthropic 5-minute cache: "
                      "first ping at 240 s, at most 2. Anthropic 1-hour cache: 1 ping at 59 minutes. "
                      "OpenAI (GPT-5.6 and later): a ping at 28 minutes, at most 2. Uses your quota."},
     "1-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 1,
-                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
+                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 20000,
                          "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
                "spends": True, "desc": "at most 1 idle ping per idle gap, on Anthropic and on OpenAI. "
                                        "Uses your quota."},
     "2-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 2,
-                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
+                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 20000,
                          "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 2},
                "spends": True, "desc": "at most 2 idle pings per idle gap, on both Anthropic cache lifetimes "
                                        "and on OpenAI. Uses your quota."},

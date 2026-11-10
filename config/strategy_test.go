@@ -84,7 +84,7 @@ func TestStrategyFillsKeys(t *testing.T) {
 	}
 	k := c.Cache
 	if !k.KeepAlive || k.KeepAliveIdleSeconds != 240 || k.KeepAliveMaxPings != 2 ||
-		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 80000 ||
+		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 20000 ||
 		k.KeepAliveIdleSeconds1h != 3540 || k.KeepAliveMaxPings1h != 2 {
 		t.Fatalf("2-ping keys wrong: %+v", k)
 	}
@@ -230,5 +230,26 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 		if len(s.Providers) != 1 {
 			t.Errorf("%s: providers %v", s.Name, s.Providers)
 		}
+	}
+}
+
+// TestStrategiesUseTheDefaultMinPrefix fails when a keep-alive strategy writes a prefix floor that
+// differs from the default. An explicit value beats the default, so a stale 80000 here kept the old
+// floor for every user on the strategy after #858 lowered the default to 20000.
+func TestStrategiesUseTheDefaultMinPrefix(t *testing.T) {
+	seen := 0
+	for _, s := range Strategies {
+		for _, k := range s.Cache {
+			if k.Key != "keepalive_min_prefix_tokens" {
+				continue
+			}
+			seen++
+			if k.Value != DefaultKeepAliveMinPrefix {
+				t.Errorf("%s: keepalive_min_prefix_tokens = %v, want the default %d", s.Name, k.Value, DefaultKeepAliveMinPrefix)
+			}
+		}
+	}
+	if seen < 3 {
+		t.Errorf("found the prefix floor in %d strategies, want at least 3 (auto, 1-ping, 2-ping)", seen)
 	}
 }
