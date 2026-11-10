@@ -396,7 +396,9 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 			e.BaselineCostUSD -= deferFig
 			e.DeferNetUSD = deferFig - e.DeferSearchUSD
 			if e.DeferNetUSD == 0 {
-				e.DeferNetUSD = 0 // not a negative zero
+				// -0 - +0 is -0 under IEEE 754, and deferFig is -0 when the library sums opposite figures to zero.
+				// Assigning the constant 0 gives a plain zero, so the field never serializes as -0.
+				e.DeferNetUSD = 0
 			}
 		}
 	}
@@ -410,8 +412,10 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
 		// keep-alive tab and the API still agree.
 		//
-		// What is held out: fig.DeltaUSD, which is every component's figure, the head-TTL premium and
-		// rescue legs (the headttl row), the ended-change break, and the filter's part. The figure can
+		// What is held out: fig.DeltaUSD less the deferral's own figure, which is every other component's
+		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
+		// filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
+		// on the lever, so it appears once (review of #1003). The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:

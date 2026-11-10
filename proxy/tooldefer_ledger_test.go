@@ -210,8 +210,31 @@ func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
 		if want := lib - e.DeferSearchUSD; math.Abs(e.DeferNetUSD-want) > 1e-12 {
 			t.Errorf("request %d: net %v, want the library's %v less the search cost %v = %v", i, e.DeferNetUSD, lib, e.DeferSearchUSD, want)
 		}
+		// The cost the Tools page shows is the ledger's own, taken before the net moved onto the library's figure.
+		// The search cost is part of it, so it cannot be less. It can exceed the gross: the ledger's net is gross
+		// less this cost, and the net is negative when the searches cost more than the deferral saved.
+		if e.DeferCostUSD < e.DeferSearchUSD {
+			t.Errorf("request %d: cost %v is less than the search cost %v it contains", i, e.DeferCostUSD, e.DeferSearchUSD)
+		}
+		// On a priced request the stored net is the library's figure less the search cost, so gross less that net is
+		// NOT the ledger's cost: the two must differ, or this test could not tell the old derivation from the new.
+		if math.Abs((e.DeferGrossUSD-e.DeferNetUSD)-e.DeferCostUSD) < 1e-12 {
+			t.Errorf("request %d: gross less net equals the cost %v: the test does not separate the two figures", i, e.DeferCostUSD)
+		}
 	}
 	if priced != 1 {
 		t.Fatalf("priced requests = %d, want 1 (the second of the thread): the test must reach the priced path", priced)
+	}
+	// /api/tool-defer sums the ledger's cost per request, so its total is exactly that sum.
+	rep, err := rec.DB().ToolDeferReportFor(dash.Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var costSum float64
+	for _, e := range tap.all() {
+		costSum += e.DeferCostUSD
+	}
+	if math.Abs(rep.Total.CostUSD-costSum) > 1e-12 {
+		t.Errorf("/api/tool-defer cost %v, want the sum of the per-request ledger costs %v", rep.Total.CostUSD, costSum)
 	}
 }

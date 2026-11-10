@@ -10,8 +10,10 @@ import (
 // The figures are the proxy's own deferral ledger, stored per request on the request row
 // (Event.DeferTokens and the rest): tokens deferred, the server-side searches the responses ran,
 // the tools those searches loaded, the wrong guesses (a deferred tool that was then loaded), and
-// the ledger's gross and net dollars. Net is gross minus the names list and every search cost
-// (tooldefer.Price), so this page and /stats show the same net figure. The wrong guesses and the
+// the ledger's gross dollars and its cost. Net is the deferral lever the Overview card shows: on a request the
+// accountant priced it is the library's deferral figure less the search cost, and on any other it is the ledger's
+// gross less its cost (tooldefer.Price). So net is NOT always gross less cost; the cost column is read from the
+// ledger, not derived from the other two. The wrong guesses and the
 // dropped searches are the ledger's own numbers (tooldefer.WrongGuesses, SearchRead.Dropped).
 //
 // Metadata only: counts and prices from the request rows. Days are UTC days, like every other
@@ -43,7 +45,9 @@ type ToolDeferDay struct {
 	WrongGuesses int64   `json:"wrong_guesses"`
 	GrossUSD     float64 `json:"gross_usd"`
 	NetUSD       float64 `json:"net_usd"`
-	// CostUSD is gross minus net: the names list and the searches.
+	// CostUSD is the ledger's own cost of the deferral: the names list and the searches. It is read from the
+	// request row, not derived as gross minus net, because on a request the accountant priced net is the library's
+	// figure less the search cost.
 	CostUSD float64 `json:"cost_usd"`
 	// Unpriced is the changed requests whose model has no price: their dollars read 0, not free.
 	Unpriced int64 `json:"unpriced_requests"`

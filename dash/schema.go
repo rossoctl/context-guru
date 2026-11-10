@@ -356,7 +356,9 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_gross  INTEGER NOT NULL DEFAULT 0,
   saved_unique INTEGER NOT NULL DEFAULT 0,
   -- This component's share of the request's baseline delta, in DOLLARS, priced at write
-  -- time from the request's own model and the cache tier the request itself paid (see
+  -- time from the request's own model and the cache tier the request itself paid. The tooldefer
+  -- row is the exception on a request the accountant priced: its dollars are in the deferral
+  -- lever (defer_net_usd), not in the baseline delta, and the row still carries them (see
   -- Event.Price). Stored rather than derived on read because the rate has to be the one
   -- that was in force, and because the UI was otherwise left improvising a dollar value
   -- from hardcoded rates.
