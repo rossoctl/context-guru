@@ -31,3 +31,33 @@ func TestSharedKeepAliveLedgerIsKeyedByTheQuery(t *testing.T) {
 		}
 	}
 }
+
+// On a Claude subscription the Overview shows every saving in tokens (/api/stats `tokens`, #998), and
+// the 5-hour share as an estimate, from GET /api/me/limits (#985).
+// The decision itself is tested in savings.test.mjs (subscriptionHeadline). This checks the wiring:
+// the page asks for the limits, the headline uses the decision, and the dollar view stays for the
+// rest (`{}`, a failed call, a window that is over).
+func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
+	app := stripComments(readUI(t, "ui/app.js"))
+	for _, want := range []string{
+		"ctl('/api/me/limits')",
+		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
+		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered())", // a filter hides the estimate
+		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
+		"loadOverviewLimits();",
+		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
+		"if (seq !== state.subSeq) return;",                                    // an older answer is dropped
+		"if (isSubscription(limits, Date.now())) {",                            // the auth kind, not only a live window
+		"const ft = sub ? featureTokens(o) : null;",                            // the cards read tokens.by_feature
+		"saving('saved-compaction-usd', parts.compaction, ft && ft.compaction", // a card shows tokens on a subscription
+		"o.tokens_unmeasured_requests",                                         // the "not measured" note
+		"'data-testid': 'saved-total-pings'",                                   // the pings: a line of their own
+		"'data-testid': 'saved-cache-pings'",                                   // on the Cache card too
+		"tokenFigure(flow, o, compact).text",                                   // one rule for zero against not measured
+		"subRows.length ? el('ul'",                                             // no empty list
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+}
