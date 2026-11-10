@@ -490,7 +490,7 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 // deferFacts is what tool deferral did on one request, for the dashboard row (#869).
 type deferFacts struct {
 	tokens, list, searches, dropped, loaded, wrong int
-	gross, net                                     float64
+	gross, net, search                             float64
 }
 
 // noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
@@ -501,7 +501,7 @@ func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) 
 		return
 	}
 	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
-		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net}
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net, search: m.SearchCost}
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -621,7 +621,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
-		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
+		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = d.gross, d.net, d.search
 	}
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
@@ -763,6 +763,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
 		if c.rejected() {
 			c.accNoResult = "rejected_status"
+		} else if c.accNoResult == accDeferralUnplaced {
+			// accEnd found a deferral it could not describe to the library (billedBody). Computing on the bodies
+			// as they are would fail the sum check, so no figure is computed and the log line names the reason.
 		} else if c.rounds <= 1 {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {

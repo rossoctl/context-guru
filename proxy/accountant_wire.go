@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/tooldefer"
+	"github.com/tidwall/gjson"
 )
 
 // accThreadID maps the primary thread to "main", the library's name for it.
@@ -54,32 +57,85 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// The envelope changes report no operation of their own: envelopeOps finds them from the two
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
-	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(forwarded)...)
+	//
+	// The library gets the prompt the provider BILLS (accountant R56, billedBody), not the bytes sent: a tool
+	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
+	billed := c.accBilled(forwarded)
+	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
 	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
 	c.accPingWindow = facts.PingWindow
-	c.savings.end(c.accReq, t, forwarded, ops, facts)
+	c.savings.end(c.accReq, t, billed, ops, facts)
 }
 
-// envelopeOpsFor is envelopeOps with tool deferral's own edits to `tools` attributed to the tooldefer
-// operator (#908). Deferral runs last, on the pipeline's final body, so the client-to-forwarded diff is
-// taken in two steps: client to the body deferral read (the other operators), then that body to the
-// forwarded one (deferral: defer_loading marks, the search tool). Without the split, deferral's bytes
-// land on toolschema, and the accountant's cost for them is booked on top of the deferral ledger's.
-func (c *capture) envelopeOpsFor(forwarded []byte) []accountant.Operation {
-	pre := c.accPreDefer
-	if pre == nil {
-		return envelopeOps(c.accClient, forwarded)
+// accDeferralUnplaced is the acc_fallback reason of a request whose deferral could not be reported to the library.
+const accDeferralUnplaced = "deferral_unplaced"
+
+// accBilled is the body the accountant records. A request deferral did not change returns the forwarded body. A
+// deferral whose stub cannot be placed (a deferred tool with no name) also returns the forwarded body, and sets
+// accNoResult so the event says why it books no figure (acc_fallback deferral_unplaced) and the sum check does not
+// turn it into a wrong one.
+func (c *capture) accBilled(forwarded []byte) []byte {
+	if c.accPreDefer == nil || len(deferredTools(forwarded)) == 0 {
+		return forwarded
 	}
-	ops := envelopeOps(c.accClient, pre)
-	for _, o := range envelopeOps(pre, forwarded) {
-		switch o.Operator {
-		case "context-guru.toolschema", "context-guru.toolfilter":
-			from := "cg:" + strings.TrimPrefix(o.Operator, "context-guru.") + ":"
-			o.Operator, o.ChangeID = "context-guru.tooldefer", "cg:tooldefer:"+strings.TrimPrefix(o.ChangeID, from)
+	b, ok := billedBody(forwarded)
+	if !ok {
+		c.accNoResult = accDeferralUnplaced
+		return forwarded
+	}
+	return b
+}
+
+// envelopeOpsFor is envelopeOps for the body the accountant records, with tool deferral's edits attributed to the
+// tooldefer operator so its row does not land on toolschema (#908). Deferral's edits are two: the definitions it
+// deferred, each now a stub (merged here into ONE operation with a span for each tool, as accountant R56 reports a
+// deferral), and the search tool it adds, an ordinary added declaration.
+func (c *capture) envelopeOpsFor(billed []byte) []accountant.Operation {
+	ops := envelopeOps(c.accClient, billed)
+	if c.accPreDefer == nil {
+		return ops
+	}
+	stubbed := map[int]bool{}
+	for _, i := range deferredTools(billed) {
+		stubbed[i] = true
+	}
+	var out []accountant.Operation
+	var merged *accountant.Operation
+	var names strings.Builder
+	for _, o := range ops {
+		switch {
+		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
+			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && isStub(billed, o.At.Index):
+			if merged == nil {
+				m := o
+				m.Operator, m.SizeBefore, m.SizeAfter = "context-guru.tooldefer", accountant.Size{}, accountant.Size{}
+				merged = &m
+			}
+			merged.Spans = append(merged.Spans, accountant.Span{Section: accountant.SectionTools, From: o.At.Index,
+				To: o.At.Index, SizeBefore: o.SizeBefore, SizeAfter: o.SizeAfter})
+			merged.SizeBefore.Bytes += o.SizeBefore.Bytes
+			merged.SizeAfter.Bytes += o.SizeAfter.Bytes
+			names.WriteString(gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String())
+			names.WriteByte(0)
+		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
+			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
+			o.Operator, o.ChangeID = "context-guru.tooldefer", "cg:tooldefer:"+strings.TrimPrefix(o.ChangeID, "cg:toolschema:")
+			out = append(out, o)
+		default:
+			out = append(out, o)
 		}
-		ops = append(ops, o)
 	}
-	return ops
+	if merged != nil {
+		merged.ChangeID = "cg:tooldefer:defer-stubs:" + hashOf(names.String())
+		out = append(out, *merged)
+	}
+	return out
+}
+
+// isStub says whether the tool at i of the billed body is a deferred stub: a bare name and the defer_loading mark.
+func isStub(billed []byte, i int) bool {
+	t := gjson.GetBytes(billed, "tools."+strconv.Itoa(i))
+	return t.Get("defer_loading").Bool() && t.Get("name").Exists()
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive

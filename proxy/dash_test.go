@@ -97,7 +97,8 @@ func billedUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		n := len(b) / 4
+		// The provider bills the prompt without the definitions of the tools deferred with defer_loading (R56).
+		n := len(billedBytesOf(b)) / 4
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
 		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",

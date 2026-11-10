@@ -132,7 +132,13 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	if int64(e.DeferWrongGuesses) != st.WrongGuesses || int64(e.DeferDroppedSearches) != st.DroppedSearches {
 		t.Errorf("row wrong %d dropped %d, ledger %d and %d", e.DeferWrongGuesses, e.DeferDroppedSearches, st.WrongGuesses, st.DroppedSearches)
 	}
-	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferNetUSD-st.Net) > 1e-12 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
-		t.Errorf("row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st.Money)
+	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
+		t.Errorf("row gross %v, ledger %+v", e.DeferGrossUSD, st.Money)
+	}
+	// The row's net is the cost the bodies cannot show, and nothing else: the library prices the deferral
+	// itself from the bodies (accountant R56), so the ledger's whole net would count it twice (#908). This
+	// request ran one search and loaded a tool, so that cost is real, and it is the ledger's cost less the names list.
+	if e.DeferNetUSD >= 0 || math.Abs(e.DeferNetUSD) > st.Cost+1e-12 {
+		t.Errorf("row net %v, want a cost no larger than the ledger's %v", e.DeferNetUSD, st.Cost)
 	}
 }

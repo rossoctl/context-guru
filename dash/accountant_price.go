@@ -196,10 +196,6 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
-// DeferComponent is the row of tool deferral's edits. Its dollars come from the deferral ledger, not
-// from the accountant (see accOverride).
-const DeferComponent = "tooldefer"
-
 // KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
 // the ended-change break, neither of which is a pipeline component.
 const KindEnvelope = "envelope"
@@ -292,15 +288,6 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		}
 	}
 	fig := e.AccountantFigure(p)
-	// Tool deferral is priced by its own ledger (tooldefer.Price: the definitions it kept out, less the
-	// names list and every search), which Overview adds as a lever of its own (DeferNetUSD, #908). The
-	// library sees deferral only as added bytes, a cost, and that cost is already inside the ledger's
-	// net: booking it here too would count it twice and turn the lever negative. The row stays, at 0.
-	if v, ok := fig.ByComponent[DeferComponent]; ok {
-		fig.DeltaUSD -= v
-		fig.ByComponent[DeferComponent] = 0
-		fig.ByComponentFirst[DeferComponent], fig.ByComponentReplay[DeferComponent] = 0, 0
-	}
 	// penalty_unknown is not a missing price: the library priced every operation and could not
 	// rule out a break, because the thread has no history or a setting has no position. The design
 	// says to show such a figure and mark it estimated (accountant design §6.4), so it does not gate.
@@ -389,6 +376,15 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		c.SavedFirstUSD, c.SavedReplayUSD = fig.ByComponentFirst[c.Component], fig.ByComponentReplay[c.Component]
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	// Tool deferral is priced here, from the bodies (accountant R56): the definitions it left out as a shrink
+	// of tools positions, the search tool and the names list as growth. That sits in the baseline delta above.
+	// The ledger priced the same request with its own tokenizer, and the lever Overview adds beside the
+	// baseline (DeferNetUSD) must not count it twice. What the bodies cannot show is the searches and the
+	// definitions they loaded, which come back in the response: the ledger still owns that cost, so the lever
+	// becomes the cost alone (#908).
+	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 {
+		e.DeferNetUSD = 0 - e.DeferSearchUSD // 0 - x, so that no cost is a plain 0 and not a negative zero
+	}
 	if estimated {
 		// The library could not rule out a break: it had no history for the thread, so it priced
 		// each removal as a write the provider would have made. When the cache was in fact warm
@@ -433,11 +429,14 @@ func inAdded(rows []CompRow, name string) bool {
 
 // toolSectionOperators are the operators whose operations act on the tools section, not on messages:
 // the declaration filter and the schema rewrite (proxy/accountant_envelope.go reports them from a body
-// diff), and the two declarations the proxy injects. Their tokens are not in TokensBefore, which counts
-// message text only.
+// diff), the two declarations the proxy injects, and tool deferral, whose deferred definitions are a
+// shrink of tools positions (accountant R56, #908). Their tokens are not in TokensBefore, which counts
+// message text only. Deferral's names list is a growth in messages and saves nothing, so it adds
+// no saved tokens to the bound.
 var toolSectionOperators = map[string]bool{
 	"context-guru.toolfilter": true, "context-guru.toolschema": true,
 	"context-guru.expand": true, "context-guru.adjudicate": true,
+	"context-guru.tooldefer": true,
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed

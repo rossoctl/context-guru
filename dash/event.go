@@ -446,6 +446,10 @@ type Event struct {
 	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
 	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
+	// DeferSearchUSD is the part of the ledger's cost that no body shows: the searches and the loaded
+	// definitions (tooldefer.Money.SearchCost). The accountant prices deferral from the bodies (R56), so
+	// PriceMode takes DeferNetUSD as its figure for the tooldefer row less this cost. Not stored.
+	DeferSearchUSD float64 `json:"-"`
 
 	TokenAccounting string `json:"token_accounting"`
 	// PriceEstimated is true when the accountant library priced this request without knowing whether a
