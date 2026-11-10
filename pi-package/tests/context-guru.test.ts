@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { endKind, forChatGPTSignIn, isRouted, parseArgs, parseFacts, readInstall } from "../extensions/context-guru.ts";
+import {
+  CHAIN, conflictPrompt, endKind, forChatGPTSignIn, isRouted, KEEP, parseArgs, parseFacts, readInstall, REPLACE,
+} from "../extensions/context-guru.ts";
 
 const install = {
   port: 8800,
@@ -70,4 +72,24 @@ test("a bare /context-guru runs status, and the first two words are the subcomma
   assert.deepEqual(parseArgs("   "), { sub: "status", value: "" });
   assert.deepEqual(parseArgs("preset"), { sub: "preset", value: "" });
   assert.deepEqual(parseArgs("  preset   medium "), { sub: "preset", value: "medium" });
+});
+
+test("a conflict is one question: chain, replace, or change nothing", () => {
+  const p = conflictPrompt({
+    result: "needs_decision", conflicts: "anthropic", existing_base_url: '{"anthropic":"https://gw.example"}',
+    consent_question_chain: "CHAIN-TEXT", consent_question_replace: "REPLACE-TEXT",
+  });
+  assert.deepEqual(p.options, [CHAIN, REPLACE, KEEP]);
+  assert.deepEqual(p.answers, { [CHAIN]: "chain", [REPLACE]: "replace" });
+  assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
+  assert.match(p.title, /anthropic somewhere else: \{"anthropic":"https:\/\/gw.example"\}/);
+  assert.match(p.title, /CHAIN-TEXT/);
+  assert.match(p.title, /REPLACE-TEXT/);
+});
+
+test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
+  const p = conflictPrompt({ conflicts: "openai", existing_base_url: "x", chain_refused: "openai:openai_path_not_v1",
+    consent_question_replace: "REPLACE-TEXT" });
+  assert.deepEqual(p.options, [REPLACE, KEEP]);
+  assert.match(p.title, /Chain is not offered.*openai_path_not_v1/);
 });
