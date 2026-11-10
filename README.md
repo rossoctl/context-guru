@@ -69,6 +69,13 @@ Choose your setup. Each button opens only the instructions for that path.
       </td>
       <td align="center">Not yet</td>
     </tr>
+    <tr>
+      <th>OpenCode (experimental)</th>
+      <td align="center">
+        <a href="#opencode-experimental"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
+      </td>
+      <td align="center">Not yet</td>
+    </tr>
   </tbody>
 </table>
 
@@ -111,6 +118,49 @@ own quota. To turn them off, run `/context-guru cache-strategy none`.
 
 Details and limits: [pi-package/README.md](pi-package/README.md). How it differs from the Claude Code
 plugin: [Pi package and Claude Code plugin compared](docs/reference/pi-vs-claude-code.md).
+
+### OpenCode (experimental)
+
+The OpenCode plugin routes OpenCode's `anthropic` and `openai` providers through a local proxy. It
+adds chat commands. It is experimental: it is new, and a real OpenCode (1.19.5) ran it once. In that
+run, a real model answer came back through the proxy, and the dashboard showed it with status 200.
+OpenCode 2, the `/context-guru-status` command end to end through the model, and keep-alive pings are
+not tested live yet.
+
+You need:
+
+- OpenCode 1.19.5. Other versions are not tested.
+- Proxy v0.7.1 or later. The plugin downloads v0.7.1, or uses the `context-guru-proxy` on your `PATH`.
+- macOS or Linux.
+
+Install it:
+
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/rossoctl/context-guru.git
+   ```
+2. Add the plugin to `~/.config/opencode/opencode.json`:
+   ```json
+   { "$schema": "https://opencode.ai/config.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/index.js"] }
+   ```
+3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`:
+   ```json
+   { "$schema": "https://opencode.ai/tui.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"] }
+   ```
+   For the native dialogs, press `ctrl+p` and search "Context Guru". `/context-guru-preset` and `/context-guru-strategy` are the chat commands.
+4. Restart OpenCode.
+
+Check it with `/context-guru-status`. Undo it with `/context-guru-uninstall`, then delete the plugin
+entry. The other commands are `/context-guru-preset`, `/context-guru-strategy`, `/context-guru-update`,
+and `/context-guru-install` (it undoes an uninstall).
+
+The default cache strategy, `auto`, sends small keep-alive requests while you are idle. They use your
+own quota. To turn them off, run `/context-guru-strategy` and choose `none`.
+
+The plugin never stores message text; the dashboard shows metadata only. Details and limits:
+[opencode-plugin/README.md](opencode-plugin/README.md) and the
+[install guide](docs/how-to/install-opencode-plugin.md).
+
 
 ## What's cool
 

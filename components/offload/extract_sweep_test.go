@@ -1005,3 +1005,43 @@ func TestSweepAsksOnTheSnapshotItChecked(t *testing.T) {
 		t.Fatalf("a refused snapshot must count as sweep_stale_prefix, not a failed ask (gates: %v)", rep2.Gates)
 	}
 }
+
+// readLabelAsker is a labelAsker that also reports the text the model read, as a PrefixReadAsker does.
+type readLabelAsker struct {
+	labelAsker
+	read string
+}
+
+func (m *readLabelAsker) AskRead(ctx context.Context, session string, _ int, _, ask string) (string, components.PrefixUsage, string, error) {
+	reply, u, err := m.labelAsker.Ask(ctx, session, ask)
+	return reply, u, m.read, err
+}
+
+// The quote check uses the text the model READ (fix 6). A quote taken from a message newer than the
+// request's transcript is real, and must not be counted as fabricated. With no read text the old check
+// stays, so the same quote IS counted: that is the control.
+func TestAQuoteFromTheBodyTheModelReadIsNotCountedAsFabricated(t *testing.T) {
+	const quote = "a line that only the newest message carries"
+	run := func(read string) *components.Report {
+		a := &readLabelAsker{labelAsker: labelAsker{verdict: "keep", needed: "c", quote: quote}, read: read}
+		a.cacheRead = 19595
+		rep := &components.Report{}
+		if _, err := askOffload(newSweepSmall(t, ""), sweepReq(), rep,
+			preExpiryCtx("s", a, store.NewMemory(store.Options{}))); err != nil {
+			t.Fatal(err)
+		}
+		if rep.Events["sweep_adjudicated"] == 0 {
+			t.Fatalf("no ask was made (gates: %v)", rep.Gates)
+		}
+		return rep
+	}
+	if rep := run("the body the model read. " + quote); rep.Gates["sweep_quote_fabricated"] != 0 {
+		t.Errorf("a quote found in the body the model read was counted as fabricated (gates: %v)", rep.Gates)
+	}
+	if rep := run(""); rep.Gates["sweep_quote_fabricated"] == 0 {
+		t.Errorf("control: the same quote with no read text should be counted as fabricated (gates: %v)", rep.Gates)
+	}
+	if rep := run("a body without it"); rep.Gates["sweep_quote_fabricated"] == 0 {
+		t.Errorf("a quote absent from the body the model read was not counted (gates: %v)", rep.Gates)
+	}
+}

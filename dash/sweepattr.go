@@ -47,15 +47,25 @@ type SweepLedger struct {
 	Applied              int64 `json:"applied"`
 	AppliedCold          int64 `json:"applied_cold"`
 	AppliedChangedPrefix int64 `json:"applied_changed_prefix"`
+	// AppliedWarm and ReferencedWarm are the warm path's share (#491), part of Applied and Referenced.
+	// Warm expands are in FalseExpandsWarm below (a column on the request row), so the warm false-drop
+	// rate here counts references and expands, as /stats does.
+	AppliedWarm    int64 `json:"applied_warm"`
+	ReferencedWarm int64 `json:"referenced_later_warm"`
 	// Referenced: drops a later turn used something from, without expanding.
 	Referenced int64 `json:"referenced_later"`
 	// Expands and ExpandTokens: every expand of a sweep marker, and what it returned.
 	Expands      int64 `json:"expands"`
 	ExpandTokens int64 `json:"expand_tokens"`
 	// FalseExpands: drops expanded back for the first time and not already counted as referenced.
-	FalseExpands  int64   `json:"false_expands"`
-	FalseDrops    int64   `json:"false_drops"`
-	FalseDropRate float64 `json:"false_drop_rate"`
+	FalseExpands int64 `json:"false_expands"`
+	// FalseExpandsWarm is the part of FalseExpands whose drop was applied warm (#491). FalseDropsWarm
+	// and FalseDropRateWarm count references and expands, the same as /stats.
+	FalseExpandsWarm  int64   `json:"false_expands_warm"`
+	FalseDropsWarm    int64   `json:"false_drops_warm"`
+	FalseDropRateWarm float64 `json:"false_drop_rate_warm"`
+	FalseDrops        int64   `json:"false_drops"`
+	FalseDropRate     float64 `json:"false_drop_rate"`
 	// ExpandChargeUSD is what the sweep's expands cost, taken off its credit.
 	ExpandChargeUSD float64 `json:"expand_charge_usd"`
 	// AnswerUSD is what the answers cost beyond the pings' own reads: its own column, booked once on
@@ -110,7 +120,9 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	q := `SELECT r.session_id, r.thread_id,
 		SUM(` + sprintfEv(ev, "sweep_applied_cold") + `),
 		SUM(` + sprintfEv(ev, "sweep_applied_changed_prefix") + `),
-		SUM(` + sprintfEv(ev, "sweep_false_ref") + `)
+		SUM(` + sprintfEv(ev, "sweep_false_ref") + `),
+		SUM(` + sprintfEv(ev, "sweep_applied_warm") + `),
+		SUM(` + sprintfEv(ev, "sweep_false_ref_warm") + `)
 		FROM requests r JOIN request_components c ON c.request_id = r.id AND c.component = '` + SweepComponent + `'
 		WHERE ` + cond + ` GROUP BY 1, 2`
 	rows, err := d.sql.QueryContext(ctx, q, args...)
@@ -119,28 +131,30 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	}
 	for rows.Next() {
 		var s, th string
-		var cold, chg, ref int64
-		if err := rows.Scan(&s, &th, &cold, &chg, &ref); err != nil {
+		var cold, chg, ref, warm, refWarm int64
+		if err := rows.Scan(&s, &th, &cold, &chg, &ref, &warm, &refWarm); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		out.AppliedCold += cold
 		out.AppliedChangedPrefix += chg
 		out.Referenced += ref
+		out.AppliedWarm += warm
+		out.ReferencedWarm += refWarm
 		t := get(s, th)
-		t.Applied += cold + chg
+		t.Applied += cold + chg + warm
 		t.FalseDrops += ref
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out.Applied = out.AppliedCold + out.AppliedChangedPrefix
+	out.Applied = out.AppliedCold + out.AppliedChangedPrefix + out.AppliedWarm
 
 	// 2. The expands, from the request rows (not the component rows: an expand lands on whichever
 	// request carried the response).
 	xq := `SELECT r.session_id, r.thread_id, r.model, SUM(r.sweep_expands), SUM(r.sweep_expand_tokens),
-		SUM(r.sweep_false_expands) FROM requests r WHERE ` + cond + ` AND r.sweep_expands > 0 GROUP BY 1, 2, 3`
+		SUM(r.sweep_false_expands), SUM(r.sweep_false_expands_warm) FROM requests r WHERE ` + cond + ` AND r.sweep_expands > 0 GROUP BY 1, 2, 3`
 	xrows, err := d.sql.QueryContext(ctx, xq, args...)
 	if err != nil {
 		return nil, err
@@ -148,14 +162,15 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	byModel := map[string]int64{}
 	for xrows.Next() {
 		var s, th, model string
-		var n, tok, fe int64
-		if err := xrows.Scan(&s, &th, &model, &n, &tok, &fe); err != nil {
+		var n, tok, fe, few int64
+		if err := xrows.Scan(&s, &th, &model, &n, &tok, &fe, &few); err != nil {
 			xrows.Close()
 			return nil, err
 		}
 		out.Expands += n
 		out.ExpandTokens += tok
 		out.FalseExpands += fe
+		out.FalseExpandsWarm += few
 		byModel[model] += tok
 		get(s, th).FalseDrops += fe
 	}
@@ -164,6 +179,10 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 		return nil, err
 	}
 	out.FalseDrops = out.Referenced + out.FalseExpands
+	out.FalseDropsWarm = out.ReferencedWarm + out.FalseExpandsWarm
+	if out.AppliedWarm > 0 {
+		out.FalseDropRateWarm = float64(out.FalseDropsWarm) / float64(out.AppliedWarm)
+	}
 	if out.Applied > 0 {
 		out.FalseDropRate = float64(out.FalseDrops) / float64(out.Applied)
 	}
