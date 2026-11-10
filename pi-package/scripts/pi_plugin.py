@@ -54,9 +54,16 @@ NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
 PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
 DEFAULT_PRESET = "off"
 DEFAULT_STRATEGY = "auto"
+# From this release the proxy owns the strategy table (#987): `cache: strategy: <name>` in its config
+# fills the cache keys. The config is strict YAML, so an older binary refuses the `strategy` key.
+NAMED_STRATEGY_RELEASE = (0, 7, 1)
 
 # The same strategies, keys and values as the Claude Code plugin (context-guru-plugin/scripts/settings.py),
 # so one name means one behaviour on both clients. `none` writes no cache keys at all.
+#
+# For a binary of NAMED_STRATEGY_RELEASE or later, the config names the strategy and the proxy's own
+# table applies. This copy then gives only the names, the consent text and the `desc` lines. The keys
+# here are written only for an older binary.
 #
 # The same keys also drive the proxy's OpenAI keep-alive; no OpenAI-only key is needed. On an OpenAI
 # Responses request the proxy uses `keepalive`, `keepalive_max_pings`, `keepalive_max_usd_per_ping` and
@@ -272,6 +279,27 @@ def release_version(tag):
     return parts
 
 
+def binary_version_text(executable):
+    """The version that `<binary> --version` prints (for example `0.7.1`), or None. `--version` exits
+    before the proxy opens a port, and a binary without the flag exits on an unknown flag, so this
+    never starts a proxy. The time limit is for a binary that hangs."""
+    try:
+        out = subprocess.run([executable, "--version"], text=True, capture_output=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out[1] if len(out) >= 2 and out[0] == "context-guru-proxy" else None
+
+
+def names_strategies(executable):
+    """True when the binary reads `cache: strategy: <name>`. A version we cannot read is False, so
+    the config gets the literal keys, which every binary accepts."""
+    text = binary_version_text(executable) if executable else None
+    try:
+        return text is not None and release_version(text) >= NAMED_STRATEGY_RELEASE
+    except RuntimeError:  # a dev build, for example
+        return False
+
+
 def install_release_binary(version=None):
     """Download the release for this platform, check it against the release's SHA-256 list, and
     install it into the private state directory. A checksum problem is a hard stop: the binary
@@ -317,7 +345,10 @@ def install_release_binary(version=None):
 
 # --------------------------------------------------------------------------------------- proxy config
 
-def render_config(preset, strategy, upstreams=None):
+def render_config(preset, strategy, upstreams=None, by_name=False):
+    """The proxy config. `by_name`: name the strategy and let the proxy fill its keys from its own
+    table (a binary with #987), so a new binary brings new values. Otherwise write Pi's literal keys.
+    `none` writes no cache block either way: it has no keys, and every binary accepts that."""
     lines = [MARKER, f"# strategy={strategy}. Change it with /context-guru preset or /context-guru cache-strategy."]
     # The proxy config has no upstream key (and refuses an unknown one), so a chained upstream is
     # written here as a comment for a person, and passed to the proxy as a flag on the service command.
@@ -325,14 +356,17 @@ def render_config(preset, strategy, upstreams=None):
         lines.append(f"# chained: {provider} -> proxy -> {upstream} ({UPSTREAM_FLAGS[provider]} on the service command)")
     lines.append(f"preset: {preset}")
     cache = STRATEGIES[strategy]["cache"]
-    if cache:
+    if cache and by_name:
+        lines += ["# The proxy fills the cache keys of this strategy from its own table.", "cache:",
+                  f"  strategy: {strategy}"]
+    elif cache:
         lines.append("cache:")
         for key, value in cache.items():
             lines.append(f"  {key}: {str(value).lower() if isinstance(value, bool) else value}")
     return "\n".join(lines) + "\n"
 
 
-def write_proxy_config(preset, strategy, upstreams=None):
+def write_proxy_config(preset, strategy, upstreams=None, by_name=False):
     if preset not in PRESETS:
         raise RuntimeError(f"unknown preset: {preset}")
     if strategy not in STRATEGIES:
@@ -342,10 +376,35 @@ def write_proxy_config(preset, strategy, upstreams=None):
     if path.exists() and not owned(path):
         raise RuntimeError(f"refusing to overwrite a proxy config we did not write: {path}")
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(render_config(preset, strategy, upstreams))
+    temporary.write_text(render_config(preset, strategy, upstreams, by_name))
     temporary.chmod(0o600)
     os.replace(temporary, path)
     return path
+
+
+def rerender_config(record, executable):
+    """Re-render the proxy config from the install record before a start, the same rule as the Claude
+    Code plugin's `strategy sync`. Only a file with our marker is written; a hand-written file stays.
+    Never raises: on a problem the proxy starts with the file as it is. Returns rendered | unchanged |
+    missing | not_owned | invalid_record | failed. A missing file is not created here: setup and
+    configure write it, after a yes."""
+    path = proxy_config()
+    if not path.exists():
+        return "missing"
+    if not owned(path):
+        return "not_owned"
+    preset = record.get("preset", DEFAULT_PRESET)
+    strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
+    if preset not in PRESETS or strategy not in STRATEGIES:
+        return "invalid_record"
+    upstreams, by_name = recorded_upstreams(record), names_strategies(executable)
+    try:
+        if path.read_text() == render_config(preset, strategy, upstreams, by_name):
+            return "unchanged"
+        write_proxy_config(preset, strategy, upstreams, by_name)
+    except Exception:
+        return "failed"
+    return "rendered"
 
 
 def proxy_command(executable, port, upstreams=None):
@@ -661,10 +720,10 @@ def setup(args):
     if service_kind() is None:
         facts(result="error", reason="unsupported_platform", detail=platform.system())
         return 2
-    try:
-        write_proxy_config(preset, strategy, upstreams)
-    except Exception as error:
-        facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+    # A hand-written config is refused before anything is downloaded.
+    if proxy_config().exists() and not owned(proxy_config()):
+        facts(result="error", reason="config_conflict", config=proxy_config(),
+              detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
         return 2
     executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
     executable = executable or find_binary()
@@ -675,6 +734,12 @@ def setup(args):
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
+    # After the binary is known: the config names the strategy only for a binary that reads the name.
+    try:
+        write_proxy_config(preset, strategy, upstreams, names_strategies(executable))
+    except Exception as error:
+        facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+        return 2
     # Proxy first, routing second: a route written while nothing answers makes every request fail.
     if not start_service(executable, port, upstreams):
         facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
@@ -765,6 +830,10 @@ def restart(args):
     if reset_hatch().exists():
         where["reset_hatch"] = reset_hatch()
     with restart_lock():
+        # Re-render first, so the next start (this one, or a later one by launchd or systemd) reads the
+        # current strategy. A proxy that answers is not restarted for it: it reads the file at its
+        # next start.
+        where["config"] = rerender_config(record, record.get("binary") or find_binary())
         if healthy(port, timeout=START_CHECK_SECONDS):
             facts(result="already_up", **where)
             return 0
@@ -792,7 +861,7 @@ def configure(args):
     strategy = args.cache_strategy or strategy
     upstreams = recorded_upstreams(record)
     try:
-        write_proxy_config(preset, strategy, upstreams)
+        write_proxy_config(preset, strategy, upstreams, names_strategies(record.get("binary")))
     except Exception as error:
         facts(result="refused", detail=error)
         return 2
@@ -827,13 +896,7 @@ def update(args):
         return 1
     record = read_record()
     executable = record.get("binary") or find_binary()
-    installed = "unknown"
-    if executable:
-        try:
-            out = subprocess.run([executable, "--version"], text=True, capture_output=True).stdout.split()
-            installed = out[1] if len(out) >= 2 else installed
-        except OSError:
-            pass
+    installed = (binary_version_text(executable) if executable else None) or "unknown"
     available = installed.removeprefix("v") != latest.removeprefix("v")
     if args.check:
         facts(result="checked", installed_version=installed, latest_version=latest,
@@ -852,8 +915,10 @@ def update(args):
         return 0
     record["binary"] = executable
     write_record(record)
+    # Re-render with the NEW binary: it decides whether the config names the strategy.
+    config = rerender_config(record, executable)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
-    facts(result="updated", version=version, restart="completed" if restarted else "failed")
+    facts(result="updated", version=version, config=config, restart="completed" if restarted else "failed")
     return 0 if restarted else 1
 
 
