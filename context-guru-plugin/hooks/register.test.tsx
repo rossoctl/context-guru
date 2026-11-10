@@ -289,10 +289,33 @@ test('on a Claude subscription the money gives way to the 5-hour limit and the t
   usage = docOverride = null
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
   const row = (await dump(ui)).split('\n')[1]
-  expect(row).toMatch(/^5h 34% · saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
-  expect(row).not.toMatch(/\$/)
+  expect(row).toMatch(/^5h 34% · this session saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
+  // the next message is in tokens too: the 90k cached prefix is read when warm, written again when cold
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd · 90\.0k wr if cold/)
+  expect(await dump(ui)).not.toMatch(/\$/)
   // the window's start (its reset less five hours) reaches the helper, which reads that window's totals
   expect(calls.some(c => c.join(' ').includes(`--window-start-ms ${NOW + 3_600_000 - 5 * 3_600_000}`))).toBe(true)
+  await ui.unmount()
+})
+
+test('on a subscription a cold cache prices the next message as the prefix written again', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ ○ cache cold · next message 90\.0k wr/)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  await ui.unmount()
+})
+
+test('on a subscription the pane prices the next message in tokens', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+  await boot($, on, true)
+  usage = null
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(ui)
+  expect(text).toMatch(/if the cache is warm 90\.0k rd/)
+  expect(text).toMatch(/if it is cold +90\.0k wr/)
   await ui.unmount()
 })
 
