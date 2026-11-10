@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
 )
 
@@ -77,6 +78,11 @@ func (c *capture) noteLimits(h http.Header) {
 		c.limits = l
 	}
 }
+
+// PingLimits reads the subscription limit headers of a keep-alive ping's response (#995). A ping is
+// a real request, so its answer carries the same headers, and recording them keeps the 5-hour share
+// current while the user is idle. It is the same parser as the request path; nil when none is usable.
+func PingLimits(r components.KeepAliveReport) *dash.Limits { return readLimitHeaders(r.Header) }
 
 // subscriptionTokenPrefix is the fixed prefix of a Claude subscription (OAuth) access token.
 const subscriptionTokenPrefix = "sk-ant-oat"

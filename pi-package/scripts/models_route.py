@@ -80,7 +80,8 @@ def _ours(url, port, provider, ours):
 
 def conflicts(models_path, port, providers, ours=None):
     """{provider: url} for every provider whose baseUrl is already set to something that is not ours.
-    Setup refuses on any: that URL may be a company gateway, and replacing it breaks its auth."""
+    That URL may be a company gateway, so setup asks the person: chain the proxy in front of it,
+    replace it (which usually breaks its auth), or change nothing."""
     ours = dict(ours or {})
     found = {}
     for provider in providers:
@@ -113,11 +114,13 @@ def install(models_path, state_path, port, providers, ours=None):
             raise ValueError(f"{models_path}: providers.{provider} is not a JSON object")
         else:
             created_entry = False
-        if provider not in keys:
-            previous = entry.get("baseUrl")
-            if previous is not None and _ours(previous, port, provider, ours):
-                previous = None  # our own URL is never the user's value to put back
-            keys[provider] = {"previous": previous, "created_entry": created_entry}
+        previous = entry.get("baseUrl")
+        mine = previous is not None and _ours(previous, port, provider, ours)
+        # A key we route keeps its first record. A key the user set to something else since (a
+        # gateway that chain or replace now goes in front of) is recorded again, so uninstall puts
+        # back what the user had last, not what they had before.
+        if provider not in keys or (previous is not None and not mine):
+            keys[provider] = {"previous": None if mine else previous, "created_entry": created_entry}
         entry["baseUrl"] = base_url(port, provider)
     if not state_path.exists():
         # For a person only: restore() works from the routing record, never from this copy.
