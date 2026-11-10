@@ -57,6 +57,8 @@ type capture struct {
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
+	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
+	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -490,6 +492,9 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	c.sweepExpandTok += tokens
 	if note.First && !note.Overlap {
 		c.sweepFalseExp++
+		if note.Warm {
+			c.sweepFalseExpWarm++
+		}
 	}
 }
 
@@ -632,6 +637,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		// The ledger's own cost, taken here, before PriceMode can move the net onto the library's figure.
 		e.DeferCostUSD = d.gross - d.net
 	}
+	e.SweepFalseExpandsWarm = c.sweepFalseExpWarm
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
@@ -803,6 +809,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 		if cgPriced {
 			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
+		} else {
+			e.CGCostUnpriced = true
 		}
 	}
 

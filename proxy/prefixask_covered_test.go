@@ -96,3 +96,33 @@ func newCoveredCli(srv *capturePrefixed) cheapmodel.Anthropic {
 	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
 	return cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 }
+
+// AskRead returns the text of the body the model read, from the same snapshot it asked over. A later put
+// (the thread's next request) must not change what a running ask reports, and a stale span is declined.
+func TestAskReadReportsTheTextOfTheBodyItAskedOver(t *testing.T) {
+	srv := newCapturePrefixed(t, 1)
+	stash := newSentStash()
+	const session = "read-1"
+	stash.put(session, bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
+	norm := apply.NormalizeMessages(bschemas.Anthropic, []byte(prefixBodyFixture))
+	hash := components.SpanHash(norm[:1])
+	a := prefixAsker{stash: stash, cli: newCoveredCli(srv)}
+
+	_, _, read, err := a.AskRead(context.Background(), session, 1, hash, "THE-ASK")
+	if err != nil {
+		t.Fatalf("AskRead over a covering stash: %v", err)
+	}
+	if !strings.Contains(read, "find the flaky test") || strings.Contains(read, "THE-ASK") {
+		t.Fatalf("read text = %q, want the stashed messages and not the ask", read)
+	}
+	// count < 0 skips the coverage check.
+	if _, _, _, err := a.AskRead(context.Background(), session, -1, "", "THE-ASK"); err != nil {
+		t.Fatalf("AskRead with no coverage check: %v", err)
+	}
+	if _, _, _, err := a.AskRead(context.Background(), session, 1, "not-the-span-hash", "ask"); err != components.ErrStalePrefix {
+		t.Fatalf("stale span: err = %v, want ErrStalePrefix", err)
+	}
+	if _, _, _, err := a.AskRead(context.Background(), "never-seen", 1, "h", "ask"); err != components.ErrNoPrefix {
+		t.Fatalf("missing stash: err = %v, want ErrNoPrefix", err)
+	}
+}

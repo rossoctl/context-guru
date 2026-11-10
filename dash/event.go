@@ -288,6 +288,10 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
+	// CGCostUnpriced is set at capture when the request made compaction calls that could not be
+	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: it only keeps the
+	// reprice pass from marking such a row complete (issue #920).
+	CGCostUnpriced bool `json:"-"`
 	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
 	// cache-read tokens priced at the fresh rate they would have cost with no cache,
 	// minus what they actually cost. A measurement of the PROVIDER's mechanism, kept
@@ -416,6 +420,9 @@ type Event struct {
 	// SweepFalseExpands is how many drops were expanded back for the FIRST time on this request and
 	// were not already counted as referenced: the expand half of the false-drop count, exact per drop.
 	SweepFalseExpands int `json:"sweep_false_expands"`
+	// SweepFalseExpandsWarm is the part of SweepFalseExpands whose drop was applied on a WARM request
+	// (#491), so the warm false-drop rate counts expands as well as references.
+	SweepFalseExpandsWarm int `json:"sweep_false_expands_warm"`
 	// SweepAnswerUSD is, on a keep-alive ping row the sweep's question replaced, what the answer cost
 	// beyond the read the ping would have paid anyway (#404 point 9). Booked once, on the ping row, as
 	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
@@ -973,8 +980,42 @@ func (e *Event) ComponentSavedUSD(p modelinfo.Price, component string, gross, un
 	if unique < 0 {
 		unique = 0
 	}
-	return (float64(unique)*e.uniqueRate(p, component) + float64(gross-unique)*e.repeatRate(p)) *
+	usd := (float64(unique)*e.uniqueRate(p, component) + float64(gross-unique)*e.repeatRate(p)) *
 		e.BilledTokenFactor
+	return usd - e.sweepWarmRewriteUSD(p, component)
+}
+
+// sweepComponentEvent reads one event count off the sweep's row of this request.
+func (e *Event) sweepComponentEvent(name string) int {
+	for i := range e.Components {
+		if e.Components[i].Component == SweepComponent {
+			return e.Components[i].Events[name]
+		}
+	}
+	return 0
+}
+
+// sweepWarmApplied is true on a request where the sweep applied a drop on a WARM request (#491).
+func (e *Event) sweepWarmApplied() bool { return e.sweepComponentEvent("sweep_applied_warm") > 0 }
+
+// sweepWarmRewriteUSD is what a warm drop COST on the request that paid it (#491): the cache from the
+// first removed output on is written again at the write rate where it would have been read. The tokens
+// are the provider's own cache-write tokens of this request when it reported a write (it cannot have
+// rewritten more than it wrote), and the apply's billed-scaled estimate (event
+// sweep_warm_rewrite_tokens) when it did not. Zero for every request that is not a warm apply, so the
+// cold pricing is unchanged.
+func (e *Event) sweepWarmRewriteUSD(p modelinfo.Price, component string) float64 {
+	if component != SweepComponent || !e.sweepWarmApplied() {
+		return 0
+	}
+	n := int64(e.sweepComponentEvent("sweep_warm_rewrite_tokens"))
+	if e.CacheWrite > 0 && e.CacheWrite < n {
+		n = e.CacheWrite
+	}
+	if n <= 0 || p.CacheWrite <= p.CacheRead {
+		return 0
+	}
+	return float64(n) * (p.CacheWrite - p.CacheRead)
 }
 
 // SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:
@@ -1009,6 +1050,12 @@ func IsSummarizer(component string) bool {
 // stands. Any other verdict (hit, or prefix_change, which on a summary turn is our own rewrite
 // of a live entry) says it was live, so the counterfactual is a read.
 func (e *Event) uniqueRate(p modelinfo.Price, component string) float64 {
+	// A WARM sweep drop (#491) removes tokens the provider would have READ, not written: the cache was
+	// live. Credited at the write rate it would be 12.5x too high. Its rewrite cost is charged in
+	// sweepWarmRewriteUSD.
+	if component == SweepComponent && e.sweepWarmApplied() {
+		return p.CacheRead
+	}
 	if IsSummarizer(component) {
 		switch e.CacheMissReason {
 		case CacheTTLExpiry, CacheColdStart:
