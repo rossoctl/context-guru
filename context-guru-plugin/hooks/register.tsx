@@ -3,7 +3,7 @@
 // The mod is the whole display: the status line is no longer installed, so what it drew lives here, the same way:
 //   band row 1  next-message price (warm vs cold), Ping or why it is off, hide, the dashboard link
 //   band row 2  the status line's row: `▲ update`, `saved $x of $y session · saved $z of $q subagents ↻ $p pings`
-//               (on a subscription `5h 34% · saved 1.2M rd / 85.0k wr` instead of money),
+//               (on a subscription `5h 34% · this session saved 85.0k wr · cost 40.0k rd` instead of money),
 //               the cache clock (`cache ● ████░░ 4:12`, dim `cache ○ cold 1:07:04` once cold), `ctx ████░░░░ 41%`
 //   band row 3  one chip per named sub-agent cache (default on; `a` or the pane button turns it off)
 //   band row 4  the weekly tip when a command is stale, else one command and what it does, rotating

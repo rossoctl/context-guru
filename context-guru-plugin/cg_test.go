@@ -617,6 +617,7 @@ func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
 func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
+		"home-subscription": "status", "insights-savings-subscription": "savings",
 		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
 		"apply-gate": "save-more", "save-more-settings": "save-more",
