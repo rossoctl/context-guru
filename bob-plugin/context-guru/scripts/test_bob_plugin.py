@@ -645,6 +645,25 @@ class SetupTest(TempHome):
         self.assertIn("old_rc_block=left_alone", out)
         self.assertEqual(self.rc.read_bytes(), edited)
 
+    def test_a_failed_rerun_after_a_shell_change_keeps_bob_routed_through_the_old_file(self):
+        # The old block is removed only after the last step that can fail. A re-run under zsh that
+        # fails later must leave ~/.bash_profile routing Bob, or the rollback leaves Bob routed
+        # nowhere while it reports rolled_back=true.
+        zshrc = self.home / ".zshrc"
+        with FakeProxy() as proxy, \
+             mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+            zshrc.write_bytes(b"alias ll='ls -l'\n")
+            with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}), \
+                 mock.patch.object(PLUGIN.bob_hooks, "install", side_effect=OSError("boom")):
+                code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 1, out)
+        self.assertIn("rolled_back=true", out)
+        self.assertNotIn("old_rc_block=removed", out)
+        self.assertTrue(ROUTE.is_routed(self.rc), "Bob is routed nowhere after the rollback")
+        self.assertEqual(zshrc.read_bytes(), b"alias ll='ls -l'\n")
+
     def test_setup_starts_the_service_then_routes_and_verifies(self):
         self.rc.write_bytes(b"alias g=git\n")
         with FakeProxy() as proxy, \
