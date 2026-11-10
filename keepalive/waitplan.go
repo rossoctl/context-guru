@@ -33,7 +33,7 @@ const (
 	// config.DefaultKeepAliveBackgroundExtraPings and DefaultKeepAliveHumanExtraPings.
 	DefaultBackgroundExtraPings = 3
 	DefaultHumanExtraPings      = 1
-	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait and of any subagent wait. Mirrored by
+	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. Mirrored by
 	// config.DefaultKeepAliveToolWaitMinPrefix.
 	DefaultToolWaitMinPrefix = 20000
 	// MaxWaitPings bounds any plan result unless the base itself is higher. It equals the highest

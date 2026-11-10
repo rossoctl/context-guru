@@ -266,8 +266,8 @@ const (
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
-	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait
-	// and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
+	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait,
+	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
 	DefaultKeepAliveMinPrefix = 80000
 	// DefaultKeepAliveToolWaitMinPrefix is 20000. No long subagent idle span had a prefix under 20k, and
 	// a 20k floor cut subagent tool-wait misses from 65 to 31 (#858). Mirrors keepalive.DefaultToolWaitMinPrefix.

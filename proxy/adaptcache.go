@@ -162,8 +162,10 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 // rowFloor is the prefix floor the keeper would apply to a replayed row (Policy.WaitMinPrefix). A row
 // has the stop reason, not the wait cause or the tool names: a tool stop is read as a tool wait, any
 // other stop as a wait for a person (80k). A row that waited for background work or a teammate gets 80k
-// here, where the keeper gives it 20k, so the replay under-counts those rows. So a main-thread tool stop that asks a person reads as a tool wait
-// here, as dash's storedWait reads it, and the replay can admit a few rows the keeper would refuse.
+// here, where the keeper gives it 20k, so the replay under-counts those rows. A row carries no stored
+// cause here, so every tool stop reads as a tool wait (20k). Dash's storedWait differs: it keeps a tool
+// stop with a stored human cause as human. So a main-thread tool stop that asks a person reads as a tool
+// wait here, and the replay can admit a few rows the keeper would refuse.
 // An OpenAI row gets the general floor only: the keeper plans no wait for OpenAI.
 func rowFloor(pol CachePolicy, f *rowFacts) int {
 	if f.openai {

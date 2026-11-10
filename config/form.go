@@ -126,7 +126,7 @@ type CacheForm struct {
 	KeepAliveMaxPings          int     `json:"keepalive_max_pings,omitempty"`
 	KeepAliveMaxUSDPerPing     float64 `json:"keepalive_max_usd_per_ping,omitempty"`
 	KeepAliveMinPrefixTokens   int     `json:"keepalive_min_prefix_tokens,omitempty"`
-	// KeepAliveToolWaitMinPrefixTokens is the floor for a tool wait and a subagent wait.
+	// KeepAliveToolWaitMinPrefixTokens is the floor for a tool wait, background work, a teammate and a subagent wait.
 	KeepAliveToolWaitMinPrefixTokens int  `json:"keepalive_tool_wait_min_prefix_tokens,omitempty"`
 	HeadTTL1h                        bool `json:"head_ttl_1h"`
 	HeadTTLMinBytes                  int  `json:"head_ttl_min_bytes,omitempty"`

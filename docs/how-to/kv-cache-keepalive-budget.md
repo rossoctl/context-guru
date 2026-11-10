@@ -30,8 +30,8 @@ cache:
   keepalive: true
   keepalive_idle_seconds: 240          # ping interval — keep this under the tier's TTL
   keepalive_max_pings: 2               # flat cap per idle span
-  keepalive_min_prefix_tokens: 80000   # skip small prefixes of a main thread that waits for a person (the default)
-  keepalive_tool_wait_min_prefix_tokens: 20000  # the lower floor for a tool wait and for a subagent (the default)
+  keepalive_min_prefix_tokens: 80000   # skip small prefixes of a main thread that waits for a person or for an unknown cause (the default)
+  keepalive_tool_wait_min_prefix_tokens: 20000  # the lower floor for a tool wait, background work, a teammate and a subagent (the default)
   keepalive_max_usd_per_ping: 0.50     # per-ping cost ceiling
 ```
 
