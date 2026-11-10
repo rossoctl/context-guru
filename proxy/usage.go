@@ -159,19 +159,8 @@ var nestedUsagePaths = [...]string{"response.usage", "usageMetadata", "data.usag
 // from the counter which one they have. `{}` is treated the same way for the same reason: a
 // provider that sent an empty object told us nothing, which is `absent`, not a missing spelling.
 //
-// agent/bob has a copy of this rule (present), because a library cannot import the proxy. Change
-// both together; agent/bob/usage_test.go fails if its copy accepts an empty block.
-func usagePresent(v gjson.Result) bool {
-	if !v.IsObject() {
-		return false
-	}
-	empty := true
-	v.ForEach(func(gjson.Result, gjson.Result) bool {
-		empty = false
-		return false // one field is enough
-	})
-	return !empty
-}
+// The rule is providerusage.Present, shared with agent/bob.
+func usagePresent(v gjson.Result) bool { return providerusage.Present(v) }
 
 // parseUsage extracts the four billed token tiers from a buffered response body,
 // in whichever dialect it is written. This is the number that actually matters on

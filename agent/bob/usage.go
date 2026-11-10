@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/tidwall/gjson"
 )
 
@@ -19,7 +20,7 @@ func (Bob) ReadUsage(contentType string, reply []byte, base agent.Usage) agent.U
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		if u := gjson.Get(strings.TrimSpace(strings.TrimPrefix(line, "data:")), "usage"); present(u) {
+		if u := gjson.Get(strings.TrimSpace(strings.TrimPrefix(line, "data:")), "usage"); providerusage.Present(u) {
 			last = u
 		}
 	}
@@ -80,18 +81,4 @@ func count(v gjson.Result) (int64, bool) {
 		return 0, false
 	}
 	return int64(v.Num), true
-}
-
-// present is the host's test for a usage block that is there: an object with at least one field.
-// A chunk with `"usage":{}` or `"usage":null` does not replace the last real block.
-func present(v gjson.Result) bool {
-	if !v.IsObject() {
-		return false
-	}
-	empty := true
-	v.ForEach(func(gjson.Result, gjson.Result) bool {
-		empty = false
-		return false // one field is enough
-	})
-	return !empty
 }

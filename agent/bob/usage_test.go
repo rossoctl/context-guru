@@ -60,7 +60,7 @@ func TestReadUsageReadsTheLastUsageChunkOfAStream(t *testing.T) {
 }
 
 // An empty or null usage block AFTER the real one must not win: only a block that carries counts
-// is a reading (present). With the empty chunk first, as above, a wrong present would still pass.
+// is a reading (providerusage.Present). With the empty chunk first, as above, a wrong rule would still pass.
 func TestReadUsageIgnoresAnEmptyUsageChunkAfterTheRealOne(t *testing.T) {
 	for name, tail := range map[string]string{"empty": `{}`, "null": `null`} {
 		stream := []byte(`data: {"id":"c1","choices":[],"usage":` + coldUsage + `}` + "\n\n" +
