@@ -58,7 +58,6 @@ If `auto` does not fit the routed providers, the plugin runs `none` and logs why
 The old name `5-min-ping` still works. The proxy reads it as `auto`.
 The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
 **The proxy must be v0.7.1 or later.** An older binary cannot list strategies, so the plugin does not start it and logs an error.
-Until v0.7.1 is released, a fresh install cannot download its proxy. `/context-guru-update` also answers "latest" for a v0.7.0 binary. Use a v0.7.1 binary from `PATH` or `CONTEXT_GURU_BIN` until then.
 Pings spend your own credential while you are away. `none` sends no pings.
 
 A choice saved by `/context-guru-preset` or `/context-guru-strategy` wins over these options.

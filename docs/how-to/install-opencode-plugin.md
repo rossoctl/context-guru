@@ -1,5 +1,7 @@
 # Install the OpenCode plugin
 
+> **Experimental.** The plugin is new. It ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
+
 The OpenCode plugin routes Anthropic and OpenAI model requests through a local context-guru proxy.
 It is project-safe, reversible, and does not add an API key.
 
@@ -55,7 +57,6 @@ credential while you are away. Set other values with the tuple form:
 - The old name `5-min-ping` still works. The proxy reads it as `auto`.
 - The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
 - **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy.
-- Until v0.7.1 is released, a fresh install cannot download its proxy, and `/context-guru-update` answers "latest" for a v0.7.0 binary. Use a v0.7.1 binary from `PATH` or `CONTEXT_GURU_BIN` until then.
 - `none` sends no keep-alive requests.
 
 ## Change the preset or strategy in a session
@@ -82,6 +83,8 @@ Add this to `~/.config/opencode/tui.json` (or the project `tui.json`):
 ```
 
 Restart OpenCode after the change.
+
+**Known issue.** In OpenCode 1.19.5 the dialogs did not appear: the two commands were not in the slash menu or the command palette as native entries. The chat commands work. Treat the native dialogs as unproven.
 
 Where the dialogs do not exist (`opencode run`, web, desktop, or no `tui.json` entry), the same commands
 run in chat. The agent shows the choices and asks for your yes in the conversation.

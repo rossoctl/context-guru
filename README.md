@@ -51,15 +51,9 @@ Choose your setup. Each button opens only the instructions for that path.
       <td align="center">
         <a href="docs/how-to/install-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logo=anthropic&amp;logoColor=white"></a>
       </td>
-      <td align="center" rowspan="3">
+      <td align="center" rowspan="2">
         <a href="docs/hosted.md#user-setup"><img alt="Connect to your organization" src="https://img.shields.io/badge/connect-organization-455A64?style=for-the-badge&amp;logoColor=white"></a><br>
-        <sub>Claude Code, Codex or OpenCode</sub>
-      </td>
-      </tr>
-    <tr>
-      <th>OpenCode</th>
-      <td align="center">
-        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
+        <sub>Claude Code or Codex</sub>
       </td>
     </tr>
     <tr>
@@ -68,8 +62,35 @@ Choose your setup. Each button opens only the instructions for that path.
         <a href="codex-marketplace/plugins/context-guru/README.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logo=openai&amp;logoColor=white"></a>
       </td>
     </tr>
+    <tr>
+      <th>OpenCode (experimental)</th>
+      <td align="center">
+        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
+      </td>
+      <td align="center">&mdash;</td>
+    </tr>
   </tbody>
 </table>
+
+### OpenCode (experimental)
+
+The OpenCode plugin routes your Anthropic and OpenAI providers through a local proxy. It adds chat commands.
+It is experimental: it is new, and it ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
+
+1. Clone this repository.
+2. Add the plugin to `~/.config/opencode/opencode.json`:
+   ```json
+   { "$schema": "https://opencode.ai/config.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/index.js"] }
+   ```
+3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`. In the one real test, the dialogs did not appear, and the chat commands worked.
+   ```json
+   { "$schema": "https://opencode.ai/tui.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"] }
+   ```
+4. Restart OpenCode.
+
+Commands: `/context-guru-status`, `/context-guru-preset`, `/context-guru-strategy`, `/context-guru-update`, `/context-guru-uninstall` (and `/context-guru-install` to undo an uninstall).
+To remove it, run `/context-guru-uninstall`, then delete the plugin entry. See the [full guide](docs/how-to/install-opencode-plugin.md).
+
 
 ## What's cool
 
