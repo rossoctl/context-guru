@@ -650,5 +650,67 @@ screen_reader_detection_done = true
             self.assertIn("configure --show", (skills / name / "SKILL.md").read_text())
 
 
+    def test_setup_on_a_running_proxy_checks_the_recorded_binary(self):
+        # The record names an old binary. A new binary comes first in find_binary. The proxy runs.
+        # Every restart uses the old binary, so setup must refuse and must not write the new form.
+        PLUGIN.state_dir().mkdir(parents=True)
+        (PLUGIN.state_dir() / "install.json").write_text(json.dumps({"port": 8791, "binary": "/old/proxy"}))
+        PLUGIN.main_config().parent.mkdir(parents=True)
+        PLUGIN.main_config().write_text('model_provider = "openai"\n')
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+
+        def load(binary):
+            if binary == "/old/proxy":
+                raise RuntimeError("cannot list cache strategies; update the proxy to v0.7.1 or later")
+            return TABLE
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/new/proxy"), \
+             mock.patch.object(PLUGIN, "healthy", return_value=True), \
+             mock.patch.object(PLUGIN, "load_strategy_table", side_effect=load), \
+             mock.patch.object(PLUGIN, "install_default_route") as route, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.setup(args), 2)
+        self.assertIn("result=strategies_unavailable", out.getvalue())
+        self.assertIn("v0.7.1", out.getvalue())
+        self.assertFalse(PLUGIN.proxy_config().exists())
+        route.assert_not_called()
+
+    def test_setup_on_a_running_proxy_with_a_new_recorded_binary_writes_the_file(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        (PLUGIN.state_dir() / "install.json").write_text(json.dumps({"port": 8791, "binary": "/new/proxy"}))
+        PLUGIN.main_config().parent.mkdir(parents=True)
+        PLUGIN.main_config().write_text('model_provider = "openai"\n')
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/new/proxy"), \
+             mock.patch.object(PLUGIN, "healthy", return_value=True), \
+             mock.patch.object(PLUGIN, "install_default_route"), \
+             mock.patch.object(PLUGIN, "install_escape_hatch", return_value=Path("/reset")), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.setup(args), 0)
+        self.assertIn("result=already_running", out.getvalue())
+        self.assertIn("strategy: 30-min-ping", PLUGIN.proxy_config().read_text())
+
+    def test_setup_reports_a_write_error_as_facts_not_a_traceback(self):
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/new/proxy"), \
+             mock.patch.object(PLUGIN.Path, "mkdir", side_effect=PermissionError("read-only")), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.setup(args), 2)
+        self.assertIn("result=config_conflict", out.getvalue())
+
+    def test_configure_show_ignores_cache_strategy(self):
+        PLUGIN.routing_state().parent.mkdir(parents=True)
+        PLUGIN.routing_state().write_text("{}")
+        PLUGIN.save_proxy_options("high", "30-min-ping")
+        before = PLUGIN.proxy_config().read_bytes()
+        args = type("Args", (), {"show": True, "preset": "off", "cache_strategy": "none"})()
+        with mock.patch.object(PLUGIN, "restart_proxy") as restart, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(PLUGIN.configure(args), 0)
+        self.assertIn("cache_strategy=30-min-ping", out.getvalue())
+        self.assertIn("preset=high", out.getvalue())
+        self.assertEqual(PLUGIN.proxy_config().read_bytes(), before)
+        restart.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

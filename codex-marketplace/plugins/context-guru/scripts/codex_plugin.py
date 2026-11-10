@@ -238,7 +238,7 @@ def install_escape_hatch():
 
 def update_hint():
     return (f"update the proxy to {STRATEGIES_RELEASE} or later "
-            f"(run context-guru-update, or remove the binary so setup downloads {STRATEGIES_RELEASE})")
+            f"(run context-guru-update, or remove the binary so setup downloads the latest release, {STRATEGIES_RELEASE} or later)")
 
 
 def load_strategy_table(binary):
@@ -327,7 +327,7 @@ def read_proxy_options():
         elif in_cache and stripped.startswith("strategy:"):
             strategy = stripped.split(":", 1)[1].strip().strip("'\"")
     if strategy is None:
-        strategy = "30-min-ping" if keepalive else "none"
+        strategy = DEFAULT_STRATEGY if keepalive else "none"
     return preset, strategy
 
 
@@ -372,8 +372,9 @@ def configure(args):
     try:
         table = load_strategy_table(read_record().get("binary") or find_binary())
         strategy = resolve_strategy(table, strategy)
-        if args.cache_strategy:
-            strategy = resolve_strategy(table, args.cache_strategy)
+        requested = None if args.show else args.cache_strategy
+        if requested:
+            strategy = resolve_strategy(table, requested)
     except RuntimeError as error:
         facts(result="refused", detail=error)
         return 2
@@ -578,16 +579,24 @@ def setup(args):
         except Exception as error:
             facts(result="binary_install_failed", detail=error)
             return 2
+    existing = read_record()
+    port = int(existing.get("port", 0))
+    # A proxy that already runs keeps its recorded binary, and every restart reads this file with
+    # that binary. So that binary, not the new one, must be able to list the strategies. If it
+    # cannot, setup refuses and writes nothing. (Restarting on the new binary would change the
+    # running proxy without a request to do so.)
+    running = bool(port and existing.get("binary") and healthy(port))
     try:
-        write_proxy_config(executable)
+        write_proxy_config(existing["binary"] if running else executable)
     except RuntimeError as error:
         facts(result="strategies_unavailable", detail=error)
         return 2
-    existing = read_record()
+    except OSError as error:
+        facts(result="config_conflict", config=proxy_config(), detail=error)
+        return 2
     provider = existing.get("provider") if is_routed(main_config()) else None
     if not isinstance(provider, dict):
         provider = base_provider()
-    port = int(existing.get("port", 0))
     if port and healthy(port):
         try:
             install_default_route(main_config(), routing_state(), port, provider)

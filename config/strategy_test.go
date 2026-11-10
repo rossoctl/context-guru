@@ -50,7 +50,8 @@ func TestStrategyTableMatchesPlugin(t *testing.T) {
 		t.Errorf("aliases: py %v, go %v", py.Aliases, StrategyAliases)
 	}
 	// The Python table has the Anthropic and "any" rows. The Go table adds the Codex rows after
-	// them, checked in strategy_codex_test.go.
+	// them. strategy_codex_test.go checks the offered set and that the Codex forms
+	// (`strategy: <name>` and `keepalive: true|false`) give the same effective config.
 	if len(py.Strategies)+1 != len(Strategies) {
 		t.Fatalf("py has %d strategies, go has %d (expect py + the Codex row)", len(py.Strategies), len(Strategies))
 	}
