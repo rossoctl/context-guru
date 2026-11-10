@@ -1,5 +1,11 @@
 package dash
 
+import (
+	"errors"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+)
+
 // SavingsTotals is the cost/savings arithmetic Overview() and /stats both need — one
 // query, one definition, so the two can never disagree about what "total saved" means.
 // See Overview's own KeepAlive*/TotalSavedUSD fields for what each addend means; this
@@ -23,7 +29,19 @@ type SavingsTotals struct {
 	ManualPings ManualPings `json:"manual_pings"`
 
 	TotalSavedUSD float64 `json:"total_saved_usd"`
+
+	// CapCorrectionUSD is what the summarize and replay ledgers moved the baseline by (a
+	// negative number: the credit past the cap). Zero unless SavingsTotalsCapped ran and the
+	// cap found something. The figures above already include it.
+	CapCorrectionUSD float64 `json:"cap_correction_usd"`
+	// CapNotApplied is true when the figures above are the stored, uncapped credit: plain
+	// SavingsTotals never applies the cap, and SavingsTotalsCapped sets it when the ledgers
+	// could not run. Such a figure can be higher than the headline for the same rows (#586).
+	CapNotApplied bool `json:"cap_not_applied"`
 }
+
+// errCapUnavailable is returned when there is no price table or window resolver to cap against.
+var errCapUnavailable = errors.New("dash: replay cap needs a price table and a window resolver")
 
 // SavingsTotals computes the combined savings figure for the filtered window: two
 // queries (agent traffic, then ping cost — see Filter.WithKeepAlive for why those
@@ -75,4 +93,47 @@ func savingsArithmetic(cost, baseline, cgllm, cachesplitSaved, kaSaved, kaPing, 
 	kaNet = kaSaved - kaPing
 	total = net + cachesplitSaved + kaNet + manualNet + deferNet
 	return net, kaNet, total
+}
+
+// CapCorrectionUSD is the correction the headline applies for the capped credit of one filter:
+// the summarize ledger's plus the replay ledger's, both negative or zero. It is the one place the
+// two ledgers are added, so a reader that cannot take a ledger row by row still lands on the
+// headline's figure. Both ledgers stream the rows f selects, so the cost follows f: give it a
+// session or a window, not the whole table (#502).
+func (d *DB) CapCorrectionUSD(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (float64, error) {
+	if windows == nil || p == nil {
+		return 0, errCapUnavailable
+	}
+	sum, err := d.SummarizeLedgerFor(f, windows, p)
+	if err != nil {
+		return 0, err
+	}
+	rep, err := d.ReplayLedgerFor(f, windows, p)
+	if err != nil {
+		return 0, err
+	}
+	return sum.DeltaUSD() + rep.DeltaUSD(), nil
+}
+
+// SavingsTotalsCapped is SavingsTotals with the cap applied, so a scope agrees with the
+// headline for the same rows. When the cap cannot be computed the stored figure is returned
+// with CapNotApplied set: a reader gets a labelled figure and not an error.
+//
+// Use it for a scope that one session or one window bounds. A lifetime read (an empty filter) streams
+// every row through the ledgers: use SavingsTotals there and say so.
+func (d *DB) SavingsTotalsCapped(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*SavingsTotals, error) {
+	s, err := d.SavingsTotals(f)
+	if err != nil {
+		return nil, err
+	}
+	corr, err := d.CapCorrectionUSD(f, windows, p)
+	if err != nil {
+		s.CapNotApplied = true
+		return s, nil
+	}
+	s.CapCorrectionUSD = corr
+	s.BaselineCostUSD += corr
+	s.NetSavedUSD += corr
+	s.TotalSavedUSD += corr
+	return s, nil
 }

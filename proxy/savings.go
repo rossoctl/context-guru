@@ -21,6 +21,13 @@ type SavingsScope struct {
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
 
 	TotalSavedUSD float64 `json:"total_saved_usd"`
+
+	// CapCorrectionUSD and CapNotApplied are dash.SavingsTotals' fields of the same name.
+	// CapNotApplied is true for the "all" scope by design: a lifetime read would stream every row
+	// through the ledgers on each status-line refresh (#502), so it keeps the stored credit and
+	// can be higher than the dashboard's headline.
+	CapCorrectionUSD float64 `json:"cap_correction_usd"`
+	CapNotApplied    bool    `json:"cap_not_applied"`
 }
 
 func savingsScope(t *dash.SavingsTotals) *SavingsScope {
@@ -29,8 +36,9 @@ func savingsScope(t *dash.SavingsTotals) *SavingsScope {
 		NetSavedUSD:        t.NetSavedUSD,
 		CachesplitSavedUSD: t.CachesplitSavedUSD,
 		KeepAlivePingUSD:   t.KeepAlivePingUSD, KeepAliveSavedUSD: t.KeepAliveSavedUSD,
-		KeepAliveNetUSD: t.KeepAliveNetUSD,
-		TotalSavedUSD:   t.TotalSavedUSD,
+		KeepAliveNetUSD:  t.KeepAliveNetUSD,
+		TotalSavedUSD:    t.TotalSavedUSD,
+		CapCorrectionUSD: t.CapCorrectionUSD, CapNotApplied: t.CapNotApplied,
 	}
 }
 
@@ -76,7 +84,9 @@ func (h *Handler) savingsStats() *SavingsStats {
 	}
 	db := h.rec.DB()
 	out := &SavingsStats{}
+	// "all" stays uncapped: see SavingsScope.CapNotApplied.
 	if all, err := db.SavingsTotals(dash.Filter{TenantAll: true}); err == nil {
+		all.CapNotApplied = true
 		out.All = savingsScope(all)
 	} else {
 		slog.Default().Warn("cg.stats_savings_all_failed", "err", err)
@@ -84,14 +94,14 @@ func (h *Handler) savingsStats() *SavingsStats {
 	if live := h.keeper.LiveSessionKeys(); len(live) > 0 {
 		// One grouped query for every live session (Filter.SessionIn), not one query per
 		// session — at maxKeepAliveSessions that would be up to 1024 sequential round trips.
-		if sum, err := db.SavingsTotals(dash.Filter{TenantAll: true, SessionIn: live}); err == nil {
+		if sum, err := db.SavingsTotalsCapped(dash.Filter{TenantAll: true, SessionIn: live}, h.opts.Windows, h.opts.Prices); err == nil {
 			out.Live = savingsScope(sum)
 		} else {
 			slog.Default().Warn("cg.stats_savings_live_failed", "err", err)
 		}
 	}
 	if session := h.getLastSession(); session != "" {
-		if cur, err := db.SavingsTotals(dash.Filter{TenantAll: true, Session: session}); err == nil {
+		if cur, err := db.SavingsTotalsCapped(dash.Filter{TenantAll: true, Session: session}, h.opts.Windows, h.opts.Prices); err == nil {
 			out.Current = savingsScope(cur)
 		} else {
 			slog.Default().Warn("cg.stats_savings_current_failed", "err", err)

@@ -1548,7 +1548,28 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"bucket_ms": bucket, "buckets": b})
+	// The buckets sum the stored credit. The headline caps the replay credit, so a client that adds
+	// the buckets up lands above it by exactly this correction (a negative number). A ledger scan
+	// streams every row of the window, so the figure is given beside the buckets and not spread over
+	// them: the ledgers do not say which bucket a correction belongs to (#586).
+	capCorr, capNotApplied := a.capCorrection(r, f)
+	writeJSON(w, map[string]any{"bucket_ms": bucket, "buckets": b,
+		"cap_correction_usd": capCorr, "cap_not_applied": capNotApplied})
+}
+
+// capCorrection is the headline's correction for the filter f, for the readers that sum stored
+// rows and so cannot apply a ledger row by row. notApplied is true when there is nothing to cap
+// against or the scan failed: the reader's totals are then the stored, uncapped credit.
+func (a *API) capCorrection(r *http.Request, f Filter) (corr float64, notApplied bool) {
+	if a.pricer == nil || a.windows == nil {
+		return 0, true
+	}
+	c, err := a.db(r).CapCorrectionUSD(f, a.windows, a.pricer)
+	if err != nil {
+		slog.Warn("context-guru: replay cap unavailable; the totals keep their stored credit", "err", err)
+		return 0, true
+	}
+	return c, false
 }
 
 func (a *API) requests(w http.ResponseWriter, r *http.Request) {
@@ -1755,10 +1776,15 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	capCorr, capNotApplied := a.capCorrection(r, f)
 	writeJSON(w, map[string]any{
 		"dim":        dim,
 		"dimensions": BreakdownDims(),
 		"groups":     rows,
+		// Each group's saved_usd is the stored credit. The headline caps it; this is the part that
+		// is past the cap for the whole scope, and it is not split over the groups (#586).
+		"cap_correction_usd": capCorr,
+		"cap_not_applied":    capNotApplied,
 		"description": "Requests, tokens and spent-vs-saved for each value of one dimension. " +
 			"spent_usd is what was billed plus context-guru's own model spend; saved_usd is the " +
 			"baseline counterfactual minus that. incomplete_rows counts rows the provider gave " +
