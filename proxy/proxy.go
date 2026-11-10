@@ -1587,8 +1587,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			//
 			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
 			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
-			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
+			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
 			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
 			//   - Any dialect: if the model calls expand on every round, the client gets the raw
 			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.

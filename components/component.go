@@ -162,8 +162,9 @@ type PrefixUsage struct {
 // superseded and would be kept anyway — and it has the side benefit of keeping a large model call off
 // the agent's critical path.
 //
-// nil when the host cannot support it: no stashed body for this session yet, the first turn, a
-// non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
+// nil when the host cannot support it: no asker exists for the route's wire (Anthropic, Responses and
+// Chat Completions have one), no incoming client, or the feature switched off. A first turn with no
+// stashed body yet is not nil: Ask returns ErrNoPrefix. A caller must decide for itself what nil means;
 // see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
 // mechanism exists to avoid.
 //

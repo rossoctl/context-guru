@@ -361,30 +361,37 @@ func TestChatPrefixAskerRouting(t *testing.T) {
 }
 
 func TestChatPrefixAskerAsksOverStashedSession(t *testing.T) {
-	var got []byte
+	var mu sync.Mutex
+	var captured []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		captured = b
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"verdict"}}],` +
 			`"usage":{"prompt_tokens":1200,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1100}}}`))
 	}))
 	defer srv.Close()
+	got := func() []byte { mu.Lock(); defer mu.Unlock(); return captured }
 	stash := newSentStash()
 	b := []byte(`{"model":"m","messages":[{"role":"user","content":"ONLY-ONE"}]}`)
 	stash.put("one", bschemas.OpenAI, b, b)
 	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.BearerAuth("k"))
 	a := chatPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{D: d, Ref: ref, Model: "m"}}
-	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got != nil {
-		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got)
+	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got() != nil {
+		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got())
 	}
 	reply, usage, err := a.Ask(context.Background(), "one", "ASK-ONE")
 	if err != nil || reply != "verdict" || usage.CacheRead != 1100 ||
-		!strings.Contains(string(got), "ONLY-ONE") || !strings.Contains(string(got), "ASK-ONE") {
-		t.Fatalf("chat ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got)
+		!strings.Contains(string(got()), "ONLY-ONE") || !strings.Contains(string(got()), "ASK-ONE") {
+		t.Fatalf("chat ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got())
 	}
 	// A stale span is refused before any call.
-	got = nil
-	if _, _, err := a.AskCovered(context.Background(), "one", 5, "nothash", "x"); err != components.ErrStalePrefix || got != nil {
+	mu.Lock()
+	captured = nil
+	mu.Unlock()
+	if _, _, err := a.AskCovered(context.Background(), "one", 5, "nothash", "x"); err != components.ErrStalePrefix || got() != nil {
 		t.Fatalf("stale span was asked: err=%v", err)
 	}
 }

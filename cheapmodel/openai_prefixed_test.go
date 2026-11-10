@@ -156,15 +156,39 @@ func TestCompletePrefixedChatAppendsOneMessageAndKeepsTheRest(t *testing.T) {
 	}
 }
 
-func TestCompletePrefixedChatUsesMaxTokensByDefault(t *testing.T) {
+func TestCompletePrefixedChatDefaultsToMaxCompletionTokens(t *testing.T) {
 	var got []byte
 	up := chatServer(t, 200, `{"choices":[{"message":{"content":"x"}}]}`, &got)
 	defer up.Close()
 	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
 	_, _, err := OpenAI{D: d, Ref: ref, Model: "m", MaxTokens: 77}.CompletePrefixedChat(context.Background(),
 		[]byte(`{"model":"m","messages":[{"role":"user","content":"t"}]}`), "q")
+	if err != nil || gjson.GetBytes(got, "max_completion_tokens").Int() != 77 || gjson.GetBytes(got, "max_tokens").Exists() {
+		t.Fatalf("a client with neither field must get max_completion_tokens: err=%v body=%s", err, got)
+	}
+}
+
+func TestCompletePrefixedChatKeepsTheClientsMaxTokens(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":"x"}}]}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	_, _, err := OpenAI{D: d, Ref: ref, Model: "m", MaxTokens: 77}.CompletePrefixedChat(context.Background(),
+		[]byte(`{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"t"}]}`), "q")
 	if err != nil || gjson.GetBytes(got, "max_tokens").Int() != 77 || gjson.GetBytes(got, "max_completion_tokens").Exists() {
 		t.Fatalf("err=%v body=%s", err, got)
+	}
+}
+
+func TestCompletePrefixedChatJoinsContentParts(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":[{"type":"text","text":"ab"},{"type":"text","text":"cd"}]}}]}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	r, _, err := OpenAI{D: d, Ref: ref, Model: "m"}.CompletePrefixedChat(context.Background(),
+		[]byte(`{"messages":[{"role":"user","content":"t"}]}`), "q")
+	if err != nil || r != "abcd" {
+		t.Fatalf("reply=%q err=%v", r, err)
 	}
 }
 
@@ -214,5 +238,17 @@ func TestCompletePrefixedChatRefusals(t *testing.T) {
 	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
 	if r, _, err := (OpenAI{D: d, Ref: ref, Model: "m"}).CompletePrefixedChat(context.Background(), ok, "q"); err != nil || r != "" {
 		t.Errorf("empty choices: %q %v", r, err)
+	}
+}
+
+func TestCompletePrefixedChatPrefersMaxCompletionTokensWhenBothAreSent(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":"x"}}]}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	_, _, err := OpenAI{D: d, Ref: ref, Model: "m", MaxTokens: 77}.CompletePrefixedChat(context.Background(),
+		[]byte(`{"model":"m","max_tokens":5,"max_completion_tokens":6,"messages":[{"role":"user","content":"t"}]}`), "q")
+	if err != nil || gjson.GetBytes(got, "max_completion_tokens").Int() != 77 {
+		t.Fatalf("err=%v body=%s", err, got)
 	}
 }

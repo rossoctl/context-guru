@@ -105,10 +105,11 @@ func (o OpenAI) CompletePrefixedChat(ctx context.Context, prefixBody []byte, ask
 	if maxTok == 0 {
 		maxTok = PrefixAskMaxTokens
 	}
-	// Reasoning models reject max_tokens; keep the field name the client used.
-	field := "max_tokens"
-	if gjson.GetBytes(prefixBody, "max_completion_tokens").Exists() {
-		field = "max_completion_tokens"
+	// Keep the field the client used. If it sent neither, use max_completion_tokens: reasoning
+	// models reject max_tokens, and other Chat models accept max_completion_tokens.
+	field := "max_completion_tokens"
+	if gjson.GetBytes(prefixBody, "max_tokens").Exists() && !gjson.GetBytes(prefixBody, "max_completion_tokens").Exists() {
+		field = "max_tokens"
 	}
 	if body, err = sjson.SetBytes(body, field, maxTok); err != nil {
 		return "", usage, err
@@ -134,5 +135,20 @@ func (o OpenAI) CompletePrefixedChat(ctx context.Context, prefixBody []byte, ask
 			return args, usage, nil
 		}
 	}
-	return msg.Get("content").String(), usage, nil
+	return chatContentText(msg.Get("content")), usage, nil
+}
+
+// chatContentText is message.content as text. It is a string, or a parts array whose text parts are
+// joined (the same read as the Anthropic twin).
+func chatContentText(c gjson.Result) string {
+	if !c.IsArray() {
+		return c.String()
+	}
+	var b strings.Builder
+	for _, p := range c.Array() {
+		if t := p.Get("text"); t.Exists() {
+			b.WriteString(t.String())
+		}
+	}
+	return b.String()
 }
