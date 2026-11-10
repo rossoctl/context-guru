@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -104,6 +105,9 @@ type SweepPingResult struct {
 	Model                                     string
 	FreshInput, Output, CacheWrite, CacheRead int
 	CacheWrite1h                              int
+	// Header is the response headers of the newest question that got an answer, or nil. The keeper
+	// puts them on the ping row it books, as for KeepAliveSummaryResult.Header (#1016).
+	Header http.Header
 	// Substituted is true when the question reached the provider and touched the prefix (read or
 	// wrote it). The keeper then counts it as the ping for this idle span. False means the keeper
 	// sends the ordinary ping: the call never left, or failed before using the cache.
@@ -578,7 +582,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	in, out := br.prompt, br.completion
 	res := SweepPingResult{Model: sink.Model(), FreshInput: int(in), Output: int(out),
 		CacheWrite: int(br.cacheWrite), CacheRead: int(br.cacheRead),
-		CacheWrite1h: int(sink.CacheWrite1h()), Offered: len(cands), Gates: gates, Events: events}
+		CacheWrite1h: int(sink.CacheWrite1h()), Header: sink.Header(), Offered: len(cands), Gates: gates, Events: events}
 	if res.Model == "" {
 		res.Model = c.ModelName
 	}
