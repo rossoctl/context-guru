@@ -203,6 +203,10 @@ const KindEnvelope = "envelope"
 // EndedChangeComponent is the row that carries the break an ended change left behind.
 const EndedChangeComponent = "ended_change"
 
+// DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
+// proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
+const DeferComponent = "tooldefer"
+
 // envelopeComponents are the operators that change the request envelope (tools, system, cache
 // marks) and may have no pipeline row: the proxy reports them from a body diff
 // (proxy/accountant_envelope.go). expand and adjudicate are never pipeline components; headttl is
@@ -377,13 +381,24 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
 	// Tool deferral is priced here, from the bodies (accountant R56): the definitions it left out as a shrink
-	// of tools positions, the search tool and the names list as growth. That sits in the baseline delta above.
-	// The ledger priced the same request with its own tokenizer, and the lever Overview adds beside the
-	// baseline (DeferNetUSD) must not count it twice. What the bodies cannot show is the searches and the
-	// definitions they loaded, which come back in the response: the ledger still owns that cost, so the lever
-	// becomes the cost alone (#908).
-	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 {
-		e.DeferNetUSD = 0 - e.DeferSearchUSD // 0 - x, so that no cost is a plain 0 and not a negative zero
+	// of tools positions, the search tool and the names list as growth. The library's figure for it sits on the
+	// tooldefer row and in the baseline delta above, which the Overview shows as the preset's saving. It is the
+	// deferral's saving, so it leaves the baseline and goes to the lever Overview adds beside it (DeferNetUSD),
+	// where the deferral card reads it. The total is the same: the figure is moved, not added. What the bodies
+	// cannot show is the searches and the definitions they loaded, which come back in the response: the ledger
+	// still owns that cost, and the lever takes it off (#908, review of #1003).
+	//
+	// A request the library held (below) keeps the ledger's net on the lever as before, and the deferral is
+	// left out of the held estimate, so the figure appears in one place and not in two.
+	deferFig := fig.ByComponent[DeferComponent]
+	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || deferFig != 0 {
+		if !estimated {
+			e.BaselineCostUSD -= deferFig
+			e.DeferNetUSD = deferFig - e.DeferSearchUSD
+			if e.DeferNetUSD == 0 {
+				e.DeferNetUSD = 0 // not a negative zero
+			}
+		}
 	}
 	if estimated {
 		// The library could not rule out a break: it had no history for the thread, so it priced
@@ -403,7 +418,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
-		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {

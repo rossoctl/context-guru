@@ -520,18 +520,30 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 	}
 }
 
-// #908, accountant R56: the library prices tool deferral from the bodies, so its figure stays booked on the
-// tooldefer row and in the baseline delta. The lever Overview adds beside the baseline (DeferNetUSD) is then
-// only the cost the bodies cannot show, the searches and the definitions they loaded. Booking the ledger's whole
-// net as well would count the deferral twice.
-func TestPriceMode_DeferralIsBookedOnceAndTheLeverIsTheSearchCost(t *testing.T) {
+// #908, accountant R56, reviewer proposal on #1003: the library prices tool deferral from the bodies, and its
+// figure is the deferral's saving. It is booked on the tooldefer row, so the components still sum to the baseline
+// delta, but the lever Overview adds beside the baseline (DeferNetUSD) is where the deferral card reads it. So the
+// library's tooldefer figure leaves the baseline (the preset card) and moves to the lever: the lever is that
+// figure minus the search cost, and the total is the same as if the figure had stayed in the baseline.
+func deferralEvent(search float64, held bool) *Event {
 	e := switchEvent()
-	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0004, 0.0002
+	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0009-search, search
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
 		{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
 		{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
 	}})
+	if held {
+		e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
+	}
 	e.PriceMode(accTestPrice, true)
+	return e
+}
+
+// total is what Overview reports for the event: the baseline delta plus the lever.
+func eventTotal(e *Event) float64 { return e.BaselineCostUSD - e.CostUSD + e.DeferNetUSD }
+
+func TestPriceMode_TheDeferralFigureMovesFromThePresetToTheLever(t *testing.T) {
+	e := deferralEvent(0, false)
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("fell back: %q", fb)
 	}
@@ -542,14 +554,33 @@ func TestPriceMode_DeferralIsBookedOnceAndTheLeverIsTheSearchCost(t *testing.T) 
 			def = c.SavedUSD
 		}
 	}
-	if want := 5000 * 0.3e-6; !accNear(def, want) {
-		t.Errorf("tooldefer row books %v, want the library's %v", def, want)
+	wantDef, wantMask := 5000*0.3e-6, 1000*0.3e-6
+	if !accNear(def, wantDef) {
+		t.Errorf("tooldefer row books %v, want the library's %v", def, wantDef)
 	}
-	if want := 6000 * 0.3e-6; !accNear(e.BaselineCostUSD-e.CostUSD, want) || !accNear(sum, want) {
-		t.Errorf("baseline delta %v, rows %v, want %v", e.BaselineCostUSD-e.CostUSD, sum, want)
+	// The preset card is baseline - cost: only the preset's own saving is left in it.
+	if !accNear(e.BaselineCostUSD-e.CostUSD, wantMask) {
+		t.Errorf("baseline delta %v, want the preset's %v alone", e.BaselineCostUSD-e.CostUSD, wantMask)
 	}
-	if !accNear(e.DeferNetUSD, -0.0002) {
-		t.Errorf("deferral lever %v, want the search cost -0.0002 alone", e.DeferNetUSD)
+	// The rows still sum to what is in the baseline and the lever together: nothing is counted twice.
+	if !accNear(sum, e.BaselineCostUSD-e.CostUSD+e.DeferNetUSD) {
+		t.Errorf("rows sum %v, baseline delta %v + lever %v", sum, e.BaselineCostUSD-e.CostUSD, e.DeferNetUSD)
+	}
+	if !accNear(e.DeferNetUSD, wantDef) {
+		t.Errorf("lever %v, want the library's deferral figure %v", e.DeferNetUSD, wantDef)
+	}
+}
+
+// The total does not change with the split: it is the same figure as when the deferral stayed in the baseline.
+func TestPriceMode_MovingTheDeferralFigureLeavesTheTotalAlone(t *testing.T) {
+	e := deferralEvent(0.0002, false)
+	if want := (1000 + 5000) * 0.3e-6; !accNear(eventTotal(e), want-0.0002) {
+		t.Errorf("total %v, want the library's %v less the search cost 0.0002", eventTotal(e), want)
+	}
+	// Against the same request with no search cost: the total falls by exactly the search cost.
+	none := deferralEvent(0, false)
+	if d := eventTotal(none) - eventTotal(e); !accNear(d, 0.0002) {
+		t.Errorf("a search cost of 0.0002 moved the total by %v", d)
 	}
 }
 
@@ -566,30 +597,53 @@ func TestPriceMode_NoDeferralLeavesTheLeverAtZero(t *testing.T) {
 }
 
 // Loading a deferred tool later is a cost the bodies cannot show (the definition returns inline, in the response
-// path). The ledger prices it as SearchCost, and the lever is that cost alone, so the total falls by exactly it
-// and the library's own deferral figure is untouched.
+// path). The ledger prices it as SearchCost and the lever carries it as a cost against the library's figure.
 func TestPriceMode_ALoadedDeferredToolIsACostOnTheLever(t *testing.T) {
-	build := func(search float64) *Event {
-		e := switchEvent()
-		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0009-search, search
-		e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
-			{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
-			{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
-		}})
-		e.PriceMode(accTestPrice, true)
-		return e
-	}
-	none, loaded := build(0), build(0.0004)
+	none, loaded := deferralEvent(0, false), deferralEvent(0.0004, false)
 	for _, e := range []*Event{none, loaded} {
 		if fb := e.AccountantFallback(); fb != "" {
 			t.Fatalf("fell back: %q", fb)
 		}
 	}
 	if !accNear(none.BaselineCostUSD-none.CostUSD, loaded.BaselineCostUSD-loaded.CostUSD) {
-		t.Errorf("the library's figure moved with the search cost: %v vs %v",
+		t.Errorf("the baseline moved with the search cost: %v vs %v",
 			none.BaselineCostUSD-none.CostUSD, loaded.BaselineCostUSD-loaded.CostUSD)
 	}
-	if none.DeferNetUSD != 0 || !accNear(loaded.DeferNetUSD, -0.0004) {
-		t.Errorf("levers %v and %v, want 0 and -0.0004", none.DeferNetUSD, loaded.DeferNetUSD)
+	if d := none.DeferNetUSD - loaded.DeferNetUSD; !accNear(d, 0.0004) {
+		t.Errorf("levers %v and %v, want them to differ by the search cost 0.0004", none.DeferNetUSD, loaded.DeferNetUSD)
+	}
+}
+
+// A held request books no break-affected saving: the library's figure goes to EstimatedSavedUSD, outside every
+// total. The ledger's net must stay in the total as it did before, and the deferral must not appear in two places:
+// not in the held estimate as well.
+func TestPriceMode_AHeldRequestKeepsTheLedgersNetAndHoldsNoDeferralTwice(t *testing.T) {
+	e := deferralEvent(0.0002, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	if !accNear(e.DeferNetUSD, 0.0009-0.0002) {
+		t.Errorf("held lever %v, want the ledger's net %v", e.DeferNetUSD, 0.0009-0.0002)
+	}
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("a held request books a baseline delta of %v", e.BaselineCostUSD-e.CostUSD)
+	}
+	// The held estimate is the other components' figure only; the deferral part is the ledger's, in the total.
+	if want := 1000 * 0.3e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("held estimate %v, want the preset's %v without the deferral", e.EstimatedSavedUSD, want)
+	}
+}
+
+// A request the accountant could not price keeps the ledger's net exactly as before.
+func TestPriceMode_AnUnpricedRequestKeepsTheLedgersNet(t *testing.T) {
+	e := switchEvent()
+	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0007, 0.0002
+	e.Model = "" // no price: the library's figure is not applied
+	e.PriceMode(accTestPrice, true)
+	if e.AccountantFallback() == "" {
+		t.Skip("the event was priced; this test needs an unpriced one")
+	}
+	if e.DeferNetUSD != 0.0007 {
+		t.Errorf("lever %v, want the ledger's net 0.0007", e.DeferNetUSD)
 	}
 }
