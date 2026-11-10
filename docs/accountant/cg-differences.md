@@ -328,12 +328,17 @@ visible.
 The report lists every difference found in the **63 hand-written cases**, each with a cause. It is
 not a report on live traffic.
 
-- **Covered:** the 63 cases of the `rossoctl/accountant` case library. Each of the 27 differences
-  has a reason in sections 3 to 8, or is marked `notCovered` or "cases not yet traced"
-  (`cg-differences-root-causes.md`, cause 14).
+- **Covered:** the 63 cases of the `rossoctl/accountant` case library as it was when this report was
+  written (accountant v0.1.0). Each of the 27 differences has a reason in sections 3 to 8. The
+  library has grown since: the version this repo pins (`5181d50c`, 2026-11-08) holds 145 case files.
+  The newer differences are in `cg-differences-root-causes.md` (causes 9 to 14; cause 14 is "cases
+  not yet traced"). Its 2026-11-08 run played 114 cases, and 58 differ. This section does not cover
+  those.
 - **Not covered:** requests that went through a running proxy. No log of live requests was compared
-  with `Compute`. The proxy does run `Compute` on every request in shadow mode
-  (`proxy/accountant_shadow.go`), but no report of those runs exists here. So the claim "every
+  with `Compute`. The proxy does run `Compute` (`computeSafe`, called at `proxy/dashcapture.go:765`) on a request
+  that has a dashboard, a session, a supported wire (not OpenAI Responses), one 2xx upstream round and
+  a usage object. `proxy/accountant_shadow.go` only logs the fallback reason. No report of those runs
+  exists here. So the claim "every
   difference from the current figure has a reason" holds for the cases only.
 - **Consequence:** the old calculation stays. The rule "remove it only when no difference is
   unexplained" is not met, because live differences are unknown and some case differences have no
@@ -368,7 +373,7 @@ is the cost of `begin` plus `end` and nothing else.
   is the client body, so the second parse is skipped.
 - **Command:** `go test ./proxy -run xxx -bench BeginEndUnchanged -benchtime=3s -count=3`
 - **Machine:** Apple M1 Max (darwin/arm64), `go1.27.2`.
-- **Body:** 608,955 bytes, 150 messages, one cache mark (`benchBody()`).
+- **Body:** 608,955 bytes, 150 messages, two cache marks, one on the system block and one on message 149 (`benchBody()`).
 - **Date:** 2026-11-09, on `origin/main` at `b49cbeb6`.
 
 | Run | ns/op | B/op | allocs/op |
