@@ -2,6 +2,7 @@ package cheapmodel
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -70,6 +71,10 @@ type Sink struct {
 	// first one to) can price the 1h tier at its own premium instead of silently folding it into
 	// the 5-minute rate — see KeepAliveSummaryResult.CacheWrite1h.
 	cacheWrite1h atomic.Int64
+	// header is the response headers of the newest call in this scope that got an answer, whatever
+	// its status. A keep-alive substitute call reports them on its ping row, so the host can read
+	// metadata such as the subscription limit headers from them (#1016).
+	header atomic.Pointer[http.Header]
 	// parent is the sink this one nests inside, so a narrower scope can be measured without
 	// hiding the call from the wider one. The proxy installs a per-REQUEST sink; a component
 	// that wants per-CALL numbers installs a child for the duration of one call, and the
@@ -118,6 +123,29 @@ func (s *Sink) CacheWrite1h() int64 {
 		return 0
 	}
 	return s.cacheWrite1h.Load()
+}
+
+// Header returns the response headers of the newest call in this scope that got an answer, or nil.
+// The caller must not change them.
+func (s *Sink) Header() http.Header {
+	if s == nil {
+		return nil
+	}
+	if h := s.header.Load(); h != nil {
+		return *h
+	}
+	return nil
+}
+
+// noteHeader records one call's response headers on this sink and every sink it nests inside, as
+// add does for usage. The newest call wins. A nil h changes nothing.
+func (s *Sink) noteHeader(h http.Header) {
+	if h == nil {
+		return
+	}
+	for cur := s; cur != nil; cur = cur.parent {
+		cur.header.Store(&h)
+	}
 }
 
 type sinkKey struct{}

@@ -3401,5 +3401,7 @@
    "ts": 1768248000000,
    "upstream_ms_avg": 520.5
   }
- ]
+ ],
+ "cap_correction_usd": 0,
+ "cap_not_applied": true
 }
