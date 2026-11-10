@@ -172,7 +172,7 @@ test('a subscription with no open 5-hour window still shows tokens, with no esti
   assert.equal(isSubscription({ subscription: true }, now), true);
   const h = subscriptionHeadline({ subscription: true, five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, o, null, now, String);
   assert.deepEqual(h, { main: 'saved 7 wr', pings: '', estimate: '' });
-  assert.equal(subscriptionHeadline({ subscription: true }, {}, null, now, String).main, 'saved 0 tokens');
+  assert.equal(subscriptionHeadline({ subscription: true }, { tokens: {} }, null, now, String).main, 'saved 0 tokens');
   assert.equal(isSubscription({ subscription: false }, now), false);
 });
 
@@ -239,16 +239,17 @@ test('the Cache strategy tab shows the rescue and the pings in tokens, never net
   const t = kaTokenLines(l, k);
   assert.deepEqual(t, { measured: true, rescue: 'saved 85.0k wr · cost 40.0k rd', pings: 'cost 0.9k wr · 410.0k rd',
     measuredText: 'Measured on the sessions where it ran: saved 85.0k wr · cost 40.0k rd',
-    avoidedText: 'up to saved 85.0k wr · cost 40.0k rd',
+    avoidedText: 'up to 85.0k wr · cost 40.0k rd',
     rescuesText: 'The rescues: saved 85.0k wr · cost 40.0k rd.' });
   assert.ok(!/\$/.test(t.rescue + t.pings), 'no dollars');
   // The pings are not in the rescue's cost.
   assert.ok(!/410/.test(t.rescue));
   // A ledger with no tokens yet, or an old server without the fields.
+  // A ledger from before #999 (no `tokens`), or none: not measured (tokenFigure).
   for (const o of [{}, null]) {
     const z = kaTokenLines(o, k);
-    assert.equal(z.measured, true);
-    assert.equal(z.rescue, 'saved 0 tokens');
+    assert.equal(z.measured, false);
+    assert.equal(z.rescue, 'not measured');
     assert.equal(z.pings, 'cost 0 tokens');
   }
 });
@@ -273,9 +274,42 @@ test('an all-zero rescue with unpriced requests says not measured; a priced zero
   assert.equal(p.measured, true);
   assert.equal(p.rescue, 'saved 0 tokens');
   assert.equal(p.measuredText, 'Measured on the sessions where it ran: saved 0 tokens');
-  assert.equal(p.avoidedText, 'up to saved 0 tokens');
+  assert.equal(p.avoidedText, 'up to 0 tokens');
   // Some requests unpriced, but a rescue measured: the measured line shows.
   const m = kaTokenLines({ tokens: { saved: { cache_write_5m: 7 } }, tokens_unmeasured_requests: 3 }, String);
   assert.equal(m.measured, true);
   assert.equal(m.rescue, 'saved 7 wr');
+});
+
+// One rule for zero against "not measured" (tokenFigure), for every screen (#988 round 2).
+test('a priced zero reads saved 0 tokens; an unpriced zero or a server with no tokens reads not measured', () => {
+  const { tokenFigure, featureTokens, totalTokens } = createRequire(import.meta.url)('./ui/savings.js');
+  const zero = { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 };
+  // A full read with 0 unmeasured: a feature left out of by_feature is a measured zero.
+  const priced = { tokens: { saved: { cache_write_5m: 9 }, caused: zero, by_feature: { mask: { saved: { cache_write_5m: 9 } } } },
+    tokens_unmeasured_requests: 0 };
+  assert.deepEqual(tokenFigure(featureTokens(priced).filter, priced, String), { text: 'saved 0 tokens', measured: true });
+  assert.deepEqual(tokenFigure(featureTokens(priced).compaction, priced, String), { text: 'saved 9 wr', measured: true });
+  // Some requests unpriced and an all-zero figure: not measured, not "saved nothing".
+  const some = { ...priced, tokens_unmeasured_requests: 3 };
+  assert.deepEqual(tokenFigure(featureTokens(some).filter, some, String), { text: 'not measured', measured: false });
+  // Some unpriced, but the figure has tokens: it is measured.
+  assert.equal(tokenFigure(featureTokens(some).compaction, some, String).measured, true);
+  // A server from before #999: no tokens at all.
+  assert.deepEqual(tokenFigure(totalTokens({}), {}, String), { text: 'not measured', measured: false });
+  assert.deepEqual(tokenFigure(undefined, null, String), { text: 'not measured', measured: false });
+});
+
+test('the headline uses the same rule, and a page filter hides the account-wide estimate', () => {
+  const { subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { subscription: true, five_hour: { utilization: 0.54, reset_s: 2000 } };
+  const win = { cost_usd: 90, total_saved_usd: 5 };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  assert.equal(subscriptionHeadline(lim, o, win, now, String).estimate, '≈ 3% of the 5-hour limit (estimate at API-price weights)');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).estimate, '');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).main, 'saved 2 wr');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 0 }, null, now, String).main, 'saved 0 tokens');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 4 }, null, now, String).main, 'not measured');
+  assert.equal(subscriptionHeadline(lim, {}, null, now, String).main, 'not measured'); // a server from before #999
 });

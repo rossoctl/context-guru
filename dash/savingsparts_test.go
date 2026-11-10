@@ -42,7 +42,7 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 	for _, want := range []string{
 		"ctl('/api/me/limits')",
 		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
-		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact)",
+		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered())", // a filter hides the estimate
 		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
 		"loadOverviewLimits();",
 		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
@@ -53,6 +53,8 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 		"o.tokens_unmeasured_requests",                                         // the "not measured" note
 		"'data-testid': 'saved-total-pings'",                                   // the pings: a line of their own
 		"'data-testid': 'saved-cache-pings'",                                   // on the Cache card too
+		"tokenFigure(flow, o, compact).text",                                   // one rule for zero against not measured
+		"subRows.length ? el('ul'",                                             // no empty list
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)

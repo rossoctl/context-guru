@@ -145,6 +145,21 @@ function tokenLine(flow, fmt) {
 // True when the flow has a token in any tier.
 function hasTokens(flow) { return tokenLine(flow, String) !== ''; }
 
+// One token figure, with the one rule for zero against "not measured" that every screen uses.
+// `flow` is the figure ({saved, caused}); `scope` is the stats object it came from, which carries
+// `tokens` and `tokens_unmeasured_requests` (the Overview's /api/stats, a ledger, a session row).
+//   - a flow with tokens: its line, measured;
+//   - an all-zero flow and nothing unpriced: `saved 0 tokens`, measured. The server leaves a
+//     feature with no tokens out of by_feature, so a missing feature on a priced scope is a zero;
+//   - an all-zero flow and some requests unpriced, or a server from before #999 (no `tokens`):
+//     `not measured`. That is not "saved nothing".
+function tokenFigure(flow, scope, fmt) {
+  const line = tokenLine(flow, fmt);
+  if (line) return { text: line, measured: true };
+  const priced = !!(scope && scope.tokens) && !((scope.tokens_unmeasured_requests || 0) > 0);
+  return priced ? { text: 'saved 0 tokens', measured: true } : { text: 'not measured', measured: false };
+}
+
 // The request-level cache effects (`cachesplit` is one entry: the split plus its component's own).
 const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
 
@@ -179,7 +194,6 @@ function totalTokens(o) {
 // What the cache strategy's keep-alive pings paid, on a line of its own: `cost 900 wr · 410.0k rd`,
 // or '' when they paid nothing. A ping is not agent traffic, so it is not in the total or in any
 // card's cost. Every screen follows this rule, because the band's lean read has no ping tokens.
-// The keep-alive's net is its rescue line less this line.
 const PING_LABEL = 'Keep-alive pings (not in the total)';
 function pingLine(o, fmt) {
   const t = tierText(o && o.keepalive_ping_tokens, fmt);
@@ -188,14 +202,15 @@ function pingLine(o, fmt) {
 
 // The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
 // stats, `w` the 5-hour window's (for the estimate), `fmt` formats a count. The estimate needs an
-// open 5-hour window; the token line does not.
-function subscriptionHeadline(limits, o, w, nowMs, fmt) {
+// open 5-hour window; the token line does not. The estimate is for the whole account, so it is
+// hidden while a page filter (a session, a time range, a model...) narrows the figures: `filtered`.
+function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered) {
   if (!isSubscription(limits, nowMs)) return null;
-  const main = tokenLine(totalTokens(o), fmt) || 'saved 0 tokens';
+  const main = tokenFigure(totalTokens(o), o, fmt).text;
   const ping = pingLine(o, fmt);
   const pings = ping ? PING_LABEL + ': ' + ping : '';
   const f = liveFiveHour(limits, nowMs);
-  const p = f ? fiveHourSavedPct(f, w) : null;
+  const p = f && !filtered ? fiveHourSavedPct(f, w) : null;
   const tail = ' (estimate at API-price weights)';
   const estimate = p === null ? ''
     : p.hit ? '≈ without context-guru you would have hit the 5-hour limit' + tail
@@ -206,26 +221,23 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
 // The Cache strategy tab in tokens (#1022), from the keep-alive ledger's `tokens` (the rescue) and
 // `keepalive_ping_tokens` (what the pings paid, read by pingLine). Two lines, never netted: the pings
 // are not added into the rescue's cost, and the tiers have no common unit. `fmt` formats a count.
-// An all-zero rescue is an absence when requests went unpriced (`tokens_unmeasured_requests`):
-// it says `not measured`, as the Overview card does. Only a priced zero says `saved 0 tokens`.
-// `measured` is false for that absence. The sentences that carry the rescue branch on it, so an
-// absence never reads as a figure ("up to not measured"):
+// The rescue follows the one rule for zero against "not measured" (tokenFigure): `measured` is
+// false for an absence. The sentences that carry the rescue branch on it, so an absence never
+// reads as a figure ("up to not measured"):
 //   measuredText  the line under the forecast
-//   avoidedText   the "Cache rewrites avoided" fact
+//   avoidedText   the "Cache rewrites avoided" fact: "up to 85.0k wr · cost 40.0k rd"
 //   rescuesText   the "costs more than it saves" banner
 function kaTokenLines(o, fmt) {
-  const line = tokenLine(o && o.tokens, fmt);
-  const measured = line !== '' || !((o && o.tokens_unmeasured_requests) > 0);
-  const rescue = measured ? (line || 'saved 0 tokens') : 'not measured';
+  const { text: rescue, measured } = tokenFigure(o && o.tokens, o, fmt);
   return {
     measured, rescue, pings: pingLine(o, fmt) || 'cost 0 tokens',
     measuredText: measured ? 'Measured on the sessions where it ran: ' + rescue
       : 'Not measured in tokens on the sessions where it ran',
-    avoidedText: measured ? 'up to ' + rescue : 'not measured',
+    avoidedText: measured ? 'up to ' + rescue.replace(/^saved /, '') : 'not measured',
     rescuesText: measured ? 'The rescues: ' + rescue + '.' : 'The rescues are not measured in tokens.',
   };
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL, kaTokenLines };
+  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, kaTokenLines };
