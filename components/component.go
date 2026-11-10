@@ -1246,10 +1246,11 @@ type KeepAliveReport struct {
 	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
 	// as belonging to a window.
 	Window time.Time
-	// Header is the ping response's headers. It is nil when no response came back, and on a
-	// substitute call, whose summary result does not carry the headers (a host can also send
-	// none). A sink reads only the metadata it needs from
-	// it, such as the subscription limit headers (#995), and must not change it.
+	// Header is the ping response's headers. On a substitute call (a summary or sweep question
+	// in the ping's place) it is that call's response headers (#1016), but only when the call
+	// used the user's own credential. It is nil when no response came back (a host can also send
+	// none). A sink reads only the metadata it needs from it,
+	// such as the subscription limit headers (#995), and must not change it.
 	Header http.Header
 }
 

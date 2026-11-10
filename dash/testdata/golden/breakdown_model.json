@@ -1,4 +1,6 @@
 {
+ "cap_correction_usd": 0,
+ "cap_not_applied": true,
  "description": "Requests, tokens and spent-vs-saved for each value of one dimension. spent_usd is what was billed plus context-guru's own model spend; saved_usd is the baseline counterfactual minus that. incomplete_rows counts rows the provider gave us no usage for — where it equals requests, the money figures for that bar are unknown rather than zero.",
  "dim": "model",
  "dimensions": [
