@@ -407,6 +407,55 @@ still works; only the text is withheld.
 - In hosted mode it is always the caller's own account, a manager's too. A single-tenant proxy has
   one account.
 
+
+## Savings in tokens
+
+`/api/stats` returns every saving the accountant library measured in **tokens**, beside the
+dollars. A subscription is limited in tokens, so a screen can show tokens and no dollars.
+
+The full read has every field below. The lean read (`lean=1` with a session or a window) has
+`tokens.saved`, `tokens.caused` and `tokens_unmeasured_requests` only. It has no `by_feature` and no
+ping tokens: they cost the status line's read 1.3x to 4x its time budget (#502). The lean totals
+equal the full totals.
+
+- **Tiers.** Each figure has four tiers: `input` (fresh input), `cache_read`, `cache_write_5m` and
+  `cache_write_1h`. The tiers are never added into one number. The provider does not say how a
+  usage limit weights them.
+- **Saved and caused.** Each figure has `saved` (tokens the request did not send or write) and
+  `caused` (tokens the change made the request pay). A feature can save in one tier and pay in
+  another: the keep-alive rescue saves a cache write and pays cache reads.
+- **`tokens.saved`, `tokens.caused`.** The sums over every feature.
+- **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
+  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
+  (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
+  ended). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
+  any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
+  plus the `cachesplit` component's `saved_usd`. Full read only.
+- **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
+  `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
+  not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is
+  `tokens.by_feature.keepalive` less this. Full read only.
+- **`tokens_unmeasured_requests`.** The requests in the period with no token figure: rows from
+  before the accountant, and rows it could not price. That is "not measured", not "saved nothing".
+- A request whose estimate is held out of the totals (`estimated_requests`) is held out of the
+  component tokens too, as its dollars are.
+
+```json
+"tokens": {
+  "saved":  {"input": 0, "cache_read": 600,  "cache_write_5m": 6000, "cache_write_1h": 0},
+  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 600,  "cache_write_1h": 0},
+  "by_feature": {
+    "mask":      {"saved": {"input": 0, "cache_read": 600, "cache_write_5m": 2000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 0, "cache_write_5m": 600, "cache_write_1h": 0}},
+    "keepalive": {"saved": {"input": 0, "cache_read": 0, "cache_write_5m": 4000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 0, "cache_write_1h": 0}}
+  }
+},
+"tokens_unmeasured_requests": 2,
+"keepalive_ping_tokens": {"input": 3, "cache_read": 9000, "cache_write_5m": 20, "cache_write_1h": 10},
+"keepalive_ping_output_tokens": 1
+```
+
 ## KV-cache panel
 
 *How long your conversations actually stay idle, what the prompt cache is costing you

@@ -481,9 +481,13 @@ type Event struct {
 	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
 	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
 	// figure, and it reads here as false (the column defaults to 0, as acc_priced does). Stored.
-	EstimateHeld       bool   `json:"estimate_held,omitempty"`
-	CacheMissReason    string `json:"cache_miss_reason"`
-	UncompressedReason string `json:"uncompressed_reason"`
+	EstimateHeld bool `json:"estimate_held,omitempty"`
+	// AccTokens is the accountant library's cache effects in tokens by tier: the keep-alive rescue,
+	// the split, the head-TTL legs and the ended-change break (#998). The component figures are
+	// CompRow.Tokens. Stored (requests.tok_*). Zero when AccountantPriced is false.
+	AccTokens          AccEffectTokens `json:"acc_tokens,omitzero"`
+	CacheMissReason    string          `json:"cache_miss_reason"`
+	UncompressedReason string          `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
 	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
 	CacheMissCause string `json:"cache_miss_cause,omitempty"`
@@ -670,8 +674,13 @@ type CompRow struct {
 	SavedFirstUSD  float64 `json:"saved_first_usd"`
 	SavedReplayUSD float64 `json:"saved_replay_usd"`
 	PricedBy       string  `json:"priced_by,omitempty"`
-	DurationMs     float64 `json:"duration_ms"`
-	Err            string  `json:"err,omitempty"`
+	// Tokens is the accountant library's figure for this component in tokens by tier: what it
+	// saved and what it caused (#998). Its dollars are SavedUSD. Stored (request_components.tok_*);
+	// zero on a row the library did not price (PricedBy not "accountant"), on a held estimate, and
+	// on the headttl and ended_change rows' effect legs, which are Event.AccTokens.
+	Tokens     TokenFlow `json:"tokens,omitzero"`
+	DurationMs float64   `json:"duration_ms"`
+	Err        string    `json:"err,omitempty"`
 	// Gates counts, per named gate, the candidates this component turned away. It is the
 	// only answer to "why did nothing happen?", and it never left the pipeline before:
 	// /stats had it service-wide, the log line had it per request, and the dashboard —
@@ -889,6 +898,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
 	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
+	e.clearAccTokens()
 	e.priceCost(p, accountingComplete)
 }
 
