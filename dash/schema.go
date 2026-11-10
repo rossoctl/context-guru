@@ -281,6 +281,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- OAuth bearer token, sk-ant-oat...), 0 for an API key or any other credential. Only the kind:
   -- the token itself is never stored. GET /api/me/limits reads it off the account's newest request.
   auth_subscription    INTEGER NOT NULL DEFAULT 0,
+  -- The part of sweep_false_expands whose drop was applied on a WARM request (#491).
+  sweep_false_expands_warm INTEGER NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -931,6 +933,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The auth kind (#984): 1 for a subscription (OAuth) token. 0 on an earlier row, which reads as
 	// "not known to be a subscription" until the account's next request.
 	{"requests", "auth_subscription", "INTEGER NOT NULL DEFAULT 0"},
+	// The part of sweep_false_expands whose drop was applied on a warm request (#491). Additive, 0 on
+	// every earlier row, which is true: no warm drop existed then.
+	{"requests", "sweep_false_expands_warm", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was

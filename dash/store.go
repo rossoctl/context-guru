@@ -596,11 +596,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 		price_estimated, acc_priced, estimated_saved_usd, estimate_held,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
-		defer_cost_usd, ` + limitCols + `, auth_subscription, ` + strings.Join(requestStoredTokenColumns(), ", ") + `
+		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, ` + strings.Join(requestStoredTokenColumns(), ", ") + `
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `)`)
+		?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `)`)
 	if err != nil {
 		return err
 	}
@@ -680,7 +680,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
 			e.CompactionPoint, e.CompactionPointSource, e.DeferCostUSD,
-		}, append(limitArgs(e.Limits), append([]any{boolInt(e.AuthSubscription)}, requestStoredTokenArgs(e)...)...)...)...)
+		}, append(limitArgs(e.Limits), append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm}, requestStoredTokenArgs(e)...)...)...)...)
 		if err != nil {
 			return err
 		}
