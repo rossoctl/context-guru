@@ -288,6 +288,10 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
+	// CGCostUnpriced is set at capture when the request made compaction calls that could not be
+	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: it only keeps the
+	// reprice pass from marking such a row complete (issue #920).
+	CGCostUnpriced bool `json:"-"`
 	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
 	// cache-read tokens priced at the fresh rate they would have cost with no cache,
 	// minus what they actually cost. A measurement of the PROVIDER's mechanism, kept

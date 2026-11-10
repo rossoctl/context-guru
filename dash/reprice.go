@@ -19,7 +19,12 @@ const maxUnpriced = 4096
 //
 // A copy with only the fields a price needs is kept, not the event: the event carries content.
 func (r *Recorder) noteUnpriced(e *Event) {
-	if r.opts.Prices == nil || e.ID == 0 || e.Model == "" || e.TokenAccounting != AccountingPartial || e.CostUSD != 0 ||
+	// A bypassed request is written "missing" and becomes "partial" when the count worker fills in
+	// its token count, after this runs, so both labels are queued. A row whose compaction calls
+	// could not be priced is left alone: repricing it would mark it complete with
+	// cg_llm_cost_usd still an unknown 0.
+	unpriced := e.TokenAccounting == AccountingPartial || e.TokenAccounting == AccountingMissing
+	if r.opts.Prices == nil || e.ID == 0 || e.Model == "" || !unpriced || e.CostUSD != 0 || e.CGCostUnpriced ||
 		e.FreshInput+e.CacheRead+e.CacheWrite+e.OutputTokens <= 0 {
 		return
 	}
@@ -82,6 +87,9 @@ func (r *Recorder) repricePass() {
 	if len(keep) > 0 {
 		r.unpricedMu.Lock()
 		r.unpriced = append(keep, r.unpriced...)
+		if over := len(r.unpriced) - maxUnpriced; over > 0 {
+			r.unpriced = r.unpriced[over:] // the oldest go first, as in noteUnpriced
+		}
 		r.unpricedMu.Unlock()
 	}
 	if done > 0 {
@@ -91,7 +99,7 @@ func (r *Recorder) repricePass() {
 
 // applyReprice writes the cost priceCost computed on e into its stored row, and adds it to the
 // tenant's monthly spend in the same transaction. It changes only a row that is still partial at
-// $0, so a row priced some other way is never overwritten and the rollup is never added twice.
+// $0 (partial, or missing for a bypassed row), so a row priced some other way is never overwritten and the rollup is never added twice.
 func (d *DB) applyReprice(e *Event) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -100,13 +108,17 @@ func (d *DB) applyReprice(e *Event) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 	res, err := tx.Exec(`UPDATE requests SET cost_usd = ?, baseline_cost_usd = ?, cache_saved_usd = ?,
 		billed_token_factor = ?, token_accounting = ?
-		WHERE id = ? AND token_accounting = ? AND cost_usd = 0`,
+		WHERE id = ? AND token_accounting IN (?, ?) AND cost_usd = 0`,
 		e.CostUSD, e.BaselineCostUSD, e.CacheSavedUSD, e.BilledTokenFactor, AccountingComplete,
-		e.ID, AccountingPartial)
+		e.ID, AccountingPartial, AccountingMissing)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return nil
 	}
 	if _, err := tx.Exec(`INSERT INTO tenant_spend(tenant_id,month,usd) VALUES (?,?,?)

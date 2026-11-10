@@ -485,7 +485,8 @@ func (r *Recorder) Stats() Stats {
 }
 
 // run is the single writer goroutine: batch, insert in one transaction, fan out,
-// and prune on a timer. Nothing else writes to the database.
+// and prune on a timer. It is the only writer of new rows; countLoop and repriceLoop later update
+// rows it wrote.
 func (r *Recorder) run() {
 	defer r.wg.Done()
 	batch := make([]*Event, 0, r.opts.BatchSize)
