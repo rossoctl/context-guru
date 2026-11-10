@@ -1051,6 +1051,12 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		return nil
 	}
 	key := CallerKey(r)
+	// Never a summary call with context-guru's own token as its key. CallerKey skips only a token of
+	// the exact shape; one of the wrong length (cut off, say) would still be returned here. The
+	// forwarded request scrubs any value with the token prefix, so this does too.
+	if tokenShaped(key) {
+		key = ""
+	}
 	// The scheme belongs to the CALLER's credential, so it is captured before any fallback
 	// to a server-held key below (which is presented the operator's way, not the caller's).
 	scheme := CallerAuthScheme(r)
@@ -1077,8 +1083,19 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
-		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
+		auth := AuthHeader(bschemas.OpenAI, key, "")
+		path := ""
+		// Bob serves chat only on its own model path, not on /v1/chat/completions. BobShell sends
+		// `Authorization: Apikey <key>`, so when the key is the caller's own, the summary call
+		// sends that header as the caller sent it. Every other route keeps the defaults.
+		if up.path == bobModelPath {
+			path = bobModelPath
+			if v := r.Header.Get("Authorization"); headerCredential(v) == key {
+				auth = http.Header{"Authorization": {v}}
+			}
+		}
+		ref := h.dispatch.incoming(up, auth)
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model, Path: path}
 	}
 	return nil
 }
