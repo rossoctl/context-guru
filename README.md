@@ -75,11 +75,12 @@ Choose your setup. Each button opens only the instructions for that path.
 ### Pi (experimental)
 
 The [Pi](https://pi.dev) package routes Pi's `anthropic` and `openai` providers through a local
-proxy. It is experimental: it is tested with fake keys in a sandbox, but not yet with a real login.
+proxy. It is experimental: it is tested with fake keys in a sandbox. A real model answer through the
+proxy, keep-alive pings and Sign in with ChatGPT are not tested live yet.
 
 You need:
 
-- Pi 1.5.0 or later, which needs Node.js 22.19 or later.
+- Pi 1.5.0 or later. Pi 1.5.0 needs Node.js 22.19 or later (the `engines` field of its `package.json`).
 - `python3`.
 - macOS or Linux.
 
