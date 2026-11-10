@@ -36,6 +36,8 @@ interface Install {
   port?: number;
   base_urls?: Record<string, string>;
   cache_strategy?: string;
+  /** Providers chained behind the endpoint models.json named before setup: {provider: proxy upstream}. */
+  upstreams?: Record<string, string>;
 }
 
 /** The install record pi_plugin.py writes. A local file read; undefined when not installed. */
@@ -170,6 +172,53 @@ export function forChatGPTSignIn(payload: unknown): Record<string, unknown> | un
   return out;
 }
 
+export const CHAIN = "Chain (recommended): Pi -> context-guru -> the endpoint you use now";
+export const REPLACE = "Replace: Pi -> context-guru -> the provider's public API";
+export const KEEP = "Don't change anything";
+
+/** The plan's `existing_base_url` ({provider: url} as JSON) in plain words: "anthropic: https://gw". */
+export function conflictWords(json: string | undefined): string {
+  try {
+    const value = JSON.parse(json ?? "");
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const words = Object.entries(value).map(([provider, url]) => `${provider}: ${String(url)}`);
+      if (words.length) return words.join(", ");
+    }
+  } catch {
+    // fall through: show the text as it came
+  }
+  return json ?? "unknown";
+}
+
+/** True when the ChatGPT sign-in field removal applies to a routed `openai` model. A chained `openai`
+ *  went to another endpoint before setup, where Pi left those fields in, so it keeps them. */
+export function stripsChatGPTFields(install: Install | undefined): boolean {
+  return !install?.upstreams?.openai;
+}
+
+/** The one question for a models.json that already sends a provider elsewhere, built from the plan's
+ *  paired answers. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
+ *  offered only when the plan printed it (the proxy can reproduce that URL). */
+export function conflictPrompt(f: Record<string, string>): { title: string; options: string[]; answers: Record<string, string> } {
+  const options: string[] = [];
+  const answers: Record<string, string> = {};
+  const parts = [`models.json already sends a provider somewhere else: ${conflictWords(f.existing_base_url)}.`];
+  if (f.consent_question_chain) {
+    options.push(CHAIN);
+    answers[CHAIN] = "chain";
+    parts.push(`Chain (usually right): ${f.consent_question_chain}`);
+  } else if (f.chain_refused) {
+    parts.push(`Chain is not offered: context-guru cannot forward to that URL the way Pi does (${f.chain_refused}).`);
+  }
+  if (f.consent_question_replace) {
+    options.push(REPLACE);
+    answers[REPLACE] = "replace";
+    parts.push(`Replace: ${f.consent_question_replace}`);
+  }
+  options.push(KEEP);
+  return { title: parts.join("\n\n"), options, answers };
+}
+
 /** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
 export function parseFacts(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -263,6 +312,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
     if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
+    if (!stripsChatGPTFields(install)) return undefined;
     const payload = event.payload as { model?: unknown } | undefined;
     if (payload?.model !== model.id || !ctx.modelRegistry.isUsingOAuth(model)) return undefined;
     return forChatGPTSignIn(payload);
@@ -302,28 +352,38 @@ export default function contextGuru(pi: ExtensionAPI) {
   const setup = async (ctx: ExtensionCommandContext) => {
     const plan = await run(["setup", "--plan"]);
     const f = plan.facts;
+    const args = ["setup", "--i-consent-to-traffic-interception"];
     if (f.result === "needs_decision") {
-      say(ctx, `models.json already sends a provider somewhere else: ${f.existing_base_url}. ` +
-        "context-guru did not change it. Remove that baseUrl first, or wait for chain support." +
-        (f.reset_hatch ? ` If an earlier context-guru install wrote it, run ${f.reset_hatch} from a shell, then setup again.` : ""),
-        "warning");
-      return;
-    }
-    if (f.result !== "planned") {
+      // One question with three answers. Print mode has no dialog, and no answer changes nothing.
+      const hatch = f.reset_hatch ? ` If an earlier context-guru install wrote that URL, run ${f.reset_hatch} from a shell, then setup again.` : "";
+      const prompt = conflictPrompt(f);
+      if (!ctx.hasUI) {
+        say(ctx, `context-guru setup needs an interactive choice, so nothing changed. ${prompt.title}${hatch}`, "warning");
+        return;
+      }
+      const choice = await ctx.ui.select(prompt.title, prompt.options);
+      const answer = choice ? prompt.answers[choice] : undefined;
+      if (!answer) {
+        say(ctx, `Nothing changed.${hatch}`);
+        return;
+      }
+      args.push("--on-conflict", answer);
+    } else if (f.result !== "planned") {
       say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}`, "error");
       return;
+    } else {
+      // Consent comes from a person. Print mode has no dialog, and no answer is a no.
+      if (!ctx.hasUI) {
+        say(ctx, `context-guru setup needs an interactive yes. Question: ${f.consent_question}`, "warning");
+        return;
+      }
+      const yes = await ctx.ui.confirm("Route Pi through context-guru?", f.consent_question);
+      if (!yes) {
+        say(ctx, "Nothing changed.");
+        return;
+      }
     }
-    // Consent comes from a person. Print mode has no dialog, and no answer is a no.
-    if (!ctx.hasUI) {
-      say(ctx, `context-guru setup needs an interactive yes. Question: ${f.consent_question}`, "warning");
-      return;
-    }
-    const yes = await ctx.ui.confirm("Route Pi through context-guru?", f.consent_question);
-    if (!yes) {
-      say(ctx, "Nothing changed.");
-      return;
-    }
-    const done = await run(["setup", "--i-consent-to-traffic-interception"], 300_000);
+    const done = await run(args, 300_000);
     const r = done.facts;
     if (r.result !== "routed") {
       say(ctx, `context-guru setup failed: ${r.reason ?? r.result ?? done.stderr.trim()}` +
@@ -332,7 +392,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     }
     await reloadModels(ctx);
     say(ctx, [
-      `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}.`,
+      `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}: ${r.routes}.`,
       `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
       "Re-select the model with /model (or restart Pi) so this session uses the new route.",
       `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
@@ -348,6 +408,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     }
     say(ctx, [
       `proxy ${f.proxy_up === "true" ? "up" : "DOWN"} on port ${f.port} · routed ${f.routed}`,
+      ...(f.routes ? [`routes: ${f.routes}`] : []),
       `this model routed: ${routed(ctx) ? "yes" : "no"} (${ctx.model?.provider ?? "no model"})`,
       `preset ${f.preset}${f.running_preset && f.running_preset !== f.preset ? ` (proxy runs ${f.running_preset})` : ""}` +
         ` · cache strategy ${f.cache_strategy} · requests ${f.requests ?? "?"}`,

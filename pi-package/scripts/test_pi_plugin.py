@@ -236,15 +236,22 @@ class Controller(Sandbox):
         self.assertTrue(pi_plugin.reset_hatch().exists())
         self.assertTrue((pi_plugin.state_dir() / "models_route.py").exists())
 
-    def setup_on(self, port, taken=()):
-        """Run setup with the service mocked, on `port`, while the ports in `taken` belong to someone else."""
+    def setup_on(self, port, taken=(), *extra):
+        """Run setup with the service mocked, on `port`, while the ports in `taken` belong to someone else.
+        The upstreams the service was started with are kept in self.started."""
+        self.started = None
+
+        def start(executable, port, upstreams=None):
+            self.started = dict(upstreams or {})
+            return True
+
         with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
                 mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
-                mock.patch.object(pi_plugin, "start_service", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", side_effect=start), \
                 mock.patch.object(pi_plugin, "healthy", return_value=False), \
                 mock.patch.object(pi_plugin, "port_free", side_effect=lambda p: p not in taken), \
                 mock.patch.object(pi_plugin, "first_free_port", return_value=port):
-            return self.run_main("setup", "--i-consent-to-traffic-interception")
+            return self.run_main("setup", "--i-consent-to-traffic-interception", *extra)
 
     def uninstall(self):
         with mock.patch.object(pi_plugin, "stop_service", return_value="stopped"):
@@ -506,6 +513,240 @@ class Restart(Sandbox):
         self.assertFalse(second.is_alive())
         self.assertEqual((result["code"], result["facts"]["result"]), (0, "already_up"))
         self.assertEqual(self.calls, [])
+
+
+GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}
+
+
+class ChainMode(Sandbox):
+    """A models.json that already sends a provider to another endpoint (a company gateway)."""
+
+    setup_on = Controller.setup_on
+    uninstall = Controller.uninstall
+
+    def write_models(self, providers):
+        self.models.parent.mkdir(parents=True, exist_ok=True)
+        self.document = {"providers": providers}
+        self.models.write_text(json.dumps(self.document))
+
+    def plan(self, *extra):
+        with mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+            return self.run_main("setup", "--plan", *extra)
+
+    def test_the_upstream_reproduces_the_path_pi_sends_today(self):
+        # Pi: anthropic baseUrl + /v1/messages; openai baseUrl + /responses.
+        # Proxy: upstream + /v1/messages; upstream + /v1/responses.
+        cases = [("anthropic", "https://gw.example/anthropic", "https://gw.example/anthropic"),
+                 ("anthropic", "https://gw.example/", "https://gw.example"),
+                 ("anthropic", "http://10.0.0.5:4000/v1", "http://10.0.0.5:4000/v1"),
+                 ("openai", "https://gw.example/openai/v1", "https://gw.example/openai"),
+                 ("openai", "https://gw.example/v1/", "https://gw.example")]
+        for provider, url, want in cases:
+            self.assertEqual(pi_plugin.chain_upstream(provider, url, 8800), (want, None), url)
+            pi_path = {"anthropic": "/v1/messages", "openai": "/responses"}[provider]
+            proxy_path = {"anthropic": "/v1/messages", "openai": "/v1/responses"}[provider]
+            self.assertEqual(want + proxy_path, url.rstrip("/") + pi_path)
+
+    def test_a_url_the_proxy_cannot_reproduce_is_refused(self):
+        cases = [("openai", "https://gw.example/openai", "openai_path_not_v1"),
+                 ("anthropic", "$GATEWAY", "not_an_http_url"),
+                 ("anthropic", "ftp://gw.example", "not_an_http_url"),
+                 ("anthropic", "https://user:secret@gw.example", "credentials_in_url"),
+                 ("anthropic", "https://gw.example/a?key=1", "query_in_url"),
+                 ("anthropic", "http://127.0.0.1:8800/anthropic", "points_at_this_proxy")]
+        for provider, url, reason in cases:
+            self.assertEqual(pi_plugin.chain_upstream(provider, url, 8800), (None, reason), url)
+
+    def test_plan_on_a_conflict_prints_paired_answers_and_no_plain_question(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-gw": "1"}}})
+        code, facts = self.plan()
+        self.assertEqual((code, facts["result"], facts["reason"], facts["conflicts"]),
+                         (0, "needs_decision", "base_url_already_set", "anthropic"))
+        self.assertNotIn("consent_question", facts)
+        self.assertIn("forwarding to https://gw.example/anthropic", facts["consent_question_chain"])
+        self.assertIn("forwarding to api.openai.com", facts["consent_question_chain"])
+        self.assertIn("api.anthropic.com in place of https://gw.example/anthropic", facts["consent_question_replace"])
+        self.assertIn("usually breaks the auth", facts["consent_question_replace"])
+        self.assertTrue(facts["confirm_command_chain"].endswith("--i-consent-to-traffic-interception --on-conflict chain"))
+        self.assertTrue(facts["confirm_command_replace"].endswith("--on-conflict replace"))
+        self.assertEqual(json.loads(self.models.read_text()), self.document)  # the plan wrote nothing
+
+    def test_plan_carries_the_cache_strategy_into_both_commands(self):
+        self.write_models({"openai": {"baseUrl": GATEWAY["openai"]}})
+        _, facts = self.plan("--cache-strategy", "none")
+        for choice in ("chain", "replace"):
+            self.assertIn(f"--on-conflict {choice} --cache-strategy none", facts[f"confirm_command_{choice}"])
+
+    def test_plan_offers_no_chain_for_a_url_it_cannot_reproduce(self):
+        self.write_models({"openai": {"baseUrl": "https://gw.example/openai"}})
+        _, facts = self.plan()
+        self.assertEqual(facts["chain_refused"], "openai:openai_path_not_v1")
+        self.assertNotIn("consent_question_chain", facts)
+        self.assertNotIn("confirm_command_chain", facts)
+        self.assertIn("consent_question_replace", facts)
+
+    def test_without_a_choice_setup_still_refuses_and_changes_nothing(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"]}})
+        code, facts = self.setup_on(8800)
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "base_url_already_set"))
+        self.assertIsNone(self.started)
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+        self.assertFalse(pi_plugin.proxy_config().exists())
+
+    def test_abort_changes_nothing(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"]}})
+        code, facts = self.setup_on(8800, (), "--on-conflict", "abort")
+        self.assertEqual((code, facts["result"]), (0, "unchanged"))
+        self.assertIsNone(self.started)
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_chain_puts_the_gateway_behind_the_proxy_and_uninstall_puts_it_back(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-gw": "1"}, "apiKey": "$GW_KEY"},
+                           "openai": {"baseUrl": GATEWAY["openai"], "headers": {"x-gw": "2"}}})
+        code, facts = self.setup_on(8800, (), "--on-conflict", "chain")
+        self.assertEqual((code, facts["result"]), (0, "routed"))
+        want = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai"}
+        self.assertEqual(self.started, want)
+        self.assertEqual(facts["routes"], "anthropic -> proxy -> https://gw.example/anthropic; "
+                                          "openai -> proxy -> https://gw.example/openai/v1")
+        providers = json.loads(self.models.read_text())["providers"]
+        self.assertEqual(providers["anthropic"], {"baseUrl": "http://127.0.0.1:8800/anthropic",
+                                                  "headers": {"x-gw": "1"}, "apiKey": "$GW_KEY"})
+        self.assertEqual(providers["openai"], {"baseUrl": "http://127.0.0.1:8800/openai/v1", "headers": {"x-gw": "2"}})
+        self.assertEqual(pi_plugin.read_record()["upstreams"], want)
+        config = pi_plugin.proxy_config().read_text()
+        self.assertIn("# chained: anthropic -> proxy -> https://gw.example/anthropic (--anthropic-upstream", config)
+        self.assertIn("# chained: openai -> proxy -> https://gw.example/openai (--openai-upstream", config)
+        command = pi_plugin.proxy_command("/bin/proxy", 8800, want)
+        self.assertEqual(command[-4:], ["--anthropic-upstream", "https://gw.example/anthropic",
+                                        "--openai-upstream", "https://gw.example/openai"])
+        _, removed = self.uninstall()
+        self.assertEqual(removed["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_a_conflict_on_one_provider_chains_only_that_provider(self):
+        self.write_models({"openai": {"baseUrl": GATEWAY["openai"]}})
+        code, facts = self.setup_on(8800, (), "--on-conflict", "chain")
+        self.assertEqual((code, facts["result"]), (0, "routed"))
+        self.assertEqual(self.started, {"openai": "https://gw.example/openai"})
+        self.assertIn("anthropic -> proxy -> api.anthropic.com", facts["routes"])
+        for provider in pi_plugin.PROVIDERS:
+            self.assertTrue(models_route.is_routed(self.models, 8800, provider))
+        self.assertEqual(self.uninstall()[1]["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_replace_goes_to_the_public_api_and_uninstall_puts_the_gateway_back(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"]}})
+        code, facts = self.setup_on(8800, (), "--on-conflict", "replace")
+        self.assertEqual((code, facts["result"]), (0, "routed"))
+        self.assertEqual(self.started, {})
+        self.assertEqual(pi_plugin.read_record()["upstreams"], {})
+        self.assertNotIn("chained", pi_plugin.proxy_config().read_text())
+        self.assertTrue(models_route.is_routed(self.models, 8800, "anthropic"))
+        self.assertEqual(self.uninstall()[1]["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_chain_refuses_a_url_it_cannot_reproduce_and_changes_nothing(self):
+        self.write_models({"openai": {"baseUrl": "https://gw.example/openai"}})
+        code, facts = self.setup_on(8800, (), "--on-conflict", "chain")
+        self.assertEqual((code, facts["reason"], facts["chain_refused"]),
+                         (2, "base_url_not_chainable", "openai:openai_path_not_v1"))
+        self.assertIsNone(self.started)
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_a_rerun_and_a_configure_keep_the_upstream(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"]}})
+        self.setup_on(8800, (), "--on-conflict", "chain")
+        # A second setup sees our own URL, so no question, and the upstream stays.
+        _, plan = self.plan()
+        self.assertEqual(plan["result"], "planned")
+        self.assertIn("forwarding to https://gw.example/anthropic", plan["consent_question"])
+        code, _ = self.setup_on(8800)
+        self.assertEqual((code, self.started), (0, {"anthropic": "https://gw.example/anthropic"}))
+        with mock.patch.object(pi_plugin, "start_service", return_value=True) as start:
+            code, facts = self.run_main("configure", "--preset", "medium")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        self.assertEqual(start.call_args.args[2], {"anthropic": "https://gw.example/anthropic"})
+        config = pi_plugin.proxy_config().read_text()
+        self.assertIn("preset: medium\n", config)
+        self.assertIn("# chained: anthropic -> proxy -> https://gw.example/anthropic", config)
+        self.assertEqual(self.uninstall()[1]["models_restore"], "restored")
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+    def test_status_shows_the_chain(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"]}})
+        self.setup_on(8800, (), "--on-conflict", "chain")
+        with mock.patch.object(pi_plugin, "healthy", return_value=False):
+            _, facts = self.run_main("status")
+        self.assertEqual(facts["routes"], "anthropic -> proxy -> https://gw.example/anthropic; "
+                                          "openai -> proxy -> api.openai.com")
+
+    def test_a_gateway_set_after_our_route_is_what_uninstall_puts_back(self):
+        """Routed first; then the user points the key at a gateway; then chain. Uninstall restores the
+        gateway, not the value from before the first setup."""
+        self.write_models({"anthropic": {"headers": {"x": "y"}}})
+        self.setup_on(8800)
+        doc = json.loads(self.models.read_text())
+        doc["providers"]["anthropic"]["baseUrl"] = GATEWAY["anthropic"]
+        self.models.write_text(json.dumps(doc))
+        code, _ = self.setup_on(8800, (), "--on-conflict", "chain")
+        self.assertEqual(code, 0)
+        self.uninstall()
+        self.assertEqual(json.loads(self.models.read_text())["providers"]["anthropic"],
+                         {"headers": {"x": "y"}, "baseUrl": GATEWAY["anthropic"]})
+
+    def test_an_old_port_of_ours_is_repointed_not_chained(self):
+        """Review note from #977: our own recorded URL on an old port is ours, never a gateway."""
+        self.write_models({})
+        self.setup_on(8800)
+        code, facts = self.setup_on(8801, (8800,))
+        self.assertEqual((code, facts["result"], facts["port"]), (0, "routed", "8801"))
+        self.assertEqual(self.started, {})
+
+    def test_the_chain_question_warns_that_pings_lack_the_gateways_headers(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-corp-tenant": "a"}},
+                           "openai": {"baseUrl": GATEWAY["openai"]}})
+        _, facts = self.plan()
+        chain = facts["consent_question_chain"]
+        self.assertIn("Anthropic sets headers in models.json", chain)
+        self.assertIn("standard auth headers (Authorization, x-api-key)", chain)
+        self.assertIn("keep-alive may stop for Anthropic", chain)
+        self.assertIn("/context-guru cache-strategy none", chain)
+        self.assertNotIn("OpenAI sets headers", chain)
+        self.assertNotIn("sets headers", facts["consent_question_replace"])
+        # Pings spend quota at the gateway, not at the provider.
+        self.assertIn("at the endpoint it is chained to", chain)
+        self.assertNotIn("your own quota on each provider", chain)
+        self.assertIn("your own quota on each provider", facts["consent_question_replace"])
+        # No pings, no warning.
+        _, quiet = self.plan("--cache-strategy", "none")
+        self.assertNotIn("sets headers", quiet["consent_question_chain"])
+
+    def test_systemd_quoting_keeps_percent_and_dollar_literal(self):
+        self.assertEqual(pi_plugin._systemd_quote('https://gw.example/team%b/$HOME"\\'),
+                         '"https://gw.example/team%%b/$$HOME\\"\\\\"')
+        # Only Exec lines expand `$`; other settings resolve `%` specifiers alone.
+        self.assertEqual(pi_plugin._systemd_quote("append:/a%h/$x", exec_line=False), '"append:/a%%h/$x"')
+
+    def test_the_systemd_unit_carries_the_upstream_literally(self):
+        self.write_models({"anthropic": {"baseUrl": "https://gw.example/team%b$x"}})
+        with mock.patch.object(pi_plugin, "service_kind", return_value="systemd"), \
+                mock.patch.object(pi_plugin.subprocess, "run"), \
+                mock.patch.object(pi_plugin, "healthy", return_value=True):
+            self.assertTrue(pi_plugin.start_service("/bin/proxy", 8800, {"anthropic": "https://gw.example/team%b$x"}))
+        unit = pi_plugin.systemd_unit().read_text()
+        self.assertIn('"--anthropic-upstream" "https://gw.example/team%%b$$x"', unit)
+
+    def test_reset_hatch_puts_the_gateway_back(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-gw": "1"}}})
+        self.setup_on(8800, (), "--on-conflict", "chain")
+        out = subprocess.run(["sh", str(pi_plugin.reset_hatch()), "--yes"], capture_output=True, text=True,
+                             env=dict(os.environ))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("models_restore=restored", out.stdout)
+        self.assertEqual(json.loads(self.models.read_text()), self.document)
 
 
 if __name__ == "__main__":

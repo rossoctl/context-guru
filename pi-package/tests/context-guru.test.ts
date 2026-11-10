@@ -9,8 +9,9 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
-  checkAtStart, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, needsStartCheck, parseArgs, parseFacts, proxyAnswers,
-  readInstall, START_CHECK_TIMEOUT_MS, StartChecks, type StartCheck,
+  CHAIN, checkAtStart, conflictPrompt, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
+  needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
+  stripsChatGPTFields, type StartCheck,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -260,4 +261,39 @@ test("a stopped check ends at once, before its time limit", async () => {
     server.closeAllConnections();
     server.close();
   }
+});
+
+test("a conflict is one question: chain, replace, or change nothing", () => {
+  const p = conflictPrompt({
+    result: "needs_decision", conflicts: "anthropic", existing_base_url: '{"anthropic":"https://gw.example"}',
+    consent_question_chain: "CHAIN-TEXT", consent_question_replace: "REPLACE-TEXT",
+  });
+  assert.deepEqual(p.options, [CHAIN, REPLACE, KEEP]);
+  assert.deepEqual(p.answers, { [CHAIN]: "chain", [REPLACE]: "replace" });
+  assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
+  assert.match(p.title, /somewhere else: anthropic: https:\/\/gw.example\./);
+  assert.doesNotMatch(p.title, /\{/);
+  assert.match(p.title, /CHAIN-TEXT/);
+  assert.match(p.title, /REPLACE-TEXT/);
+});
+
+test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
+  const p = conflictPrompt({ conflicts: "openai", existing_base_url: "x", chain_refused: "openai:openai_path_not_v1",
+    consent_question_replace: "REPLACE-TEXT" });
+  assert.deepEqual(p.options, [REPLACE, KEEP]);
+  assert.match(p.title, /Chain is not offered.*openai_path_not_v1/);
+});
+
+test("conflicts read as plain words, and odd input is shown as it came", () => {
+  assert.equal(conflictWords('{"anthropic":"https://a.example","openai":"https://o.example/v1"}'),
+    "anthropic: https://a.example, openai: https://o.example/v1");
+  assert.equal(conflictWords("not json"), "not json");
+  assert.equal(conflictWords(undefined), "unknown");
+});
+
+test("the ChatGPT field removal skips a chained openai provider only", () => {
+  assert.equal(stripsChatGPTFields(install), true);
+  assert.equal(stripsChatGPTFields(undefined), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { anthropic: "https://gw.example" } }), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { openai: "https://gw.example" } }), false);
 });

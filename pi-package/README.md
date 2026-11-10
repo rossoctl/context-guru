@@ -51,6 +51,44 @@ stay as they are. Until you do, `/context-guru status` reports that a provider i
 **A port someone else took.** If another program now holds the port the proxy used, setup picks a
 free port and moves both routes to it. It does not refuse because of its own old URL.
 
+## An existing baseUrl (a company gateway)
+
+If `models.json` already sends `anthropic` or `openai` to another endpoint, setup asks one question
+with three answers. Only a provider with its own `baseUrl` is affected. The other provider is routed
+as usual.
+
+| Answer | Route | Use it when |
+|---|---|---|
+| **Chain** (recommended) | Pi -> proxy -> your endpoint | Usually right. The endpoint still gets every request, with the same path, headers and key |
+| **Replace** | Pi -> proxy -> the provider's public API | You want to stop using that endpoint. This usually breaks its auth |
+| **Don't change anything** | As before | Nothing is written |
+
+- Chain keeps the provider entry as it is (`headers`, `apiKey` and the rest). Only `baseUrl` changes.
+- The proxy forwards the client's headers, so the endpoint's key and custom headers still arrive.
+  The proxy removes its own `x-context-guru-*` headers, `Cookie`, `Accept-Encoding` and hop-by-hop
+  headers.
+- **Keep-alive pings and custom headers.** A ping carries only the standard auth headers
+  (`Authorization`, `x-api-key`), not the `headers` from `models.json`. If the endpoint needs those
+  headers, it refuses the pings, and keep-alive stops for that provider. Requests are not affected.
+  Then run `/context-guru cache-strategy none`. Setup says this in its question when a chained provider
+  sets `headers`.
+- Keep-alive pings go to the endpoint, so they spend quota there.
+- The proxy appends `/v1/messages` (Anthropic) or `/v1/responses` (OpenAI) to its upstream. So an
+  OpenAI `baseUrl` of `https://gw.example/openai/v1` becomes the upstream `https://gw.example/openai`.
+- The upstream goes on the service command (`--anthropic-upstream`, `--openai-upstream`) and into the
+  install record. `preset`, `cache-strategy`, `update` and a new `setup` keep it.
+- `/context-guru status` shows each route, for example `anthropic -> proxy -> https://gw.example/anthropic`.
+- **One answer for both providers.** If both providers have a `baseUrl` and one of them cannot be
+  chained, setup does not offer chain. Replace then applies to both.
+- **A chain stays until uninstall.** The install record keeps the upstream. If you later delete the
+  `baseUrl` key from `models.json`, a new setup routes the provider to the proxy again, and the proxy
+  still forwards to the recorded endpoint. Run `/context-guru uninstall` to remove the chain.
+- Uninstall and the reset command put your old `baseUrl` back.
+
+From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `confirm_command_chain`,
+and `consent_question_replace` with `confirm_command_replace`. Setup with a conflict and no
+`--on-conflict chain|replace` refuses and changes nothing.
+
 ## Commands
 
 | Command | What it does |
@@ -100,7 +138,8 @@ call to the local proxy, described below.
   (`prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens`, `temperature`). Pi does
   that only when the model's URL is `https://api.openai.com/v1`, which a routed model no longer has.
   So for a routed `openai` model with a stored ChatGPT login, the extension removes the same four
-  fields. An API key request is not changed.
+  fields. An API key request is not changed. A chained `openai` provider is not changed either: Pi
+  sent those fields to that endpoint before setup.
 - **Proxy check at session start.** See the next section.
 - **Session signals.** When a session ends or compacts, it tells the proxy. It sends only the session
   id, the event and the reason. The proxy then stops pinging a cache that no later request will read.
@@ -178,9 +217,11 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
   classifier (`/v1/decisions`). The proxy serves only `/v1/responses` and `/v1/chat/completions`, so a
   classifier call on a routed `openai` provider gets a 404.
 - **One proxy for all Pi sessions on the machine,** because `models.json` is per user, not per project.
-- If `models.json` already sends Anthropic or OpenAI somewhere else (a company gateway, for example),
-  setup refuses and changes nothing, for both providers. If an earlier context-guru install left that
-  URL behind, the message names the reset command.
+- **Chain needs a URL the proxy can reproduce.** An OpenAI `baseUrl` must end in `/v1`. A URL with a
+  query, a user name or password, or one that is not `http(s)` cannot be chained. Setup then offers
+  only replace or no change. See [An existing baseUrl](#an-existing-baseurl-a-company-gateway).
+- **A `baseUrl` on one model** (`models.<id>.baseUrl` in `models.json`) wins over the provider's.
+  Setup does not read or change it, so that model goes direct, as before.
 
 ## Development
 

@@ -198,7 +198,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
 	r.compaction_point, r.compaction_point_source,
 	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
-	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription`
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, ` + requestTokenSelect + ``
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -210,7 +210,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var r5, r7 sql.NullInt64
 	var s5, s7 sql.NullString
 	var authSub int
-	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
+	err := rows.Scan(append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
@@ -230,7 +230,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
 		&e.CompactionPoint, &e.CompactionPointSource,
-		&u5, &r5, &s5, &u7, &r7, &s7, &authSub)
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub}, requestTokenDest(&e.AccTokens)...)...)
 	e.AuthSubscription = authSub != 0
 	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
 		e.Limits = &l
@@ -324,7 +324,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	}
 	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
 		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events,
-		saved_first_usd, saved_replay_usd, priced_by FROM request_components
+		saved_first_usd, saved_replay_usd, priced_by, `+strings.Join(compTokenColumns, ", ")+` FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -334,9 +334,9 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var c CompRow
 		var a, m, rv, sk int
 		var gates, events string
-		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
+		if err := crows.Scan(append([]any{&c.Component, &c.Kind, &a, &m, &rv, &sk,
 			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
-			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy); err != nil {
+			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy}, c.Tokens.dest()...)...); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0

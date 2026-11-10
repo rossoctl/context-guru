@@ -42,13 +42,26 @@ type AccFigure struct {
 	UnattributedBreakUSD float64
 	Unpriced             []string // "opID:reason"; an unpriced operation is not a zero saving
 	Estimated            bool     // any counted operation or effect is an estimate
+
+	// The same figures as tokens by tier, before any pricing (#998). TokByComponent follows exactly
+	// the attribution of ByComponent: the counted operations and the breaks and mark legs each
+	// component owns. It does NOT hold the head-TTL legs or the ended-change break, which accOverride
+	// adds to the dollar rows afterwards: those are TokTTL and TokEndedBreak. So the component tokens
+	// and the four effect figures never overlap. For each, the dollar figure is
+	// tierUSD(Saved) - tierUSD(Caused).
+	TokByComponent map[string]TokenFlow
+	TokKeepAlive   TokenFlow // rescue effects
+	TokSplit       TokenFlow // split effects
+	TokTTL         TokenFlow // ttlPremium and ttlRescue effects
+	TokEndedBreak  TokenFlow // the break an ended change left behind
 }
 
 // AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
-	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{}}
+	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{},
+		TokByComponent: map[string]TokenFlow{}}
 	if e.accRes == nil {
 		return f
 	}
@@ -78,6 +91,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		}
 		net := tierUSD(p, o.Saved) - tierUSD(p, o.Caused)
 		f.ByComponent[c] += net
+		f.addTok(c, o.Saved, o.Caused)
 		read := tierUSD(p, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
 		f.ByComponentReplay[c] += read
 		f.ByComponentFirst[c] += tierUSD(p, o.Saved) - read
@@ -105,18 +119,23 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			case ok && ce.ChangeID != "":
 				f.ByComponent[c] += value
 				f.DeltaUSD += value
+				f.addTok(c, ce.Saved, ce.Caused)
 			case ce.ChangeID == "": // an ended change left it behind: counted, owned by no component
 				f.EndedBreakUSD += value
 				f.DeltaUSD += value
+				f.TokEndedBreak.addTiers(ce.Saved, ce.Caused)
 			default: // a ChangeID no counted op owns (a dry run): shown, never charged
 				f.UnattributedBreakUSD -= value
 			}
 		case accountant.EffectRescue:
 			f.KeepAliveSavedUSD += value
+			f.TokKeepAlive.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectSplit:
 			f.SplitUSD += value
+			f.TokSplit.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
 			f.TTLUSD += value
+			f.TokTTL.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
 			// markPayback is the other half of markPremium: the next request reads the tail the host's mark
 			// wrote, which the client body would have billed as input. Saved is that input, Caused the read:
@@ -133,6 +152,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			}
 			f.ByComponent[c] += value
 			f.DeltaUSD += value
+			f.addTok(c, ce.Saved, ce.Caused)
 		default:
 			f.Unpriced = append(f.Unpriced, "effect:"+string(ce.Kind)+":unknown_kind")
 			continue
@@ -254,6 +274,7 @@ func (e *Event) UnpricedWhy() string {
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimateHeld = "", false, false, 0, false
 	e.accUnpricedWhy = ""
+	e.clearAccTokens()
 	if !e.priceCost(p, accountingComplete) {
 		e.accFallback = FallbackUnpriced
 		e.accUnpricedWhy = UnpricedNoUsage
@@ -374,7 +395,12 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		c := &e.Components[i]
 		c.SavedUSD, c.PricedBy = saved[i], PricedByAccountant
 		c.SavedFirstUSD, c.SavedReplayUSD = fig.ByComponentFirst[c.Component], fig.ByComponentReplay[c.Component]
+		c.Tokens = fig.TokByComponent[c.Component]
 	}
+	// The tokens of the effects outside the component rows. The headttl and ended_change rows carry
+	// the dollars of TTL and EndedBreak; their tokens are here, never on those rows, so no token is
+	// counted twice.
+	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
 	if estimated {
 		// The library could not rule out a break: it had no history for the thread, so it priced
@@ -399,7 +425,11 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
 			e.Components[i].SavedUSD, e.Components[i].SavedFirstUSD, e.Components[i].SavedReplayUSD = 0, 0, 0
+			e.Components[i].Tokens = TokenFlow{}
 		}
+		// The tokens of what is held out are held out too: the head-TTL legs and the ended-change
+		// break are part of fig.DeltaUSD. The rescue and the split stay, as their dollars do.
+		e.AccTokens.TTL, e.AccTokens.EndedBreak = TokenFlow{}, TokenFlow{}
 	}
 	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
 	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
