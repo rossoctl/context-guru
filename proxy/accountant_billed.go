@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -30,39 +30,61 @@ func jsonString(s string) string {
 	return gjson.GetBytes(b, "v").Raw
 }
 
-// deferredTools lists the positions in `tools` of the definitions the forwarded body defers.
-func deferredTools(forwarded []byte) []int {
-	var at []int
-	for i, t := range gjson.GetBytes(forwarded, "tools").Array() {
-		if t.Get("defer_loading").Bool() && t.Get("name").String() != "" {
-			at = append(at, i)
+// deferredNames is the set of names of the definitions the body defers.
+func deferredNames(body []byte) map[string]bool {
+	out := map[string]bool{}
+	for _, t := range gjson.GetBytes(body, "tools").Array() {
+		if n := t.Get("name").String(); n != "" && t.Get("defer_loading").Bool() {
+			out[n] = true
 		}
 	}
-	return at
+	return out
 }
 
-// billedBody returns the forwarded body as the provider bills it. ok=false means the accountant should not be given a
-// stub-sized copy: the body has no deferred tool, or a stub would not be smaller than the definition it replaces. A
-// stub that grows the tool is not a deferral the provider billed less for, and an operation that reports it as a
-// shrink would book a saving nothing measured. The caller then keeps the forwarded body as it is, and the event says
-// why it books no figure (acc_fallback deferral_unplaced) instead of booking a wrong one.
-func billedBody(forwarded []byte) (billed []byte, ok bool) {
-	at := deferredTools(forwarded)
-	if len(at) == 0 {
+// ownDeferred is the names the PROXY deferred on this request: deferred in the forwarded body, and not already
+// deferred in the body deferral read. A tool the client deferred itself (Claude Code does) is free in the baseline
+// too, because the provider bills no definition for it whoever set the mark, so it is no saving of ours and it keeps
+// its definition, with its cache_control, in the accountant's copy.
+func ownDeferred(forwarded, preDefer []byte) map[string]bool {
+	out := deferredNames(forwarded)
+	for n := range deferredNames(preDefer) {
+		delete(out, n)
+	}
+	return out
+}
+
+// billedBody returns the forwarded body as the provider bills it, with the definitions in own cut to stubs. ok=false
+// means the accountant should not be given a stub-sized copy: nothing in own is in the body, or a stub would not be
+// smaller than the definition it replaces. A stub that grows the tool is not a deferral the provider billed less for,
+// and an operation that reports it as a shrink would book a saving nothing measured. The caller then keeps the
+// forwarded body as it is, and the event books no figure (the log line says acc_fallback deferral_unplaced) instead of
+// booking a wrong one. The tools array is rebuilt in one pass: a copy of the body for each stub is O(body x tools).
+func billedBody(forwarded []byte, own map[string]bool) (billed []byte, ok bool) {
+	if len(own) == 0 {
 		return forwarded, false
 	}
-	billed = forwarded
-	for _, i := range at {
-		path := "tools." + strconv.Itoa(i)
-		def := gjson.GetBytes(billed, path)
-		stub := deferredStub(def.Get("name").String())
-		if len(stub) >= len(def.Raw) {
+	tools := gjson.GetBytes(forwarded, "tools").Array()
+	parts := make([]string, len(tools))
+	stubbed := 0
+	for i, t := range tools {
+		name := t.Get("name").String()
+		if !own[name] {
+			parts[i] = t.Raw
+			continue
+		}
+		stub := deferredStub(name)
+		if len(stub) >= len(t.Raw) {
 			return forwarded, false
 		}
-		var err error
-		if billed, err = sjson.SetRawBytes(billed, path, []byte(stub)); err != nil {
-			return forwarded, false
-		}
+		parts[i] = stub
+		stubbed++
+	}
+	if stubbed == 0 {
+		return forwarded, false
+	}
+	billed, err := sjson.SetRawBytes(forwarded, "tools", []byte("["+strings.Join(parts, ",")+"]"))
+	if err != nil {
+		return forwarded, false
 	}
 	return billed, true
 }

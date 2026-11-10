@@ -137,7 +137,8 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	}
 	// The row's net is the cost the bodies cannot show, and nothing else: the library prices the deferral
 	// itself from the bodies (accountant R56), so the ledger's whole net would count it twice (#908). This
-	// request ran one search and loaded a tool, so that cost is real, and it is the ledger's cost less the names list.
+	// request ran one search and loaded a tool, so that cost is real, and it is the ledger's cost less the names
+	// list. The exact figure (the search cost) is not stored on the event, so the test can only bound it.
 	if e.DeferNetUSD >= 0 || math.Abs(e.DeferNetUSD) > st.Cost+1e-12 {
 		t.Errorf("row net %v, want a cost no larger than the ledger's %v", e.DeferNetUSD, st.Cost)
 	}

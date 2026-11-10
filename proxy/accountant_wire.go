@@ -67,18 +67,23 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	c.savings.end(c.accReq, t, billed, ops, facts)
 }
 
-// accDeferralUnplaced is the acc_fallback reason of a request whose deferral could not be reported to the library.
+// accDeferralUnplaced names why a request books no figure when its deferral cannot be placed. The log line says
+// acc_fallback deferral_unplaced (noResultWhy). The stored fallback of the event is no_result.
 const accDeferralUnplaced = "deferral_unplaced"
 
 // accBilled is the body the accountant records. A request deferral did not change returns the forwarded body. A
-// deferral whose stub cannot be placed (a deferred tool with no name) also returns the forwarded body, and sets
-// accNoResult so the event says why it books no figure (acc_fallback deferral_unplaced) and the sum check does not
-// turn it into a wrong one.
+// deferral whose stub cannot be placed (a stub that would not be smaller than its definition) also returns the
+// forwarded body, and sets accNoResult so the event books no figure and the sum check does not turn it into a
+// wrong one. A tool the client deferred itself is left as it is (ownDeferred).
 func (c *capture) accBilled(forwarded []byte) []byte {
-	if c.accPreDefer == nil || len(deferredTools(forwarded)) == 0 {
+	if c.accPreDefer == nil {
 		return forwarded
 	}
-	b, ok := billedBody(forwarded)
+	own := ownDeferred(forwarded, c.accPreDefer)
+	if len(own) == 0 {
+		return forwarded
+	}
+	b, ok := billedBody(forwarded, own)
 	if !ok {
 		c.accNoResult = accDeferralUnplaced
 		return forwarded
@@ -87,47 +92,39 @@ func (c *capture) accBilled(forwarded []byte) []byte {
 }
 
 // envelopeOpsFor is envelopeOps for the body the accountant records, with tool deferral's edits attributed to the
-// tooldefer operator so its row does not land on toolschema (#908). Deferral's edits are two: the definitions it
-// deferred, each now a stub (merged here into ONE operation with a span for each tool, as accountant R56 reports a
-// deferral), and the search tool it adds, an ordinary added declaration.
+// tooldefer operator so its row does not land on toolschema (#908). Deferral's edits are two: the definitions the
+// proxy deferred, each now a stub (R56), and the search tool it adds, an ordinary added declaration.
+//
+// Each keeps the ChangeID envelopeOps gave it, and only the operator changes. The ChangeID is what the library
+// replaces by, so a thread whose state was written before this change (per-tool cg:toolschema:decl-rewritten and
+// decl-added operations) has them replaced on its next request instead of kept beside a second copy, and a deferred
+// set that grows or shrinks mid-thread re-reports each surviving tool under its own stable ID. One merged operation
+// would carry a hash of the whole set, so any change of the set would orphan it.
 func (c *capture) envelopeOpsFor(billed []byte) []accountant.Operation {
 	ops := envelopeOps(c.accClient, billed)
 	if c.accPreDefer == nil {
 		return ops
 	}
-	stubbed := map[int]bool{}
-	for _, i := range deferredTools(billed) {
-		stubbed[i] = true
+	// Match by NAME: a rewritten declaration is reported at its CLIENT index, and a declaration removed before it
+	// makes the billed index smaller.
+	own := ownDeferred(billed, c.accPreDefer)
+	atBilled := map[string]int{}
+	for i, t := range gjson.GetBytes(billed, "tools").Array() {
+		atBilled[t.Get("name").String()] = i
 	}
-	var out []accountant.Operation
-	var merged *accountant.Operation
-	var names strings.Builder
+	client := gjson.GetBytes(c.accClient, "tools").Array()
+	out := make([]accountant.Operation, 0, len(ops))
 	for _, o := range ops {
 		switch {
 		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
-			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && isStub(billed, o.At.Index):
-			if merged == nil {
-				m := o
-				m.Operator, m.SizeBefore, m.SizeAfter = "context-guru.tooldefer", accountant.Size{}, accountant.Size{}
-				merged = &m
-			}
-			merged.Spans = append(merged.Spans, accountant.Span{Section: accountant.SectionTools, From: o.At.Index,
-				To: o.At.Index, SizeBefore: o.SizeBefore, SizeAfter: o.SizeAfter})
-			merged.SizeBefore.Bytes += o.SizeBefore.Bytes
-			merged.SizeAfter.Bytes += o.SizeAfter.Bytes
-			names.WriteString(gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String())
-			names.WriteByte(0)
+			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && o.At.Index < len(client) &&
+			own[client[o.At.Index].Get("name").String()] && isStub(billed, atBilled[client[o.At.Index].Get("name").String()]):
+			o.Operator = "context-guru.tooldefer"
 		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
 			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
-			o.Operator, o.ChangeID = "context-guru.tooldefer", "cg:tooldefer:"+strings.TrimPrefix(o.ChangeID, "cg:toolschema:")
-			out = append(out, o)
-		default:
-			out = append(out, o)
+			o.Operator = "context-guru.tooldefer"
 		}
-	}
-	if merged != nil {
-		merged.ChangeID = "cg:tooldefer:defer-stubs:" + hashOf(names.String())
-		out = append(out, *merged)
+		out = append(out, o)
 	}
 	return out
 }

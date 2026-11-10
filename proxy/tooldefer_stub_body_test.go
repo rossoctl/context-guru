@@ -190,7 +190,7 @@ func TestClientSearchDeferralKeepsTheRealShrinkAndAddsNoFallback(t *testing.T) {
 func TestBilledBodyRefusesAStubThatWouldGrowTheTool(t *testing.T) {
 	body := []byte(`{"model":"m","tools":[{"name":"a","description":"x"},{"name":"b","defer_loading":true}],` +
 		`"messages":[{"role":"user","content":"hi"}]}`)
-	billed, ok := billedBody(body)
+	billed, ok := billedBody(body, deferredNames(body))
 	if ok || !bytes.Equal(billed, body) {
 		t.Errorf("ok=%v changed=%v: a stub as large as the definition must leave the body alone", ok, !bytes.Equal(billed, body))
 	}
@@ -201,7 +201,7 @@ func TestBilledBodyStubsEveryDeferredToolAndKeepsTheOthers(t *testing.T) {
 	body := []byte(`{"model":"m","tools":[{"name":"keep","description":"` + long + `"},` +
 		`{"name":"a","description":"` + long + `","defer_loading":true},{"name":"b","description":"` + long + `","defer_loading":true}],` +
 		`"messages":[{"role":"user","content":"hi"}]}`)
-	billed, ok := billedBody(body)
+	billed, ok := billedBody(body, deferredNames(body))
 	if !ok {
 		t.Fatal("not stubbed")
 	}
@@ -220,7 +220,7 @@ func TestBilledBodyStubsEveryDeferredToolAndKeepsTheOthers(t *testing.T) {
 
 func TestBilledBodyLeavesABodyWithNoDeferralAlone(t *testing.T) {
 	body := []byte(`{"model":"m","tools":[{"name":"a","description":"x"}],"messages":[]}`)
-	billed, ok := billedBody(body)
+	billed, ok := billedBody(body, deferredNames(body))
 	if ok || !bytes.Equal(billed, body) {
 		t.Errorf("ok=%v, body changed=%v: want the body as it was", ok, !bytes.Equal(billed, body))
 	}
