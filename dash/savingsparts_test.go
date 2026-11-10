@@ -69,7 +69,7 @@ func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
 	app := stripComments(readUI(t, "ui/app.js"))
 	for _, want := range []string{
 		"if (!readsLimits(account && account.tenant)) return Promise.resolve(false);", // a manager keeps dollars
-		"() => { if (state.limitsP === p) state.limitsP = null; });", // a failed answer is not kept
+		"() => { if (state.limitsP === p) state.limitsP = null; });",                  // a failed answer is not kept
 		"return meLimits(60000).then((l) => isSubscription(l, Date.now()), () => false);",
 		"const limits = await meLimits(0);", // the Overview shares the request, and always asks fresh
 		"sessionHeaders(sub);",
