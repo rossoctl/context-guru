@@ -207,13 +207,12 @@ func TestReplayLedgerThroughSQLMovesTheHeadlineAndTheRow(t *testing.T) {
 	if c.Rows != 5 || c.PastRows != 2 {
 		t.Errorf("rows = %d past = %d, want 5 and 2", c.Rows, c.PastRows)
 	}
-	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5, TotalReducedUSD: 5}
+	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5}
 	o.ApplyReplayLedger(l)
 	nearEq(t, "baseline", o.BaselineCostUSD, 10+l.DeltaUSD())
 	nearEq(t, "correction", o.ReplayCapCorrectionUSD, l.DeltaUSD())
 	nearEq(t, "net saved", o.NetSavedUSD, 4+l.DeltaUSD())
 	nearEq(t, "total saved", o.TotalSavedUSD, 5+l.DeltaUSD())
-	nearEq(t, "total reduced", o.TotalReducedUSD, 5+l.DeltaUSD())
 	if l.DeltaUSD() >= 0 {
 		t.Fatal("the fixture does not cap anything")
 	}
@@ -483,7 +482,6 @@ func TestLeanStatsMatchFullForTheSameWindow(t *testing.T) {
 	type body struct {
 		Net        float64 `json:"net_saved_usd"`
 		Total      float64 `json:"total_saved_usd"`
-		Reduced    float64 `json:"total_reduced_usd"`
 		Correction float64 `json:"replay_cap_correction_usd"`
 	}
 	for _, path := range []string{fmt.Sprintf("/api/stats?since=0&until=%d", until), "/api/stats?session=s"} {
@@ -496,7 +494,6 @@ func TestLeanStatsMatchFullForTheSameWindow(t *testing.T) {
 		nearEq(t, path+" correction", lean.Correction, full.Correction)
 		nearEq(t, path+" net_saved_usd", lean.Net, full.Net)
 		nearEq(t, path+" total_saved_usd", lean.Total, full.Total)
-		nearEq(t, path+" total_reduced_usd", lean.Reduced, full.Reduced)
 	}
 }
 
@@ -902,7 +899,7 @@ func TestApplyReplayLedgerCarriesTheAvoidedCompactionApart(t *testing.T) {
 	l.priceAvoided(func(string) (modelinfo.Price, bool) {
 		return modelinfo.Price{Output: 15e-6, CacheRead: 0.3e-6}, true
 	})
-	o := &Overview{NetSavedUSD: 10, TotalSavedUSD: 10, BaselineCostUSD: 20, TotalReducedUSD: 10}
+	o := &Overview{NetSavedUSD: 10, TotalSavedUSD: 10, BaselineCostUSD: 20}
 	o.ApplyReplayLedger(l)
 	nearEq(t, "avoided", o.AvoidedCompactionUSD, 1_000_000*0.3e-6+assumedSummaryTokens*15e-6)
 	if !o.AvoidedCompactionAssumed {

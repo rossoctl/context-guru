@@ -79,56 +79,6 @@
   "text_rows": 0,
   "tokens": 0
  },
- "self_removed": [
-  {
-   "avoided_reads": 9240,
-   "avoided_usd": 0.018875999999999997,
-   "kind": "skill",
-   "last_seen": 1767940220000,
-   "name": "skill-1",
-   "overlap": false,
-   "priced": false,
-   "sessions_after": 4,
-   "sessions_before": 2,
-   "tokens": 220
-  },
-  {
-   "avoided_reads": 8360,
-   "avoided_usd": 0.021383999999999997,
-   "kind": "skill",
-   "last_seen": 1767928820000,
-   "name": "skill-0",
-   "overlap": false,
-   "priced": false,
-   "sessions_after": 4,
-   "sessions_before": 2,
-   "tokens": 220
-  },
-  {
-   "avoided_reads": 6600,
-   "avoided_usd": 0.016565999999999997,
-   "kind": "skill",
-   "last_seen": 1767963020000,
-   "name": "skill-3",
-   "overlap": false,
-   "priced": false,
-   "sessions_after": 3,
-   "sessions_before": 2,
-   "tokens": 220
-  },
-  {
-   "avoided_reads": 5940,
-   "avoided_usd": 0.021383999999999997,
-   "kind": "skill",
-   "last_seen": 1767951620000,
-   "name": "skill-2",
-   "overlap": false,
-   "priced": false,
-   "sessions_after": 3,
-   "sessions_before": 2,
-   "tokens": 220
-  }
- ],
  "servers": [
   {
    "calls": 16,
