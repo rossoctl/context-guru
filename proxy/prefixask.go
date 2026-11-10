@@ -360,7 +360,11 @@ func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models compone
 // Responses differs only in the request/response wire shape: the sweep's
 // selection, read-verification and fallback decisions remain in the component.
 func (h *Handler) prefixAskerForAPI(provider bschemas.ModelProvider, api string, models components.ModelSpec) components.PrefixAsker {
-	if !schema.IsResponses(schema.WireFor(string(provider), api)) {
+	wire := schema.WireFor(string(provider), api)
+	if !schema.IsResponses(wire) {
+		if provider == bschemas.OpenAI && wire == schema.WireOpenAI {
+			return h.chatPrefixAsker(models)
+		}
 		return h.prefixAskerFor(provider, models)
 	}
 	cli, ok := models.Incoming.(cheapmodel.OpenAI)
@@ -369,4 +373,50 @@ func (h *Handler) prefixAskerForAPI(provider bschemas.ModelProvider, api string,
 	}
 	cli.MaxTokens = cheapmodel.PrefixAskMaxTokens
 	return responsesPrefixAsker{stash: h.sent, cli: cli}
+}
+
+// chatPrefixAsker is the asker for the OpenAI Chat Completions wire. It is shared core and holds no
+// route-specific code.
+//
+// THE CLIENT is the incoming one as built: path /v1/chat/completions and Bearer auth. A route that
+// needs another path or auth scheme (IBM Bob: /inference/v1/chat/completions and Apikey) is not
+// served yet, so the ask there gets a non-200, the sweep declines, and the request goes on
+// unchanged (fail open). #1030 item 4 and #1029 give the incoming client those two values.
+//
+// THE CACHE CHECK stays the sweep's: prefixAskCacheOK reads prompt_tokens_details.cached_tokens and
+// refuses a read of 0 (#725). Both IBM Bob backends report cache reads (#975 captures).
+func (h *Handler) chatPrefixAsker(models components.ModelSpec) components.PrefixAsker {
+	cli, ok := models.Incoming.(cheapmodel.OpenAI)
+	if !ok {
+		return nil
+	}
+	cli.MaxTokens = cheapmodel.PrefixAskMaxTokens
+	return chatPrefixAsker{stash: h.sent, cli: cli}
+}
+
+type chatPrefixAsker struct {
+	stash *sentStash
+	cli   cheapmodel.OpenAI
+}
+
+func (p chatPrefixAsker) Ask(ctx context.Context, session, ask string) (string, components.PrefixUsage, error) {
+	body := p.stash.get(session)
+	if len(body) == 0 {
+		return "", components.PrefixUsage{}, components.ErrNoPrefix
+	}
+	reply, u, err := p.cli.CompletePrefixedChat(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
+func (p chatPrefixAsker) AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, components.PrefixUsage, error) {
+	body, err := p.stash.snapshotCovering(session, count, hash)
+	if err != nil {
+		return "", components.PrefixUsage{}, err
+	}
+	reply, u, err := p.cli.CompletePrefixedChat(ctx, body, ask)
+	return reply, components.PrefixUsage(u), err
+}
+
+func (p chatPrefixAsker) CoversSpan(session string, count int, hash string) bool {
+	return p.stash.CoversSpan(session, count, hash)
 }

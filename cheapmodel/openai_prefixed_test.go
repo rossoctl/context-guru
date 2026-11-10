@@ -122,3 +122,97 @@ func TestOpenAIPrefixedResponsesLiveCache(t *testing.T) {
 	t.Logf("verified live Responses cache read: seed_input=%d cached=%d fresh=%d write=%d output=%d",
 		seeded.Usage.InputTokens, u.CacheRead, u.Fresh, u.CacheWrite, u.Output)
 }
+
+func chatServer(t *testing.T, status int, reply string, got *[]byte) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		*got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(reply))
+	}))
+}
+
+func TestCompletePrefixedChatAppendsOneMessageAndKeepsTheRest(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":"{\"verdicts\":[]}"}}],`+
+		`"usage":{"prompt_tokens":1200,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":1100}}}`, &got)
+	defer up.Close()
+	body := []byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":50,` +
+		`"tool_choice":"auto","tools":[{"type":"function","function":{"name":"Read"}}],` +
+		`"messages":[{"role":"system","content":"S"},{"role":"user","content":"task"}]}`)
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	reply, u, err := OpenAI{D: d, Ref: ref, Model: "m", MaxTokens: 100}.CompletePrefixedChat(context.Background(), body, "judge")
+	if err != nil || reply != `{"verdicts":[]}` || u.CacheRead != 1100 || u.Fresh != 100 || u.Output != 20 || u.ViaTool {
+		t.Fatalf("reply=%q usage=%+v err=%v", reply, u, err)
+	}
+	if gjson.GetBytes(got, "messages.#").Int() != 3 || gjson.GetBytes(got, "messages.2.content").String() != "judge" ||
+		gjson.GetBytes(got, "messages.0.content").String() != "S" || gjson.GetBytes(got, "messages.1.content").String() != "task" ||
+		gjson.GetBytes(got, "stream").Exists() || gjson.GetBytes(got, "stream_options").Exists() ||
+		gjson.GetBytes(got, "max_completion_tokens").Int() != 100 || gjson.GetBytes(got, "max_tokens").Exists() ||
+		gjson.GetBytes(got, "tool_choice").String() != "auto" || gjson.GetBytes(got, "tools.0.function.name").String() != "Read" {
+		t.Fatalf("prefix changed: %s", got)
+	}
+}
+
+func TestCompletePrefixedChatUsesMaxTokensByDefault(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":"x"}}]}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	_, _, err := OpenAI{D: d, Ref: ref, Model: "m", MaxTokens: 77}.CompletePrefixedChat(context.Background(),
+		[]byte(`{"model":"m","messages":[{"role":"user","content":"t"}]}`), "q")
+	if err != nil || gjson.GetBytes(got, "max_tokens").Int() != 77 || gjson.GetBytes(got, "max_completion_tokens").Exists() {
+		t.Fatalf("err=%v body=%s", err, got)
+	}
+}
+
+func TestCompletePrefixedChatReadsAdjudicationToolAmongOthers(t *testing.T) {
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[{"message":{"content":"prose","tool_calls":[`+
+		`{"id":"1","function":{"name":"Read","arguments":"{\"p\":1}"}},`+
+		`{"id":"2","function":{"name":"context_guru_adjudicate","arguments":"{\"verdicts\":[{\"i\":0}]}"}}]}}],`+
+		`"usage":{"prompt_tokens":10,"completion_tokens":1}}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	reply, u, err := OpenAI{D: d, Ref: ref, Model: "m"}.CompletePrefixedChat(context.Background(),
+		[]byte(`{"messages":[{"role":"user","content":"t"}]}`), "q")
+	if err != nil || reply != `{"verdicts":[{"i":0}]}` || !u.ViaTool {
+		t.Fatalf("reply=%q usage=%+v err=%v", reply, u, err)
+	}
+}
+
+func TestCompletePrefixedChatRefusals(t *testing.T) {
+	ok := []byte(`{"messages":[{"role":"user","content":"t"}]}`)
+	for name, tc := range map[string]struct {
+		body   []byte
+		status int
+		reply  string
+	}{
+		"no messages array": {[]byte(`{"model":"m"}`), 200, `{}`},
+		"non-200":           {ok, 401, `{"error":"no"}`},
+		"not json":          {ok, 200, `<html>`},
+	} {
+		var got []byte
+		up := chatServer(t, tc.status, tc.reply, &got)
+		d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+		reply, _, err := OpenAI{D: d, Ref: ref, Model: "m"}.CompletePrefixedChat(context.Background(), tc.body, "q")
+		up.Close()
+		if err == nil || reply != "" {
+			t.Errorf("%s: reply=%q err=%v", name, reply, err)
+		}
+	}
+	// No dispatcher: fail open with an error.
+	if _, _, err := (OpenAI{Model: "m"}).CompletePrefixedChat(context.Background(), ok, "q"); err == nil {
+		t.Error("no dispatcher did not error")
+	}
+	// An empty choices list is an empty reply, not a panic.
+	var got []byte
+	up := chatServer(t, 200, `{"choices":[]}`, &got)
+	defer up.Close()
+	d, ref := dispatchtest.HTTP(up.URL, dispatchtest.BearerAuth("k"))
+	if r, _, err := (OpenAI{D: d, Ref: ref, Model: "m"}).CompletePrefixedChat(context.Background(), ok, "q"); err != nil || r != "" {
+		t.Errorf("empty choices: %q %v", r, err)
+	}
+}
