@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,14 +16,26 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-// panicky is a test agent whose SessionID panics on the route it owns.
+// panicCanary is the panic message of panicky. It stands for a header value an agent's panic text
+// could carry, and must never reach the log.
+const panicCanary = "CANARY-agent-panic-7d1e-never-log"
+
+// panicky is a test agent whose SessionID panics on the route it owns. It counts its calls, so a
+// test can show the agent was asked: a passing fail-open test proves nothing if the host never
+// calls the agent.
 type panicky struct {
 	agent.Base
-	path string
+	path  string
+	calls *atomic.Int64
 }
 
-func (p panicky) Paths() []string            { return []string{p.path} }
-func (panicky) SessionID(http.Header) string { panic("agent bug") }
+func (p panicky) Paths() []string { return []string{p.path} }
+func (p panicky) SessionID(http.Header) string {
+	if p.calls != nil {
+		p.calls.Add(1)
+	}
+	panic(panicCanary)
+}
 
 // agentSessionHandler is bobSessionHandler with the agents taken from reg, not the default
 // registry.
@@ -65,18 +80,41 @@ func TestPanickingAgentSessionIDFailsOpenToTheSessionWithoutTheAgent(t *testing.
 	hdr := map[string]string{"x-context-guru-session": "hdr-1"}
 	plainSrv, plainRec := agentSessionHandler(t, agent.NewRegistry())
 	want := sessionAt(t, plainSrv, plainRec, route, body, hdr)
+	var calls atomic.Int64
 	reg := agent.NewRegistry()
-	if err := reg.Register(panicky{path: upPath}); err != nil {
+	if err := reg.Register(panicky{path: upPath, calls: &calls}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	srv, rec := agentSessionHandler(t, reg)
+	logs := captureDefaultLog(t)
 
 	// sessionAt fails the test on any status but 200.
 	got := sessionAt(t, srv, rec, route, body, hdr)
 
+	if calls.Load() == 0 {
+		t.Fatal("the agent was never asked; the fail-open path was not run")
+	}
 	if got != want || got != "hdr-1" {
 		t.Fatalf("session = %q, want %q (the session without the agent)", got, want)
 	}
+	out := logs.String()
+	// Seen first, or the canary check below could pass on a log it never captured.
+	if !strings.Contains(out, "recovered from panic in the agent's session id") {
+		t.Fatalf("the recovery was not logged where this test reads:\n%s", out)
+	}
+	if strings.Contains(out, panicCanary) {
+		t.Fatalf("the log holds the agent's panic message:\n%s", out)
+	}
+}
+
+// captureDefaultLog sends the default logger to a buffer for this test.
+func captureDefaultLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
 }
 
 // The panicking agent's route without the session header: the fallback is the derived session,

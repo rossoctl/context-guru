@@ -21,6 +21,7 @@ infrastructure the components sit on.
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. The shared code asks the request's agent; it never names one |
+| `agent/bob/` | IBM Bob's agent: its model route and its session id (`X-Task-Id`) |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
@@ -289,7 +290,7 @@ substitute kind.
 `sha256(system + firstUser)[:16]` so two turns of one conversation land on the same key.
 Explicit id sources: proxy header `x-context-guru-session`, then the agent's own id in the request
 metadata (`user_id` from Claude Code, `taskId` from Bob Shell; `session.Explicit`), then, on Bob's
-model route only, the Bob IDE's `X-Task-Id` header (`explicitSessionOf`); the external
+model route only, the Bob IDE's `X-Task-Id` header (`agent/bob`, through `agent.Agent.SessionID`); the external
 plugin's `pctx.Session`; eval-containers stamps it in the gateway. The bifrost adapter uses
 `session.ExplicitStrict`: it takes `user_id` only in Claude Code's JSON form, because a plain
 `user_id` may name a user, not a conversation.
