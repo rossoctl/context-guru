@@ -422,8 +422,9 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 			e.BaselineCostUSD -= deferFig
 			e.DeferNetUSD = deferFig - e.DeferSearchUSD
 			if e.DeferNetUSD == 0 {
-				// -0 - +0 is -0 under IEEE 754, and deferFig is -0 when the library sums opposite figures to zero.
-				// Assigning the constant 0 gives a plain zero, so the field never serializes as -0.
+				// A guard, not a known case. -0 - +0 is -0 under IEEE 754, but deferFig comes from a map entry that
+				// starts at +0, and +a + -a and +0 + -0 are +0, so deferFig is never -0 and this branch is not
+				// reached today. If it ever were, a plain zero is what the field should serialize.
 				e.DeferNetUSD = 0
 			}
 		}
