@@ -13,9 +13,9 @@ import os
 from pathlib import Path
 import sys
 
-# Provider name in Pi -> the proxy path that serves it. One entry per route; the OpenAI route is added
-# in its own change.
-ROUTES = {"anthropic": "/anthropic"}
+# Provider name in Pi -> the proxy path that serves it. Pi's OpenAI SDK appends `/responses` to the
+# base URL, so the OpenAI path ends in `/v1`, as the proxy serves `POST /openai/v1/responses`.
+ROUTES = {"anthropic": "/anthropic", "openai": "/openai/v1"}
 
 
 def base_url(port, provider):
@@ -71,18 +71,31 @@ def is_routed(models_path, port, provider="anthropic"):
     return bool(port) and _same(current(models_path, provider), base_url(port, provider))
 
 
-def conflicts(models_path, port, providers):
+def _ours(url, port, provider, ours):
+    """True for the URL this port gives the provider, or the URL an earlier setup wrote FOR THIS
+    provider (`ours`: {provider: url}, from the install record). A route on an old port is still ours
+    to move. Another provider's URL is not: a user who copied it here set this key, and it is theirs."""
+    return _same(url, base_url(port, provider)) or _same(url, ours.get(provider))
+
+
+def conflicts(models_path, port, providers, ours=None):
     """{provider: url} for every provider whose baseUrl is already set to something that is not ours.
     Setup refuses on any: that URL may be a company gateway, and replacing it breaks its auth."""
+    ours = dict(ours or {})
     found = {}
     for provider in providers:
         url = current(models_path, provider)
-        if url is not None and not _same(url, base_url(port, provider)):
+        if url is not None and not _ours(url, port, provider, ours):
             found[provider] = url
     return found
 
 
-def install(models_path, state_path, port, providers):
+def install(models_path, state_path, port, providers, ours=None):
+    """Set each provider's baseUrl to the proxy on `port`. A provider already in the routing record
+    keeps its first `previous`, so a re-run (on the same or a new port) never records our own URL as
+    the user's value. `ours` ({provider: url}) names the URL an earlier setup wrote for each provider,
+    for the case the record is gone."""
+    ours = dict(ours or {})
     models_path, state_path = Path(models_path), Path(state_path)
     existed = models_path.exists()
     document = _load(models_path)
@@ -101,7 +114,10 @@ def install(models_path, state_path, port, providers):
         else:
             created_entry = False
         if provider not in keys:
-            keys[provider] = {"previous": entry.get("baseUrl"), "created_entry": created_entry}
+            previous = entry.get("baseUrl")
+            if previous is not None and _ours(previous, port, provider, ours):
+                previous = None  # our own URL is never the user's value to put back
+            keys[provider] = {"previous": previous, "created_entry": created_entry}
         entry["baseUrl"] = base_url(port, provider)
     if not state_path.exists():
         # For a person only: restore() works from the routing record, never from this copy.

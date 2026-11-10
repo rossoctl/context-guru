@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package", "context-guru", "prompt-caching", "anthropic"],
+  "keywords": ["pi-package", "context-guru", "prompt-caching", "anthropic", "openai"],
   "repository": {"type": "git", "url": "https://github.com/rossoctl/context-guru.git", "directory": "pi-package"},
   "pi": {
     "extensions": ["./extensions"]

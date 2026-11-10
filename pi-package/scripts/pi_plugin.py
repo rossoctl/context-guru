@@ -38,13 +38,23 @@ RELEASE_REPO = "rossoctl/context-guru"
 MINIMUM_RELEASE = (0, 4, 0)
 SERVICE = "context-guru-pi"
 LAUNCHD_LABEL = "io.rossoctl.context-guru-pi"
-PROVIDERS = ("anthropic",)
+# Pi's built-in providers this package routes, and where each one forwards. `openai-codex` (ChatGPT
+# login through chatgpt.com/backend-api) is not here: the proxy has no route for that backend.
+PROVIDERS = ("anthropic", "openai")
+UPSTREAMS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
+NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
 PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
 DEFAULT_PRESET = "off"
 DEFAULT_STRATEGY = "auto"
 
 # The same strategies, keys and values as the Claude Code plugin (context-guru-plugin/scripts/settings.py),
 # so one name means one behaviour on both clients. `none` writes no cache keys at all.
+#
+# The same keys also drive the proxy's OpenAI keep-alive; no OpenAI-only key is needed. On an OpenAI
+# Responses request the proxy uses `keepalive`, `keepalive_max_pings`, `keepalive_max_usd_per_ping` and
+# `keepalive_min_prefix_tokens`, and replaces the idle time with its OpenAI default (28 minutes, under
+# the 30-minute cache of GPT-5.6 and later). The `_1h` keys are Anthropic only. Earlier OpenAI models
+# get no pings. The Codex plugin writes `keepalive: true` alone, which gives the same OpenAI behaviour.
 STRATEGIES = {
     "none": {"cache": {}, "spends": False,
              "desc": "no keep-alive pings. Pi's own cache warming runs as it would without context-guru."},
@@ -52,17 +62,19 @@ STRATEGIES = {
                        "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
                        "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
              "spends": True,
-             "desc": "idle pings that follow the cache lifetime of each session. 5-minute cache: first "
-                     "ping at 240 s, at most 2. 1-hour cache: 1 ping at 59 minutes. Uses your quota."},
+             "desc": "idle pings that follow the cache lifetime of each session. Anthropic 5-minute cache: "
+                     "first ping at 240 s, at most 2. Anthropic 1-hour cache: 1 ping at 59 minutes. "
+                     "OpenAI (GPT-5.6 and later): a ping at 28 minutes, at most 2. Uses your quota."},
     "1-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 1,
                          "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
                          "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
-               "spends": True, "desc": "at most 1 idle ping per idle gap. Uses your quota."},
+               "spends": True, "desc": "at most 1 idle ping per idle gap, on Anthropic and on OpenAI. "
+                                       "Uses your quota."},
     "2-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 2,
                          "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
                          "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 2},
-               "spends": True, "desc": "at most 2 idle pings per idle gap, on both cache lifetimes. "
-                                       "Uses your quota."},
+               "spends": True, "desc": "at most 2 idle pings per idle gap, on both Anthropic cache lifetimes "
+                                       "and on OpenAI. Uses your quota."},
 }
 
 
@@ -408,18 +420,31 @@ def install_escape_hatch():
 # ------------------------------------------------------------------------------------------- commands
 
 def consent_question(port, strategy):
-    question = (f"Route Pi's Anthropic models through a local context-guru proxy at "
-                f"http://127.0.0.1:{port}/anthropic, forwarding to api.anthropic.com. This changes "
-                f"{models_path()} for every Pi session on this machine, and installs the proxy as a "
-                f"user service that starts at login.")
+    routes = "; ".join(f"{NAMES[p]} at {models_route.base_url(port, p)}, forwarding to {UPSTREAMS[p]}"
+                       for p in PROVIDERS)
+    question = (f"Route Pi's {' and '.join(NAMES[p] for p in PROVIDERS)} models through a local "
+                f"context-guru proxy: {routes}. This changes {models_path()} for every Pi session on "
+                f"this machine, and installs the proxy as a user service that starts at login.")
     if STRATEGIES[strategy]["spends"]:
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
-                     "using your own quota, and Pi's own cache warming stops for routed models.")
+                     "using your own quota on each provider: Anthropic after 4 minutes idle (59 "
+                     "minutes on a 1-hour cache), OpenAI GPT-5.6 and later after 28 minutes idle. "
+                     "Pi's own cache warming stops for routed models.")
     return question
+
+
+def own_urls(record):
+    """{provider: url} an earlier setup wrote, on any port. A clash with a provider's own entry is our
+    own route; a clash with another provider's entry is not."""
+    urls = record.get("base_urls")
+    return {p: url for p, url in urls.items() if isinstance(url, str)} if isinstance(urls, dict) else {}
 
 
 def setup(args):
     record = read_record()
+    # Read before the record changes: a recorded port someone else now holds moves the route to a new
+    # port, and the old URLs must still count as ours, not as a foreign gateway.
+    earlier = own_urls(record)
     port = choose_port(record)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     preset = record.get("preset") or DEFAULT_PRESET
@@ -427,14 +452,16 @@ def setup(args):
         facts(result="refused", reason="unknown_strategy", note=",".join(STRATEGIES))
         return 2
     try:
-        clash = models_route.conflicts(models_path(), port, PROVIDERS)
+        clash = models_route.conflicts(models_path(), port, PROVIDERS, earlier)
     except Exception as error:  # an unreadable models.json
         facts(result="error", reason="models_unreadable", models=models_path(), detail=error)
         return 2
+    # Only a hatch that exists is named: it undoes a route an earlier install left behind.
+    hatch = {"reset_hatch": reset_hatch()} if reset_hatch().exists() else {}
     if args.plan:
         if clash:
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
-                  existing_base_url=clash)
+                  existing_base_url=clash, **hatch)
             return 0
         facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy,
               service=service_kind() or "unsupported", already_routed=str(
@@ -445,7 +472,7 @@ def setup(args):
         facts(result="refused", reason="consent_required")
         return 2
     if clash:
-        facts(result="refused", reason="base_url_already_set", existing_base_url=clash)
+        facts(result="refused", reason="base_url_already_set", existing_base_url=clash, **hatch)
         return 2
     if service_kind() is None:
         facts(result="error", reason="unsupported_platform", detail=platform.system())
@@ -473,7 +500,7 @@ def setup(args):
                   base_urls={p: models_route.base_url(port, p) for p in PROVIDERS})
     write_record(record)
     try:
-        models_route.install(models_path(), routing_state(), port, PROVIDERS)
+        models_route.install(models_path(), routing_state(), port, PROVIDERS, earlier)
         hatch = install_escape_hatch()
     except Exception as error:
         facts(result="error", reason="routing_write_failed", detail=error, proxy_running="true")

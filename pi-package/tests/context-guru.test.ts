@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { endKind, isRouted, parseArgs, parseFacts, readInstall } from "../extensions/context-guru.ts";
+import { endKind, forChatGPTSignIn, isRouted, parseArgs, parseFacts, readInstall } from "../extensions/context-guru.ts";
 
-const install = { port: 8800, base_urls: { anthropic: "http://127.0.0.1:8800/anthropic" }, cache_strategy: "auto" };
+const install = {
+  port: 8800,
+  base_urls: { anthropic: "http://127.0.0.1:8800/anthropic", openai: "http://127.0.0.1:8800/openai/v1" },
+  cache_strategy: "auto",
+};
 
 test("a model is routed only when its baseUrl is one setup wrote", () => {
   assert.equal(isRouted(install, "http://127.0.0.1:8800/anthropic"), true);
@@ -16,6 +20,28 @@ test("a model is routed only when its baseUrl is one setup wrote", () => {
   assert.equal(isRouted(install, "http://127.0.0.1:8801/anthropic"), false);
   assert.equal(isRouted(undefined, "http://127.0.0.1:8800/anthropic"), false);
   assert.equal(isRouted(install, undefined), false);
+});
+
+test("an OpenAI model is routed by its own URL, and OpenAI's own URL is not", () => {
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai/v1"), true);
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai/v1/"), true);
+  assert.equal(isRouted(install, "https://api.openai.com/v1"), false);
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai"), false);
+  // An install from the Anthropic-only version routes no OpenAI model.
+  assert.equal(isRouted({ ...install, base_urls: { anthropic: install.base_urls.anthropic } }, "http://127.0.0.1:8800/openai/v1"), false);
+});
+
+test("a ChatGPT sign-in request loses the fields ChatGPT rejects, and keeps everything else", () => {
+  const payload = {
+    model: "gpt-5.6-luna", input: [{ role: "user" }], stream: true, prompt_cache_key: "s1", store: false,
+    prompt_cache_retention: "24h", prompt_cache_options: { ttl: "30m" }, max_output_tokens: 1000, temperature: 0.2,
+  };
+  const out = forChatGPTSignIn(payload);
+  assert.deepEqual(out, { model: "gpt-5.6-luna", input: [{ role: "user" }], stream: true, prompt_cache_key: "s1", store: false });
+  assert.equal(payload.max_output_tokens, 1000, "the payload Pi built is not changed");
+  assert.equal(forChatGPTSignIn({ model: "gpt-5.6-luna", input: [] }), undefined);
+  assert.equal(forChatGPTSignIn(undefined), undefined);
+  assert.equal(forChatGPTSignIn([1, 2]), undefined);
 });
 
 test("facts parse one key per line and keep '=' inside values", () => {
