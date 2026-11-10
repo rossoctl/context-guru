@@ -2755,3 +2755,42 @@ func TestAnAgedOutAnswerIsCountedByKindWhenTheWarmRequestReadsIt(t *testing.T) {
 		})
 	}
 }
+
+// ⭐ A flat-rate provider (IBM Bob, #1030) bills fresh input, cache read and cache write at ONE rate. An
+// operator price entry with cache_read == cache_write == input gives a rewrite cost of 0, so any cut with a
+// positive saving passes. The SAME cut is refused at Claude Opus rates, where the rewrite costs more.
+func TestTheSameWarmCutPassesAtAFlatRateAndIsRefusedAtOpusRates(t *testing.T) {
+	flat := components.TokenRates{Input: 2e-6, Output: 8e-6, CacheRead: 2e-6, CacheWrite: 2e-6}
+	deep, rm, _ := deepFixture(warmLookbackBlocks) // a deep drop: it rewrites the whole conversation
+	res := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: rm[0].saves}}}
+	decide := func(rates components.TokenRates) (bool, string) {
+		e := shippedSweep(t, warmCfg)
+		c := warmCtx("w-flat", newMemStore())
+		c.ModelName, c.SelfRates = "premium-ide", rates
+		c.PrevBilledInput = localTokens(deep.Input) // ratio 1
+		return e.warmGate(c, deep, 3, 0, 0, localTokens(deep.Input), &warmApply{})(res, deep.Input)
+	}
+	if ok, reason := decide(flat); !ok {
+		t.Fatalf("flat rate: refused (%q), want a cut with a positive saving to pass", reason)
+	}
+	if ok, _ := decide(opusRates); ok {
+		t.Fatal("Opus rates: the same cut was accepted, want a refusal")
+	}
+	// The gate's rates are the flat ones, with a rewrite price of exactly 0.
+	c := warmCtx("w-flat2", newMemStore())
+	c.ModelName, c.SelfRates = "premium-ide", flat
+	if r, w := shippedSweep(t, warmCfg).warmGateRates(c); r != w || r != 2e-6 {
+		t.Fatalf("rates = %v/%v, want read == write == 2e-6", r, w)
+	}
+}
+
+// A model with NO price entry gets the built-in Claude-class rates (write 12.5x read), never a flat rate. The
+// premium makes the rewrite dear, so the gate refuses more and never less: the safe direction.
+func TestAModelWithNoPriceEntryIsGatedAtClaudeClassRatesNeverFlat(t *testing.T) {
+	c := warmCtx("w-noprice", newMemStore())
+	c.ModelName, c.SelfRates = "premium-ide", components.TokenRates{}
+	r, w := shippedSweep(t, warmCfg).warmGateRates(c)
+	if !(w > r) || r <= 0 {
+		t.Fatalf("rates = %v/%v, want write > read > 0 for a model with no price entry", r, w)
+	}
+}
