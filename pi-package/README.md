@@ -118,6 +118,27 @@ One cache strategy drives both providers. What each one spends:
 | `1-ping` | At most 1 ping per idle gap | At most 1 ping per idle gap, after 28 minutes |
 | `2-ping` | At most 2 pings per idle gap, on both cache lifetimes | At most 2 pings per idle gap, after 28 minutes |
 
+## The proxy config
+
+The package writes the proxy config to `~/.local/state/context-guru-pi/proxy.yaml`. Its first line is
+the package's marker. The second line names the cache strategy.
+
+- **A proxy of v0.7.1 or later** gets the strategy by name (`cache:` / `strategy: auto`). The proxy
+  fills the cache keys from its own table at each start. So a new proxy release brings new values.
+- **An older proxy** does not accept that key. It gets the cache keys written out, from the package's
+  own table.
+- The package reads the version from `context-guru-proxy --version`. That command never starts a proxy.
+  A version it cannot read counts as old.
+- `none` writes no `cache:` block, on any proxy.
+- **The config is written again before each start:** in `setup`, `preset`, `cache-strategy`,
+  `update` (with the new binary) and the session-start `restart`. It comes from the install record:
+  the preset, the cache strategy and any chained upstream. A proxy that already answers is not
+  restarted for it. It reads the new file at its next start.
+- **A hand edit inside a file with the marker does not stay.** The next `restart`, `update`,
+  `preset` or `cache-strategy` writes the file again. To keep your edits, remove the marker line.
+- **A file without the marker is yours.** The package never writes it. `restart` and `update` report
+  `config=not_owned` and start the proxy with your file. `setup` and `configure` refuse.
+
 A ping goes to the provider with your own credential, so it uses your API quota (or your
 subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more (20,000 while a tool runs, for background work or a teammate, and on a subagent), and
 never a ping that would cost more than $0.50. It does not ping OpenAI models before GPT-5.6: their

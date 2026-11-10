@@ -391,6 +391,8 @@ func main() {
 			QueueSize:        *dashQueue,
 			LifecycleSignals: *dashLifecycle,
 			TrustedCIDRs:     splitComma(*dashCIDRs),
+			// Prices rows booked at $0 before the price map finished its background load (#920).
+			Prices: priceResolver(windows),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
