@@ -115,13 +115,20 @@ is installed and at least one Pi model goes to the proxy (the session's model or
    makes no model call and uses no tokens.
 2. If the proxy does not answer, it restarts the service once: `launchctl kickstart -k` on macOS
    (it loads the LaunchAgent first if it is not loaded), `systemctl --user restart` on Linux. It
-   restarts only a service that setup wrote. A proxy that already answers is not restarted.
+   restarts only a service that setup wrote. Before it restarts, it checks `/healthz` once more with
+   the same 5-second limit, so a proxy that is slow but alive is not restarted.
 3. It checks `/healthz` again, with the same 5-second limit.
-4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down,
-   tells you to run `/context-guru status`, and names the reset command.
+4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down and
+   why: the restart did not help, the service file is missing, the service file is not ours, or the
+   platform has no user service. It tells you to run `/context-guru status`. It names the reset
+   command only when that file exists.
 
 The check runs in the background. The session does not wait for it. It runs once per session start
-and never loops. If the session ends first, the check stops and shows nothing.
+and never loops. When the session ends, Pi stops that session's check, the restart included. So
+`pi -p` exits as soon as it has the answer, and an ended session gets no warning.
+
+One restart runs at a time. If two Pi sessions start together, the second one waits for the first
+restart, checks `/healthz` again, and does not restart a proxy that now answers.
 
 In print mode (`pi -p`) and JSON mode there is no UI, so the warning goes to stderr. stdout carries
 the answer, and a script reads errors on stderr.

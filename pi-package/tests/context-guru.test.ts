@@ -9,8 +9,8 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
-  checkAtStart, downNotice, endKind, forChatGPTSignIn, isRouted, needsStartCheck, parseArgs, parseFacts, proxyAnswers,
-  readInstall, START_CHECK_TIMEOUT_MS, type StartCheck,
+  checkAtStart, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, needsStartCheck, parseArgs, parseFacts, proxyAnswers,
+  readInstall, START_CHECK_TIMEOUT_MS, StartChecks, type StartCheck,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -96,7 +96,7 @@ function fake(answers: boolean[], over: Partial<StartCheck> = {}) {
     answers: async () => answers[log.checks++] ?? false,
     restart: async () => {
       log.restarts++;
-      return {};
+      return { result: "down", service: "restarted" };
     },
     active: () => true,
     notify: (text) => log.notices.push(text),
@@ -123,7 +123,7 @@ test("a proxy still down after one restart gives exactly one notice, and no loop
   assert.equal(log.checks, 2);
   assert.equal(log.restarts, 1);
   assert.equal(log.notices.length, 1);
-  assert.match(log.notices[0], /port 8800 does not answer/);
+  assert.match(log.notices[0], /port 8800 does not answer: one restart did not help\./);
   assert.match(log.notices[0], /\/context-guru status/);
   assert.match(log.notices[0], /\/state\/context-guru-reset/);
 });
@@ -148,7 +148,54 @@ test("a session that ended during the check gets no restart and no notice", asyn
 });
 
 test("the notice text is one line", () => {
-  assert.equal(downNotice(8800, "/h").includes("\n"), false);
+  assert.equal(downNotice(8800, { service: "restarted" }, "/h").includes("\n"), false);
+});
+
+test("the notice names the real reason the proxy is still down", () => {
+  assert.equal(downReason({ result: "down", service: "restarted" }), "one restart did not help");
+  assert.match(downReason({ result: "down", service: "no_service" }), /service file is missing, so nothing was restarted.*\/context-guru setup/);
+  assert.match(downReason({ result: "down", service: "not_owned" }), /not written by context-guru/);
+  assert.match(downReason({ result: "down", service: "unsupported" }), /no user service/);
+  assert.match(downReason({ result: "down", service: "failed" }), /restart command failed/);
+  assert.match(downReason({ result: "not_installed" }), /no install record/);
+  assert.match(downReason({ result: "already_up" }), /answered the restart check/);
+  assert.equal(downReason({}), "the restart did not run");
+  assert.match(downNotice(8800, { service: "no_service" }), /port 8800 does not answer: its service file is missing/);
+});
+
+test("the notice names the reset command only when there is one", () => {
+  assert.match(downNotice(8800, {}, "/h/context-guru-reset"), /run \/h\/context-guru-reset from a shell/);
+  assert.doesNotMatch(downNotice(8800, {}), /from a shell|undefined/);
+  const none = fake([false, false], { hatch: undefined, restart: async () => ({ result: "down", service: "restarted" }) });
+  return checkAtStart(none.check).then(() => assert.doesNotMatch(none.log.notices[0], /from a shell|undefined/));
+});
+
+test("a session's end stops only that session's check", () => {
+  const checks = new StartChecks();
+  const a = checks.begin("session-a");
+  const b = checks.begin("session-b");
+  checks.end("session-a");
+  assert.equal(a.active(), false);
+  assert.equal(a.signal.aborted, true);
+  assert.equal(b.active(), true, "the other session's check keeps running");
+  assert.equal(b.signal.aborted, false);
+  checks.end("session-unknown"); // nothing to stop
+  assert.equal(b.active(), true);
+});
+
+test("a session that starts again replaces its own check, and a finished check is forgotten", () => {
+  const checks = new StartChecks();
+  const first = checks.begin("s");
+  const second = checks.begin("s");
+  assert.equal(first.active(), false);
+  assert.equal(second.active(), true);
+  checks.done("s", first.signal); // a late finish of the old check does not drop the new one
+  checks.end("s");
+  assert.equal(second.active(), false);
+  const third = checks.begin("s");
+  checks.done("s", third.signal);
+  checks.end("s"); // already forgotten: nothing aborts
+  assert.equal(third.active(), true);
 });
 
 test("the health check is a GET to localhost /healthz, true only on 200", async () => {

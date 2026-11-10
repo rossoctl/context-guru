@@ -137,9 +137,14 @@ def facts(**values):
         print(f"{key}=" + " ".join(str(value).split("\n")).replace("\r", " "))
 
 
-def healthy(port):
+# The time limit of the extension's session-start check. `restart` uses the same limit before it
+# restarts, so a proxy that is slow but alive is not killed.
+START_CHECK_SECONDS = 5
+
+
+def healthy(port, timeout=1):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
             return response.status == 200
     except Exception:
         return False
@@ -590,20 +595,41 @@ def status(args):
     return 0 if values["result"] == "ok" else 1
 
 
+def restart_lock():
+    """An exclusive lock on a file in the state directory, held until the returned file is closed.
+    A second caller waits here until the first one is done."""
+    import fcntl  # Unix only, like the services this restarts.
+    path = state_dir() / "restart.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
 def restart(args):
-    """Restart the proxy service once, for the extension's session-start check. A proxy that already
-    answers is left alone, so two Pi sessions that start together do not restart it twice."""
+    """Restart the proxy service once, for the extension's session-start check. One restart runs at a
+    time (a lock file). A caller that waited for the lock checks health again first, so when two Pi
+    sessions start together, the second one finds the proxy up and does not restart it again. The
+    health check here has the extension's 5-second limit, so a slow but live proxy is left alone."""
     record = read_record()
     port = int(record.get("port") or 0)
     if not port:
         facts(result="not_installed")
         return 2
-    where = {"port": port, "reset_hatch": reset_hatch(), "log": state_dir() / "proxy.log"}
-    if healthy(port):
-        facts(result="already_up", **where)
-        return 0
-    service = restart_service()
-    up = service == "restarted" and wait_healthy(port)
+    where = {"port": port, "log": state_dir() / "proxy.log"}
+    # Only a hatch that exists is named, as in setup: a failed setup can leave a record without one.
+    if reset_hatch().exists():
+        where["reset_hatch"] = reset_hatch()
+    with restart_lock():
+        if healthy(port, timeout=START_CHECK_SECONDS):
+            facts(result="already_up", **where)
+            return 0
+        service = restart_service()
+        up = service == "restarted" and wait_healthy(port)
     facts(result="up" if up else "down", service=service, **where)
     return 0 if up else 1
 

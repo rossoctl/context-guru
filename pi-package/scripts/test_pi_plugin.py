@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -386,13 +387,13 @@ class Restart(Sandbox):
 
     def test_not_installed(self):
         pi_plugin.record_path().unlink()
-        code, facts = self.restart("launchd", lambda port: False)
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
         self.assertEqual((code, facts["result"]), (2, "not_installed"))
         self.assertEqual(self.calls, [])
 
     def test_a_proxy_that_answers_is_not_restarted(self):
         self.our_plist()
-        code, facts = self.restart("launchd", lambda port: True)
+        code, facts = self.restart("launchd", lambda port, timeout=1: True)
         self.assertEqual((code, facts["result"]), (0, "already_up"))
         self.assertEqual(self.calls, [])
 
@@ -406,7 +407,7 @@ class Restart(Sandbox):
         self.our_plist()
         self.fail = {"kickstart"}
         # The first kickstart fails, so the plist is loaded; the second kickstart then fails too here.
-        code, facts = self.restart("launchd", lambda port: False)
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
         self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
         self.assertEqual(self.calls[1], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
         self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
@@ -428,12 +429,12 @@ class Restart(Sandbox):
 
     def test_a_plist_we_do_not_own_is_left_alone(self):
         self.our_plist(managed=False)
-        code, facts = self.restart("launchd", lambda port: False)
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
         self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "not_owned"))
         self.assertEqual(self.calls, [])
 
     def test_no_service_file_means_no_restart(self):
-        code, facts = self.restart("launchd", lambda port: False)
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
         self.assertEqual((code, facts["service"]), (1, "no_service"))
         self.assertEqual(self.calls, [])
 
@@ -445,22 +446,65 @@ class Restart(Sandbox):
 
     def test_a_unit_we_do_not_own_is_left_alone(self):
         self.our_unit("[Service]\n")
-        code, facts = self.restart("systemd", lambda port: False)
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
         self.assertEqual(facts["service"], "not_owned")
         self.assertEqual(self.calls, [])
 
     def test_still_down_names_the_reset_hatch_and_the_log(self):
         self.our_unit()
+        pi_plugin.reset_hatch().write_text("#!/bin/sh\n")
         self.fail = {"--user"}
-        code, facts = self.restart("systemd", lambda port: False)
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
         self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
         self.assertEqual(facts["reset_hatch"], str(pi_plugin.reset_hatch()))
         self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
         self.assertEqual(facts["port"], "8800")
 
     def test_an_unsupported_platform_restarts_nothing(self):
-        code, facts = self.restart(None, lambda port: False)
+        code, facts = self.restart(None, lambda port, timeout=1: False)
         self.assertEqual((code, facts["service"]), (1, "unsupported"))
+        self.assertEqual(self.calls, [])
+
+
+    def test_a_missing_reset_hatch_is_not_named(self):
+        self.our_unit()
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
+        self.assertEqual(facts["result"], "down")
+        self.assertNotIn("reset_hatch", facts)
+
+    def test_the_first_health_check_has_the_extensions_5_second_limit(self):
+        """A proxy that is slow but alive answers within 5 s, and is not force-restarted."""
+        self.our_plist()
+        limits = []
+
+        def healthy(port, timeout=1):
+            limits.append(timeout)
+            return timeout >= 5  # answers only to a check that waits long enough
+        code, facts = self.restart("launchd", healthy)
+        self.assertEqual((code, facts["result"]), (0, "already_up"))
+        self.assertEqual(limits, [pi_plugin.START_CHECK_SECONDS])
+        self.assertEqual(pi_plugin.START_CHECK_SECONDS, 5)
+        self.assertEqual(self.calls, [])
+
+    def test_a_second_restart_waits_for_the_first_and_finds_the_proxy_up(self):
+        self.our_plist()
+        up = threading.Event()
+        result = {}
+        lock = pi_plugin.restart_lock()  # the first restart, still running
+        try:
+            with mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                    mock.patch.object(pi_plugin, "healthy", side_effect=lambda port, timeout=1: up.is_set()):
+                second = threading.Thread(target=lambda: result.update(zip(("code", "facts"), self.run_main("restart"))))
+                second.start()
+                second.join(0.3)
+                self.assertTrue(second.is_alive(), "the second caller waits for the lock")
+                up.set()  # the first restart brought the proxy up
+                lock.close()
+                second.join(5)
+        finally:
+            lock.close()
+        self.assertFalse(second.is_alive())
+        self.assertEqual((result["code"], result["facts"]["result"]), (0, "already_up"))
         self.assertEqual(self.calls, [])
 
 
