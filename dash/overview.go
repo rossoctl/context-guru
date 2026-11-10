@@ -430,6 +430,23 @@ type Overview struct {
 	// request of a thread, and the first one after a restart that lost the state. It does not count a row
 	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
 	EstimatedRequests int64 `json:"estimated_requests"`
+	// Tokens is the accountant library's figures in tokens by tier, in total and by feature (#998).
+	// Every accountant-measured saving has its token form here. The read-time credits (the declaration
+	// filter, the split's historical credit), defer_net_usd and the manual pings' savings do not.
+	// The tiers are never added into one number.
+	// TokensUnmeasuredRequests counts the agent requests in the period the library did not price
+	// (acc_priced = 0: rows from before the library, and rows it could not price): they have no
+	// token figure, which is not a zero saving. A held estimate (EstimatedRequests) is measured
+	// and its component tokens are held out, as its dollars are. Both reads come from DB.AccTokens,
+	// so the full and the lean answer agree.
+	Tokens                   AccTokenStats `json:"tokens"`
+	TokensUnmeasuredRequests int64         `json:"tokens_unmeasured_requests"`
+	// KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens by tier (the ping
+	// rows' usage), and KeepAlivePingOutputTokens their output tokens: the token form of
+	// KeepAlivePingUSD. Not in Tokens. The keep-alive's net in tokens is
+	// Tokens.ByFeature["keepalive"] less these.
+	KeepAlivePingTokens       TierTokens `json:"keepalive_ping_tokens"`
+	KeepAlivePingOutputTokens int64      `json:"keepalive_ping_output_tokens"`
 	// EstimatedSavedUSD is what those requests would have saved, held OUT of every total (#915):
 	// NetSavedUSD, TotalSavedUSD, the components and the keep-alive tab never include it. It is
 	// what the library priced without knowing whether the cache was already warm, and that can be
@@ -800,6 +817,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		invalidConfigRecent                    int64
 	)
 	var g errgroup.Group
+	g.Go(func() error {
+		t, err := d.AccTokens(f)
+		if err != nil {
+			return err
+		}
+		t.apply(o)
+		return nil
+	})
 	// See InvalidConfigRequests' own comment: preset is set to "invalid" by
 	// proxy/tenancy.go's build() exactly when this account's stored configuration failed to
 	// build, on every request forwarded uncompacted while that lasts. Cheap: cond already

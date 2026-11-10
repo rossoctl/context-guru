@@ -116,6 +116,25 @@ CREATE TABLE IF NOT EXISTS requests (
   -- 0 on every row written before this column existed, including an old estimated row that DID book its
   -- figure (price_estimated alone does not say which meaning a row has).
   estimate_held      INTEGER NOT NULL DEFAULT 0,
+  -- The accountant library's cache effects in TOKENS by tier (#998), beside their dollars: the
+  -- keep-alive rescue (tok_ka_*), the split (tok_split_*), the head-TTL legs (tok_ttl_*) and the
+  -- ended-change break (tok_ended_*). Each is saved and caused, by tier: in = fresh input,
+  -- rd = cache read, w5m / w1h = the 5-minute / 1-hour cache write. Stored at write time for the
+  -- reason saved_first_usd is: the library prices from the thread's history, which a row does not
+  -- keep. 0 on a request the library did not price (acc_priced = 0) and on every older row, which is
+  -- "not measured", not "saved nothing". Additive (acctokens.go).
+  tok_ka_saved_in INTEGER NOT NULL DEFAULT 0, tok_ka_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ka_caused_in INTEGER NOT NULL DEFAULT 0, tok_ka_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_saved_in INTEGER NOT NULL DEFAULT 0, tok_split_saved_rd INTEGER NOT NULL DEFAULT 0, tok_split_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_split_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_caused_in INTEGER NOT NULL DEFAULT 0, tok_split_caused_rd INTEGER NOT NULL DEFAULT 0, tok_split_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_split_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_saved_in INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_caused_in INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_saved_in INTEGER NOT NULL DEFAULT 0, tok_ended_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_caused_in INTEGER NOT NULL DEFAULT 0, tok_ended_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  -- The request's whole token figure: the sum of its request_components tok_* figures and the four
+  -- effects above, written with them, so the lean stats read takes the totals from its one scan (#502).
+  tok_total_saved_in INTEGER NOT NULL DEFAULT 0, tok_total_saved_rd INTEGER NOT NULL DEFAULT 0, tok_total_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_total_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_total_caused_in INTEGER NOT NULL DEFAULT 0, tok_total_caused_rd INTEGER NOT NULL DEFAULT 0, tok_total_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_total_caused_w1h INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -246,6 +265,22 @@ CREATE TABLE IF NOT EXISTS requests (
   -- the table. A number from a config file.
   compaction_point        INTEGER NOT NULL DEFAULT 0,
   compaction_point_source TEXT    NOT NULL DEFAULT '',
+  -- The subscription limit values of the provider's answer (#984), from its
+  -- anthropic-ratelimit-unified-5h-* and -7d-* response headers: the used share (0..1), the reset
+  -- time (unix seconds) and the status word. NULLABLE: NULL is "the header was missing or did not
+  -- parse", which must stay apart from a share of 0. limit_seen is 1 when at least one value is
+  -- set, for the partial indexes behind GET /api/me/limits. Numbers and status words only.
+  limit_seen           INTEGER NOT NULL DEFAULT 0,
+  limit_5h_utilization REAL,
+  limit_5h_reset       INTEGER,
+  limit_5h_status      TEXT,
+  limit_7d_utilization REAL,
+  limit_7d_reset       INTEGER,
+  limit_7d_status      TEXT,
+  -- 1 when the client authenticated this Anthropic request with a Claude subscription token (an
+  -- OAuth bearer token, sk-ant-oat...), 0 for an API key or any other credential. Only the kind:
+  -- the token itself is never stored. GET /api/me/limits reads it off the account's newest request.
+  auth_subscription    INTEGER NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -367,6 +402,10 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_first_usd  REAL NOT NULL DEFAULT 0,
   saved_replay_usd REAL NOT NULL DEFAULT 0,
   priced_by        TEXT NOT NULL DEFAULT '',
+  -- The same figure as saved_usd in TOKENS by tier (#998): what the component saved and what it
+  -- caused. 0 unless priced_by = 'accountant'. Additive (acctokens.go).
+  tok_saved_in INTEGER NOT NULL DEFAULT 0, tok_saved_rd INTEGER NOT NULL DEFAULT 0, tok_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_caused_in INTEGER NOT NULL DEFAULT 0, tok_caused_rd INTEGER NOT NULL DEFAULT 0, tok_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_caused_w1h INTEGER NOT NULL DEFAULT 0,
   duration_ms  REAL    NOT NULL DEFAULT 0,
   err          TEXT    NOT NULL DEFAULT '',
   -- Why this component turned candidates away, as {"gate_name":count} — the only answer
@@ -719,6 +758,14 @@ CREATE INDEX IF NOT EXISTS idx_requests_session_alias ON requests(session_alias)
 -- addColumns adds.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
   ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
+-- GET /api/me/limits reads the newest row with limit values (#984). Partial, so only rows that
+-- carried the subscription headers are in them and a database without them pays nothing. One per
+-- read shape: a tenant's own rows, and every row on a single-tenant proxy. Here for the same reason
+-- as idx_requests_project: they name columns addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_requests_limits_tenant
+  ON requests(tenant_id, ts DESC) WHERE limit_seen = 1;
+CREATE INDEX IF NOT EXISTS idx_requests_limits_ts
+  ON requests(ts DESC) WHERE limit_seen = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -872,6 +919,18 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The user's own compaction point (#948). Additive: an earlier row has none.
 	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
+	// The subscription limit headers (#984). Nullable, no default: an earlier row read no headers,
+	// and NULL says so. limit_seen 0 on an earlier row is true for the same reason.
+	{"requests", "limit_seen", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "limit_5h_utilization", "REAL"},
+	{"requests", "limit_5h_reset", "INTEGER"},
+	{"requests", "limit_5h_status", "TEXT"},
+	{"requests", "limit_7d_utilization", "REAL"},
+	{"requests", "limit_7d_reset", "INTEGER"},
+	{"requests", "limit_7d_status", "TEXT"},
+	// The auth kind (#984): 1 for a subscription (OAuth) token. 0 on an earlier row, which reads as
+	// "not known to be a subscription" until the account's next request.
+	{"requests", "auth_subscription", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was

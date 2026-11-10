@@ -3,7 +3,7 @@
 // The mod is the whole display: the status line is no longer installed, so what it drew lives here, the same way:
 //   band row 1  next-message price (warm vs cold), Ping or why it is off, hide, the dashboard link
 //   band row 2  the status line's row: `▲ update`, `saved $x of $y session · saved $z of $q subagents ↻ $p pings`
-//               (on a subscription `5h 34% · saved 1.2M rd / 85.0k wr` instead of money),
+//               (on a subscription `5h 34% · this session saved 85.0k wr · cost 40.0k rd` instead of money),
 //               the cache clock (`cache ● ████░░ 4:12`, dim `cache ○ cold 1:07:04` once cold), `ctx ████░░░░ 41%`
 //   band row 3  one chip per named sub-agent cache (default on; `a` or the pane button turns it off)
 //   band row 4  the weekly tip when a command is stale, else one command and what it does, rotating
@@ -20,7 +20,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { PaneData, Snapshot, ThreadView, View } from '../types'
-import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, nextPingWords, pingReason, pingToast, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
+import { ROTATE_MS, TIPS, cacheClock, ctxBar, ctxNumbers, heatCells, moneyPair, nextPrice, nextPingWords, pingReason, pingToast, reasonWords, rotatingTip, shortReason, showPing, signature, spark, stack, usd, view, weeklyTip, words } from './model'
 
 const PANE = 'context-guru'
 const POLL_MS = 15_000
@@ -199,8 +199,9 @@ function engineFigures(c: { tokens?: number; window: number }, limits: readonly 
 /** The status line's row, from the same figures and with the same rules, shortened to fit `cols` in the status line's
  * order: the subagents phrase, then the `session` label, then the bars (the clock and the percentages stay). */
 function statusRow(v: View, engine: { tokens?: number; window?: number; fiveHour?: number } | null, cols: number) {
-  // A subscription pays in limit, not dollars: the 5-hour window's share and saved tokens replace the money.
-  const limit = engine?.fiveHour !== undefined ? { pct: `${Math.round(engine.fiveHour)}%`, saved: v.windowSaved } : undefined
+  // A subscription pays in limit, not dollars: the 5-hour window's share and the tokens THIS session saved in it replace
+  // the money. The limit is the account's, but the band speaks for this session.
+  const limit = engine?.fiveHour !== undefined ? { pct: `${Math.round(engine.fiveHour)}%`, saved: v.windowSaved && `this session ${v.windowSaved}` } : undefined
   const save = limit ? undefined : moneyPair(v.mainSaved, v.mainBaseline) ?? (v.mainSaved === undefined ? moneyPair(v.saved, v.baseline) : undefined)
   const subs = v.others > 0 ? moneyPair(v.othersSaved, v.othersBaseline) : undefined
   const pings = v.pingsSaved !== undefined && v.pingsSaved >= 0.005 ? usd(v.pingsSaved) : undefined
@@ -320,7 +321,10 @@ export const register: Register = on => {
     const narrow = cols < 80 // row 1 must fit one line with `hide` at 60 columns
     const tip = weeklyTip(v.tip)
     const chips = v.subs.slice(0, AGENT_CHIPS)
-    const status = statusRow(v, await read($, context), cols)
+    const figures = await read($, context)
+    const status = statusRow(v, figures, cols)
+    // On a subscription the next message is priced in tokens, the unit of the saving; with an API key in dollars.
+    const { warm, cold } = nextPrice(m, figures?.fiveHour !== undefined)
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -335,15 +339,15 @@ export const register: Register = on => {
           {m.isWarm && (
             <Text>
               <Text dimColor>{narrow ? 'next ' : 'next message '}</Text>
-              {m.warmUsd !== undefined && <Text color="success">{usd(m.warmUsd)}</Text>}
-              {m.coldUsd !== undefined && <Text dimColor>{m.warmUsd !== undefined ? ' · ' : ''}{usd(m.coldUsd)}{narrow ? ' cold' : ' if cold'}</Text>}
+              {warm !== undefined && <Text color="success">{warm}</Text>}
+              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
           {!m.isWarm && (
             <Text>
               <Text dimColor>○ cache cold</Text>
-              {m.coldUsd !== undefined && <Text dimColor> · next message </Text>}
-              {m.coldUsd !== undefined && <Text color="warning">{usd(m.coldUsd)}</Text>}
+              {cold !== undefined && <Text dimColor> · next message </Text>}
+              {cold !== undefined && <Text color="warning">{cold}</Text>}
             </Text>
           )}
           {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
@@ -485,6 +489,7 @@ export const register: Register = on => {
     const tip = weeklyTip(v.tip)
     const head = (label: string) => <Text dimColor bold>{label}</Text>
     const nameWidth = Math.max(8, Math.min(20, cols - 34))
+    const next = nextPrice(m, (await read($, context))?.fiveHour !== undefined)
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -503,11 +508,11 @@ export const register: Register = on => {
           {head('NEXT MESSAGE')}
           <Text>
             <Text dimColor>if the cache is warm </Text>
-            {m.warmUsd !== undefined ? <Text color="success">{usd(m.warmUsd)}</Text> : <Text dimColor>unknown</Text>}
+            {next.warm !== undefined ? <Text color="success">{next.warm}</Text> : <Text dimColor>unknown</Text>}
           </Text>
           <Text>
             <Text dimColor>if it is cold      </Text>
-            {m.coldUsd !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{usd(m.coldUsd)}</Text> : <Text dimColor>unknown</Text>}
+            {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
             {m.tokens !== undefined && <Text dimColor>  ({Math.round(m.tokens / 1000)}k tokens in the cached prefix)</Text>}
           </Text>
           {m.isWarm ? (

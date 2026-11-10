@@ -1,0 +1,16 @@
+{
+  "name": "@rossoctl/context-guru-pi",
+  "version": "0.1.0",
+  "description": "Route Pi through a local context-guru proxy: keep the prompt cache warm and carry less context.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package", "context-guru", "prompt-caching", "anthropic", "openai"],
+  "repository": {"type": "git", "url": "https://github.com/rossoctl/context-guru.git", "directory": "pi-package"},
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

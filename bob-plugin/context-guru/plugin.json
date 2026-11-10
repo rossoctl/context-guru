@@ -1,0 +1,12 @@
+{
+  "id": "context-guru",
+  "name": "context-guru",
+  "displayName": "context-guru",
+  "description": "Send IBM Bob's model traffic through a local context-guru proxy that cuts token cost, and check that it works.",
+  "version": "0.1.0",
+  "category": "Developer Tools",
+  "author": {"name": "rossoctl", "url": "https://github.com/rossoctl"},
+  "homepage": "https://github.com/rossoctl/context-guru",
+  "keywords": ["bob", "context", "tokens", "prompt-caching", "cost"],
+  "disabled": false
+}

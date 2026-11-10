@@ -104,7 +104,12 @@ func (r *Recorder) ObservePrefix(session, threadID, fromThread string, hasFrom b
 	}
 	// A restart forgets lastFacts but SeedSessions reloads the billed tier. Use it only while the
 	// thread has no facts at all.
-	seededTier := !same && !hadAny && r.seedTier[key]
+	// The tier is per model, and a fork reads its parent's, as lastFacts does above (#994).
+	_, seededTier := r.seedTier[perModel(key)]
+	if !seededTier && hasFrom {
+		_, seededTier = r.seedTier[perModel(thread.Key(session, fromThread))]
+	}
+	seededTier = seededTier && !same && !hadAny
 	// The thread's latest committed request was on this model, so a keep-alive ping after it
 	// refreshed THIS model's entry.
 	lastWasSame = hadAny && last.Model == cur.Model
