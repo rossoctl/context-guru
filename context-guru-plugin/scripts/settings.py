@@ -3667,7 +3667,7 @@ def _update_hint() -> str:
 _TABLE_CACHE: dict[tuple[str, int], dict | Exception] = {}
 
 # Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
-_PROBE_DROP = re.compile(r"^(DASHBOARD.*|SESSION_STATE.*|CONTROL_DB|UPSTREAMS|CG_RECORD.*|STORE|IDLE_EXIT)$")
+_PROBE_DROP = re.compile(r"^(DASHBOARD.*|SESSION_STATE.*|CONTROL_DB|UPSTREAMS|CG_RECORD.*|ARCHIVE_.*|STORE|IDLE_EXIT)$")
 
 # The one alias the plugin names itself, for display only (`strategy show`, marker rename) when no
 # proxy can be asked. The proxy's own `aliases` stay the authority everywhere else.
