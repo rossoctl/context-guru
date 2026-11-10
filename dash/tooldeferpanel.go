@@ -61,7 +61,7 @@ func (d *DB) ToolDeferReportFor(f Filter) (*ToolDeferReport, error) {
 	cond, args := f.where()
 	q := `SELECT (r.ts / ?) * ?, r.tenant_id, COUNT(*), SUM(r.defer_tokens), SUM(r.defer_list_tokens),
 		SUM(r.defer_searches), SUM(r.defer_dropped_searches), SUM(r.defer_loaded), SUM(r.defer_wrong_guesses),
-		SUM(r.defer_gross_usd), ` + deferNetSum + `,
+		SUM(r.defer_gross_usd), ` + deferNetSum + `, SUM(r.defer_cost_usd),
 		SUM(CASE WHEN r.defer_gross_usd = 0 AND r.defer_net_usd = 0 THEN 1 ELSE 0 END)
 		FROM requests r WHERE ` + cond + ` AND r.defer_tokens > 0 GROUP BY 1, 2`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append([]any{DayMs, DayMs}, args...)...)
@@ -73,10 +73,9 @@ func (d *DB) ToolDeferReportFor(f Filter) (*ToolDeferReport, error) {
 	for rows.Next() {
 		var x ToolDeferDay
 		if err := rows.Scan(&x.Day, &x.Tenant, &x.Requests, &x.TokensDeferred, &x.ListTokens,
-			&x.Searches, &x.DroppedSearches, &x.Loaded, &x.WrongGuesses, &x.GrossUSD, &x.NetUSD, &x.Unpriced); err != nil {
+			&x.Searches, &x.DroppedSearches, &x.Loaded, &x.WrongGuesses, &x.GrossUSD, &x.NetUSD, &x.CostUSD, &x.Unpriced); err != nil {
 			return nil, err
 		}
-		x.CostUSD = x.GrossUSD - x.NetUSD
 		out.Days = append(out.Days, x)
 		t := &out.Total
 		t.Requests += x.Requests

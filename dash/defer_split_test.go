@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/rossoctl/accountant"
@@ -84,5 +85,78 @@ func TestTheDeferralSavingIsOnTheDeferralCardAndTheTotalIsUnchanged(t *testing.T
 	}
 	if !accNear(s.TotalSavedUSD, o.TotalSavedUSD) {
 		t.Errorf("SavingsTotals total %v != Overview %v", s.TotalSavedUSD, o.TotalSavedUSD)
+	}
+}
+
+// The Tools page shows what the names list and the searches cost. That is the ledger's own figure, gross less
+// net. It must not be derived from the stored net, which is the lever: on a request the accountant priced the
+// lever is the library's deferral figure less the search cost, so gross less lever would be the gap between two
+// tokenizers, not a cost (round 3 review of #1003).
+func TestTheToolsPageCostIsTheLedgersCostOnAPricedRequest(t *testing.T) {
+	const gross, ledgerNet, search = 0.0020, 0.0016, 0.0001
+	e := switchEvent()
+	e.TS, e.SessionID = 1, "s"
+	e.DeferTokens = 4000
+	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = gross, ledgerNet, search
+	e.DeferCostUSD = gross - ledgerNet // set by the proxy from the ledger, before PriceMode moves the net
+	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
+		{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
+		{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 9000}},
+	}})
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	if accNear(e.DeferNetUSD, ledgerNet) {
+		t.Fatalf("the lever %v equals the ledger's net: the test would not tell the two figures apart", e.DeferNetUSD)
+	}
+	db := openTestDB(t)
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := db.ToolDeferReportFor(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := gross - ledgerNet; !accNear(r.Total.CostUSD, want) {
+		t.Errorf("cost %v, want the ledger's own %v (gross less lever would be %v)", r.Total.CostUSD, want, gross-e.DeferNetUSD)
+	}
+	if !accNear(r.Total.NetUSD, e.DeferNetUSD) || !accNear(r.Total.GrossUSD, gross) {
+		t.Errorf("net %v gross %v: net must stay the lever, gross the ledger's", r.Total.NetUSD, r.Total.GrossUSD)
+	}
+}
+
+// A row written before defer_cost_usd existed has the ledger's net in defer_net_usd, so its cost is exactly gross
+// less net. The migration fills it, and a second run changes nothing.
+func TestTheLedgerCostOfAnOlderRowIsFilledByTheMigrationOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := switchEvent()
+	e.TS, e.SessionID = 1, "s"
+	e.DeferTokens, e.DeferGrossUSD, e.DeferNetUSD = 4000, 0.0030, 0.0021
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	// Put the row in the shape an older build left: the cost column is 0.
+	if _, err := db.sql.Exec(`UPDATE requests SET defer_cost_usd = 0`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	for i := range 2 { // the second open is the idempotence check
+		db, err = Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got float64
+		if err := db.sql.QueryRow(`SELECT defer_cost_usd FROM requests`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if !accNear(got, 0.0009) {
+			t.Errorf("open %d: defer_cost_usd = %v, want gross less net, 0.0009", i+1, got)
+		}
+		db.Close()
 	}
 }

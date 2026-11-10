@@ -445,6 +445,10 @@ type Event struct {
 	DeferLoaded           int     `json:"defer_loaded,omitempty"`
 	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
+	// DeferCostUSD is the ledger's own cost of the deferral, gross less the ledger's net: the names list and the
+	// searches. It is set from the ledger before PriceMode can move the net, and the Tools page reads it, because
+	// gross less the stored net is not a cost on a request the accountant priced.
+	DeferCostUSD float64 `json:"defer_cost_usd,omitempty"`
 	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 	// DeferSearchUSD is the part of the ledger's cost that no body shows: the searches and the loaded
 	// definitions (tooldefer.Money.SearchCost). The accountant prices the deferral itself from the bodies (R56),

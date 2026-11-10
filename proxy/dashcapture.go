@@ -622,6 +622,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
 		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = d.gross, d.net, d.search
+		// The ledger's own cost, taken here, before PriceMode can move the net onto the library's figure.
+		e.DeferCostUSD = d.gross - d.net
 	}
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
