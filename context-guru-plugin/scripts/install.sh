@@ -504,7 +504,7 @@ everywhere, not only here (a machine-wide switch-off set in /plugin is left as i
   # that exist, and the catch-all asserted "(no spend)" about every name it had not been told about -
   # so a fourth strategy that spends, or 1-hour-head gaining a ping, would make this state something
   # false in the one sentence a human is asked to agree to. consent_question= and confirm_command=
-  # could no longer disagree with each other; this is consent_question= disagreeing with STRATEGIES.
+  # could no longer disagree with each other; this is consent_question= disagreeing with the proxy's table.
   #
   # An unknown spend status reads as SPENDING, not as free: the sentence a user consents to is the
   # wrong place to resolve an uncertainty in their favour.
@@ -750,6 +750,13 @@ or written." ;;
   fi
   if [ "$R_STRATLIST_DEFERRED" = 0 ]; then
     route_check_strategy "$slist"
+  elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ]; then
+    # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
+    # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
+    route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
+context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
+Install the proxy v0.7.1 or later, or pass --cache-strategy none. Nothing was installed, started \
+or written."
   fi
 
   if [ "$R_MODE" = attach ]; then
@@ -933,6 +940,8 @@ handling auth), replace (theirs is recorded and uninstall puts it back), or abor
 
   if [ "$R_PLAN" = 1 ]; then
     emit "result=planned"
+    [ "$R_STRATLIST_DEFERRED" = 1 ] && [ "$R_STRATEGY" != none ] && emit "strategy_unchecked=true" \
+      && emit "strategy_unchecked_note=no proxy binary yet, so cache strategy $R_STRATEGY is checked after the binary is installed; an unknown name is then refused before any routing is written"
     if [ "$R_MODE" = attach ]; then emit "binary=(not needed in attach mode)"
     else emit "binary=would_check"; fi
     route_report

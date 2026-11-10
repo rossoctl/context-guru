@@ -93,6 +93,9 @@ First read the names the proxy offers for Claude Code:
 - `default=` is the name used when the user chose none. `aliases=` are old names (`old:new`) that still work.
 - `result=error reason=proxy_too_old` means the installed proxy is older than v0.7.1. Say so and tell
   the user to run `/context-guru:update`. Do not guess a list.
+- `reason=no_proxy_binary` means no proxy is installed: tell the user to run `/context-guru:install`.
+  `reason=proxy_unrunnable` means the binary named by `--bin` or `CONTEXT_GURU_BIN` cannot run: show
+  the `note=`. Do not guess a list in either case.
 
 Then switch:
 

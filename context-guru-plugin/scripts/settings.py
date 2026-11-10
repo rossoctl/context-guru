@@ -3647,6 +3647,10 @@ def find_proxy_binary(explicit: str = "") -> str:
             path = shutil.which(cand) or ""
             if path:
                 return path
+            if os.path.exists(cand):
+                # Named on purpose, so another binary on PATH must not answer in its place.
+                raise StrategyTableError(f"{cand} exists but is not an executable file",
+                                         "proxy_unrunnable")
     path = shutil.which("context-guru-proxy") or ""
     if path:
         return path
@@ -3661,6 +3665,13 @@ def _update_hint() -> str:
 
 
 _TABLE_CACHE: dict[tuple[str, int], dict | Exception] = {}
+
+# Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
+_PROBE_DROP = re.compile(r"^(DASHBOARD.*|SESSION_STATE.*|CONTROL_DB|UPSTREAMS|CG_RECORD.*|STORE|IDLE_EXIT)$")
+
+# The one alias the plugin names itself, for display only (`strategy show`, marker rename) when no
+# proxy can be asked. The proxy's own `aliases` stay the authority everywhere else.
+LEGACY_NAME_ALIASES = {"5-min-ping": "auto"}
 
 
 def load_strategy_table(explicit_bin: str = "") -> dict:
@@ -3688,11 +3699,16 @@ def load_strategy_table(explicit_bin: str = "") -> dict:
         limit = float(os.environ.get(STRATEGIES_TIMEOUT_ENV, "") or STRATEGIES_TIMEOUT)
     except ValueError:
         limit = STRATEGIES_TIMEOUT
-    env = dict(os.environ, LISTEN_ADDR="127.0.0.1:0", CONFIG="")
+    # An old binary ignores `strategies` and serves until the limit. It must write nothing: the
+    # probe env drops every setting that turns on a database, a record dir or hosted mode, and the
+    # probe runs in a fresh empty directory so a relative default path cannot land in a project.
+    env = {k: v for k, v in os.environ.items() if not _PROBE_DROP.match(k)}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
     try:
-        run = subprocess.run([binary, "strategies"], capture_output=True, text=True, timeout=limit,
-                             env=env, stdin=subprocess.DEVNULL)
-        out, code = run.stdout, run.returncode
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as cwd:
+            run = subprocess.run([binary, "strategies"], capture_output=True, timeout=limit,
+                                 env=env, stdin=subprocess.DEVNULL, cwd=cwd)
+        out, code = run.stdout.decode("utf-8", errors="replace"), run.returncode
     except subprocess.TimeoutExpired:
         out, code = "", -1     # run() has already killed it: an old binary that started serving
     except OSError as exc:
@@ -3702,7 +3718,12 @@ def load_strategy_table(explicit_bin: str = "") -> dict:
     except ValueError:
         table = None
     rows = table.get("strategies") if isinstance(table, dict) else None
-    ok = (code == 0 and isinstance(table.get("default"), str) and isinstance(rows, list) and rows
+    ok = (code == 0 and isinstance(table, dict) and isinstance(table.get("default"), str)
+          and isinstance(rows, list) and rows
+          and isinstance(table.get("aliases", {}), dict)
+          and all(isinstance(k, str) and isinstance(v, str) for k, v in table.get("aliases", {}).items())
+          and isinstance(table.get("presets", []), list)
+          and all(isinstance(x, str) for x in table.get("presets", []))
           and all(isinstance(r, dict) and isinstance(r.get("name"), str)
                   and isinstance(r.get("providers"), list) and isinstance(r.get("spends"), bool)
                   and isinstance(r.get("desc"), str) for r in rows))
@@ -3728,7 +3749,7 @@ def canonical_strategy(name: str, table: dict | None = None) -> str:
         try:
             table = load_strategy_table()
         except StrategyTableError:
-            return name
+            return LEGACY_NAME_ALIASES.get(name, name)
     return table["aliases"].get(name, name)
 
 
@@ -3842,7 +3863,7 @@ def _render_strategy(name: str, preset: str) -> str:
     fills `cache:` from its table (a key the file sets itself would win, and this file sets none).
 
     Files written before v0.7.1 carry the keys themselves. They keep working: the proxy reads
-    them as they are. `strategy sync` re-renders them to this form (see cmd_strategy)."""
+    them as they are, and `strategy sync` leaves their keys alone (see cmd_strategy)."""
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
         f"/context-guru:cache-strategy-picker",
@@ -4095,11 +4116,11 @@ def cmd_strategy(args) -> int:
             return 0
         # The new form is re-rendered whole (byte-identical to a fresh `set`); the old form keeps its
         # keys and gets only the preset line.
-        name = recorded
+        name = LEGACY_NAME_ALIASES.get(recorded, recorded)
         lines = text.splitlines()
         stale_marker = (any(l.startswith(LEGACY_BINARY_MARKER_PREFIX) for l in lines)
                         and _legacy_marker() not in lines)
-        if _is_new_form(text, name):
+        if _is_new_form(text, recorded):
             want = _render_strategy(name, args.preset)
         elif stale_marker and _proxy_version_at_least(STRATEGY_MIN_PROXY):
             # The proxy was updated since the `_1h` keys were dropped, and the recorded version knows
@@ -4109,6 +4130,8 @@ def cmd_strategy(args) -> int:
             want = _set_preset_line(text, args.preset)
             if args.legacy_binary or _legacy_marker() in lines:
                 want = _without_one_hour_keys(want)
+            if name != recorded:     # the marker name only, so the status line shows the current name
+                want = want.replace(f"strategy={recorded} ", f"strategy={name} ", 1)
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -4283,11 +4306,15 @@ def _gap_facts(saved: str) -> dict:
 
 
 def _presets_known_to_proxy(args) -> int:
-    """0 when the proxy registers every preset of the picker list (PRESETS). Else prints the error
-    and returns the exit code. The short list stays here; the proxy's `presets` is what it accepts."""
-    table, rc = _table_for(args)
-    if table is None:
-        return rc
+    """0 when the proxy registers every preset of the picker list (PRESETS), or when no proxy can be
+    asked. Then it prints a warning and the choice is saved unchecked, as before this check existed.
+    A proxy that answers and lacks a preset is an error. The short list stays here."""
+    try:
+        table = load_strategy_table(getattr(args, "bin", ""))
+    except StrategyTableError as exc:
+        emit(warning="preset_unchecked",
+             warning_note=f"the preset name is not checked against the proxy: {exc}")
+        return 0
     missing = [n for n in PRESETS if n not in table["presets"]]
     if missing:
         emit(result="error", reason="preset_unknown_to_proxy", missing=",".join(missing),

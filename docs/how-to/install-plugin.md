@@ -131,6 +131,8 @@ expected, not broken.
 Files written by an older plugin hold the keys themselves. They keep working and stay as they are.
 **The proxy must be v0.7.1 or later.** An older binary (v0.7.0 included) cannot list its strategies.
 The plugin then says so and tells you to run `/context-guru:update`.
+A strategy file in the new form needs proxy v0.7.1 or later. Do not downgrade the proxy after you
+switch strategy. `CONTEXT_GURU_STRATEGIES_TIMEOUT` (seconds, default 5) is a test and debug setting.
 
 Other presets (`conservative`, `medium`, `high`, `xhigh` — `/context-guru:preset-picker`'s
 effort ladder) add components that edit the request body too — see
