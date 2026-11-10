@@ -143,7 +143,9 @@ func (s *SavingsTotals) ApplyCap(c CapResult) {
 }
 
 // SavingsTotalsCapped is SavingsTotals with the cap applied, so a scope agrees with the
-// headline for the same rows. When the cap cannot be computed in full the figure keeps the part
+// headline for the same rows. The baseline, net and total agree with the lean headline; the full
+// headline adds a historical split figure and a declaration-filter credit to its total that
+// SavingsTotals has never carried. When the cap cannot be computed in full the figure keeps the part
 // that ran and CapNotApplied is set: a reader gets a labelled figure and not an error.
 //
 // Use it for a scope that one session or one window bounds. A lifetime read (an empty filter) streams
