@@ -189,7 +189,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
 			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
 			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
-			Window: job.gapStart,
+			Window: job.gapStart, Header: resp.Header,
 		})
 	}
 	return res, nil
