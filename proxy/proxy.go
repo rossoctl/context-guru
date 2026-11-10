@@ -1589,8 +1589,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			//
 			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
 			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
-			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
+			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
 			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
 			//   - Any dialect: if the model calls expand on every round, the client gets the raw
 			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
@@ -1640,11 +1640,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// control arm of every published comparison in this repo — and including presets
 				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
 				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Responses has one; Chat Completions does not.
+				// matching wire adapter. Anthropic, Responses and Chat Completions have one
+				// (chatPrefixAsker, #1030); every other wire does not.
 				//
 				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
 				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
+				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
 				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
