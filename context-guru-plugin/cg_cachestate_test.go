@@ -17,8 +17,51 @@ import (
 // window. Each comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank
 // a field in silence. This test is what catches it.
 func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
+	// The window's saving comes from `tokens` (#999), every feature, by tier; the old compaction-only fields lose.
+	window := `{"saved_unique":85000,"replay_tokens":1200000,` +
+		`"tokens":{"saved":{"input":12000,"cache_read":0,"cache_write_5m":85000,"cache_write_1h":0},` +
+		`"caused":{"input":0,"cache_read":40000,"cache_write_5m":0,"cache_write_1h":0}},"tokens_unmeasured_requests":3}`
+	doc := cachestateWithExtras(t, window)
+	if doc["update"] != "▲ update v0.6.9" {
+		t.Errorf("update = %v, want the status line's `▲ update v0.6.9`", doc["update"])
+	}
+	if mp, _ := doc["manual_pings"].(map[string]any); mp["saved_usd"] != 0.27 {
+		t.Errorf("manual_pings = %v, want the session stats' figure", doc["manual_pings"])
+	}
+	// The tokens are this session's, not every session's in the window. The unmeasured count is not on the band.
+	if doc["window_saved"] != "saved 85.0k wr · 12.0k in · cost 40.0k rd" {
+		t.Errorf("window_saved = %v, want this session's tokens by tier (window asked since=%v, want %d)", doc["window_saved"], doc["window_asked"], cachestateWindowStart)
+	}
+}
+
+// The band's token figure by case: a tier at 0 is left out, `cost` only when a tier was paid, and a proxy before #999
+// (no `tokens`) keeps its compaction-only `rd / wr` figure.
+func TestCGCachestateWindowTokensByCase(t *testing.T) {
+	zero := `{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0}`
+	for _, c := range []struct{ name, window, want string }{
+		{"every tier, in order", `{"tokens":{"saved":{"input":5,"cache_read":1200000,"cache_write_5m":85000,"cache_write_1h":2000},"caused":{"input":0,"cache_read":0,"cache_write_5m":600,"cache_write_1h":0}}}`,
+			"saved 85.0k wr · 2.0k wr1h · 1.2M rd · 5 in · cost 600 wr"},
+		{"saved only", `{"tokens":{"saved":{"input":0,"cache_read":0,"cache_write_5m":85000,"cache_write_1h":0},"caused":` + zero + `}}`, "saved 85.0k wr"},
+		{"cost only", `{"tokens":{"saved":` + zero + `,"caused":{"input":0,"cache_read":40000,"cache_write_5m":0,"cache_write_1h":0}}}`, "cost 40.0k rd"},
+		{"nothing", `{"saved_unique":85000,"replay_tokens":1200000,"tokens":{"saved":` + zero + `,"caused":` + zero + `}}`, ""},
+		{"proxy before #999", `{"saved_unique":85000,"replay_tokens":1200000}`, "saved 1.2M rd / 85.0k wr"},
+	} {
+		doc := cachestateWithExtras(t, c.window)
+		got, _ := doc["window_saved"].(string)
+		if got != c.want {
+			t.Errorf("%s: window_saved = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+const cachestateWindowStart = 1_800_000_000_000 - 3_600_000
+
+// cachestateWithExtras runs `cg.py cachestate --json` against a stub proxy whose window read for this session answers
+// window, and returns the doc, with the `since` the window read asked for under "window_asked".
+func cachestateWithExtras(t *testing.T, window string) map[string]any {
+	t.Helper()
 	const now = 1_800_000_000_000
-	const start = now - 3_600_000
+	const start = cachestateWindowStart
 	cache := fmt.Sprintf(`{"session":"session-A","model":"m","last_ts":%d,"ttl_s":300,"now_ms":%d,"prefix_tokens":52000,"threads":[{"id":"","main":true,"last_ts":%d}]}`, now-60_000, now, now-60_000)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -32,11 +75,11 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 		switch {
 		case q.Get("session") != "" && q.Get("since") != "": // this session in the window: the band's saving
 			windowAsked = q.Get("since")
-			w.Write([]byte(`{"saved_unique":85000,"replay_tokens":1200000}`)) //nolint:errcheck
+			w.Write([]byte(window)) //nolint:errcheck
 		case q.Get("session") != "":
 			w.Write([]byte(`{"total_saved_usd":0.31,"manual_pings":{"count":2,"ping_usd":0.08,"saved_usd":0.27}}`)) //nolint:errcheck
 		default: // every session in the window: the band must not show these
-			w.Write([]byte(`{"saved_unique":999000,"replay_tokens":9990000}`)) //nolint:errcheck
+			w.Write([]byte(`{"saved_unique":999000,"replay_tokens":9990000,"tokens":{"saved":{"input":0,"cache_read":0,"cache_write_5m":999000,"cache_write_1h":0}}}`)) //nolint:errcheck
 		}
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -54,16 +97,8 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
-	if doc["update"] != "▲ update v0.6.9" {
-		t.Errorf("update = %v, want the status line's `▲ update v0.6.9`", doc["update"])
-	}
-	if mp, _ := doc["manual_pings"].(map[string]any); mp["saved_usd"] != 0.27 {
-		t.Errorf("manual_pings = %v, want the session stats' figure", doc["manual_pings"])
-	}
-	// The tokens are this session's, not every session's in the window.
-	if doc["window_saved"] != "saved 1.2M rd / 85.0k wr" {
-		t.Errorf("window_saved = %v, want this session's tokens (window asked since=%q, want %d)", doc["window_saved"], windowAsked, start)
-	}
+	doc["window_asked"] = windowAsked
+	return doc
 }
 
 // The band says `cg ✕ proxy offline` only when nothing answers, as the status line does. A proxy that answers 404
