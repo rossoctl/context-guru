@@ -19,7 +19,7 @@ func noBinaryEnv(t *testing.T, home, state string) []string {
 func TestAttachModeRefusesAnUncheckedStrategyName(t *testing.T) {
 	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 	env := noBinaryEnv(t, home, state)
-	args := []string{"--mode", "attach", "--base-url", "http://127.0.0.1:9", "--no-health-check",
+	args := []string{"--mode", "attach", "--base-url", "http://127.0.0.1:9/anthropic", "--no-health-check",
 		"--scope", "project", "--cache-strategy", "5-minute-ping"}
 
 	plan, code := runRoute(t, proj, env, append([]string{"--plan"}, args...)...)
@@ -39,7 +39,7 @@ func TestAttachModeRefusesAnUncheckedStrategyName(t *testing.T) {
 	}
 
 	// `none` needs no table, so it still installs.
-	ok, code := runRoute(t, proj, env, "--plan", "--mode", "attach", "--base-url", "http://127.0.0.1:9",
+	ok, code := runRoute(t, proj, env, "--plan", "--mode", "attach", "--base-url", "http://127.0.0.1:9/anthropic",
 		"--scope", "project", "--cache-strategy", "none")
 	if code != 0 || ok["result"] != "planned" {
 		t.Errorf("none in attach mode: exit %d %v", code, ok)
