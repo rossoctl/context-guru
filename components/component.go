@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -323,6 +324,16 @@ type PrefixCoverage interface {
 // `hash`, ErrNoPrefix when nothing is stashed, and otherwise asks on exactly the body it checked.
 type PrefixCoveredAsker interface {
 	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
+}
+
+// PrefixReadAsker, when a PrefixAsker also implements it, asks over ONE snapshot of the stash and also
+// returns the text of the messages the model read in that snapshot. The sweep checks a judge's quote
+// against that text, because that is what the model was shown. The ping registry's snapshot is one
+// request newer, so a quote taken from the newest message there is real but not in what the model read.
+// count < 0 skips the coverage check; count >= 0 behaves as in PrefixCoveredAsker. The text is only used
+// to count fabricated quotes. It never decides a drop.
+type PrefixReadAsker interface {
+	AskRead(ctx context.Context, session string, count int, hash, ask string) (reply string, usage PrefixUsage, read string, err error)
 }
 
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
@@ -1235,6 +1246,11 @@ type KeepAliveReport struct {
 	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
 	// as belonging to a window.
 	Window time.Time
+	// Header is the ping response's headers. It is nil when no response came back, and on a
+	// substitute call, whose summary result does not carry the headers (a host can also send
+	// none). A sink reads only the metadata it needs from
+	// it, such as the subscription limit headers (#995), and must not change it.
+	Header http.Header
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter
