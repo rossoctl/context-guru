@@ -1891,9 +1891,9 @@ var errNoUpstream = errors.New("no upstream configured")
 // next request would otherwise carry the content.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
 	wire := schema.WireFor(string(provider), up.path)
-	// Only Bob's model route reads the cache writes Bob adds to its OpenAI chat usage block
-	// (bobUsage). Every other route keeps the shared parser's reading unchanged.
-	bob := up.path == bobModelPath
+	// The agent that owns the route may correct the shared parser's usage reading
+	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
+	ag := h.agentFor(up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -2265,7 +2265,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2363,7 +2363,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2390,9 +2390,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
-			if bob {
-				u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u)
-			}
+			u = readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
@@ -2749,12 +2747,12 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
-	return h.streamRecOn(w, resp, tee, false)
+	return h.streamRecOn(w, resp, tee, agent.Base{})
 }
 
-// streamRecOn is streamRec for a chat route. bob is true only on Bob's model route, where the
-// usage block also carries the cache writes (bobUsage).
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, bob bool) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
+// the shared parser's usage reading (readAgentUsage).
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2787,8 +2785,13 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if bob && ok {
-		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u)
+	if ok {
+		// The request's context carries its logger. A test's hand-built response has no request.
+		ctx := context.Background()
+		if resp.Request != nil {
+			ctx = resp.Request.Context()
+		}
+		u = readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.

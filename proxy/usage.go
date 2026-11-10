@@ -158,6 +158,9 @@ var nestedUsagePaths = [...]string{"response.usage", "usageMetadata", "data.usag
 // healthy traffic reads as an outage — and it costs the same thing: an operator who cannot tell
 // from the counter which one they have. `{}` is treated the same way for the same reason: a
 // provider that sent an empty object told us nothing, which is `absent`, not a missing spelling.
+//
+// agent/bob has a copy of this rule (present), because a library cannot import the proxy. Change
+// both together; agent/bob/usage_test.go fails if its copy accepts an empty block.
 func usagePresent(v gjson.Result) bool {
 	if !v.IsObject() {
 		return false
