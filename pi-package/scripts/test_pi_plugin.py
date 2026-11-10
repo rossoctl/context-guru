@@ -451,27 +451,6 @@ class Restart(Sandbox):
         self.assertEqual((code, facts["result"]), (0, "up"))
         self.assertEqual(self.calls, [["systemctl", "--user", "restart", "context-guru-pi.service"]])
 
-    def test_restart_renders_the_config_again_from_the_strategy_table(self):
-        """A config this package wrote before a table change gets the new keys at the next restart."""
-        pi_plugin.write_record({"port": 8800, "preset": "off", "cache_strategy": "auto"})
-        path = pi_plugin.write_proxy_config("off", "auto")
-        old = path.read_text().replace("keepalive_min_prefix_tokens: 80000", "keepalive_min_prefix_tokens: 12345")
-        path.write_text(old)
-        self.our_unit()
-        code, facts = self.restart("systemd", [False, True])
-        self.assertEqual((code, facts["result"]), (0, "up"))
-        self.assertIn("keepalive_min_prefix_tokens: 80000", path.read_text())
-        self.assertNotIn("12345", path.read_text())
-
-    def test_restart_leaves_a_config_it_does_not_own_alone(self):
-        pi_plugin.write_record({"port": 8800, "preset": "off", "cache_strategy": "auto"})
-        path = pi_plugin.proxy_config()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("preset: high\n")
-        self.our_unit()
-        self.restart("systemd", [False, True])
-        self.assertEqual(path.read_text(), "preset: high\n")
-
     def test_a_unit_we_do_not_own_is_left_alone(self):
         self.our_unit("[Service]\n")
         code, facts = self.restart("systemd", lambda port, timeout=1: False)

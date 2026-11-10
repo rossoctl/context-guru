@@ -348,27 +348,6 @@ def write_proxy_config(preset, strategy, upstreams=None):
     return path
 
 
-def resync_config(record):
-    """Write the proxy config again from the recorded preset and strategy, so a strategy table that
-    changed in a newer package reaches a config written earlier. The same rule as `strategy sync` in
-    the Claude Code plugin: only a file this package owns. A missing or foreign file is left alone.
-    Never raises: the proxy then starts with the config it has. Returns True when it wrote the file."""
-    try:
-        path = proxy_config()
-        if not path.exists() or not owned(path):
-            return False
-        preset = record.get("preset", DEFAULT_PRESET)
-        strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
-        if preset not in PRESETS or strategy not in STRATEGIES:
-            return False
-        if path.read_text() == render_config(preset, strategy, recorded_upstreams(record)):
-            return False
-        write_proxy_config(preset, strategy, recorded_upstreams(record))
-        return True
-    except Exception:
-        return False
-
-
 def proxy_command(executable, port, upstreams=None):
     command = [executable, "--listen", f"127.0.0.1:{port}", "--config", str(proxy_config()),
                "--dashboard", "--dashboard-db", str(state_dir() / "dashboard.db")]
@@ -789,7 +768,6 @@ def restart(args):
         if healthy(port, timeout=START_CHECK_SECONDS):
             facts(result="already_up", **where)
             return 0
-        resync_config(record)
         service = restart_service()
         up = service == "restarted" and wait_healthy(port)
     facts(result="up" if up else "down", service=service, **where)
@@ -874,7 +852,6 @@ def update(args):
         return 0
     record["binary"] = executable
     write_record(record)
-    resync_config(record)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
     facts(result="updated", version=version, restart="completed" if restarted else "failed")
     return 0 if restarted else 1
