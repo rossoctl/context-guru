@@ -106,6 +106,8 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	// The keep-alive fields and the two totals they feed are the ONLY keys allowed to differ.
 	mayMove := map[string]bool{
 		"keepalive_pings": true, "keepalive_ping_usd": true, "keepalive_net_usd": true,
+		// The token form of keepalive_ping_usd (#998): the pings' own billed tokens.
+		"keepalive_ping_tokens": true, "keepalive_ping_output_tokens": true,
 		// The credit and its count move too, and that is the correction rather than a leak: a
 		// credit is only booked for a gap a ping row demonstrably covered (kaSaved), so the
 		// fixture WITHOUT pings has a credited row with no ping anywhere on its session — the

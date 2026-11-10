@@ -75,8 +75,8 @@ func TestARestartRecoversRecencyPerThread(t *testing.T) {
 		t.Fatal(err)
 	}
 	const now = int64(1_700_000_000_000)
-	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "s1", Model: "m", TokensBefore: 10})
-	rec.Record(&Event{TS: now + 420_000, TenantID: "t1", SessionID: "s1", ThreadID: "a:S", Model: "m", TokensBefore: 10})
+	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "s1", Model: "m", TokensBefore: 10, Status: 200})
+	rec.Record(&Event{TS: now + 420_000, TenantID: "t1", SessionID: "s1", ThreadID: "a:S", Model: "m", TokensBefore: 10, Status: 200})
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var n int64

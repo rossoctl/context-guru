@@ -101,6 +101,13 @@
  "invalid_config_requests": 0,
  "keepalive_misses_avoided": 0,
  "keepalive_net_usd": -0.006,
+ "keepalive_ping_output_tokens": 750,
+ "keepalive_ping_tokens": {
+  "cache_read": 720540,
+  "cache_write_1h": 0,
+  "cache_write_5m": 0,
+  "input": 150
+ },
  "keepalive_ping_usd": 0.006,
  "keepalive_pings": 15,
  "keepalive_saved_usd": 0,
@@ -171,9 +178,24 @@
   "total_usd": 66.92121449999999,
   "uncovered_requests": 217
  },
+ "tokens": {
+  "caused": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  },
+  "saved": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  }
+ },
  "tokens_after": 20401690,
  "tokens_before": 20900053,
  "tokens_before_billed": 20900053,
+ "tokens_unmeasured_requests": 591,
  "total_ms_avg_buffered": 0,
  "total_reduced_usd": 0.6460545000000001,
  "total_saved_usd": 0.24318150000000016,

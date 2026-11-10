@@ -256,7 +256,7 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
     """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
     longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
     from the status line's own cached /api/stats), and on a subscription the tokens compaction kept out of the current
-    5-hour window. Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
+    5-hour window by this session. Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
     try:
         import statusline as sl  # noqa: PLC0415
         strip = lambda t: re.sub(r"\033\[[0-9;]*m", "", t or "")  # noqa: E731
@@ -268,8 +268,9 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
         if isinstance(stats, dict) and isinstance(stats.get("manual_pings"), dict):
             doc["manual_pings"] = stats["manual_pings"]
         if window_start_ms:
-            win, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}", f"win-{window_start_ms // 1000}", sl.WINDOW_TTL_SECONDS)
-            saved = sl._saved_tokens_text(win)
+            # The 5-hour limit is the account's, but the band speaks for this session: only its own tokens count.
+            mine, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}&session={sid}", f"win-{window_start_ms // 1000}-{sid}", sl.WINDOW_TTL_SECONDS)
+            saved = sl._saved_tokens_text(mine)
             if saved:
                 doc["window_saved"] = saved
     except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
@@ -1709,7 +1710,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
     ap.add_argument("--transcript", help="cachestate: this session's transcript path, to name its sub-agents")
-    ap.add_argument("--window-start-ms", type=int, help="cachestate: when this subscription's 5-hour window began, for its saved tokens")
+    ap.add_argument("--window-start-ms", type=int, help="cachestate: when this subscription's 5-hour window began, for this session's saved tokens in it")
     ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
