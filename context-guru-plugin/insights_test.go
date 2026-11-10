@@ -2139,3 +2139,28 @@ print(v + "|" + why)`
 		t.Errorf("verdict = %q; want keep, quoting 2 calls and not 0 sessions", got)
 	}
 }
+
+// TestAnAccountsOwnRemovalIsNotShownAsOurSaving. A server the account stopped declaring on its own
+// is not a saving context-guru made (#583, #584), so the report carries no finding and no fact with
+// a dollar figure for it, even when /api/tools lists one.
+func TestAnAccountsOwnRemovalIsNotShownAsOurSaving(t *testing.T) {
+	body := strings.Replace(toolsWithUnusedShare(), `"tools": [],`,
+		`"self_removed": [{"server": "gone", "avoided_usd": 7.5, "overlap": false}], "tools": [],`, 1)
+	if body == toolsWithUnusedShare() {
+		t.Fatal("the fixture did not gain a self_removed row, so this test proves nothing")
+	}
+	stub := newAPIStub(t, map[string]string{"/api/stats": window(30), "/api/tools": body})
+	dir := insightsProject(t, map[string]any{"port": stub.port, "cache_strategy": "none"})
+	out, _ := runInsights(t, dir, nil, "all")
+	if contains(findingIDs(out), "self-removed-credit") {
+		t.Errorf("an account's own removal came back as a finding:\n%s", out)
+	}
+	for k := range facts(out) {
+		if strings.HasPrefix(k, "self_removed") {
+			t.Errorf("fact %q reports a saving context-guru did not make:\n%s", k, out)
+		}
+	}
+	if strings.Contains(out, "7.5") {
+		t.Errorf("the removal's dollar figure reached the report:\n%s", out)
+	}
+}
