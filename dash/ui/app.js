@@ -1234,18 +1234,6 @@ const TILE_INFO = {
       + 'component configurations it EXCEEDS what the preset saved — check the '
       + "Preset steps tab, which shows each component's net separately.",
   },
-  'total-reduced-usd': {
-    what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
-      + 'removed yourself.',
-    how: '"Total dollars avoided" plus the declarations this account stopped carrying on its own: '
-      + 'an MCP server you removed, a skill you switched off. Those tokens genuinely stopped being '
-      + 'billed.',
-    catch: 'The two totals are separate on purpose. This one answers "how much smaller did my '
-      + 'bill get"; the other answers "how much of that did context-guru do". Rolling your own '
-      + 'work into the figure this product claims for itself would be taking credit for it. The '
-      + 'half that is yours is also MODELLED rather than measured \u2014 see the "Removed by you" '
-      + 'tile for exactly how, and when it is wrong.',
-  },
   'decl-filter-saved': {
     what: 'Money not spent because the removal filter stopped sending tool schemas, MCP tool '
       + 'schemas and skill listing entries you opted out of.',
@@ -1262,23 +1250,6 @@ const TILE_INFO = {
       + 'also costs one cache miss per session in flight, once, because the declarations sit at '
       + 'the front of the cached prompt; that charge is inside the billed cost and is not '
       + 'subtracted from this figure.',
-  },
-  'self-removed': {
-    what: 'Declarations YOU stopped carrying \u2014 an MCP server removed with `claude mcp '
-      + 'remove`, a skill switched off. Real money, and not ours.',
-    how: 'The inventory is a time series. A name present in the early sessions of this window and '
-      + 'absent from the later ones stopped being declared, and its weight times the requests of '
-      + 'the sessions that followed is what carrying it would have cost. Only COMPARABLE later '
-      + 'sessions count \u2014 one that declared no MCP tool at all cannot testify about a missing '
-      + 'MCP tool \u2014 and fewer than three of them is not reported at all.',
-    catch: 'MODELLED, not measured, and the difference matters. The method sees that the '
-      + 'declaration set changed; it cannot see WHY. On this deployment\u2019s own history the '
-      + 'largest candidate was the editor integration, which is declared only when a session runs '
-      + 'inside the IDE \u2014 so "you removed it" and "you worked in a terminal that day" look '
-      + 'identical here, and no threshold separates them. The reduction is real either way; the '
-      + 'attribution is a guess. That is why this is outside "Total dollars avoided" and inside '
-      + '"Total the bill came down". Anything the removal filter is already credited for is '
-      + 'excluded rather than counted twice, and the count of exclusions is on the tile.',
   },
   'cachesplit-saved': {
     what: 'Money saved by splitting the prompt so that the stable part stays cached when '
