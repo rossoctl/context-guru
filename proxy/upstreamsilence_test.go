@@ -702,7 +702,16 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
-	for i := 0; i < 300; i++ {
+	// The limit also bounds the resend, which the server answers at once. A limit of 5 ms was too
+	// short for that answer on a loaded -race runner (3 failures in 200 runs): the resend went silent
+	// too and the call failed for a reason this test does not study. The first attempt does not
+	// depend on the limit, because its hook holds the byte until the watchdog has cancelled it.
+	// 15 ms is long enough for the resend; 100 calls still find the 1-in-20 shape.
+	const (
+		silence    = 15 * time.Millisecond
+		iterations = 100
+	)
+	for i := 0; i < iterations; i++ {
 		var attempts atomic.Int64
 		build := func(ctx context.Context) (*http.Request, error) {
 			if attempts.Add(1) == 1 {
@@ -712,7 +721,7 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 			}
 			return silenceBuild(srv.URL, streamBody)(ctx)
 		}
-		resp, err := doWithSilenceGuard(context.Background(), c, 5*time.Millisecond, build)
+		resp, err := doWithSilenceGuard(context.Background(), c, silence, build)
 		if err != nil {
 			t.Fatalf("call %d: the resend should have been answered: %v", i, err)
 		}
