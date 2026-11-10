@@ -63,33 +63,103 @@ Choose your setup. Each button opens only the instructions for that path.
       </td>
     </tr>
     <tr>
+      <th>Pi (experimental)</th>
+      <td align="center">
+        <a href="#pi-experimental"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logoColor=white"></a>
+      </td>
+      <td align="center">Not yet</td>
+    </tr>
+    <tr>
       <th>OpenCode (experimental)</th>
       <td align="center">
-        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
+        <a href="#opencode-experimental"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
       </td>
-      <td align="center">&mdash;</td>
+      <td align="center">Not yet</td>
     </tr>
   </tbody>
 </table>
 
+### Pi (experimental)
+
+The [Pi](https://pi.dev) package routes Pi's `anthropic` and `openai` providers through a local
+proxy. It is experimental: it is tested with fake keys in a sandbox. A real model answer through the
+proxy, keep-alive pings and Sign in with ChatGPT are not tested live yet.
+
+You need:
+
+- Pi 1.5.0 or later. Pi 1.5.0 needs Node.js 22.19 or later (the `engines` field of its `package.json`).
+- `python3`.
+- macOS or Linux.
+
+Install it:
+
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/rossoctl/context-guru.git
+   ```
+2. Install the package into Pi:
+   ```sh
+   pi install ./context-guru/pi-package
+   ```
+3. Start Pi and run:
+   ```text
+   /context-guru setup
+   ```
+   Setup asks one question and changes nothing until you answer yes. On yes, it installs the proxy
+   as a user service that starts at login. Then it points Pi's `anthropic` and `openai` providers at
+   the proxy, in `~/.pi/agent/models.json`.
+4. Select the model again with `/model`, or restart Pi.
+
+Check it with `/context-guru status`. Undo it with `/context-guru uninstall`. If Pi cannot talk after
+setup, run `~/.local/state/context-guru-pi/context-guru-reset`.
+
+The default cache strategy, `auto`, sends small keep-alive requests while you are idle. They use your
+own quota. To turn them off, run `/context-guru cache-strategy none`.
+
+Details and limits: [pi-package/README.md](pi-package/README.md). How it differs from the Claude Code
+plugin: [Pi package and Claude Code plugin compared](docs/reference/pi-vs-claude-code.md).
+
 ### OpenCode (experimental)
 
-The OpenCode plugin routes your Anthropic and OpenAI providers through a local proxy. It adds chat commands.
-It is experimental: it is new, and it ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
+The OpenCode plugin routes OpenCode's `anthropic` and `openai` providers through a local proxy. It
+adds chat commands. It is experimental: it is new, and a real OpenCode (1.19.5) ran it once. In that
+run, a real model answer came back through the proxy, and the dashboard showed it with status 200.
+OpenCode 2, the `/context-guru-status` command end to end through the model, and keep-alive pings are
+not tested live yet.
 
-1. Clone this repository.
+You need:
+
+- OpenCode 1.19.5. Other versions are not tested.
+- Proxy v0.7.1 or later. The plugin downloads v0.7.1, or uses the `context-guru-proxy` on your `PATH`.
+- macOS or Linux.
+
+Install it:
+
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/rossoctl/context-guru.git
+   ```
 2. Add the plugin to `~/.config/opencode/opencode.json`:
    ```json
    { "$schema": "https://opencode.ai/config.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/index.js"] }
    ```
-3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`. In OpenCode 1.19.5, press `ctrl+p` and search "Context Guru".
+3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`:
    ```json
    { "$schema": "https://opencode.ai/tui.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"] }
    ```
+   In OpenCode 1.19.5, press `ctrl+p` and search "Context Guru".
 4. Restart OpenCode.
 
-Commands: `/context-guru-status`, `/context-guru-preset`, `/context-guru-strategy`, `/context-guru-update`, `/context-guru-uninstall` (and `/context-guru-install` to undo an uninstall).
-The plugin never stores message text; the dashboard shows metadata only. To remove it, run `/context-guru-uninstall`, then delete the plugin entry. See the [full guide](docs/how-to/install-opencode-plugin.md).
+Check it with `/context-guru-status`. Undo it with `/context-guru-uninstall`, then delete the plugin
+entry. The other commands are `/context-guru-preset`, `/context-guru-strategy`, `/context-guru-update`,
+and `/context-guru-install` (it undoes an uninstall).
+
+The default cache strategy, `auto`, sends small keep-alive requests while you are idle. They use your
+own quota. To turn them off, run `/context-guru-strategy` and choose `none`.
+
+The plugin never stores message text; the dashboard shows metadata only. Details and limits:
+[opencode-plugin/README.md](opencode-plugin/README.md) and the
+[install guide](docs/how-to/install-opencode-plugin.md).
 
 
 ## What's cool

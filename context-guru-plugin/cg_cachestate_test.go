@@ -13,9 +13,9 @@ import (
 )
 
 // What `cg.py cachestate` adds beside the raw cachestate since the mod's band draws the status line (0.6.1): the
-// `▲ update` marker, the session's manual pings and, on a subscription, the tokens saved in the 5-hour window. Each
-// comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank a field in
-// silence. This test is what catches it.
+// `▲ update` marker, the session's manual pings and, on a subscription, the tokens this session saved in the 5-hour
+// window. Each comes from a statusline.py helper; status_extras swallows every error, so a rename there would blank
+// a field in silence. This test is what catches it.
 func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	const now = 1_800_000_000_000
 	const start = now - 3_600_000
@@ -28,12 +28,16 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/cachestate", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(cache)) }) //nolint:errcheck
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("session") != "" {
+		q := r.URL.Query()
+		switch {
+		case q.Get("session") != "" && q.Get("since") != "": // this session in the window: the band's saving
+			windowAsked = q.Get("since")
+			w.Write([]byte(`{"saved_unique":85000,"replay_tokens":1200000}`)) //nolint:errcheck
+		case q.Get("session") != "":
 			w.Write([]byte(`{"total_saved_usd":0.31,"manual_pings":{"count":2,"ping_usd":0.08,"saved_usd":0.27}}`)) //nolint:errcheck
-			return
+		default: // every session in the window: the band must not show these
+			w.Write([]byte(`{"saved_unique":999000,"replay_tokens":9990000}`)) //nolint:errcheck
 		}
-		windowAsked = r.URL.Query().Get("since")
-		w.Write([]byte(`{"saved_unique":85000,"replay_tokens":1200000}`)) //nolint:errcheck
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln) //nolint:errcheck
@@ -56,8 +60,9 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	if mp, _ := doc["manual_pings"].(map[string]any); mp["saved_usd"] != 0.27 {
 		t.Errorf("manual_pings = %v, want the session stats' figure", doc["manual_pings"])
 	}
+	// The tokens are this session's, not every session's in the window.
 	if doc["window_saved"] != "saved 1.2M rd / 85.0k wr" {
-		t.Errorf("window_saved = %v (window asked since=%q, want %d)", doc["window_saved"], windowAsked, start)
+		t.Errorf("window_saved = %v, want this session's tokens (window asked since=%q, want %d)", doc["window_saved"], windowAsked, start)
 	}
 }
 

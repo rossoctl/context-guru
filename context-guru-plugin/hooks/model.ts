@@ -34,6 +34,18 @@ export const usd = (x: number): string => {
   return `${sign}$${a >= 100 ? a.toFixed(0) : a.toFixed(2)}`
 }
 
+/** A token count as the status line writes it (statusline.py `_human`): `85.0k`, `1.2M`, `593`. */
+export const tokens = (n: number): string => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${Math.round(n)}`)
+
+/** The next message's price in the unit the user pays in. With an API key: dollars. On a Claude subscription: tokens,
+ * the same unit as the band's saving. A warm cache reads the cached prefix (`rd`); a cold one writes it again (`wr`).
+ * Anthropic does not publish how the 5-hour limit weights the two, so the band shows counts and does not convert. */
+export function nextPrice(m: ThreadView, isSubscription: boolean): { warm?: string; cold?: string } {
+  if (!isSubscription) return { warm: m.warmUsd === undefined ? undefined : usd(m.warmUsd), cold: m.coldUsd === undefined ? undefined : usd(m.coldUsd) }
+  if (m.tokens === undefined || m.tokens < 1) return {}
+  return { warm: m.warmUsd === undefined ? undefined : `${tokens(m.tokens)} rd`, cold: m.coldUsd === undefined ? undefined : `${tokens(m.tokens)} wr` }
+}
+
 /** "4m", "<1m", "1h05m": coarse on purpose, so the band redraws when the words change, not every poll. */
 export function span(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1000))

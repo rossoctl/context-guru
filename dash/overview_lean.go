@@ -9,13 +9,15 @@ import (
 // OverviewLean answers /api/stats?lean=1 (dash/api.go's statsLean branch) — see #502.
 //
 // For a SESSION or a concrete time window (anything but true lifetime), it runs 1 bounded
-// aggregate (overviewLeanWindow) instead of Overview()'s 16 queries, because lean reads only a
+// aggregate (overviewLeanWindow), which also carries the `tokens` object's terms (#998), instead of
+// Overview()'s 16 queries, because lean reads only a
 // handful of their outputs: confirmed against context-guru-plugin/scripts/statusline.py and
 // scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
 // upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
 // waterfall rows keyed "compaction", "cachesplit_saved", "keepalive_saved", "keepalive_ping",
-// "decl_filter_saved", "self_removed", "cg_llm" — every one a plain SUM/AVG of a `requests`
-// column, bounded by the session or the time window, same index Overview()'s own main
+// "decl_filter_saved", "self_removed", "cg_llm", plus the saved token counts saved_unique,
+// saved_gross and replay_tokens (the status line's `rd / wr`, #990) — every one a plain SUM/AVG of a
+// `requests` column or arithmetic on them, bounded by the session or the time window, same index Overview()'s own main
 // aggregate already uses. The 7 goroutines Overview() runs beyond that aggregate (the replay
 // ceiling, its keep-alive correction, CompactionResets, the TTL/accounting breakdown, 2
 // invalid-config counts, the estimator-divergence query, the p95-latency query) feed none of
@@ -64,12 +66,13 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	q, args := leanWindowMainQuery(f)
 	var upAvg, cgAvg sql.NullFloat64
 	var manual manualAgg
+	var tok leanAgg
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(append([]any{
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings,
 		&o.EstimatedRequests, &o.EstimatedSavedUSD},
-		append(manual.dest(), &o.DeferNetUSD)...)...); err != nil {
+		append(append(manual.dest(), &o.DeferNetUSD), tok.dest()...)...)...); err != nil {
 		return nil, err
 	}
 	o.ManualPings = manual.pings()
@@ -78,6 +81,15 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	o.TotalReducedUSD = o.TotalSavedUSD
+	// The same arithmetic as the full Overview(), from the same agent-only columns, so a lean read gives the status
+	// line's `rd` (replay_tokens) and not 0 (#990).
+	o.SavedGross = o.TokensBefore - o.TokensAfter
+	if o.ReplayTokens = o.SavedGross - o.SavedUnique; o.ReplayTokens < 0 {
+		o.ReplayTokens = 0
+	}
+	// The tokens object, from the same scan: the totals and the unmeasured count. No by_feature and
+	// no ping tokens: see leanAgg.read (#998).
+	tok.read().apply(o)
 	return o, nil
 }
 
@@ -119,6 +131,7 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.estimate_held ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.estimated_saved_usd ELSE 0 END),0),
 			` + manualSelect + `,
-			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.defer_net_usd ELSE 0 END),0)
+			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.defer_net_usd ELSE 0 END),0),
+			` + accTokenLeanTerms + `
 		FROM requests r WHERE ` + cond, args
 }
