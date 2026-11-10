@@ -5,8 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import {
-  CHAIN, conflictPrompt, conflictWords, endKind, forChatGPTSignIn, isRouted, KEEP, parseArgs, parseFacts, readInstall, REPLACE, stripsChatGPTFields,
+  CHAIN, checkAtStart, conflictPrompt, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
+  needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
+  stripsChatGPTFields, type StartCheck,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -72,6 +77,190 @@ test("a bare /context-guru runs status, and the first two words are the subcomma
   assert.deepEqual(parseArgs("   "), { sub: "status", value: "" });
   assert.deepEqual(parseArgs("preset"), { sub: "preset", value: "" });
   assert.deepEqual(parseArgs("  preset   medium "), { sub: "preset", value: "medium" });
+});
+
+test("a session start checks the proxy only when installed and some model is routed", () => {
+  assert.equal(needsStartCheck(undefined, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck({ ...install, port: undefined }, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck(install, []), false);
+  assert.equal(needsStartCheck(install, [undefined, "https://api.anthropic.com"]), false);
+  // The session's model need not be routed: any routed provider is enough.
+  assert.equal(needsStartCheck(install, [undefined, "https://api.x.ai/v1", "http://127.0.0.1:8800/openai/v1"]), true);
+});
+
+/** A StartCheck whose answers come from a list, and that records what it did. */
+function fake(answers: boolean[], over: Partial<StartCheck> = {}) {
+  const log = { checks: 0, restarts: 0, notices: [] as string[] };
+  const check: StartCheck = {
+    port: 8800,
+    hatch: "/state/context-guru-reset",
+    answers: async () => answers[log.checks++] ?? false,
+    restart: async () => {
+      log.restarts++;
+      return { result: "down", service: "restarted" };
+    },
+    active: () => true,
+    notify: (text) => log.notices.push(text),
+    ...over,
+  };
+  return { check, log };
+}
+
+test("a proxy that answers is not restarted and nothing is said", async () => {
+  const { check, log } = fake([true]);
+  assert.equal(await checkAtStart(check), "up");
+  assert.deepEqual(log, { checks: 1, restarts: 0, notices: [] });
+});
+
+test("a proxy that comes back after one restart gives no notice", async () => {
+  const { check, log } = fake([false, true]);
+  assert.equal(await checkAtStart(check), "restarted");
+  assert.deepEqual(log, { checks: 2, restarts: 1, notices: [] });
+});
+
+test("a proxy still down after one restart gives exactly one notice, and no loop", async () => {
+  const { check, log } = fake([false, false, false, false]);
+  assert.equal(await checkAtStart(check), "down");
+  assert.equal(log.checks, 2);
+  assert.equal(log.restarts, 1);
+  assert.equal(log.notices.length, 1);
+  assert.match(log.notices[0], /port 8800 does not answer: one restart did not help\./);
+  assert.match(log.notices[0], /\/context-guru status/);
+  assert.match(log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("the notice names the reset command the controller reports, and a failed restart still warns", async () => {
+  const reported = fake([false, false], { restart: async () => ({ result: "down", reset_hatch: "/x/context-guru-reset" }) });
+  await checkAtStart(reported.check);
+  assert.match(reported.log.notices[0], /run \/x\/context-guru-reset from a shell/);
+  const thrown = fake([false, false], { restart: async () => { throw new Error("stale"); } });
+  assert.equal(await checkAtStart(thrown.check), "down");
+  assert.match(thrown.log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("a session that ended during the check gets no restart and no notice", async () => {
+  let active = true;
+  const early = fake([false], { active: () => false });
+  assert.equal(await checkAtStart(early.check), "ended");
+  assert.deepEqual(early.log, { checks: 1, restarts: 0, notices: [] });
+  const late = fake([false, false], { restart: async () => { active = false; return {}; }, active: () => active });
+  assert.equal(await checkAtStart(late.check), "ended");
+  assert.deepEqual(late.log.notices, []);
+});
+
+test("the notice text is one line", () => {
+  assert.equal(downNotice(8800, { service: "restarted" }, "/h").includes("\n"), false);
+});
+
+test("the notice names the real reason the proxy is still down", () => {
+  assert.equal(downReason({ result: "down", service: "restarted" }), "one restart did not help");
+  assert.match(downReason({ result: "down", service: "no_service" }), /service file is missing, so nothing was restarted.*\/context-guru setup/);
+  assert.match(downReason({ result: "down", service: "not_owned" }), /not written by context-guru/);
+  assert.match(downReason({ result: "down", service: "unsupported" }), /no user service/);
+  assert.match(downReason({ result: "down", service: "failed" }), /restart command failed/);
+  assert.match(downReason({ result: "not_installed" }), /no install record/);
+  assert.match(downReason({ result: "already_up" }), /answered the restart check/);
+  assert.equal(downReason({}), "the restart did not run");
+  assert.match(downNotice(8800, { service: "no_service" }), /port 8800 does not answer: its service file is missing/);
+});
+
+test("the notice names the reset command only when there is one", () => {
+  assert.match(downNotice(8800, {}, "/h/context-guru-reset"), /run \/h\/context-guru-reset from a shell/);
+  assert.doesNotMatch(downNotice(8800, {}), /from a shell|undefined/);
+  const none = fake([false, false], { hatch: undefined, restart: async () => ({ result: "down", service: "restarted" }) });
+  return checkAtStart(none.check).then(() => assert.doesNotMatch(none.log.notices[0], /from a shell|undefined/));
+});
+
+test("a session's end stops only that session's check", () => {
+  const checks = new StartChecks();
+  const a = checks.begin("session-a");
+  const b = checks.begin("session-b");
+  checks.end("session-a");
+  assert.equal(a.active(), false);
+  assert.equal(a.signal.aborted, true);
+  assert.equal(b.active(), true, "the other session's check keeps running");
+  assert.equal(b.signal.aborted, false);
+  checks.end("session-unknown"); // nothing to stop
+  assert.equal(b.active(), true);
+});
+
+test("a session that starts again replaces its own check, and a finished check is forgotten", () => {
+  const checks = new StartChecks();
+  const first = checks.begin("s");
+  const second = checks.begin("s");
+  assert.equal(first.active(), false);
+  assert.equal(second.active(), true);
+  checks.done("s", first.signal); // a late finish of the old check does not drop the new one
+  checks.end("s");
+  assert.equal(second.active(), false);
+  const third = checks.begin("s");
+  checks.done("s", third.signal);
+  checks.end("s"); // already forgotten: nothing aborts
+  assert.equal(third.active(), true);
+});
+
+test("the health check is a GET to localhost /healthz, true only on 200", async () => {
+  const seen: string[] = [];
+  let status = 200;
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.statusCode = status;
+    res.end("ok");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    assert.equal(await proxyAnswers(port), true);
+    status = 503;
+    assert.equal(await proxyAnswers(port), false);
+    assert.deepEqual(seen, ["GET /healthz", "GET /healthz"]);
+  } finally {
+    server.close();
+  }
+  // Nothing listens there now.
+  assert.equal(await proxyAnswers(port, 1000), false);
+});
+
+test("a proxy that accepts but never answers fails the check at the time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const start = Date.now();
+    assert.equal(await proxyAnswers(port, 200), false);
+    assert.ok(Date.now() - start < 2000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("each check has a time limit, 5 seconds by default", async () => {
+  assert.equal(START_CHECK_TIMEOUT_MS, 5000);
+  let signal: AbortSignal | undefined;
+  const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+    signal = init?.signal ?? undefined;
+    return new Response("ok");
+  }) as typeof fetch;
+  assert.equal(await proxyAnswers(8800, undefined, fetcher), true);
+  assert.ok(signal, "the request carries a time limit");
+});
+
+test("a stopped check ends at once, before its time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const stop = new AbortController();
+    const start = Date.now();
+    const pending = proxyAnswers(port, 5000, fetch, stop.signal);
+    setTimeout(() => stop.abort(), 50);
+    assert.equal(await pending, false);
+    assert.ok(Date.now() - start < 1000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 test("a conflict is one question: chain, replace, or change nothing", () => {

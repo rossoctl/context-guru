@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -351,6 +352,167 @@ class Controller(Sandbox):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("models_restore=restored", out.stdout)
         self.assertFalse(self.models.exists())
+
+
+class Restart(Sandbox):
+    """`restart`: the extension's one restart at session start. Only a service we own is touched."""
+
+    def setUp(self):
+        super().setUp()
+        pi_plugin.write_record({"port": 8800})
+        self.calls = []
+        self.fail = set()  # first words of commands that fail, e.g. "kickstart"
+
+        def run(cmd, **kwargs):
+            self.calls.append(cmd)
+            code = 113 if cmd[1] in self.fail else 0
+            if code and kwargs.get("check"):
+                raise subprocess.CalledProcessError(code, cmd)
+            return subprocess.CompletedProcess(cmd, code, b"", b"")
+        self.run_patch = mock.patch.object(pi_plugin.subprocess, "run", side_effect=run)
+        self.run_patch.start()
+        self.addCleanup(self.run_patch.stop)
+        sleep = mock.patch.object(pi_plugin.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def restart(self, kind, healthy):
+        with mock.patch.object(pi_plugin, "service_kind", return_value=kind), \
+                mock.patch.object(pi_plugin, "healthy", side_effect=healthy):
+            return self.run_main("restart")
+
+    def our_plist(self, managed=True):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": managed}, handle)
+
+    def our_unit(self, text=None):
+        unit = pi_plugin.systemd_unit()
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(text if text is not None else pi_plugin.MARKER + "\n[Service]\n")
+
+    def test_not_installed(self):
+        pi_plugin.record_path().unlink()
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["result"]), (2, "not_installed"))
+        self.assertEqual(self.calls, [])
+
+    def test_a_proxy_that_answers_is_not_restarted(self):
+        self.our_plist()
+        code, facts = self.restart("launchd", lambda port, timeout=1: True)
+        self.assertEqual((code, facts["result"]), (0, "already_up"))
+        self.assertEqual(self.calls, [])
+
+    def test_launchd_kickstarts_our_label(self):
+        self.our_plist()
+        code, facts = self.restart("launchd", [False, False, True])
+        self.assertEqual((code, facts["result"], facts["service"]), (0, "up", "restarted"))
+        self.assertEqual(self.calls, [["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/io.rossoctl.context-guru-pi"]])
+
+    def test_launchd_bootstraps_a_plist_that_is_not_loaded(self):
+        self.our_plist()
+        self.fail = {"kickstart"}
+        # The first kickstart fails, so the plist is loaded; the second kickstart then fails too here.
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
+        self.assertEqual(self.calls[1], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
+
+    def test_launchd_bootstrap_then_kickstart_brings_it_up(self):
+        self.our_plist()
+        first = [True]
+
+        def run(cmd, **kwargs):
+            self.calls.append(cmd)
+            if cmd[1] == "kickstart" and first[0]:
+                first[0] = False
+                return subprocess.CompletedProcess(cmd, 113, b"", b"")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
+            code, facts = self.restart("launchd", [False, True])
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
+        self.assertEqual((code, facts["result"]), (0, "up"))
+
+    def test_a_plist_we_do_not_own_is_left_alone(self):
+        self.our_plist(managed=False)
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "not_owned"))
+        self.assertEqual(self.calls, [])
+
+    def test_no_service_file_means_no_restart(self):
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["service"]), (1, "no_service"))
+        self.assertEqual(self.calls, [])
+
+    def test_systemd_restarts_our_unit(self):
+        self.our_unit()
+        code, facts = self.restart("systemd", [False, True])
+        self.assertEqual((code, facts["result"]), (0, "up"))
+        self.assertEqual(self.calls, [["systemctl", "--user", "restart", "context-guru-pi.service"]])
+
+    def test_a_unit_we_do_not_own_is_left_alone(self):
+        self.our_unit("[Service]\n")
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
+        self.assertEqual(facts["service"], "not_owned")
+        self.assertEqual(self.calls, [])
+
+    def test_still_down_names_the_reset_hatch_and_the_log(self):
+        self.our_unit()
+        pi_plugin.reset_hatch().write_text("#!/bin/sh\n")
+        self.fail = {"--user"}
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
+        self.assertEqual(facts["reset_hatch"], str(pi_plugin.reset_hatch()))
+        self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
+        self.assertEqual(facts["port"], "8800")
+
+    def test_an_unsupported_platform_restarts_nothing(self):
+        code, facts = self.restart(None, lambda port, timeout=1: False)
+        self.assertEqual((code, facts["service"]), (1, "unsupported"))
+        self.assertEqual(self.calls, [])
+
+
+    def test_a_missing_reset_hatch_is_not_named(self):
+        self.our_unit()
+        code, facts = self.restart("systemd", lambda port, timeout=1: False)
+        self.assertEqual(facts["result"], "down")
+        self.assertNotIn("reset_hatch", facts)
+
+    def test_the_first_health_check_has_the_extensions_5_second_limit(self):
+        """A proxy that is slow but alive answers within 5 s, and is not force-restarted."""
+        self.our_plist()
+        limits = []
+
+        def healthy(port, timeout=1):
+            limits.append(timeout)
+            return timeout >= 5  # answers only to a check that waits long enough
+        code, facts = self.restart("launchd", healthy)
+        self.assertEqual((code, facts["result"]), (0, "already_up"))
+        self.assertEqual(limits, [pi_plugin.START_CHECK_SECONDS])
+        self.assertEqual(pi_plugin.START_CHECK_SECONDS, 5)
+        self.assertEqual(self.calls, [])
+
+    def test_a_second_restart_waits_for_the_first_and_finds_the_proxy_up(self):
+        self.our_plist()
+        up = threading.Event()
+        result = {}
+        lock = pi_plugin.restart_lock()  # the first restart, still running
+        try:
+            with mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                    mock.patch.object(pi_plugin, "healthy", side_effect=lambda port, timeout=1: up.is_set()):
+                second = threading.Thread(target=lambda: result.update(zip(("code", "facts"), self.run_main("restart"))))
+                second.start()
+                second.join(0.3)
+                self.assertTrue(second.is_alive(), "the second caller waits for the lock")
+                up.set()  # the first restart brought the proxy up
+                lock.close()
+                second.join(5)
+        finally:
+            lock.close()
+        self.assertFalse(second.is_alive())
+        self.assertEqual((result["code"], result["facts"]["result"]), (0, "already_up"))
+        self.assertEqual(self.calls, [])
 
 
 GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}
