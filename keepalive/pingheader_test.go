@@ -34,7 +34,8 @@ func TestScheduledPingReportCarriesTheResponseHeader(t *testing.T) {
 }
 
 // A ping refused for the rate limit (a 429) is still booked with its row, and its answer's headers
-// go with it: the provider sends the limit headers on a refusal too, with the status "rejected".
+// go with it: the provider sends the limit headers on a refusal too. The parser's status words are
+// checked in proxy/pinglimits_test.go; here only the header's arrival is checked.
 func TestTransientPingReportCarriesTheResponseHeader(t *testing.T) {
 	k, sink, clock := manualKeeper(t)
 	fd := fakeOf(k)
