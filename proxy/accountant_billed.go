@@ -14,9 +14,10 @@ import (
 // prompt that was billed. The library reads body bytes, so it would see no shrink, and the sum check could not tie
 // the saving to the bodies.
 //
-// billedBody is the forwarded body with each deferred definition cut to a stub, a bare {"name":...}. The accountant
-// gets this copy. Nothing else does: the bytes sent to the provider, the cache breakpoints and the ping facts all
-// come from the real body. Deferral is then an ordinary shrink of `tools` positions, reported as one operation.
+// billedBody is the forwarded body with each definition the proxy itself deferred cut to a stub, a bare
+// {"name":...}. A tool the client deferred keeps its definition. The accountant gets this copy. Nothing else does:
+// the bytes sent to the provider, the cache breakpoints and the ping facts all come from the real body. Deferral is
+// then an ordinary shrink of `tools` positions, reported as one operation for each tool.
 
 // deferredStub is what the accountant's copy of a deferred definition keeps. The provider bills no definition, so the
 // stub is as small as a tool can be and still be a tool. Our own tokenizer does not enter here: the library converts
