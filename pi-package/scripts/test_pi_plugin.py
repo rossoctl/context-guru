@@ -645,6 +645,28 @@ class Restart(Sandbox):
         self.assertEqual(result["facts"]["result"], "already_up")
         self.assertEqual([r.get("cache_strategy") for r in seen], ["none"])
 
+    def test_a_restart_checks_the_port_that_a_setup_moved_during_the_wait(self):
+        """Review finding on #1058: the health check and the facts use the port read after the wait."""
+        self.our_plist()
+        checked, result = [], {}
+        lock = pi_plugin.restart_lock()
+        try:
+            with mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                    mock.patch.object(pi_plugin, "rerender_config", return_value="unchanged"), \
+                    mock.patch.object(pi_plugin, "healthy",
+                                      side_effect=lambda port, timeout=1: checked.append(port) or port == 8801):
+                second = threading.Thread(target=lambda: result.update(zip(("code", "facts"), self.run_main("restart"))))
+                second.start()
+                second.join(0.3)
+                pi_plugin.write_record({"port": 8801})  # setup moved the port
+                lock.close()
+                second.join(5)
+        finally:
+            lock.close()
+        self.assertEqual((result["facts"]["result"], result["facts"]["port"]), ("already_up", "8801"))
+        self.assertEqual(checked, [8801])
+        self.assertEqual(self.calls, [])
+
     def test_with_no_fcntl_restart_reports_unsupported_and_no_traceback(self):
         """Review note from #1011: a state directory copied to Windows has no fcntl."""
         with mock.patch.dict(sys.modules, {"fcntl": None}):
@@ -797,6 +819,88 @@ class ConfigByName(Sandbox):
         self.assertIn("  strategy: auto\n", seen["config"])
         self.assertNotIn("keepalive", seen["config"])
         self.assertIn("# chained: anthropic -> proxy -> https://gw.example/anthropic", seen["config"])
+
+    def during_the_lock_wait(self, argv, change, patches=()):
+        """Run `argv` while the restart lock is held; run `change` while it waits; then free the lock."""
+        result = {}
+        lock = pi_plugin.restart_lock()
+        try:
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                thread = threading.Thread(target=lambda: result.update(zip(("code", "facts"), self.run_main(*argv))))
+                thread.start()
+                thread.join(0.3)
+                self.assertTrue(thread.is_alive(), "the command waits for the lock")
+                change()
+                lock.close()
+                thread.join(5)
+        finally:
+            lock.close()
+        self.assertFalse(thread.is_alive())
+        return result["code"], result["facts"]
+
+    def test_configure_reads_the_record_again_after_the_lock(self):
+        """Review finding on #1058: a setup that ran during the wait is not undone."""
+        self.installed()
+        started = {}
+        both = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}
+
+        def setup_ran():
+            pi_plugin.write_record({**pi_plugin.read_record(), "upstreams": both, "base_urls": {"openai": "x"}})
+
+        def start(executable, port, upstreams=None):
+            started["upstreams"] = dict(upstreams or {})
+            return True
+        code, facts = self.during_the_lock_wait(
+            ("configure", "--cache-strategy", "1-ping"), setup_ran,
+            (mock.patch.object(pi_plugin, "names_strategies", return_value=True),
+             mock.patch.object(pi_plugin, "start_service", side_effect=start)))
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        record = pi_plugin.read_record()
+        self.assertEqual((record["cache_strategy"], record["upstreams"], record["base_urls"]),
+                         ("1-ping", both, {"openai": "x"}))
+        self.assertEqual(started["upstreams"], both)
+        self.assertIn("# chained: openai -> proxy -> https://gw.example/openai/v1", pi_plugin.proxy_config().read_text())
+
+    def test_update_after_an_uninstall_during_the_wait_skips_the_restart(self):
+        """Review finding on #1058: no KeyError, and no new record holding only the binary."""
+        self.installed(binary=str(pi_plugin.managed_binary()))
+        new = str(pi_plugin.managed_binary())
+        start = mock.Mock(return_value=True)
+        code, facts = self.during_the_lock_wait(
+            ("update", "--install"), lambda: pi_plugin.record_path().unlink(),
+            (mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"),
+             mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"),
+             mock.patch.object(pi_plugin, "install_release_binary", return_value=(new, "v0.7.1")),
+             mock.patch.object(pi_plugin, "start_service", start)))
+        self.assertEqual((code, facts["result"], facts["restart"]), (0, "updated", "skipped"))
+        self.assertFalse(pi_plugin.record_path().exists())
+        start.assert_not_called()
+
+    def test_configure_and_update_refuse_when_the_lock_stays_busy(self):
+        """Review note on #1058: the busy paths of configure and update write nothing."""
+        self.installed(binary=str(pi_plugin.managed_binary()))
+        before = (pi_plugin.record_path().read_text(), pi_plugin.proxy_config().read_text())
+        start = mock.Mock(return_value=True)
+        lock = pi_plugin.restart_lock()
+        try:
+            with mock.patch.object(pi_plugin, "LOCK_WAIT_SECONDS", 0.2), \
+                    mock.patch.object(pi_plugin, "names_strategies", return_value=True), \
+                    mock.patch.object(pi_plugin, "start_service", start), \
+                    mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"), \
+                    mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"), \
+                    mock.patch.object(pi_plugin, "install_release_binary",
+                                      return_value=(str(pi_plugin.managed_binary()), "v0.7.1")):
+                configured = self.run_main("configure", "--cache-strategy", "1-ping")
+                updated = self.run_main("update", "--install")
+        finally:
+            lock.close()
+        self.assertEqual((configured[0], configured[1]["result"], configured[1]["reason"]), (2, "refused", "busy"))
+        self.assertIn("0.2 seconds", configured[1]["detail"])
+        self.assertEqual((updated[0], updated[1]["result"], updated[1]["reason"]), (1, "error", "busy"))
+        self.assertEqual((pi_plugin.record_path().read_text(), pi_plugin.proxy_config().read_text()), before)
+        start.assert_not_called()
 
 
 GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}

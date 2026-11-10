@@ -79,10 +79,22 @@ export async function proxyAnswers(port: number, timeoutMs: number = START_CHECK
   }
 }
 
+/** The time limit of `pi_plugin.py restart` and `configure`: both can wait for the restart lock. */
+export const RESTART_TIMEOUT_MS = 60_000;
+
+/** The facts of a `restart` run. `pi.exec` resolves (it does not reject) when it stops a command at its
+ * time limit or on abort, with `killed: true` (ExecResult in pi-coding-agent's dist/core/exec.d.ts).
+ * Python printed nothing then, so the extension adds its own `killed` fact. */
+export function restartFacts(result: { killed?: boolean; facts: Record<string, string> }): Record<string, string> {
+  return result.killed ? { ...result.facts, killed: "true" } : result.facts;
+}
+
 /** Why the proxy is still down, from the facts `pi_plugin.py restart` printed (empty when it did not run).
  * `killed` is the extension's own fact: the restart ran past its time limit and was stopped. */
 export function downReason(facts: Record<string, string>): string {
-  if (facts.killed === "true") return "the restart did not finish within 60 seconds and was stopped";
+  if (facts.killed === "true") {
+    return `the restart did not finish within ${RESTART_TIMEOUT_MS / 1000} seconds and was stopped`;
+  }
   if (facts.result === "not_installed") return "context-guru has no install record, so nothing was restarted";
   if (facts.result === "busy") return "another context-guru command held the restart lock, so nothing was restarted";
   switch (facts.service) {
@@ -290,11 +302,8 @@ export default function contextGuru(pi: ExtensionAPI) {
       port,
       hatch: existsSync(hatch) ? hatch : undefined,
       answers: () => proxyAnswers(port, START_CHECK_TIMEOUT_MS, fetch, current.signal),
-      // 60 s: a restart can wait for another session's restart to finish (a lock in pi_plugin.py).
-      restart: async () => {
-        const result = await run(["restart"], 60_000, current.signal);
-        return result.killed ? { ...result.facts, killed: "true" } : result.facts;
-      },
+      // A restart can wait for another session's restart to finish (a lock in pi_plugin.py).
+      restart: async () => restartFacts(await run(["restart"], RESTART_TIMEOUT_MS, current.signal)),
       active: current.active,
       notify: (text) => {
         try {
@@ -443,8 +452,8 @@ export default function contextGuru(pi: ExtensionAPI) {
   const configure = async (ctx: ExtensionCommandContext, flag: "--preset" | "--cache-strategy", value: string) => {
     if (!(await agree(ctx, "Restart the proxy?",
       "The new setting applies after a restart. A restart costs one cache rewrite in every open Pi session."))) return;
-    // 60 s, as for restart: configure can wait for a session-start restart that holds the lock.
-    const out = await run(["configure", flag, value], 60_000);
+    // As for restart: configure can wait for a session-start restart that holds the lock.
+    const out = await run(["configure", flag, value], RESTART_TIMEOUT_MS);
     install = readInstall();
     const f = out.facts;
     say(ctx, f.result === "configured"
@@ -483,7 +492,7 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (!(await agree(ctx, "Update the proxy?",
             `Install ${check.latest_version} (now ${check.installed_version}) and restart the proxy?`))) return;
           const f = (await run(["update", "--install"], 300_000)).facts;
-          return say(ctx, `context-guru update: ${f.result} ${f.version ?? f.reason ?? ""}`.trim());
+          return say(ctx, ["context-guru update:", f.result, f.version, f.reason, f.detail].filter(Boolean).join(" "));
         }
         case "uninstall": {
           if (!(await agree(ctx, "Remove context-guru?",

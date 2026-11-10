@@ -155,9 +155,10 @@ def facts(**values):
 # restarts, so a proxy that is slow but alive is not killed.
 START_CHECK_SECONDS = 5
 
-# The longest a command waits for another one's restart lock. A restart holds it for about 45 s at
-# most (--version, the health check, the service command, wait_healthy). The extension gives
-# `restart` and `configure` 60 s, so a caller that waits 40 s still has time to report.
+# The longest a command waits for another one's restart lock. A restart usually holds it for a few
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has up to
+# 90 s of command time limits, and setup holds it across start_service). A caller that waits 40 s
+# reports `busy` and still finishes inside the extension's 60 s limit.
 LOCK_WAIT_SECONDS = 40
 
 
@@ -747,14 +748,17 @@ def setup(args):
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
     by_name = names_strategies(executable)
-    # The config, the start and the record happen under the restart lock, as in configure: a
-    # session-start restart cannot re-render an older record over the new config between them.
+    # The config, the start and the record happen under the restart lock: a session-start restart
+    # cannot re-render an older record over the new config between them.
     try:
         lock = restart_lock()
     except LockBusy as error:
         facts(result="error", reason="busy", detail=error)
         return 2
     with lock:
+        # Read again under the lock, so the fields setup does not set are not an old copy. The preset
+        # and the strategy stay the ones the consent question named.
+        record = read_record()
         # After the binary is known: the config names the strategy only for a binary that reads the name.
         try:
             write_proxy_config(preset, strategy, upstreams, by_name)
@@ -838,7 +842,8 @@ def restart_lock(wait=None):
         import fcntl  # Unix only, like the services this restarts.
     except ImportError:
         return handle
-    deadline = time.monotonic() + (LOCK_WAIT_SECONDS if wait is None else wait)
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    deadline = time.monotonic() + wait
     try:
         while True:
             try:
@@ -847,7 +852,7 @@ def restart_lock(wait=None):
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise LockBusy(f"another context-guru command held {path} for more than "
-                                   f"{LOCK_WAIT_SECONDS} seconds") from None
+                                   f"{wait} seconds") from None
                 time.sleep(0.1)
     except BaseException:
         handle.close()
@@ -874,8 +879,14 @@ def restart(args):
         facts(result="busy", **where)
         return 1
     with lock:
-        # Read again under the lock: a `configure` that ran while this one waited wrote a new record.
+        # Read again under the lock: a `configure` or `setup` that ran while this one waited wrote a
+        # new record, and a setup can move the port.
         record = read_record()
+        port = int(record.get("port") or 0)
+        if not port:
+            facts(result="not_installed")
+            return 2
+        where["port"] = port
         # Re-render first, so the next start (this one, or a later one by launchd or systemd) reads the
         # current strategy. A proxy that answers is not restarted for it: it reads the file at its
         # next start.
@@ -903,10 +914,6 @@ def configure(args):
     if args.show:
         facts(result="ok", preset=preset, cache_strategy=strategy)
         return 0
-    preset = args.preset or preset
-    strategy = args.cache_strategy or strategy
-    upstreams = recorded_upstreams(record)
-    by_name = names_strategies(record.get("binary"))
     # The config and the record change together under the restart lock, so a session-start restart
     # cannot re-render the old record over the new file between the two writes.
     try:
@@ -915,6 +922,16 @@ def configure(args):
         facts(result="refused", reason="busy", detail=error)
         return 2
     with lock:
+        # Read again under the lock: a `setup` that ran while this one waited wrote a new record.
+        # Only the values given on the command line come from this call.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="not_installed")
+            return 2
+        preset = args.preset or record.get("preset", DEFAULT_PRESET)
+        strategy = args.cache_strategy or record.get("cache_strategy", DEFAULT_STRATEGY)
+        upstreams = recorded_upstreams(record)
+        by_name = names_strategies(record.get("binary"))
         try:
             write_proxy_config(preset, strategy, upstreams, by_name)
         except Exception as error:
@@ -975,7 +992,11 @@ def update(args):
         facts(result="error", reason="busy", version=version, detail=error, restart="skipped")
         return 1
     with lock:
+        # Read again under the lock. An uninstall that ran during the wait leaves no port.
         record = read_record()
+        if not record.get("port"):
+            facts(result="updated", version=version, restart="skipped")
+            return 0
         record["binary"] = executable
         write_record(record)
         # Re-render with the NEW binary: it decides whether the config names the strategy.
