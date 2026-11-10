@@ -13,7 +13,8 @@ import "net/http"
 type Agent interface {
 	// Name is the agent label on the dashboard. "" means the shared code picks the label.
 	Name() string
-	// Paths are the model routes this agent owns. The registry finds the agent by them.
+	// Paths are the model routes this agent owns. The registry finds the agent by them, by the
+	// exact path: no method, no query string, the same trailing slash as the route.
 	Paths() []string
 	// SessionID is a session id that only this agent's client sends in a header. The host tries
 	// it LAST: after x-context-guru-session and the ids in the body. It is per agent because such

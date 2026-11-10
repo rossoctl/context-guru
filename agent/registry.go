@@ -20,20 +20,24 @@ func (r *Registry) Register(a Agent) error {
 	if a == nil {
 		return errors.New("agent: Register with nil agent")
 	}
-	paths := a.Paths()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// The agent's own methods run before the lock: one that called back into the registry would
+	// otherwise deadlock. %T names an agent whose Name is empty.
+	paths, name := a.Paths(), fmt.Sprintf("%q (%T)", a.Name(), a)
 	seen := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		if p == "" {
-			return fmt.Errorf("agent: %q claims an empty path", a.Name())
+			return fmt.Errorf("agent: %s claims an empty path", name)
 		}
 		if seen[p] {
-			return fmt.Errorf("agent: %q claims path %s twice", a.Name(), p)
+			return fmt.Errorf("agent: %s claims path %s twice", name, p)
 		}
 		seen[p] = true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range paths {
 		if old, ok := r.byPath[p]; ok {
-			return fmt.Errorf("agent: path %s is claimed by %q and %q", p, old.Name(), a.Name())
+			return fmt.Errorf("agent: path %s is claimed by %T and %s", p, old, name)
 		}
 	}
 	for _, p := range paths {

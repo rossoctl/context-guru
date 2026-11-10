@@ -36,12 +36,13 @@ func TestAgentDoesNotImportAHost(t *testing.T) {
 
 func TestIsHostMatchesEveryHostPackage(t *testing.T) {
 	for _, pkg := range []string{module + "/proxy", module + "/proxy/sub", module + "/proxyapp",
-		module + "/cmd/context-guru-proxy"} {
+		module + "/cmd/context-guru-proxy", module + "/adapters", module + "/adapters/bifrost"} {
 		if !isHost(pkg) {
 			t.Errorf("isHost(%q) = false, want true", pkg)
 		}
 	}
-	for _, pkg := range []string{module + "/agent", module + "/apply", module + "/proxyish", "net/http"} {
+	for _, pkg := range []string{module + "/agent", module + "/apply", module + "/proxyish",
+		module + "/adaptersish", "net/http"} {
 		if isHost(pkg) {
 			t.Errorf("isHost(%q) = true, want false", pkg)
 		}
@@ -49,7 +50,7 @@ func TestIsHostMatchesEveryHostPackage(t *testing.T) {
 }
 
 func isHost(pkg string) bool {
-	for _, host := range []string{"/proxy", "/proxyapp", "/cmd"} {
+	for _, host := range []string{"/proxy", "/proxyapp", "/cmd", "/adapters"} {
 		root := module + host
 		if pkg == root || strings.HasPrefix(pkg, root+"/") {
 			return true
