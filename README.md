@@ -82,7 +82,7 @@ It is experimental: it is new, and it ran in a real OpenCode only once (1.19.5).
    ```json
    { "$schema": "https://opencode.ai/config.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/index.js"] }
    ```
-3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`. In the one real test, the dialogs did not appear, and the chat commands worked.
+3. Optional, for native dialogs: add `tui.js` to `~/.config/opencode/tui.json`. In OpenCode 1.19.5, press `ctrl+p` and search "Context Guru".
    ```json
    { "$schema": "https://opencode.ai/tui.json", "plugin": ["/absolute/path/to/context-guru/opencode-plugin/tui.js"] }
    ```

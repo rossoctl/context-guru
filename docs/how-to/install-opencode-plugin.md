@@ -84,7 +84,10 @@ Add this to `~/.config/opencode/tui.json` (or the project `tui.json`):
 
 Restart OpenCode after the change.
 
-**Known issue.** In OpenCode 1.19.5 the dialogs did not appear: the two commands were not in the slash menu or the command palette as native entries. The chat commands work. Treat the native dialogs as unproven.
+**Tested in OpenCode 1.19.5.** Press `ctrl+p` and search for "Context Guru". Two entries appear: "Context Guru: preset" and
+"Context Guru: cache strategy". Each one opens the select list, then the two confirm dialogs. The choice is saved only after the first yes.
+In the slash menu, `/context-guru-preset` and `/context-guru-strategy` each list two entries: the chat command and the native one.
+Use the palette to be sure you get the native dialog.
 
 Where the dialogs do not exist (`opencode run`, web, desktop, or no `tui.json` entry), the same commands
 run in chat. The agent shows the choices and asks for your yes in the conversation.
@@ -114,6 +117,8 @@ configuration.
 
 `/context-guru-uninstall --yes --purge` also removes the saved choices (`settings.env`), the strategy
 files, the logs, and the command scripts, except `context-guru-install`, which undoes the uninstall.
+Two files stay: the `disabled` marker, and `dashboard.db.accountant-state.json`, which the proxy writes.
+The next OpenCode start writes the command scripts again. The `disabled` marker keeps routing off.
 
 ## Troubleshooting
 
@@ -123,6 +128,8 @@ the `anthropic` or `openai` provider. Other providers are left untouched by desi
 **Requests fail with a connection error.** Read `proxy.log` in the project state directory. The
 plugin does not rewrite provider configuration when the proxy health check fails, so restarting
 OpenCode restores the original provider endpoint.
+
+**You changed your API key, and requests still fail with 401.** The proxy keeps the environment it started with. It does not read a new key. Run `/context-guru-uninstall --yes`, then `/context-guru-install`, and restart OpenCode with the new key set. Or stop the recorded proxy with the `context-guru-reset` script.
 
 **A gateway stops working after the plugin routes it.** The plugin adds `/v1` to the proxy path, and
 the proxy appends the rest to your gateway `baseURL`. A gateway `baseURL` must therefore end in `/v1`,

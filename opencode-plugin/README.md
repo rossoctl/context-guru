@@ -74,7 +74,7 @@ The plugin registers six commands:
 | `/context-guru-status` | Proxy up or down, port, version, routing, and savings from `/stats` |
 | `/context-guru-install` | Idempotent repair: clears a disable marker, restarts a stopped proxy |
 | `/context-guru-update` | Checks for a newer proxy binary; installs it after confirmation |
-| `/context-guru-uninstall` | Stops the proxy and disables routing after confirmation; `--purge` also removes the binary and state files |
+| `/context-guru-uninstall` | Stops the proxy and disables routing after confirmation; `--purge` also removes the binary the plugin downloaded and the state files, except the `disabled` marker and the proxy's `dashboard.db.accountant-state.json` |
 | `/context-guru-preset` | Lists the presets (current one marked), switches after your yes. A native dialog in the TUI, a chat confirmation elsewhere |
 | `/context-guru-strategy` | Lists the cache strategies, switches after your yes. A native dialog in the TUI, a chat confirmation elsewhere |
 
@@ -94,7 +94,7 @@ export both `server` and `tui`. Add it to `~/.config/opencode/tui.json`:
 }
 ```
 
-- `tui.js` registers the two commands with `api.keymap.registerLayer`.
+- `tui.js` registers the two commands with `api.keymap.registerLayer`. In OpenCode 1.19.5 they show in the `ctrl+p` palette under "Context Guru". The slash menu lists a chat entry and a native entry with the same name; use the palette for the native dialog.
 - A select list marks the current choice. Two confirm dialogs follow: save, then restart.
 - Without `tui.json`, or in `opencode run`, web and desktop, the same commands run in chat.
 - Both ways run the same `set NAME [--restart]` script.
