@@ -2794,3 +2794,28 @@ func TestAModelWithNoPriceEntryIsGatedAtClaudeClassRatesNeverFlat(t *testing.T) 
 		t.Fatalf("rates = %v/%v, want write > read > 0 for a model with no price entry", r, w)
 	}
 }
+
+// ⭐ The gate's SAVING is priced at the READ rate. At Opus rates (write 12.5x read) a deep cut does not pay even
+// over the full 60 turns. If the saving were priced at the write rate, it would pass. This pins the saving side
+// that the flat-rate test cannot see (there read == write).
+func TestTheGateSavingIsPricedAtTheReadRateNotTheWriteRate(t *testing.T) {
+	deep, rm, _ := deepFixture(warmLookbackBlocks)
+	res := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: rm[0].saves}}}
+	e := shippedSweep(t, warmCfg)
+	c := warmCtx("w-sav", newMemStore())
+	c.ModelName, c.SelfRates = "claude-opus-5", opusRates
+	c.PrevBilledInput = localTokens(deep.Input) // ratio 1
+	if ok, reason := e.warmGate(c, deep, 60, 0, 0, localTokens(deep.Input), &warmApply{})(res, deep.Input); ok {
+		t.Fatalf("a deep cut was accepted at Opus rates over 60 turns (%q): the saving must be priced at READ", reason)
+	}
+	// The same cut at a flat rate passes, so the refusal above is the rate, not the fixture.
+	c.SelfRates = components.TokenRates{Input: 2e-6, Output: 8e-6, CacheRead: 2e-6, CacheWrite: 2e-6}
+	if ok, reason := e.warmGate(c, deep, 60, 0, 0, localTokens(deep.Input), &warmApply{})(res, deep.Input); !ok {
+		t.Fatalf("flat rate refused (%q)", reason)
+	}
+	// And the economics function itself: saving scales with the READ rate only.
+	in := warmEconIn{Removed: 1000, Rewritten: 0, RatioContent: 1, RatioFull: 1, Read: 1, Write: 12.5, Turns: 1}
+	if s, _ := warmEcon(in); s != 1000 {
+		t.Fatalf("saving = %v, want 1000 (removed x read x turns)", s)
+	}
+}
