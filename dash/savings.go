@@ -1,5 +1,9 @@
 package dash
 
+import (
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+)
+
 // SavingsTotals is the cost/savings arithmetic Overview() and /stats both need — one
 // query, one definition, so the two can never disagree about what "total saved" means.
 // See Overview's own KeepAlive*/TotalSavedUSD fields for what each addend means; this
@@ -23,6 +27,15 @@ type SavingsTotals struct {
 	ManualPings ManualPings `json:"manual_pings"`
 
 	TotalSavedUSD float64 `json:"total_saved_usd"`
+
+	// CapCorrectionUSD is what the summarize and replay ledgers moved the baseline by (a
+	// negative number: the credit past the cap). Zero unless SavingsTotalsCapped ran and the
+	// cap found something. The figures above already include it.
+	CapCorrectionUSD float64 `json:"cap_correction_usd"`
+	// CapNotApplied is true when the figures above hold the stored, uncapped credit in whole or in
+	// part: plain SavingsTotals never applies the cap, and SavingsTotalsCapped sets it when a ledger
+	// could not run. Such a figure can be higher than the headline for the same rows (#586).
+	CapNotApplied bool `json:"cap_not_applied"`
 }
 
 // SavingsTotals computes the combined savings figure for the filtered window: two
@@ -75,4 +88,73 @@ func savingsArithmetic(cost, baseline, cgllm, cachesplitSaved, kaSaved, kaPing, 
 	kaNet = kaSaved - kaPing
 	total = net + cachesplitSaved + kaNet + manualNet + deferNet
 	return net, kaNet, total
+}
+
+// CapResult is the cap's correction for one filter and whether it is complete.
+type CapResult struct {
+	// CorrectionUSD is the sum of the corrections of the ledgers that ran: negative or zero.
+	CorrectionUSD float64
+	// NotApplied is true when at least one ledger did not run (no price table or window resolver,
+	// or its scan failed). CorrectionUSD then holds only the part that did.
+	NotApplied bool
+}
+
+// CapCorrection is the correction the headline applies for the capped credit of one filter. The two
+// ledgers run on their own, as they do for the headline: one that fails leaves the other's
+// correction in place and sets NotApplied, so a reader lands where the headline lands. It is the one
+// place the two are added, so a reader that cannot take a ledger row by row still agrees with the
+// headline. Both ledgers stream the rows f selects, so the cost follows f: give it a session or a
+// window, not the whole table (#502).
+func (d *DB) CapCorrection(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) CapResult {
+	return d.capCorrection(f, windows, p, func(f Filter) (*ReplayLedger, error) {
+		return d.ReplayLedgerFor(f, windows, p)
+	})
+}
+
+// capCorrection is CapCorrection with the replay ledger injected, so a caller that has a test hook
+// for it (API.replayLedger) goes through the same code.
+func (d *DB) capCorrection(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer,
+	replay func(Filter) (*ReplayLedger, error)) CapResult {
+	if windows == nil || p == nil {
+		return CapResult{NotApplied: true}
+	}
+	var r CapResult
+	if l, err := d.SummarizeLedgerFor(f, windows, p); err == nil {
+		r.CorrectionUSD += l.DeltaUSD()
+	} else {
+		r.NotApplied = true
+	}
+	if l, err := replay(f); err == nil {
+		r.CorrectionUSD += l.DeltaUSD()
+	} else {
+		r.NotApplied = true
+	}
+	return r
+}
+
+// ApplyCap moves the totals by the cap's correction, the way ApplySummarizeLedger and
+// ApplyReplayLedger move the headline's.
+func (s *SavingsTotals) ApplyCap(c CapResult) {
+	s.CapCorrectionUSD = c.CorrectionUSD
+	s.CapNotApplied = c.NotApplied
+	s.BaselineCostUSD += c.CorrectionUSD
+	s.NetSavedUSD += c.CorrectionUSD
+	s.TotalSavedUSD += c.CorrectionUSD
+}
+
+// SavingsTotalsCapped is SavingsTotals with the cap applied, so a scope agrees with the
+// headline for the same rows. The baseline, net and total agree with the lean headline; the full
+// headline adds a historical split figure and a declaration-filter credit to its total that
+// SavingsTotals has never carried. When the cap cannot be computed in full the figure keeps the part
+// that ran and CapNotApplied is set: a reader gets a labelled figure and not an error.
+//
+// Use it for a scope that one session or one window bounds. A lifetime read (an empty filter) streams
+// every row through the ledgers: use SavingsTotals there and say so.
+func (d *DB) SavingsTotalsCapped(f Filter, windows modelinfo.Resolver, p modelinfo.Pricer) (*SavingsTotals, error) {
+	s, err := d.SavingsTotals(f)
+	if err != nil {
+		return nil, err
+	}
+	s.ApplyCap(d.CapCorrection(f, windows, p))
+	return s, nil
 }
