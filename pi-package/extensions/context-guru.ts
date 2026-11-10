@@ -72,13 +72,33 @@ export const CHAIN = "Chain (recommended): Pi -> context-guru -> the endpoint yo
 export const REPLACE = "Replace: Pi -> context-guru -> the provider's public API";
 export const KEEP = "Don't change anything";
 
+/** The plan's `existing_base_url` ({provider: url} as JSON) in plain words: "anthropic: https://gw". */
+export function conflictWords(json: string | undefined): string {
+  try {
+    const value = JSON.parse(json ?? "");
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const words = Object.entries(value).map(([provider, url]) => `${provider}: ${String(url)}`);
+      if (words.length) return words.join(", ");
+    }
+  } catch {
+    // fall through: show the text as it came
+  }
+  return json ?? "unknown";
+}
+
+/** True when the ChatGPT sign-in field removal applies to a routed `openai` model. A chained `openai`
+ *  went to another endpoint before setup, where Pi left those fields in, so it keeps them. */
+export function stripsChatGPTFields(install: Install | undefined): boolean {
+  return !install?.upstreams?.openai;
+}
+
 /** The one question for a models.json that already sends a provider elsewhere, built from the plan's
  *  paired answers. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
  *  offered only when the plan printed it (the proxy can reproduce that URL). */
 export function conflictPrompt(f: Record<string, string>): { title: string; options: string[]; answers: Record<string, string> } {
   const options: string[] = [];
   const answers: Record<string, string> = {};
-  const parts = [`models.json already sends ${f.conflicts ?? "a provider"} somewhere else: ${f.existing_base_url}.`];
+  const parts = [`models.json already sends a provider somewhere else: ${conflictWords(f.existing_base_url)}.`];
   if (f.consent_question_chain) {
     options.push(CHAIN);
     answers[CHAIN] = "chain";
@@ -149,8 +169,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("before_provider_request", (event, ctx) => {
     const model = ctx.model;
     if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
-    // A chained provider went to another endpoint before setup, where Pi left these fields in. Keep that.
-    if (install?.upstreams?.openai) return undefined;
+    if (!stripsChatGPTFields(install)) return undefined;
     const payload = event.payload as { model?: unknown } | undefined;
     if (payload?.model !== model.id || !ctx.modelRegistry.isUsingOAuth(model)) return undefined;
     return forChatGPTSignIn(payload);

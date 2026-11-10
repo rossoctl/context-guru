@@ -64,12 +64,24 @@ as usual.
 
 - Chain keeps the provider entry as it is (`headers`, `apiKey` and the rest). Only `baseUrl` changes.
 - The proxy forwards the client's headers, so the endpoint's key and custom headers still arrive.
-  The proxy removes only its own `x-context-guru-*` headers, `Cookie` and hop-by-hop headers.
+  The proxy removes its own `x-context-guru-*` headers, `Cookie`, `Accept-Encoding` and hop-by-hop
+  headers.
+- **Keep-alive pings and custom headers.** A ping carries only the standard auth headers
+  (`Authorization`, `x-api-key`), not the `headers` from `models.json`. If the endpoint needs those
+  headers, it refuses the pings, and keep-alive stops for that provider. Requests are not affected.
+  Then run `/context-guru cache-strategy none`. Setup says this in its question when a chained provider
+  sets `headers`.
+- Keep-alive pings go to the endpoint, so they spend quota there.
 - The proxy appends `/v1/messages` (Anthropic) or `/v1/responses` (OpenAI) to its upstream. So an
   OpenAI `baseUrl` of `https://gw.example/openai/v1` becomes the upstream `https://gw.example/openai`.
 - The upstream goes on the service command (`--anthropic-upstream`, `--openai-upstream`) and into the
   install record. `preset`, `cache-strategy`, `update` and a new `setup` keep it.
 - `/context-guru status` shows each route, for example `anthropic -> proxy -> https://gw.example/anthropic`.
+- **One answer for both providers.** If both providers have a `baseUrl` and one of them cannot be
+  chained, setup does not offer chain. Replace then applies to both.
+- **A chain stays until uninstall.** The install record keeps the upstream. If you later delete the
+  `baseUrl` key from `models.json`, a new setup routes the provider to the proxy again, and the proxy
+  still forwards to the recorded endpoint. Run `/context-guru uninstall` to remove the chain.
 - Uninstall and the reset command put your old `baseUrl` back.
 
 From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `confirm_command_chain`,

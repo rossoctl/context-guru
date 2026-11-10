@@ -543,6 +543,40 @@ class ChainMode(Sandbox):
         self.assertEqual((code, facts["result"], facts["port"]), (0, "routed", "8801"))
         self.assertEqual(self.started, {})
 
+    def test_the_chain_question_warns_that_pings_lack_the_gateways_headers(self):
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-corp-tenant": "a"}},
+                           "openai": {"baseUrl": GATEWAY["openai"]}})
+        _, facts = self.plan()
+        chain = facts["consent_question_chain"]
+        self.assertIn("Anthropic sets headers in models.json", chain)
+        self.assertIn("standard auth headers (Authorization, x-api-key)", chain)
+        self.assertIn("keep-alive may stop for Anthropic", chain)
+        self.assertIn("/context-guru cache-strategy none", chain)
+        self.assertNotIn("OpenAI sets headers", chain)
+        self.assertNotIn("sets headers", facts["consent_question_replace"])
+        # Pings spend quota at the gateway, not at the provider.
+        self.assertIn("at the endpoint it is chained to", chain)
+        self.assertNotIn("your own quota on each provider", chain)
+        self.assertIn("your own quota on each provider", facts["consent_question_replace"])
+        # No pings, no warning.
+        _, quiet = self.plan("--cache-strategy", "none")
+        self.assertNotIn("sets headers", quiet["consent_question_chain"])
+
+    def test_systemd_quoting_keeps_percent_and_dollar_literal(self):
+        self.assertEqual(pi_plugin._systemd_quote('https://gw.example/team%b/$HOME"\\'),
+                         '"https://gw.example/team%%b/$$HOME\\"\\\\"')
+        # Only Exec lines expand `$`; other settings resolve `%` specifiers alone.
+        self.assertEqual(pi_plugin._systemd_quote("append:/a%h/$x", exec_line=False), '"append:/a%%h/$x"')
+
+    def test_the_systemd_unit_carries_the_upstream_literally(self):
+        self.write_models({"anthropic": {"baseUrl": "https://gw.example/team%b$x"}})
+        with mock.patch.object(pi_plugin, "service_kind", return_value="systemd"), \
+                mock.patch.object(pi_plugin.subprocess, "run"), \
+                mock.patch.object(pi_plugin, "healthy", return_value=True):
+            self.assertTrue(pi_plugin.start_service("/bin/proxy", 8800, {"anthropic": "https://gw.example/team%b$x"}))
+        unit = pi_plugin.systemd_unit().read_text()
+        self.assertIn('"--anthropic-upstream" "https://gw.example/team%%b$$x"', unit)
+
     def test_reset_hatch_puts_the_gateway_back(self):
         self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-gw": "1"}}})
         self.setup_on(8800, (), "--on-conflict", "chain")

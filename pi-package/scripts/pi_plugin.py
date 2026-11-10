@@ -381,8 +381,14 @@ def routes_text(upstreams):
 
 # -------------------------------------------------------------------------------------------- service
 
-def _systemd_quote(value):
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+def _systemd_quote(value, exec_line=True):
+    """One double-quoted systemd argument. Quotes do not stop systemd's own expansion, so `%` (a
+    specifier, `%h` is the home directory) becomes `%%`, and on an Exec line `$` (an environment
+    variable) becomes `$$`. Other settings do not expand `$`, so there it stays as it is."""
+    value = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if exec_line:
+        value = value.replace("$", "$$")
+    return '"' + value + '"'
 
 
 def start_service(executable, port, upstreams=None):
@@ -401,8 +407,8 @@ def start_service(executable, port, upstreams=None):
             f"{MARKER}\n[Unit]\nDescription=context-guru for Pi\n\n[Service]\nType=simple\n"
             f"ExecStart={' '.join(_systemd_quote(item) for item in command)}\n"
             "Restart=on-failure\nRestartSec=1\n"
-            f"StandardOutput={_systemd_quote('append:' + str(log))}\n"
-            f"StandardError={_systemd_quote('append:' + str(log))}\n\n"
+            f"StandardOutput={_systemd_quote('append:' + str(log), exec_line=False)}\n"
+            f"StandardError={_systemd_quote('append:' + str(log), exec_line=False)}\n\n"
             "[Install]\nWantedBy=default.target\n")
         unit.chmod(0o600)
         try:
@@ -504,11 +510,29 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
     if STRATEGIES[strategy]["spends"]:
+        spends = ("using quota where each request goes (for a chained provider, at the endpoint it is "
+                  "chained to)" if upstreams else "using your own quota on each provider")
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
-                     "using your own quota on each provider: Anthropic after 4 minutes idle (59 "
+                     f"{spends}: Anthropic after 4 minutes idle (59 "
                      "minutes on a 1-hour cache), OpenAI GPT-5.6 and later after 28 minutes idle. "
                      "Pi's own cache warming stops for routed models.")
+        headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
+        if headered:
+            names = " and ".join(NAMES[p] for p in headered)
+            question += (f" {names} sets headers in models.json. A keep-alive ping carries only the "
+                         "standard auth headers (Authorization, x-api-key), not those headers, so the "
+                         f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
+                         "/context-guru cache-strategy none.")
     return question
+
+
+def has_headers(provider):
+    """True when the provider's models.json entry sets custom headers (a gateway may need them)."""
+    try:
+        entry = models_route._load(models_path()).get("providers", {}).get(provider)
+    except (OSError, ValueError):
+        return False
+    return isinstance(entry, dict) and bool(entry.get("headers"))
 
 
 def confirm_command(choice, extra=()):

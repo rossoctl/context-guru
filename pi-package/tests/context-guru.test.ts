@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  CHAIN, conflictPrompt, endKind, forChatGPTSignIn, isRouted, KEEP, parseArgs, parseFacts, readInstall, REPLACE,
+  CHAIN, conflictPrompt, conflictWords, endKind, forChatGPTSignIn, isRouted, KEEP, parseArgs, parseFacts, readInstall, REPLACE, stripsChatGPTFields,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -82,7 +82,8 @@ test("a conflict is one question: chain, replace, or change nothing", () => {
   assert.deepEqual(p.options, [CHAIN, REPLACE, KEEP]);
   assert.deepEqual(p.answers, { [CHAIN]: "chain", [REPLACE]: "replace" });
   assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
-  assert.match(p.title, /anthropic somewhere else: \{"anthropic":"https:\/\/gw.example"\}/);
+  assert.match(p.title, /somewhere else: anthropic: https:\/\/gw.example\./);
+  assert.doesNotMatch(p.title, /\{/);
   assert.match(p.title, /CHAIN-TEXT/);
   assert.match(p.title, /REPLACE-TEXT/);
 });
@@ -92,4 +93,18 @@ test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
     consent_question_replace: "REPLACE-TEXT" });
   assert.deepEqual(p.options, [REPLACE, KEEP]);
   assert.match(p.title, /Chain is not offered.*openai_path_not_v1/);
+});
+
+test("conflicts read as plain words, and odd input is shown as it came", () => {
+  assert.equal(conflictWords('{"anthropic":"https://a.example","openai":"https://o.example/v1"}'),
+    "anthropic: https://a.example, openai: https://o.example/v1");
+  assert.equal(conflictWords("not json"), "not json");
+  assert.equal(conflictWords(undefined), "unknown");
+});
+
+test("the ChatGPT field removal skips a chained openai provider only", () => {
+  assert.equal(stripsChatGPTFields(install), true);
+  assert.equal(stripsChatGPTFields(undefined), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { anthropic: "https://gw.example" } }), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { openai: "https://gw.example" } }), false);
 });
