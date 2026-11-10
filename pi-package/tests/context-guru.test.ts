@@ -161,6 +161,9 @@ test("the notice names the real reason the proxy is still down", () => {
   assert.match(downReason({ result: "not_installed" }), /no install record/);
   assert.match(downReason({ result: "already_up" }), /answered the restart check/);
   assert.equal(downReason({}), "the restart did not run");
+  assert.match(downReason({ result: "busy" }), /held the restart lock, so nothing was restarted/);
+  // A restart stopped at the time limit printed nothing, but it did run.
+  assert.match(downReason({ killed: "true" }), /did not finish within 60 seconds/);
   assert.match(downNotice(8800, { service: "no_service" }), /port 8800 does not answer: its service file is missing/);
 });
 
@@ -286,7 +289,7 @@ test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
 
 test("conflicts read as plain words, and odd input is shown as it came", () => {
   assert.equal(conflictWords('{"anthropic":"https://a.example","openai":"https://o.example/v1"}'),
-    "anthropic: https://a.example, openai: https://o.example/v1");
+    "anthropic: https://a.example; openai: https://o.example/v1");
   assert.equal(conflictWords("not json"), "not json");
   assert.equal(conflictWords(undefined), "unknown");
 });

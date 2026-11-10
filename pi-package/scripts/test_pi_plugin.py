@@ -166,6 +166,25 @@ class ModelsRoute(Sandbox):
 
 
 class Controller(Sandbox):
+    def test_setup_waits_for_the_restart_lock_and_writes_nothing_when_busy(self):
+        """Review note from #1049: setup writes the config and the record under the restart lock."""
+        lock = pi_plugin.restart_lock()
+        try:
+            with mock.patch.object(pi_plugin, "LOCK_WAIT_SECONDS", 0.2), \
+                    mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                    mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                    mock.patch.object(pi_plugin, "start_service", return_value=True) as start, \
+                    mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                    mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+                code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        finally:
+            lock.close()
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "error", "busy"))
+        start.assert_not_called()
+        self.assertFalse(self.models.exists())
+        self.assertFalse(pi_plugin.record_path().exists())
+        self.assertFalse(pi_plugin.proxy_config().exists())
+
     def test_plan_writes_nothing_and_asks_one_question(self):
         code, facts = self.run_main("setup", "--plan")
         self.assertEqual(code, 0)
@@ -590,6 +609,49 @@ class Restart(Sandbox):
         self.assertEqual((result["code"], result["facts"]["result"]), (0, "already_up"))
         self.assertEqual(self.calls, [])
 
+    def test_a_restart_that_waits_too_long_for_the_lock_reports_busy(self):
+        """Review note from #1011: the lock wait has its own limit, inside the extension's 60 s."""
+        self.our_plist()
+        lock = pi_plugin.restart_lock()
+        try:
+            with mock.patch.object(pi_plugin, "LOCK_WAIT_SECONDS", 0.2):
+                code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        finally:
+            lock.close()
+        self.assertEqual((code, facts["result"]), (1, "busy"))
+        self.assertEqual(self.calls, [])
+        self.assertLess(pi_plugin.LOCK_WAIT_SECONDS, 60)
+
+    def test_a_restart_reads_the_record_again_after_the_lock(self):
+        """Review note from #1049: a configure that ran during the wait is not undone."""
+        self.our_plist()
+        seen = []
+        lock = pi_plugin.restart_lock()
+        result = {}
+        try:
+            with mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                    mock.patch.object(pi_plugin, "healthy", return_value=True), \
+                    mock.patch.object(pi_plugin, "rerender_config",
+                                      side_effect=lambda record, binary: seen.append(dict(record)) or "rendered"):
+                second = threading.Thread(target=lambda: result.update(zip(("code", "facts"), self.run_main("restart"))))
+                second.start()
+                second.join(0.3)
+                self.assertTrue(second.is_alive(), "the restart waits for the lock")
+                pi_plugin.write_record({"port": 8800, "cache_strategy": "none"})  # configure, during the wait
+                lock.close()
+                second.join(5)
+        finally:
+            lock.close()
+        self.assertEqual(result["facts"]["result"], "already_up")
+        self.assertEqual([r.get("cache_strategy") for r in seen], ["none"])
+
+    def test_with_no_fcntl_restart_reports_unsupported_and_no_traceback(self):
+        """Review note from #1011: a state directory copied to Windows has no fcntl."""
+        with mock.patch.dict(sys.modules, {"fcntl": None}):
+            code, facts = self.restart(None, lambda port, timeout=1: False)
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "unsupported"))
+        self.assertEqual(self.calls, [])
+
 
 class ConfigByName(Sandbox):
     """The config names the strategy for a binary with #987 (v0.7.1+), and is re-rendered before
@@ -945,6 +1007,15 @@ class ChainMode(Sandbox):
         # No pings, no warning.
         _, quiet = self.plan("--cache-strategy", "none")
         self.assertNotIn("sets headers", quiet["consent_question_chain"])
+
+    def test_two_providers_with_headers_read_as_plural_and_are_named(self):
+        """Review notes from #1010: "set", not "sets", and the chained wording names the providers."""
+        self.write_models({"anthropic": {"baseUrl": GATEWAY["anthropic"], "headers": {"x-corp-tenant": "a"}},
+                           "openai": {"baseUrl": GATEWAY["openai"], "headers": {"x-corp-tenant": "o"}}})
+        _, facts = self.plan()
+        chain = facts["consent_question_chain"]
+        self.assertIn("Anthropic and OpenAI set headers in models.json", chain)
+        self.assertIn("for Anthropic and OpenAI, at the endpoint it is chained to", chain)
 
     def test_systemd_quoting_keeps_percent_and_dollar_literal(self):
         self.assertEqual(pi_plugin._systemd_quote('https://gw.example/team%b/$HOME"\\'),
