@@ -17,6 +17,9 @@ import (
 //
 // label prefixes the error on a non-2xx status ("", "prefixed ", "prefixed Responses "), so the
 // three call shapes keep their own wording without three near-identical error branches.
+//
+// The response headers go to the sink scoping ctx (Sink.Header), so a caller that reports the call,
+// such as a keep-alive substitute, can pass them to its host. send itself reads none of them.
 func send(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, p bschemas.ModelProvider,
 	path, label string, hdr http.Header, body []byte) ([]byte, error) {
 	if d == nil {
@@ -27,6 +30,8 @@ func send(ctx context.Context, d dispatch.Dispatcher, ref dispatch.Ref, p bschem
 	if err != nil {
 		return nil, err
 	}
+	// Before the status check: an error answer carries the same metadata headers (#1016).
+	SinkFrom(ctx).noteHeader(resp.Header)
 	if resp.Status != http.StatusOK {
 		return nil, fmt.Errorf("cheapmodel: %sstatus %d: %s", label, resp.Status, clipErr(resp.Body))
 	}
