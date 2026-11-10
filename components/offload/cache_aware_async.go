@@ -269,7 +269,9 @@ type KeepAliveSummaryResult struct {
 	CacheWrite1h int
 	// Header is the call's response headers, or nil when no answer came back. The keeper puts them
 	// on the ping row it books (KeepAliveReport.Header), so the host can read the subscription limit
-	// headers from them as it does for an ordinary ping (#1016). Nothing here reads them.
+	// headers from them as it does for an ordinary ping (#1016). Nothing here reads them. It is nil
+	// too when the call went to the operator's configured model and not with the user's own
+	// credential: that answer carries the operator's limits (KeepAliveSubstitute clears it).
 	Header http.Header
 	// Committed is false either because the call could not be started (another commission —
 	// async or keep-alive — is already in flight for this session, or the global concurrency

@@ -12,9 +12,11 @@ import (
 
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -134,5 +136,31 @@ func TestSubstituteReportWithoutResponseHeaderIsEmpty(t *testing.T) {
 	}
 	if reps[0].Header != nil {
 		t.Errorf("report header = %v, want nil", reps[0].Header)
+	}
+}
+
+// A summary sent to the operator's configured model, not with the user's own credential, carries
+// the operator's limit headers. They must not land on the user's ping row (#1016 review).
+func TestConfigSourceSummarySubstituteReportHasNoHeader(t *testing.T) {
+	k, fd, sink, clock := substituteKeeper(t)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	cli := cheapClient(t, func([]byte) string { return "<summary>explored the handler.</summary>" })
+	msg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
+	schema.SetMessageText(&msg, "fix the failing tests, there is a lot of context here")
+	offload.RegisterConfigKeepAliveCandidateForTest("sess-1", st,
+		func(ctx context.Context) (string, error) { return cli.Complete(ctx, "summarize") },
+		"messages", []bschemas.ChatMessage{msg}, 1)
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate("sess-1") })
+	recordBodyWithSink(k, sink, sess1, clock.now(), kaToolBody)
+	k.Sweep(clock.advance(281 * time.Second))
+	if k.summarySubstituted.Load() != 1 || fd.n() != 0 {
+		t.Fatalf("summarySubstituted = %d, ordinary pings = %d", k.summarySubstituted.Load(), fd.n())
+	}
+	reps := sink.all()
+	if len(reps) != 1 {
+		t.Fatalf("reports = %d, want 1", len(reps))
+	}
+	if reps[0].Header != nil {
+		t.Errorf("report header = %v, want nil: the operator's limits are not the user's", reps[0].Header)
 	}
 }
