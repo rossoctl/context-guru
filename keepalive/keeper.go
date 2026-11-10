@@ -1515,21 +1515,21 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	switch k.noteOutcome(j, status, u) {
 	case outcomeTransient:
-		k.record1(j, u, status, ms, start) // the audit row; the next ping may work
+		k.record1(j, u, status, ms, start, resp.Header) // the audit row; the next ping may work
 		return
 	case outcomeFailed:
 		return
 	case outcomeFailedRecorded:
-		k.record1(j, u, status, ms, start)
+		k.record1(j, u, status, ms, start, resp.Header)
 		return
 	case outcomeMissed:
-		cost := k.record1(j, u, status, ms, start)
+		cost := k.record1(j, u, status, ms, start, resp.Header)
 		slog.Info("context-guru: cache keep-alive ping missed (entry had expired); cache re-written",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "fresh_input", u.FreshInput, "cost_usd", cost)
 		return
 	}
-	cost := k.record1(j, u, status, ms, start)
+	cost := k.record1(j, u, status, ms, start, resp.Header)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
 		"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "output", u.Output,
@@ -1686,7 +1686,8 @@ func (k *Keeper) giveBackFailedPing(j pingJob) bool {
 //
 // startedAt is when THIS ping's request began, not when it completed. The provider's cache lifetime
 // runs from request start, which is the same anchor kaEntry.startedAt uses and for the same reason.
-func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt time.Time) float64 {
+// hdr is the ping response's headers, passed through to the report for the host to read.
+func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt time.Time, hdr http.Header) float64 {
 	e := j.e
 	// The identifying fields are read under the lock with everything else: they are set once
 	// at record time and never mutated, but a retired entry is concurrent with this goroutine
@@ -1754,6 +1755,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// scale.
 			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
 			Window:    j.gapStart,
+			Header:    hdr,
 		})
 	}
 	return cost

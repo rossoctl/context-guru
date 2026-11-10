@@ -117,6 +117,11 @@ type Money struct {
 	Gross float64 `json:"gross_usd"`
 	Cost  float64 `json:"cost_usd"`
 	Net   float64 `json:"net_usd"`
+	// SearchCost is the part of Cost that the request body does not show: the search calls' output, the
+	// second pass over the loaded definitions, and their write to the cache. The accountant prices a
+	// request from its bodies, and the names list is in them, so it sees the rest of Cost on its own
+	// (accountant R56). SearchCost is what a host must still subtract from the accountant's figure.
+	SearchCost float64 `json:"-"`
 }
 
 // searchOutputEstimate is the output tokens one search call costs when usage does not say.
@@ -131,22 +136,24 @@ func Price(r Request, p modelinfo.Price) (Money, bool) {
 	billed := func(n int) float64 { return float64(n) * f }
 	gross := billed(r.DeferredTokens) * rate(p, r.Tier)
 	cost := billed(r.ListTokens) * rate(p, r.Tier)
+	var search float64 // the cost the bodies do not show; exactly 0 when no search ran
 	if r.Searches > 0 {
 		out := r.SearchOutput
 		if out == 0 {
 			out = int64(r.Searches * searchOutputEstimate)
 		}
-		cost += float64(out) * p.Output
-		cost += billed(r.LoadedTokens) * p.Input
+		search += float64(out) * p.Output
+		search += billed(r.LoadedTokens) * p.Input
 		// The next request carries the loaded definitions in its transcript and writes them to
 		// the cache, once per load (#866, N7). The later reads are in that request's own weight.
 		w := TierWrite
 		if r.Tier == TierWrite1h {
 			w = TierWrite1h
 		}
-		cost += billed(r.LoadedTokens) * rate(p, w)
+		search += billed(r.LoadedTokens) * rate(p, w)
+		cost += search
 	}
-	return Money{Gross: gross, Cost: cost, Net: gross - cost}, true
+	return Money{Gross: gross, Cost: cost, Net: gross - cost, SearchCost: search}, true
 }
 
 // Ledger adds requests up for /stats, in total and per account. Safe for concurrent use.
