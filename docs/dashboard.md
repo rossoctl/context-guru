@@ -487,6 +487,30 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
 - **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
   how many requests have no token figure.
 
+### On a subscription, the Cache strategy tab shows tokens
+
+The same rule applies to the Cache strategy tab (`#/keepalive`). The same people see it: a member
+or a local proxy on a subscription. Managers, API-key users and hosted mode keep dollars.
+
+- **Source.** `GET /api/keepalive` (the ledger) has the token form of its two halves, for the same
+  filter:
+  - `tokens`: the rescue, as `{saved, caused}` by tier. It equals `/api/stats`
+    `tokens.by_feature.keepalive`.
+  - `keepalive_ping_tokens`: what the pings paid, by tier. It equals `/api/stats`
+    `keepalive_ping_tokens`.
+  - `tokens_unmeasured_requests`: the requests with no token figure.
+- **Two lines, never netted.** The measured figure is the rescue line, for example
+  `saved 85.0k wr · cost 40.0k rd`. The pings show on their own line: `Pings: cost 900 wr · 410.0k rd`.
+  The ping cost is never added into the rescue's cost.
+- **What changes.** The measured tiles, the facts list, the measured line under the forecast, and the
+  head of "Which sessions gained and which lost". The count of expiries still worth acting on shows
+  without its dollars.
+- **What stays in dollars.** The forecast ("Forecast for all your traffic") is a replay that adds
+  saved writes and paid reads in dollars. A yes or no in tokens needs a rule that weighs one tier
+  against another, so the forecast keeps dollars, with the line `Forecast at API-price weights`.
+  "Ahead" or "Behind", the winner and loser split, and the "costs more than it saves" banner use
+  the dollar net too, and say "at API-price weights". The tables below the ledger stay in dollars.
+
 ## KV-cache panel
 
 *How long your conversations actually stay idle, what the prompt cache is costing you

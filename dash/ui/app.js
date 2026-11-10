@@ -904,6 +904,17 @@ const TILE_INFO = {
       + 'feeling. That confound cannot be measured from this side \u2014 the counts beside this '
       + 'figure (pings sent, pings that read nothing) are what to check it against.',
   },
+  'ka-net-tok': {
+    what: 'On a Claude subscription: what your cache strategy earned you, in tokens. The first line is '
+      + 'the rescues: the cache writes they avoided and the cache reads they paid. The second line is '
+      + 'what the pings paid.',
+    how: 'Both lines come from real rows, by token kind (wr cache write, rd cache read, in fresh input). '
+      + 'The rescues are the accountant’s figure on the request that resumed; the pings are their '
+      + 'own billed usage. The two lines are never added: Anthropic does not say how the limit weights '
+      + 'one kind against another.',
+    catch: 'The saving line is a CEILING: another session with a byte-identical prompt may have kept the '
+      + 'same cache warm for free. Ahead or behind on this tab is decided at API-price weights.',
+  },
   'ka-pings': {
     what: 'How many minimal requests this service sent on your behalf while you were away, and '
       + 'what they cost.',
@@ -8919,7 +8930,11 @@ Object.assign(loaders, { feedback: loadFeedback });
 // to an entity and never to a rank.
 
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
-const kaState = { ledger: null, recommend: null, behaviour: null, sessions: [], calc: null, armed: [], live: null,
+const kaState = { ledger: null, recommend: null,
+  // sub is true on a Claude subscription (#1022): the measured figures show in tokens, and the
+  // forecast keeps dollars with an "at API-price weights" label. False for a manager, an API key,
+  // Bedrock, Vertex and hosted mode (`{}`), which keep dollars.
+  sub: false, behaviour: null, sessions: [], calc: null, armed: [], live: null,
   x: 280, k: 2,
   // canArm is false on a single-tenant deployment, which mounts no control plane at all — so
   // there is nothing to POST an arm to. Drawing the button anyway would put an affordance on the
@@ -8929,6 +8944,13 @@ const kaState = { ledger: null, recommend: null, behaviour: null, sessions: [], 
 
 /** kaMuted is the de-emphasis gray for "outside the current coverage". Not a fifth series. */
 const KA_MUTED = 'var(--s-mute)';
+
+/** kaSubscription says whether this tab shows tokens: a subscription, and not a manager (whose
+ *  view spans other accounts, while the limits are the signed-in account's own). Any failure keeps dollars. */
+async function kaSubscription() {
+  if (!readsLimits(account && account.tenant)) return false;
+  try { return isSubscription(await ctl('/api/me/limits'), Date.now()); } catch (e) { return false; }
+}
 
 async function loadKeepAlive() {
   // Panels 1 and 2 first and from ONE request, so the verdict is on screen before any
@@ -8942,10 +8964,14 @@ async function loadKeepAlive() {
   // contending for the database slowed every one of them (the ledger took twice as long). Each panel
   // still fills from its own request, so one slow query never blanks another.
   const ledger = keepAliveLedger();
+  const subP = kaSubscription();
   loadKARecommend();
   const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
-    kaState.ledger = await ledger;
+    // The limits read is fast; the ledger and the flag land together, so the tiles never flip units.
+    const [l, sub] = await Promise.all([ledger, subP]);
+    kaState.sub = sub;
+    kaState.ledger = l;
     rest();
     renderKAVerdict(kaState.ledger);
     // The decision row paints immediately with the ledger half, and again when the
@@ -9042,13 +9068,24 @@ function renderKADecision(o, rec) {
     setting = mid < 0 ? 'Leave your cache strategy off.'
       : 'Setting to use: ping after ' + rec.idle_seconds + ' s idle, at most ' + rec.max_pings + ' pings in a row.';
   }
+  // On a subscription the measured figures are tokens, but the forecast stays a dollar replay: a
+  // yes/no in tokens would need a rule to weigh a saved write against paid reads (#1022).
+  const tk = kaState.sub && ledgerNet !== null ? kaTokenLines(o, compact) : null;
   host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
     el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
+    kaState.sub ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' },
+      'Forecast at API-price weights. A subscription does not bill per token.') : null,
     el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
     el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
     el('p', { class: 'ka-sentence' }, sentence),
     setting ? el('p', { class: 'ka-setting', 'data-testid': 'ka-setting' }, setting) : null,
-    ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
+    tk ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured-tokens' },
+      el('strong', {}, 'Measured on the sessions where it ran: ' + tk.rescue),
+      el('br'), el('strong', {}, 'Pings: ' + tk.pings),
+      el('br'), 'On ' + num(o.sessions_touched) + ' sessions. The saving is an ',
+      term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
+      ', so it is not the number to decide on.')
+    : ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
       el('strong', {}, 'Measured on the sessions where it ran: ' + usd(ledgerNet)),
       ' on ' + num(o.sessions_touched) + ' sessions. This is an ',
       term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
@@ -9066,21 +9103,27 @@ function renderKAVerdict(o) {
   // it outright. The position now states which population it describes, and the judgement — the
   // --good/--bad colour — is deferred to the decision row above, which has the counterfactual.
   const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Behind' : 'Ahead');
+  // On a subscription the saving and the pings are tokens, on two lines that are never netted (#1022).
+  const tk = kaState.sub ? kaTokenLines(o, compact) : null;
   const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
-      ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
+      ran ? num(o.sessions_touched) + ' sessions touched' + (tk ? ' (at API-price weights)' : '') + ' — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
-    tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
-      'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
-      ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
+    tk ? tile('ka-net-tok', 'Cache strategy, measured', ran ? tk.rescue : '—',
+      ran ? 'pings: ' + tk.pings + ' — on the sessions it fired on, an upper bound, not the decision' : 'none')
+      : tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
+        'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
+        ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
     tile('ka-pings', 'Cache-strategy requests sent', ran ? num(o.pings) : '—',
-      ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
-    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? usd(o.saved_usd) : '—',
+      ran ? (tk ? tk.pings + ' of your limit' : usd(o.ping_usd) + ' spent on your key') : 'none'),
+    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? (tk ? tk.rescue : usd(o.saved_usd)) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),
-    tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
-      num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
+    tk ? tile('ka-addressable', 'Expiries still worth acting on', num(o.addressable_misses),
+      'cache expiries worth acting on', 'accent')
+      : tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
+        num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
     tile('ka-rowgrowth', 'Log growth from cache-strategy requests', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
       o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no cache-strategy requests'),
@@ -9096,10 +9139,15 @@ function renderKAVerdict(o) {
   const row = (label, value, note) => rows.push(el('div', { class: 'ka-fact' },
     el('div', { class: 'ka-fl' }, label), el('div', { class: 'ka-fv' }, value), el('div', { class: 'ka-fn' }, note)));
   if (ran) {
-    row('Cache-strategy requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
-      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'), ' is billed to your own key.']);
-    row('Cache rewrites avoided', 'up to ' + usd(o.saved_usd),
+    row('Cache-strategy requests sent', num(o.pings) + (tk ? ' · ' + tk.pings : ' for ' + usd(o.ping_usd)),
+      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'),
+        tk ? ' counts against your limit.' : ' is billed to your own key.']);
+    row('Cache rewrites avoided', 'up to ' + (tk ? tk.rescue : usd(o.saved_usd)),
       [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
+  }
+  if (tk && o.tokens_unmeasured_requests > 0) {
+    row('Not measured in tokens', num(o.tokens_unmeasured_requests) + ' requests',
+      'Requests from before the token count, or that could not be priced. That is not "saved nothing".');
   }
   if (o.latency && o.latency.known) {
     row('Time saved per avoided rewrite', 'about ' + Math.round(o.latency.per_miss_ms) + ' ms',
@@ -9135,10 +9183,17 @@ function renderKADownside(o) {
     ['winners', 'Came out ahead', o.winners, 'good'],
     ['losers', 'Paid for nothing', o.losers, 'bad'],
   ];
-  host.appendChild(el('div', { class: 'nps-head' },
-    el('span', { class: 'nps-score' + (o.net_usd < 0 ? ' bad' : ''), text: usd(o.net_usd) }),
-    el('span', { class: 'muted small', text:
-      `your own net across ${o.sessions_touched} touched session${o.sessions_touched === 1 ? '' : 's'}` })));
+  // On a subscription the head is the two token lines, and the split is by the dollar net: labelled so.
+  const tk = kaState.sub ? kaTokenLines(o, compact) : null;
+  const across = `${o.sessions_touched} touched session${o.sessions_touched === 1 ? '' : 's'}`;
+  host.appendChild(tk
+    ? el('div', { class: 'nps-head', 'data-testid': 'ka-split-tokens' },
+      el('span', { class: 'nps-score', text: tk.rescue }),
+      el('span', { class: 'muted small', text: 'pings: ' + tk.pings + ' · across ' + across
+        + '. Ahead or behind is at API-price weights.' }))
+    : el('div', { class: 'nps-head' },
+      el('span', { class: 'nps-score' + (o.net_usd < 0 ? ' bad' : ''), text: usd(o.net_usd) }),
+      el('span', { class: 'muted small', text: 'your own net across ' + across })));
   host.appendChild(el('div', { class: 'nps-bar' }, ...parts
     .filter(([, , n]) => n > 0)
     .map(([key, label, n, c]) => el('div', {
@@ -9148,16 +9203,21 @@ function renderKADownside(o) {
   host.appendChild(el('div', { class: 'nps-legend' }, ...parts.map(([, label, n, c]) =>
     el('span', {}, el('i', { class: 'sw ' + c }), `${label}: ${n}`))));
   if (o.worst_net_usd < 0) {
-    worst.appendChild(el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
-      'Your worst session paid ', el('strong', {}, usd(-o.worst_net_usd)),
-      ' and got nothing back for it.'));
+    worst.appendChild(tk
+      ? el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
+        'Your worst session paid more for pings than it got back, at API-price weights.')
+      : el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
+        'Your worst session paid ', el('strong', {}, usd(-o.worst_net_usd)),
+        ' and got nothing back for it.'));
   }
   // A negative own net turns the panel into the refusal it should be, with the way out on it.
   if (o.net_usd < 0) {
     worst.appendChild(el('div', { class: 'banner bad', 'data-testid': 'ka-turn-off' },
-      el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
-        'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
-        usd(o.saved_usd) + '.'),
+      tk ? el('div', {}, el('strong', {}, 'At API-price weights this costs more than it saves. '),
+        'Over this window the pings: ' + tk.pings + '. The rescues: ' + tk.rescue + '.')
+        : el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
+          'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
+          usd(o.saved_usd) + '.'),
       el('button', {
         class: 'ghost small', 'data-testid': 'ka-turn-off-btn',
         onclick: async () => {

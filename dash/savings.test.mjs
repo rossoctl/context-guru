@@ -225,3 +225,22 @@ test('the capped note leaves the dollars out on a subscription', () => {
   assert.equal(capNote({ replay_cap_correction_usd: -1.5 }, null),
     'Capped: replay credit earned after the client would have compacted is not counted.');
 });
+
+// The Cache strategy tab on a subscription (#1022): the measured rescue and the pings, two lines.
+test('the Cache strategy tab shows the rescue and the pings in tokens, never netted', () => {
+  const { kaTokenLines } = createRequire(import.meta.url)('./ui/savings.js');
+  const k = (v) => (v / 1e3).toFixed(1) + 'k';
+  const l = {
+    net_usd: -1.5,
+    tokens: { saved: { cache_write_5m: 85000 }, caused: { cache_read: 40000 } },
+    keepalive_ping_tokens: { input: 0, cache_read: 410000, cache_write_5m: 900, cache_write_1h: 0 },
+  };
+  const t = kaTokenLines(l, k);
+  assert.deepEqual(t, { rescue: 'saved 85.0k wr · cost 40.0k rd', pings: 'cost 0.9k wr · 410.0k rd' });
+  assert.ok(!/\$/.test(t.rescue + t.pings), 'no dollars');
+  // The pings are not in the rescue's cost.
+  assert.ok(!/410/.test(t.rescue));
+  // A ledger with no tokens yet, or an old server without the fields.
+  assert.deepEqual(kaTokenLines({}, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
+  assert.deepEqual(kaTokenLines(null, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
+});

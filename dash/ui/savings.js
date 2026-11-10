@@ -203,6 +203,13 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
   return { main, pings, estimate };
 }
 
+// The Cache strategy tab in tokens (#1022), from the keep-alive ledger's `tokens` (the rescue) and
+// `keepalive_ping_tokens` (what the pings paid, read by pingLine). Two lines, never netted: the pings
+// are not added into the rescue's cost, and the tiers have no common unit. `fmt` formats a count.
+function kaTokenLines(o, fmt) {
+  return { rescue: tokenLine(o && o.tokens, fmt) || 'saved 0 tokens', pings: pingLine(o, fmt) || 'cost 0 tokens' };
+}
+
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL };
+  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL, kaTokenLines };
