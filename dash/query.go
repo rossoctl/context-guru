@@ -196,7 +196,9 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held,
 	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
-	r.compaction_point, r.compaction_point_source`
+	r.compaction_point, r.compaction_point_source,
+	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -204,6 +206,10 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
+	var u5, u7 sql.NullFloat64
+	var r5, r7 sql.NullInt64
+	var s5, s7 sql.NullString
+	var authSub int
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
@@ -223,7 +229,12 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held,
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
-		&e.CompactionPoint, &e.CompactionPointSource)
+		&e.CompactionPoint, &e.CompactionPointSource,
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub)
+	e.AuthSubscription = authSub != 0
+	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
+		e.Limits = &l
+	}
 	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
 	e.EstimateHeld = held != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String

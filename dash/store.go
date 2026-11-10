@@ -595,10 +595,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
 		price_estimated, acc_priced, estimated_saved_usd, estimate_held,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
-		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source
+		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
+		` + limitCols + `, auth_subscription
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -646,7 +648,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		if e.KeepAliveStrategyID != "" {
 			strategyID = e.KeepAliveStrategyID
 		}
-		res, err := reqStmt.Exec(
+		res, err := reqStmt.Exec(append([]any{
 			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
@@ -677,7 +679,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
 			e.CompactionPoint, e.CompactionPointSource,
-		)
+		}, append(limitArgs(e.Limits), boolInt(e.AuthSubscription))...)...)
 		if err != nil {
 			return err
 		}
