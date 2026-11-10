@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -9,6 +11,8 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/tooldefer"
+	"github.com/tidwall/gjson"
 )
 
 // accThreadID maps the primary thread to "main", the library's name for it.
@@ -53,10 +57,82 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	// The envelope changes report no operation of their own: envelopeOps finds them from the two
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.
-	ops = append(append([]accountant.Operation(nil), ops...), envelopeOps(c.accClient, forwarded)...)
+	//
+	// The library gets the prompt the provider BILLS (accountant R56, billedBody), not the bytes sent: a tool
+	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
+	billed := c.accBilled(forwarded)
+	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
 	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
 	c.accPingWindow = facts.PingWindow
-	c.savings.end(c.accReq, t, forwarded, ops, facts)
+	c.savings.end(c.accReq, t, billed, ops, facts)
+}
+
+// accDeferralUnplaced names why a request books no figure when its deferral cannot be placed. The log line says
+// acc_fallback deferral_unplaced (noResultWhy). The stored fallback of the event is no_result.
+const accDeferralUnplaced = "deferral_unplaced"
+
+// accBilled is the body the accountant records. A request deferral did not change returns the forwarded body. A
+// deferral whose stub cannot be placed (a stub that would not be smaller than its definition) also returns the
+// forwarded body, and sets accNoResult so the event books no figure and the sum check does not turn it into a
+// wrong one. A tool the client deferred itself is left as it is (ownDeferred).
+func (c *capture) accBilled(forwarded []byte) []byte {
+	if c.accPreDefer == nil {
+		return forwarded
+	}
+	own := ownDeferred(forwarded, c.accPreDefer)
+	if len(own) == 0 {
+		return forwarded
+	}
+	b, ok := billedBody(forwarded, own)
+	if !ok {
+		c.accNoResult = accDeferralUnplaced
+		return forwarded
+	}
+	return b
+}
+
+// envelopeOpsFor is envelopeOps for the body the accountant records, with tool deferral's edits attributed to the
+// tooldefer operator so its row does not land on toolschema (#908). Deferral's edits are two: the definitions the
+// proxy deferred, each now a stub (R56), and the search tool it adds, an ordinary added declaration.
+//
+// Each keeps the ChangeID envelopeOps gave it, and only the operator changes. The ChangeID is what the library
+// replaces by, so a thread whose state was written before this change (per-tool cg:toolschema:decl-rewritten and
+// decl-added operations) has them replaced on its next request instead of kept beside a second copy, and a deferred
+// set that grows or shrinks mid-thread re-reports each surviving tool under its own stable ID. One merged operation
+// would carry a hash of the whole set, so any change of the set would orphan it.
+func (c *capture) envelopeOpsFor(billed []byte) []accountant.Operation {
+	ops := envelopeOps(c.accClient, billed)
+	if c.accPreDefer == nil {
+		return ops
+	}
+	// Match by NAME: a rewritten declaration is reported at its CLIENT index, and a declaration removed before it
+	// makes the billed index smaller.
+	own := ownDeferred(billed, c.accPreDefer)
+	atBilled := map[string]int{}
+	for i, t := range gjson.GetBytes(billed, "tools").Array() {
+		atBilled[t.Get("name").String()] = i
+	}
+	client := gjson.GetBytes(c.accClient, "tools").Array()
+	out := make([]accountant.Operation, 0, len(ops))
+	for _, o := range ops {
+		switch {
+		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
+			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && o.At.Index < len(client) &&
+			own[client[o.At.Index].Get("name").String()] && isStub(billed, atBilled[client[o.At.Index].Get("name").String()]):
+			o.Operator = "context-guru.tooldefer"
+		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
+			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
+			o.Operator = "context-guru.tooldefer"
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// isStub says whether the tool at i of the billed body is a deferred stub: a bare name and the defer_loading mark.
+func isStub(billed []byte, i int) bool {
+	t := gjson.GetBytes(billed, "tools."+strconv.Itoa(i))
+	return t.Get("defer_loading").Bool() && t.Get("name").Exists()
 }
 
 // entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive

@@ -6,14 +6,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // sweepPipeline is a pipeline that CONTAINS extract_llm_sweep, i.e. one that can actually adjudicate.
@@ -193,17 +196,45 @@ func TestAdjudicateToolNotAdvertisedWhenThePipelineCannotAdjudicate(t *testing.T
 	}
 }
 
-// THE GATE, half two: the provider. prefixAskerFor returns nil for anything but Anthropic and
-// cheapmodel/openai.go has no CompletePrefixed at all, so on the OpenAI route the definition is
-// unreachable by construction — it was pure prefix cost, ~217 tokens per request.
-func TestAdjudicateToolNotAdvertisedOnANonAnthropicRoute(t *testing.T) {
-	got := forwardedOn(t, "/openai/v1/chat/completions", sweepPipeline,
+// THE GATE, half two: the provider. Anthropic, Responses and Chat Completions have a prefix asker
+// and get the tool; the tests below cover Chat.
+// Chat Completions (#1030): a sweep pipeline appends exactly the adjudicate tool, last. Nothing else
+// in the request moves.
+func TestAdjudicateToolAdvertisedOnChatCompletionsWithSweep(t *testing.T) {
+	req := toolsRequestOpenAI(t, map[string]any{"role": "user", "content": "go"})
+	got := forwardedOn(t, "/openai/v1/chat/completions", sweepPipeline, req)
+	if len(got) == 0 {
+		t.Fatal("nothing reached upstream")
+	}
+	tools := gjson.GetBytes(got, "tools").Array()
+	n := len(tools)
+	if n < 2 || tools[n-1].Get("function.name").String() != adjudicate.ToolName ||
+		tools[0].Get("function.name").String() != "read_file" {
+		t.Fatalf("tools are not [client tool, ..., adjudicate]: %s", gjson.GetBytes(got, "tools").Raw)
+	}
+	// Against the no-sweep request the diff is two tools: expand (already injected on a sweep
+	// pipeline before #1030) and the adjudicate tool. Strip both and the bytes match.
+	ctrl := forwardedOn(t, "/openai/v1/chat/completions", "pipeline: [format]\n", req)
+	stripped, _ := sjson.DeleteBytes(got, "tools."+strconv.Itoa(n-1))
+	stripped, _ = sjson.DeleteBytes(stripped, "tools."+strconv.Itoa(n-2))
+	if n != 3 || string(stripped) != string(ctrl) {
+		t.Errorf("more than the tool changed:\n got %s\nctrl %s", stripped, ctrl)
+	}
+	if !bytes.Contains(got, adjudicate.ToolDefRaw(schema.WireOpenAI)) {
+		t.Errorf("the tool is not the standard Chat definition")
+	}
+}
+
+// Chat Completions without a sweep in the pipeline: the request is byte-identical to what the
+// client sent (apart from the model rewrite the harness does not make), so `off` stays the control arm.
+func TestAdjudicateToolNotAdvertisedOnChatCompletionsWithoutSweep(t *testing.T) {
+	got := forwardedOn(t, "/openai/v1/chat/completions", "pipeline: []\n",
 		toolsRequestOpenAI(t, map[string]any{"role": "user", "content": "go"}))
 	if len(got) == 0 {
 		t.Fatal("nothing reached upstream")
 	}
-	if strings.Contains(string(got), adjudicate.ToolName) {
-		t.Errorf("advertised on a route that can never read it: %s", got)
+	if strings.Contains(string(got), adjudicate.ToolName) || gjson.GetBytes(got, "tools.#").Int() != 1 {
+		t.Errorf("tool added without a sweep: %s", got)
 	}
 }
 

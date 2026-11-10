@@ -20,6 +20,7 @@ func TestToolDeferReportPerAccountAndDay(t *testing.T) {
 		e.TenantID = tenant
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = tok, 20, searches
 		e.DeferLoaded, e.DeferWrongGuesses, e.DeferGrossUSD, e.DeferNetUSD = loaded, wrong, gross, net
+		e.DeferCostUSD = gross - net // the proxy sets this from the ledger when it records the request
 		e.DeferDroppedSearches = searches / 2
 		return e
 	}

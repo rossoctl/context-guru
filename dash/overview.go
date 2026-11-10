@@ -176,8 +176,10 @@ type Overview struct {
 	// it. Priced against a cache miss. A floor. The accountant library's split effect.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
-	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
-	// TotalSavedUSD and is its own lever. 0 for an account that never deferred.
+	// `defer_net_usd`. On a request the accountant priced it is the library's deferral figure minus the
+	// searches and the definitions they loaded; on any other request it is the ledger's net (gross minus the
+	// names list and the searches). It is in TotalSavedUSD and is its own lever, and the library's figure is
+	// not also in the baseline. 0 for an account that never deferred.
 	DeferNetUSD float64 `json:"defer_net_usd"`
 	// The three counts behind that figure, so a small number is explicable rather than
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
@@ -1390,8 +1392,11 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"this project."},
 		{Key: "defer_net", Label: "Tool deferral", DeltaUSD: -o.DeferNetUSD,
 			Description: "Tool definitions the ultrahigh preset left out of the prompt until the model " +
-				"searched for them, NET of the names list and the searches that cost. From the " +
-				"per-request ledger, so it is the same figure as the Tools page. Its own line: the " +
+				"searched for them, net of what that cost. On a request the accountant priced, this " +
+				"line holds the library's whole deferral saving (the definitions left out, less the " +
+				"names list) minus the searches and the definitions they loaded; the saving is not " +
+				"in \"Your preset\". On a request it held, or could not price, it is the ledger's net. " +
+				"The same figure as the Tools page and /api/tool-defer. Its own line: the " +
 				"definitions sit in the top-level `tools` array, which the compaction walk never " +
 				"counted, and deferral runs after the declaration filter, so it holds none of the " +
 				"tokens that filter dropped."},

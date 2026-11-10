@@ -83,3 +83,178 @@ test('tool deferral is its own part, and the parts still add up to total_saved_u
   assert.ok(Math.abs(p.total - p.serverTotal) < 1e-9, `${p.total} vs ${p.serverTotal}`);
   assert.equal(savedParts({ net_saved_usd: 5, total_saved_usd: 5 }).defer, 0); // no deferral: zero, not NaN
 });
+
+// A Claude subscription: GET /api/me/limits is mocked here as data, the shape of its contract.
+test('a live 5-hour window turns the headline into saved tokens, with the estimate below', () => {
+  const { subscriptionHeadline, fiveHourStartMs } = createRequire(import.meta.url)('./ui/savings.js');
+  const fmt = (v) => (v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? Math.round(v / 1e3) + 'k' : String(v));
+  const now = 1794233089000;
+  const limits = { subscription: true, at_ms: now, five_hour: { utilization: 0.54, reset_s: 1794249600, status: 'allowed' } };
+  const o = { total_saved_usd: 40, tokens: { saved: { cache_write_5m: 85000, cache_write_1h: 0, cache_read: 1200000, input: 0 },
+    caused: { cache_read: 40000 } } };
+  const win = { cost_usd: 90, total_saved_usd: 5 }; // 54% x 5 / 90 = 3%
+  const h = subscriptionHeadline(limits, o, win, now, fmt);
+  assert.equal(h.main, 'saved 85k wr · 1.2M rd · cost 40k rd');
+  assert.equal(h.estimate, '≈ 3% of the 5-hour limit (estimate at API-price weights)');
+  assert.ok(!/\$/.test(h.main + h.estimate), 'no dollars on a subscription');
+  assert.equal(fiveHourStartMs(limits.five_hour), (1794249600 - 18000) * 1000);
+});
+
+test('the estimate waits for $0.50 of spend and 2% used; the tokens show without it', () => {
+  const { subscriptionHeadline, fiveHourSavedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const f = (u) => ({ five_hour: { utilization: u, reset_s: 2000 } });
+  const o = { tokens: { saved: { cache_write_5m: 2, cache_read: 10 } } };
+  assert.equal(subscriptionHeadline(f(0.54), o, { cost_usd: 0.49, total_saved_usd: 1 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.01), o, { cost_usd: 9, total_saved_usd: 1 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).estimate, ''); // the window stats failed
+  assert.equal(subscriptionHeadline(f(0.54), o, { cost_usd: 9, total_saved_usd: 0 }, now, String).estimate, '');
+  assert.equal(subscriptionHeadline(f(0.54), o, null, now, String).main, 'saved 2 wr · 10 rd');
+  assert.deepEqual(fiveHourSavedPct({ utilization: 0.02 }, { cost_usd: 0.5, total_saved_usd: 0.5 }), { pct: 2, hit: false });
+  assert.match(subscriptionHeadline(f(0.02), o, { cost_usd: 100, total_saved_usd: 1 }, now, String).estimate, /^≈ < 1% /);
+});
+
+test('{}, no answer, or a window that is over with no subscription flag keeps the dollar view', () => {
+  const { subscriptionHeadline, liveFiveHour } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1794233089000;
+  const o = { tokens: { saved: { cache_read: 5 } } };
+  assert.equal(subscriptionHeadline({}, o, null, now, String), null);
+  assert.equal(subscriptionHeadline(null, o, null, now, String), null);
+  assert.equal(subscriptionHeadline({ seven_day: { utilization: 0.1, reset_s: 1794348000 } }, o, null, now, String), null);
+  assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, now), null); // reset in the past
+  assert.equal(liveFiveHour({ five_hour: { utilization: 0.5, reset_s: now / 1000 } }, now), null); // resets this moment
+});
+
+test('the share saved is capped at 100 - used: past it, the line says the limit would have been hit', () => {
+  const { subscriptionHeadline, fiveHourSavedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.45, reset_s: 2000 } };
+  const o = { tokens: { saved: { cache_write_5m: 2, cache_read: 10 } } };
+  // used 45, cost $15, saved $45: raw 135%, but only 55% was left.
+  assert.deepEqual(fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 45 }), { pct: 55, hit: true });
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 15, total_saved_usd: 45 }, now, String).estimate,
+    '≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)');
+  // Just below the cap: used 45, cost $15, saved $18 is 54%, under the 55% left.
+  const below = fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 18 });
+  assert.equal(below.hit, false); assert.ok(Math.abs(below.pct - 54) < 1e-9);
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 15, total_saved_usd: 18 }, now, String).estimate,
+    '≈ 54% of the 5-hour limit (estimate at API-price weights)');
+  // Exactly at the cap counts as a hit.
+  assert.equal(fiveHourSavedPct(lim.five_hour, { cost_usd: 15, total_saved_usd: 15 * 55 / 45 }).hit, true);
+});
+
+test('a manager keeps the dollar view and the page does not ask for the limits; everyone else asks', () => {
+  const { readsLimits } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(readsLimits({ role: 'manager' }), false);
+  assert.equal(readsLimits({ role: 'member' }), true);
+  assert.equal(readsLimits(null), true); // a local proxy has no tenant
+});
+
+// The shared display rule for tokens (#998): tiers are never added; wr, wr1h, rd, in; cost after.
+test('a token line shows the tiers that are not 0, in order, and the cost after', () => {
+  const { tokenLine, tierText } = createRequire(import.meta.url)('./ui/savings.js');
+  const k = (v) => (v / 1e3).toFixed(1) + 'k';
+  assert.equal(tokenLine({ saved: { input: 12000, cache_write_5m: 85000 } }, k), 'saved 85.0k wr · 12.0k in');
+  assert.equal(tokenLine({ saved: { cache_write_5m: 85000 }, caused: { cache_read: 40000 } }, k), 'saved 85.0k wr · cost 40.0k rd');
+  assert.equal(tokenLine({ saved: { input: 1000, cache_read: 2000, cache_write_1h: 3000, cache_write_5m: 4000 } }, k),
+    'saved 4.0k wr · 3.0k wr1h · 2.0k rd · 1.0k in');
+  assert.equal(tokenLine({ caused: { cache_read: 1000 } }, k), 'saved 0 · cost 1.0k rd');
+  assert.equal(tokenLine({ saved: {}, caused: {} }, k), '');
+  assert.equal(tokenLine(undefined, k), '');
+  assert.equal(tierText({ input: 0, cache_read: 0 }, k), '');
+});
+
+test('a subscription with no open 5-hour window still shows tokens, with no estimate', () => {
+  const { subscriptionHeadline, isSubscription } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1794233089000;
+  const o = { tokens: { saved: { cache_write_5m: 7 } } };
+  assert.equal(isSubscription({ subscription: true }, now), true);
+  const h = subscriptionHeadline({ subscription: true, five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, o, null, now, String);
+  assert.deepEqual(h, { main: 'saved 7 wr', pings: '', estimate: '' });
+  assert.equal(subscriptionHeadline({ subscription: true }, { tokens: {} }, null, now, String).main, 'saved 0 tokens');
+  assert.equal(isSubscription({ subscription: false }, now), false);
+});
+
+test('the cards split tokens.by_feature: cache, filter, deferral, preset; the pings stay apart', () => {
+  const { featureTokens, totalTokens, tokenLine, pingLine, subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const f = (saved, caused) => ({ saved, caused });
+  const o = {
+    tokens: {
+      saved: { input: 0, cache_read: 600, cache_write_5m: 6500, cache_write_1h: 300 },
+      caused: { input: 0, cache_read: 4000, cache_write_5m: 600, cache_write_1h: 0 },
+      by_feature: {
+        mask: f({ cache_read: 600, cache_write_5m: 2000 }, { cache_write_5m: 600 }),
+        ended_change: f({ cache_write_5m: 100 }, {}),
+        keepalive: f({ cache_write_5m: 4000 }, { cache_read: 4000 }),
+        cachesplit: f({ cache_write_5m: 200 }, {}),
+        ttl: f({ cache_write_1h: 300 }, {}),
+        toolfilter: f({ cache_write_5m: 150 }, {}),
+        tooldefer: f({ cache_write_5m: 50 }, {}),
+      },
+    },
+    keepalive_ping_tokens: { input: 3, cache_read: 9000, cache_write_5m: 20, cache_write_1h: 10 },
+  };
+  const t = featureTokens(o);
+  // The rescue's own cost only: the pings are not added into it.
+  assert.equal(tokenLine(t.keepalive, String), 'saved 4000 wr · cost 4000 rd');
+  assert.equal(tokenLine(t.cache, String), 'saved 4200 wr · 300 wr1h · cost 4000 rd');
+  assert.equal(tokenLine(t.compaction, String), 'saved 2100 wr · 600 rd · cost 600 wr');
+  assert.equal(tokenLine(t.filter, String), 'saved 150 wr');
+  assert.equal(tokenLine(t.defer, String), 'saved 50 wr');
+  // The cards add up to the total, tier by tier. The total is tokens.saved and tokens.caused: no pings.
+  const tot = totalTokens(o);
+  assert.deepEqual(tot.caused, o.tokens.caused);
+  for (const k of ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h']) {
+    assert.equal(t.cache.saved[k] + t.compaction.saved[k] + t.filter.saved[k] + t.defer.saved[k], tot.saved[k], 'saved ' + k);
+    assert.equal(t.cache.caused[k] + t.compaction.caused[k] + t.filter.caused[k] + t.defer.caused[k], tot.caused[k], 'caused ' + k);
+  }
+  // The pings are a line of their own, on the card and under the total.
+  assert.equal(pingLine(o, String), 'cost 20 wr · 10 wr1h · 9000 rd · 3 in');
+  const h = subscriptionHeadline({ subscription: true }, o, null, 0, String);
+  assert.equal(h.main, 'saved 6500 wr · 300 wr1h · 600 rd · cost 600 wr · 4000 rd');
+  assert.equal(h.pings, 'Keep-alive pings (not in the total): cost 20 wr · 10 wr1h · 9000 rd · 3 in');
+  assert.equal(subscriptionHeadline({ subscription: true }, { tokens: o.tokens }, null, 0, String).pings, ''); // no pings: no line
+  assert.equal(pingLine({ keepalive_ping_tokens: { input: 0, cache_read: 0 } }, String), '');
+  // A read with no tokens (a server from before #999) gives empty lines, not NaN.
+  assert.equal(tokenLine(featureTokens({}).cache, String), '');
+  assert.equal(tokenLine(totalTokens({}), String), '');
+});
+
+test('the capped note leaves the dollars out on a subscription', () => {
+  const { capNote } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(capNote({ replay_cap_correction_usd: -1.5 }, null),
+    'Capped: replay credit earned after the client would have compacted is not counted.');
+});
+
+// One rule for zero against "not measured" (tokenFigure), for every screen (#988 round 2).
+test('a priced zero reads saved 0 tokens; an unpriced zero or a server with no tokens reads not measured', () => {
+  const { tokenFigure, featureTokens, totalTokens } = createRequire(import.meta.url)('./ui/savings.js');
+  const zero = { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 };
+  // A full read with 0 unmeasured: a feature left out of by_feature is a measured zero.
+  const priced = { tokens: { saved: { cache_write_5m: 9 }, caused: zero, by_feature: { mask: { saved: { cache_write_5m: 9 } } } },
+    tokens_unmeasured_requests: 0 };
+  assert.deepEqual(tokenFigure(featureTokens(priced).filter, priced, String), { text: 'saved 0 tokens', measured: true });
+  assert.deepEqual(tokenFigure(featureTokens(priced).compaction, priced, String), { text: 'saved 9 wr', measured: true });
+  // Some requests unpriced and an all-zero figure: not measured, not "saved nothing".
+  const some = { ...priced, tokens_unmeasured_requests: 3 };
+  assert.deepEqual(tokenFigure(featureTokens(some).filter, some, String), { text: 'not measured', measured: false });
+  // Some unpriced, but the figure has tokens: it is measured.
+  assert.equal(tokenFigure(featureTokens(some).compaction, some, String).measured, true);
+  // A server from before #999: no tokens at all.
+  assert.deepEqual(tokenFigure(totalTokens({}), {}, String), { text: 'not measured', measured: false });
+  assert.deepEqual(tokenFigure(undefined, null, String), { text: 'not measured', measured: false });
+});
+
+test('the headline uses the same rule, and a page filter hides the account-wide estimate', () => {
+  const { subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { subscription: true, five_hour: { utilization: 0.54, reset_s: 2000 } };
+  const win = { cost_usd: 90, total_saved_usd: 5 };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  assert.equal(subscriptionHeadline(lim, o, win, now, String).estimate, '≈ 3% of the 5-hour limit (estimate at API-price weights)');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).estimate, '');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).main, 'saved 2 wr');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 0 }, null, now, String).main, 'saved 0 tokens');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 4 }, null, now, String).main, 'not measured');
+  assert.equal(subscriptionHeadline(lim, {}, null, now, String).main, 'not measured'); // a server from before #999
+});
