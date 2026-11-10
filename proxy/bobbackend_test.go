@@ -48,13 +48,19 @@ func TestBobBackendClassifier(t *testing.T) {
 		"23-char id with cache writes":     {bobMarks{id: bobIDB, usage: true, cacheWrite: true}, "other"},
 		"23-char id with creation details": {bobMarks{id: bobIDB, usage: true, creationDetails: true}, "other"},
 		// New shapes.
-		"chatcmpl without the dash":       {bobMarks{id: "chatcmpl" + bobIDA[9:], usage: true, cacheWrite: true}, "other"},
-		"uppercase CHATCMPL-":             {bobMarks{id: "CHATCMPL-" + bobIDA[9:], usage: true, cacheWrite: true}, "other"},
-		"22-char id":                      {bobMarks{id: bobIDB[:22], usage: true}, "other"},
-		"24-char id":                      {bobMarks{id: bobIDB + "x", usage: true}, "other"},
-		"23 chars, not alphanumeric":      {bobMarks{id: "nb3x-7kLm2PzR8tYv4WcJ1s", usage: true}, "other"},
+		"chatcmpl without the dash": {bobMarks{id: "chatcmpl" + bobIDA[9:], usage: true, cacheWrite: true}, "other"},
+		"uppercase CHATCMPL-":       {bobMarks{id: "CHATCMPL-" + bobIDA[9:], usage: true, cacheWrite: true}, "other"},
+		// Backend B ids vary in length and characters. Seen on real traffic on 2026-11-10: a 22-char
+		// id, and 23-char ids with characters other than letters and digits. They are B.
+		"22-char id":                      {bobMarks{id: bobIDB[:22], usage: true}, "B"},
+		"24-char id":                      {bobMarks{id: bobIDB + "x", usage: true}, "B"},
+		"23 chars, not alphanumeric":      {bobMarks{id: "nb3x-7kLm2PzR8tYv4WcJ_s", usage: true}, "B"},
 		"23-char id with chatcmpl- start": {bobMarks{id: "chatcmpl-" + bobIDB[:14], usage: true}, "other"},
 		"stream chunks with mixed ids":    {bobMarks{id: bobIDA, mixedIDs: true, usage: true, cacheWrite: true}, "other"},
+		// Bob's helper calls (model "security", "router") are not the premium model: no label, no
+		// alarm. On 2026-11-10 a "security" reply had a chatcmpl- id and no cache fields.
+		"security helper call": {bobMarks{id: bobIDA, usage: true, helper: true}, ""},
+		"premium model reply":  {bobMarks{id: bobIDA, usage: true, cacheWrite: true, helper: false}, "A"},
 	} {
 		if got := bobBackend(tc.m); got != tc.want {
 			t.Errorf("%s: bobBackend = %q, want %q", name, got, tc.want)
@@ -415,8 +421,9 @@ func TestBobBackendAlarmIsOncePerKindOfShapeNotPerID(t *testing.T) {
 	if n := strings.Count(logs.String(), "cg.bob_backend_unknown"); n != 1 {
 		t.Fatalf("20 replies of one changed shape logged %d WARNs, want 1", n)
 	}
-	// A different change later still gets its own WARN: a 30-character id.
-	bobNoteBackend(bobMarks{id: strings.Repeat("x", 30), usage: true})
+	// A different change later still gets its own WARN: a chatcmpl- id with no cache writes (the
+	// marks disagree).
+	bobNoteBackend(bobMarks{id: "chatcmpl-0123456789abcdefghijklmnopqrstuvwxyz", usage: true})
 	if n := strings.Count(logs.String(), "cg.bob_backend_unknown"); n != 2 {
 		t.Fatalf("a second, different shape: %d WARNs in all, want 2", n)
 	}
@@ -425,5 +432,20 @@ func TestBobBackendAlarmIsOncePerKindOfShapeNotPerID(t *testing.T) {
 		cacheWrite: true, creationDetails: true, providerFields: true, mixedIDs: true})
 	if !strings.Contains(logs.String(), "mixed_ids=true") {
 		t.Fatalf("a mixed-id reply's WARN does not say mixed_ids=true:\n%s", logs.String())
+	}
+}
+
+// Only Bob's named helper models are helpers. A coding call on any tier keeps its label, so a user
+// on standard or fast is not silently left without one.
+func TestBobMarksTreatOnlyTheNamedHelpersAsHelpers(t *testing.T) {
+	for model, helper := range map[string]bool{
+		"security": true, "router": true,
+		"premium-ide": false, "premium": false, "standard": false, "standard-ide": false,
+		"fast": false, "fast-ide": false, "": false,
+	} {
+		_, m := bobMarksOf("application/json", []byte(`{"id":"x","model":"`+model+`","usage":{"prompt_tokens":1}}`))
+		if m.helper != helper {
+			t.Errorf("model %q: helper = %v, want %v", model, m.helper, helper)
+		}
 	}
 }

@@ -66,21 +66,19 @@ func bobCount(v gjson.Result) (int64, bool) {
 	return int64(v.Num), true
 }
 
-// Bob's model route is served by at least 2 backends that count tokens differently (about 20,300
-// against 12,440 for the same request), so a comparison is valid only on one backend. Two marks
-// that do not depend on each other tell them apart (seen on 9 replies, 2026-11-09):
+// Bob's model route is served by at least 2 backends that count the same request differently (a
+// chat's first request: about 21,000 tokens on A, 13,000 on B), so a comparison is valid only on
+// one backend. Two marks that do not depend on each other tell them apart (9 replies on 2026-11-09,
+// 58 on 2026-11-10):
 //
 //	A: the id starts with "chatcmpl-", and usage.prompt_tokens_details has cache_write_tokens.
-//	B: the id is 23 characters of [A-Za-z0-9] with no "chatcmpl-", and the block has neither
-//	   cache_write_tokens nor cache_creation_token_details.
+//	B: the id does not start with "chatcmpl-", and the block has neither cache_write_tokens nor
+//	   cache_creation_token_details. B ids vary in length and characters, so neither is checked.
 //
-// IBM can change either mark at any time. So a reply where the marks disagree, or that matches
-// neither, is "other" and never A or B. A reply with no id or no usage block (Bob's router helper
-// calls) is "" and is no alarm.
-const (
-	bobIDPrefixA = "chatcmpl-"
-	bobIDLenB    = 23
-)
+// Both backends read the cache. IBM can change either mark at any time. So a reply where the
+// marks disagree is "other" and never A or B. A reply with no id or no usage block (Bob's router
+// helper calls) is "" and is no alarm.
+const bobIDPrefixA = "chatcmpl-"
 
 // bobMarks are the facts about one reply that tell Bob's backends apart. The id stays in memory
 // for one call only: only the label from bobBackend is kept.
@@ -91,11 +89,12 @@ type bobMarks struct {
 	cacheWrite      bool // usage.prompt_tokens_details.cache_write_tokens is present
 	creationDetails bool // usage.prompt_tokens_details.cache_creation_token_details is present
 	providerFields  bool // the top-level provider_specific_fields is present
+	helper          bool // the reply names one of Bob's helper models (security, router)
 }
 
 // bobBackend is the backend label for a reply's marks: "A", "B", "other" or "".
 func bobBackend(m bobMarks) string {
-	if m.id == "" || !m.usage {
+	if m.id == "" || !m.usage || m.helper {
 		return ""
 	}
 	if m.mixedIDs {
@@ -107,7 +106,9 @@ func bobBackend(m bobMarks) string {
 		}
 		return "other"
 	}
-	if len(m.id) == bobIDLenB && bobAlnum(m.id) && !m.cacheWrite && !m.creationDetails {
+	// B ids vary in length and characters (22 and 23 chars, some with - or _, seen on 2026-11-10),
+	// so only what B lacks is checked: the chatcmpl- start (above) and the cache-write fields.
+	if !m.cacheWrite && !m.creationDetails {
 		return "B"
 	}
 	return "other"
@@ -139,6 +140,12 @@ func bobMarksOf(contentType string, body []byte) (gjson.Result, bobMarks) {
 		}
 		if doc.Get("provider_specific_fields").Exists() {
 			m.providerFields = true
+		}
+		// Bob's helper calls name their own model. They are named here, not the coding tiers: a
+		// user may pick premium, standard or fast, and every one of those must keep its label.
+		switch doc.Get("model").String() {
+		case "security", "router":
+			m.helper = true
 		}
 		if u := doc.Get("usage"); usagePresent(u) {
 			usage = u
