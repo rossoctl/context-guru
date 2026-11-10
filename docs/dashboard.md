@@ -436,8 +436,8 @@ equal the full totals.
   plus the `cachesplit` component's `saved_usd`. Full read only.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
   `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
-  not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is
-  `tokens.by_feature.keepalive` less this. Full read only.
+  not agent traffic, so this is not in `tokens.caused`. Show it beside the keep-alive rescue, never
+  subtracted from it: the tiers have no common unit. Full read only.
 - **`tokens_unmeasured_requests`.** The requests in the period with no token figure: rows from
   before the accountant, and rows it could not price. That is "not measured", not "saved nothing".
 - A request whose estimate is held out of the totals (`estimated_requests`) is held out of the
@@ -470,20 +470,29 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
 - **The display rule.** One line per saving: the saved tiers that are not 0, in the order `wr`
   (`cache_write_5m`), `wr1h` (`cache_write_1h`), `rd` (`cache_read`), `in` (`input`). The caused
   tiers follow as `cost`. Example: `saved 85.0k wr · cost 40.0k rd`. Tiers are never added.
+- **Zero or not measured** (`tokenFigure` in `dash/ui/savings.js`, one rule for every screen):
+  - a figure with tokens shows its line;
+  - an all-zero figure with no unpriced request shows `saved 0 tokens`. The server leaves a
+    feature with no tokens out of `by_feature`, so a missing feature on a priced period is a zero;
+  - an all-zero figure while `tokens_unmeasured_requests` is more than 0, or a server with no
+    `tokens` (before #999), shows `not measured`.
 - **The total.** `tokens.saved` and `tokens.caused`. The cards add up to it, tier by tier.
 - **Keep-alive pings** show on a line of their own, under the total and on the Cache card:
   `Keep-alive pings (not in the total): cost 900 wr · 410.0k rd`. A ping is not agent traffic, so
   `keepalive_ping_tokens` is not in the total or in any card's cost. Every screen follows this rule:
-  the band's lean read has no ping tokens. The keep-alive's net is its rescue line less the pings line.
+  the band's lean read has no ping tokens.
 - **The cards** read `tokens.by_feature`:
-  - Cache: `keepalive`, `cachesplit` and `ttl`, with one row each, and the pings line. Manual pings
-    have no token figure, so they do not show.
+  - Cache: `keepalive` (the rescue), `cachesplit` and `ttl`, with one row each, and the pings line.
+    A row with no tokens does not show; with no rows, the list does not show. Manual pings have no
+    token figure, so they do not show.
   - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
   - Preset: every other entry (the preset's components and `ended_change`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
   weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
-  `min(used% × saved_usd / cost_usd, 100 − used%)` for the window. At the cap the line says that
-  without context-guru the limit would have been hit.
+  `min(used% × saved_usd / cost_usd, 100 − used%)` for the window: the provider stops a user at
+  100%, so the share saved is never more than the room that was left. At the cap the line says that
+  without context-guru the limit would have been hit. The estimate is for the whole account, so it
+  is hidden while a page filter (a session, a time range, a model, ...) narrows the Overview.
 - **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
   how many requests have no token figure.
 

@@ -304,6 +304,9 @@ function writeRange(p) {
 }
 /** hasRange is whether the time filter is narrowing anything at all. */
 function hasRange() { const [a, b] = rangeMs(); return a > 0 || b > 0; }
+/** pageFiltered is whether a filter or the time range narrows the page. The tenant pick is not one:
+ *  it chooses whose figures, not a part of them. */
+function pageFiltered() { return hasRange() || Object.entries(state.filter).some(([k, v]) => v && k !== 'tenant'); }
 
 function qs(extra) {
   const p = new URLSearchParams();
@@ -1745,12 +1748,12 @@ function renderSavedLedger(o, ka, partial) {
   const totalTok = presetTok + filterTok;
   // A Claude subscription does not bill per token: every saving is in tokens (/api/stats `tokens`),
   // with the 5-hour share as an estimate below the total. null keeps the dollar view.
-  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact) : null;
+  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered()) : null;
   const unmeasured = o.tokens_unmeasured_requests || 0;
   const heroMain = sub
     ? el('div', { class: 'ov-hero-money' },
       el('div', { class: 'ov-hero-v ov-hero-sub', 'data-testid': 'saved-total-subscription', text: sub.main }),
-      el('div', { class: 'ov-hero-of', text: 'tokens in this period, by kind: wr cache write, rd cache read, in fresh input' }),
+      el('div', { class: 'ov-hero-of', text: 'tokens in this period, by kind: wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input' }),
       sub.pings ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-pings', text: sub.pings }) : null,
       sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null,
       unmeasured > 0 ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-unmeasured',
@@ -1765,10 +1768,12 @@ function renderSavedLedger(o, ka, partial) {
     'On a Claude subscription every saving is in tokens, not dollars. A subscription does not bill per token.',
     'The total is the sum of the parts below, kind by kind. wr is cache write (wr1h: the 1-hour cache), rd is cache read, in is fresh input.',
     'Kinds are never added into one number: Anthropic does not say how the limit weights them. "cost" is what a saving made you pay, for example the cache reads after a keep-alive rescue.',
-    'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic. The keep-alive\'s net is its saving less the pings.',
-    'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing".',
+    'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic.',
+    'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing". "saved 0 tokens" is a measured zero.',
     'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
     'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
+    'The share saved can never be more than 100% less the share used: Anthropic stops you at 100%. When the estimate reaches that cap, the line says that without context-guru you would have hit the 5-hour limit.',
+    'The estimate is for your whole account. It is hidden while a filter (a session, a time range, a model...) narrows this page.',
   ];
   const hero = el('section', { class: 'ov-hero', 'data-testid': 'saved-total' },
     el('div', { class: 'ov-hero-head' },
@@ -1803,7 +1808,7 @@ function renderSavedLedger(o, ka, partial) {
   const ft = sub ? featureTokens(o) : null;
   const tokens = (tid, flow, ran) => !ran ? el('p', { class: 'ov-none', text: 'Nothing saved yet in this period.' })
     : partial ? el('p', { class: 'ov-none', text: 'Loading…' })
-      : ovFigure(tid, 'Tokens saved', tokenLine(flow, compact) || 'not measured', '', '', 'ov-fig-tok');
+      : ovFigure(tid, 'Tokens saved', tokenFigure(flow, o, compact).text, '', '', 'ov-fig-tok');
   const saving = (tid, v, flow, ran) => sub ? tokens(tid.replace(/-usd$/, '-tok'), flow, ran) : money(tid, v, ran);
   const grid = el('div', { class: 'ov-cards' });
 
@@ -1811,12 +1816,15 @@ function renderSavedLedger(o, ka, partial) {
   const cacheUSD = parts.cache + parts.manual;
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
   const tokRow = (label, flow) => hasTokens(flow) ? el('li', {}, el('span', { text: label }), el('strong', { text: tokenLine(flow, compact) })) : null;
-  const brk = sub ? el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
-    tokRow('Automatic pings', ft.keepalive),
-    pingLine(o, compact) ? el('li', { 'data-testid': 'saved-cache-pings' }, el('span', { text: PING_LABEL }),
-      el('strong', { text: pingLine(o, compact) })) : null,
+  const pings = sub ? pingLine(o, compact) : '';
+  const subRows = sub ? [
+    tokRow('Keep-alive rescue', ft.keepalive),
+    pings ? el('li', { 'data-testid': 'saved-cache-pings' }, el('span', { text: PING_LABEL }), el('strong', { text: pings })) : null,
     tokRow('Cache reorder', ft.cachesplit),
-    tokRow('1-hour cache', ft.ttl))
+    tokRow('1-hour cache', ft.ttl),
+  ].filter(Boolean) : [];
+  // No empty list when every row is empty.
+  const brk = sub ? (subRows.length ? el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' }, subRows) : null)
     : el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
     el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
@@ -1849,7 +1857,12 @@ function renderSavedLedger(o, ka, partial) {
       cacheRan ? ovFigure('saved-cache-writes', 'Cache writes prevented', num(w.requests),
         'requests that read a warm cache' + (w.manual ? ' · up to ' + num(w.manual) + ' more from manual pings that found it warm' : ''), '') : null,
     ],
-    infoButton('cache', 'Cache', [
+    infoButton('cache', 'Cache', sub ? [
+      'Tokens saved: the cache writes context-guru prevented, by kind, and "cost" for what that made you pay. It is the keep-alive rescue, the cache reorder and the 1-hour cache together.',
+      'Keep-alive rescue: requests that read a cache a ping kept warm, in place of writing it again. Its cost is the cache reads.',
+      'Keep-alive pings: what the pings themselves paid. A ping is not your agent\'s traffic, so it is on its own line and not in the total.',
+      'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
+    ] : [
       'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
       'Manual pings: the same, when you press Ping. This figure is an estimate. It is the write the ping avoided, taken from the cache lifetime and the size of the prefix. No request read it back. The other figures in this total are measured.',
       'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',

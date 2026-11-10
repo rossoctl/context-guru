@@ -171,7 +171,7 @@ test('a subscription with no open 5-hour window still shows tokens, with no esti
   assert.equal(isSubscription({ subscription: true }, now), true);
   const h = subscriptionHeadline({ subscription: true, five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, o, null, now, String);
   assert.deepEqual(h, { main: 'saved 7 wr', pings: '', estimate: '' });
-  assert.equal(subscriptionHeadline({ subscription: true }, {}, null, now, String).main, 'saved 0 tokens');
+  assert.equal(subscriptionHeadline({ subscription: true }, { tokens: {} }, null, now, String).main, 'saved 0 tokens');
   assert.equal(isSubscription({ subscription: false }, now), false);
 });
 
@@ -224,4 +224,37 @@ test('the capped note leaves the dollars out on a subscription', () => {
   const { capNote } = createRequire(import.meta.url)('./ui/savings.js');
   assert.equal(capNote({ replay_cap_correction_usd: -1.5 }, null),
     'Capped: replay credit earned after the client would have compacted is not counted.');
+});
+
+// One rule for zero against "not measured" (tokenFigure), for every screen (#988 round 2).
+test('a priced zero reads saved 0 tokens; an unpriced zero or a server with no tokens reads not measured', () => {
+  const { tokenFigure, featureTokens, totalTokens } = createRequire(import.meta.url)('./ui/savings.js');
+  const zero = { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 };
+  // A full read with 0 unmeasured: a feature left out of by_feature is a measured zero.
+  const priced = { tokens: { saved: { cache_write_5m: 9 }, caused: zero, by_feature: { mask: { saved: { cache_write_5m: 9 } } } },
+    tokens_unmeasured_requests: 0 };
+  assert.deepEqual(tokenFigure(featureTokens(priced).filter, priced, String), { text: 'saved 0 tokens', measured: true });
+  assert.deepEqual(tokenFigure(featureTokens(priced).compaction, priced, String), { text: 'saved 9 wr', measured: true });
+  // Some requests unpriced and an all-zero figure: not measured, not "saved nothing".
+  const some = { ...priced, tokens_unmeasured_requests: 3 };
+  assert.deepEqual(tokenFigure(featureTokens(some).filter, some, String), { text: 'not measured', measured: false });
+  // Some unpriced, but the figure has tokens: it is measured.
+  assert.equal(tokenFigure(featureTokens(some).compaction, some, String).measured, true);
+  // A server from before #999: no tokens at all.
+  assert.deepEqual(tokenFigure(totalTokens({}), {}, String), { text: 'not measured', measured: false });
+  assert.deepEqual(tokenFigure(undefined, null, String), { text: 'not measured', measured: false });
+});
+
+test('the headline uses the same rule, and a page filter hides the account-wide estimate', () => {
+  const { subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { subscription: true, five_hour: { utilization: 0.54, reset_s: 2000 } };
+  const win = { cost_usd: 90, total_saved_usd: 5 };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  assert.equal(subscriptionHeadline(lim, o, win, now, String).estimate, '≈ 3% of the 5-hour limit (estimate at API-price weights)');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).estimate, '');
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true).main, 'saved 2 wr');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 0 }, null, now, String).main, 'saved 0 tokens');
+  assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 4 }, null, now, String).main, 'not measured');
+  assert.equal(subscriptionHeadline(lim, {}, null, now, String).main, 'not measured'); // a server from before #999
 });
