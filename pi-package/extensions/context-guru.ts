@@ -1,8 +1,10 @@
 // context-guru for Pi.
 //
 // Routing lives in Pi's models.json (written by scripts/pi_plugin.py after the user says yes), and the
-// proxy runs as a user service. So this extension does NO network work when a session starts or a
-// request is sent. It only:
+// proxy runs as a user service. This extension sends no request of its own when Pi sends a request.
+// It only:
+//   0. checks the proxy once when a session starts (a localhost /healthz, in the background, never
+//      awaited by Pi), restarts the service once if it does not answer, and warns once if it is still down;
 //   1. tags each routed request with Pi's own session id (header x-context-guru-session), so the proxy
 //      keeps one session across a compaction instead of splitting it in two;
 //   2. stops Pi's own cache warming for routed models while the proxy's keep-alive is on, so the cache
@@ -26,6 +28,8 @@ const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
 const STRATEGIES = ["auto", "1-ping", "2-ping", "none"];
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
+/** The time limit of each /healthz check at session start (the user's choice). */
+export const START_CHECK_TIMEOUT_MS = 5000;
 
 interface Install {
   port?: number;
@@ -48,6 +52,62 @@ export function isRouted(install: Install | undefined, baseUrl: string | undefin
   if (!install?.base_urls || !baseUrl) return false;
   const want = baseUrl.replace(/\/+$/, "");
   return Object.values(install.base_urls).some((url) => url.replace(/\/+$/, "") === want);
+}
+
+/** True when a session start must check the proxy: context-guru is installed and at least one of these
+ *  model URLs (the session's model, and every model Pi knows) goes to our proxy. */
+export function needsStartCheck(install: Install | undefined, baseUrls: Array<string | undefined>): boolean {
+  if (!install?.port) return false;
+  return baseUrls.some((url) => isRouted(install, url));
+}
+
+/** One GET /healthz on localhost: true only on HTTP 200 within the time limit. No model call, no tokens.
+ *  `stop` ends the check at once, so an open check does not keep a finished `pi -p` alive. */
+export async function proxyAnswers(port: number, timeoutMs: number = START_CHECK_TIMEOUT_MS,
+  fetcher: typeof fetch = fetch, stop?: AbortSignal): Promise<boolean> {
+  const limit = AbortSignal.timeout(timeoutMs);
+  try {
+    const response = await fetcher(`http://127.0.0.1:${port}/healthz`,
+      { signal: stop ? AbortSignal.any([limit, stop]) : limit });
+    await response.arrayBuffer().catch(() => undefined);
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/** The one warning when the proxy is still down after the restart. */
+export function downNotice(port: number, hatch: string): string {
+  return `context-guru: the proxy on port ${port} does not answer, and one restart did not help. ` +
+    `Requests routed through it will fail. Run /context-guru status. If Pi cannot talk, run ${hatch} from a shell.`;
+}
+
+export interface StartCheck {
+  port: number;
+  /** The reset command to name when the restart does not report one. */
+  hatch: string;
+  answers: () => Promise<boolean>;
+  /** Runs `pi_plugin.py restart` once; returns its facts. */
+  restart: () => Promise<Record<string, string>>;
+  /** False once the session has ended: a check for an ended session restarts and says nothing. */
+  active: () => boolean;
+  notify: (text: string) => void;
+}
+
+/** The session-start check: one check, at most one restart, one more check, at most one notice. No loop. */
+export async function checkAtStart(check: StartCheck): Promise<"up" | "restarted" | "down" | "ended"> {
+  if (await check.answers()) return "up";
+  if (!check.active()) return "ended";
+  let facts: Record<string, string> = {};
+  try {
+    facts = await check.restart();
+  } catch {
+    // A failed restart is the same as a restart that did not help: check again, then warn.
+  }
+  if (await check.answers()) return "restarted";
+  if (!check.active()) return "ended";
+  check.notify(downNotice(check.port, facts.reset_hatch || check.hatch));
+  return "down";
 }
 
 // The fields Pi's openai-responses API leaves out for a Sign in with ChatGPT token (pi-ai 1.5.0,
@@ -105,8 +165,45 @@ export default function contextGuru(pi: ExtensionAPI) {
     }).catch(() => undefined);
   };
 
-  pi.on("session_start", () => {
+  const run = async (args: string[], timeout = 180_000) => {
+    const result = await pi.exec("python3", [SCRIPT, ...args], { timeout });
+    return { ...result, facts: parseFacts(result.stdout) };
+  };
+
+  // The running session's check. session_shutdown clears `active` and aborts an open /healthz, so a
+  // check for an ended session stays quiet and does not hold the process open. One per session start.
+  let started = { active: true, stop: new AbortController() };
+
+  pi.on("session_start", (_event, ctx) => {
     install = readInstall();
+    const current = (started = { active: true, stop: new AbortController() });
+    const port = install?.port;
+    let urls: Array<string | undefined> = [ctx.model?.baseUrl];
+    try {
+      urls = urls.concat(ctx.modelRegistry.getAll().map((model) => model.baseUrl));
+    } catch {
+      // Without the registry, the session's own model decides.
+    }
+    if (!port || !needsStartCheck(install, urls)) return;
+    // Read now: ctx throws once the session is replaced, and the notice may come seconds later.
+    const hasUI = ctx.hasUI;
+    // Not awaited: Pi awaits session_start handlers, and this check must not delay the session.
+    void checkAtStart({
+      port,
+      hatch: join(STATE_DIR, "context-guru-reset"),
+      answers: () => proxyAnswers(port, START_CHECK_TIMEOUT_MS, fetch, current.stop.signal),
+      restart: async () => (await run(["restart"], 30_000)).facts,
+      active: () => current.active,
+      notify: (text) => {
+        try {
+          // Print and JSON modes have no UI. stdout carries the answer there, so the warning goes to stderr.
+          if (hasUI) ctx.ui.notify(text, "warning");
+          else console.error(text);
+        } catch {
+          // The session was replaced; its successor runs its own check.
+        }
+      },
+    }).catch(() => undefined);
   });
 
   pi.on("before_provider_headers", (event, ctx) => {
@@ -133,14 +230,11 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, ctx) => signal(ctx, "SessionStart", "compact"));
 
   pi.on("session_shutdown", (event, ctx) => {
+    started.active = false;
+    started.stop.abort();
     const kind = endKind(event.reason);
     if (kind) signal(ctx, "SessionEnd", kind);
   });
-
-  const run = async (args: string[], timeout = 180_000) => {
-    const result = await pi.exec("python3", [SCRIPT, ...args], { timeout });
-    return { ...result, facts: parseFacts(result.stdout) };
-  };
 
   const say = (ctx: ExtensionCommandContext, text: string, level: "info" | "warning" | "error" = "info") => {
     if (ctx.hasUI) ctx.ui.notify(text, level);

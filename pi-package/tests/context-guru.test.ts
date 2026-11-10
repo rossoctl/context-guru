@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { endKind, forChatGPTSignIn, isRouted, parseArgs, parseFacts, readInstall } from "../extensions/context-guru.ts";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import {
+  checkAtStart, downNotice, endKind, forChatGPTSignIn, isRouted, needsStartCheck, parseArgs, parseFacts, proxyAnswers,
+  readInstall, START_CHECK_TIMEOUT_MS, type StartCheck,
+} from "../extensions/context-guru.ts";
 
 const install = {
   port: 8800,
@@ -70,4 +76,141 @@ test("a bare /context-guru runs status, and the first two words are the subcomma
   assert.deepEqual(parseArgs("   "), { sub: "status", value: "" });
   assert.deepEqual(parseArgs("preset"), { sub: "preset", value: "" });
   assert.deepEqual(parseArgs("  preset   medium "), { sub: "preset", value: "medium" });
+});
+
+test("a session start checks the proxy only when installed and some model is routed", () => {
+  assert.equal(needsStartCheck(undefined, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck({ ...install, port: undefined }, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck(install, []), false);
+  assert.equal(needsStartCheck(install, [undefined, "https://api.anthropic.com"]), false);
+  // The session's model need not be routed: any routed provider is enough.
+  assert.equal(needsStartCheck(install, [undefined, "https://api.x.ai/v1", "http://127.0.0.1:8800/openai/v1"]), true);
+});
+
+/** A StartCheck whose answers come from a list, and that records what it did. */
+function fake(answers: boolean[], over: Partial<StartCheck> = {}) {
+  const log = { checks: 0, restarts: 0, notices: [] as string[] };
+  const check: StartCheck = {
+    port: 8800,
+    hatch: "/state/context-guru-reset",
+    answers: async () => answers[log.checks++] ?? false,
+    restart: async () => {
+      log.restarts++;
+      return {};
+    },
+    active: () => true,
+    notify: (text) => log.notices.push(text),
+    ...over,
+  };
+  return { check, log };
+}
+
+test("a proxy that answers is not restarted and nothing is said", async () => {
+  const { check, log } = fake([true]);
+  assert.equal(await checkAtStart(check), "up");
+  assert.deepEqual(log, { checks: 1, restarts: 0, notices: [] });
+});
+
+test("a proxy that comes back after one restart gives no notice", async () => {
+  const { check, log } = fake([false, true]);
+  assert.equal(await checkAtStart(check), "restarted");
+  assert.deepEqual(log, { checks: 2, restarts: 1, notices: [] });
+});
+
+test("a proxy still down after one restart gives exactly one notice, and no loop", async () => {
+  const { check, log } = fake([false, false, false, false]);
+  assert.equal(await checkAtStart(check), "down");
+  assert.equal(log.checks, 2);
+  assert.equal(log.restarts, 1);
+  assert.equal(log.notices.length, 1);
+  assert.match(log.notices[0], /port 8800 does not answer/);
+  assert.match(log.notices[0], /\/context-guru status/);
+  assert.match(log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("the notice names the reset command the controller reports, and a failed restart still warns", async () => {
+  const reported = fake([false, false], { restart: async () => ({ result: "down", reset_hatch: "/x/context-guru-reset" }) });
+  await checkAtStart(reported.check);
+  assert.match(reported.log.notices[0], /run \/x\/context-guru-reset from a shell/);
+  const thrown = fake([false, false], { restart: async () => { throw new Error("stale"); } });
+  assert.equal(await checkAtStart(thrown.check), "down");
+  assert.match(thrown.log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("a session that ended during the check gets no restart and no notice", async () => {
+  let active = true;
+  const early = fake([false], { active: () => false });
+  assert.equal(await checkAtStart(early.check), "ended");
+  assert.deepEqual(early.log, { checks: 1, restarts: 0, notices: [] });
+  const late = fake([false, false], { restart: async () => { active = false; return {}; }, active: () => active });
+  assert.equal(await checkAtStart(late.check), "ended");
+  assert.deepEqual(late.log.notices, []);
+});
+
+test("the notice text is one line", () => {
+  assert.equal(downNotice(8800, "/h").includes("\n"), false);
+});
+
+test("the health check is a GET to localhost /healthz, true only on 200", async () => {
+  const seen: string[] = [];
+  let status = 200;
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.statusCode = status;
+    res.end("ok");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    assert.equal(await proxyAnswers(port), true);
+    status = 503;
+    assert.equal(await proxyAnswers(port), false);
+    assert.deepEqual(seen, ["GET /healthz", "GET /healthz"]);
+  } finally {
+    server.close();
+  }
+  // Nothing listens there now.
+  assert.equal(await proxyAnswers(port, 1000), false);
+});
+
+test("a proxy that accepts but never answers fails the check at the time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const start = Date.now();
+    assert.equal(await proxyAnswers(port, 200), false);
+    assert.ok(Date.now() - start < 2000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("each check has a time limit, 5 seconds by default", async () => {
+  assert.equal(START_CHECK_TIMEOUT_MS, 5000);
+  let signal: AbortSignal | undefined;
+  const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+    signal = init?.signal ?? undefined;
+    return new Response("ok");
+  }) as typeof fetch;
+  assert.equal(await proxyAnswers(8800, undefined, fetcher), true);
+  assert.ok(signal, "the request carries a time limit");
+});
+
+test("a stopped check ends at once, before its time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const stop = new AbortController();
+    const start = Date.now();
+    const pending = proxyAnswers(port, 5000, fetch, stop.signal);
+    setTimeout(() => stop.abort(), 50);
+    assert.equal(await pending, false);
+    assert.ok(Date.now() - start < 1000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
