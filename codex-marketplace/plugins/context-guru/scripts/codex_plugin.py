@@ -587,7 +587,18 @@ def setup(args):
     # running proxy without a request to do so.)
     running = bool(port and existing.get("binary") and healthy(port))
     try:
-        write_proxy_config(existing["binary"] if running else executable)
+        if running:
+            write_proxy_config(existing["binary"])
+        else:
+            # The proxy is down. Restarts (`ensure`, `serve`) run the recorded binary with this file.
+            # So the record must name the binary that validated the file BEFORE the file is written.
+            # Then a later setup failure leaves a file and a binary that match. The user may have
+            # installed a new binary to replace an old record on purpose: this path accepts that.
+            load_strategy_table(executable)
+            if existing.get("binary") and existing["binary"] != executable:
+                existing["binary"] = executable
+                (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
+            write_proxy_config(executable)
     except RuntimeError as error:
         facts(result="strategies_unavailable", detail=error)
         return 2

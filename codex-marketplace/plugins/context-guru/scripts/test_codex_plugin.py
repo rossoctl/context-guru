@@ -712,5 +712,45 @@ screen_reader_detection_done = true
         restart.assert_not_called()
 
 
+    def test_setup_with_the_proxy_down_keeps_the_record_and_the_file_in_step(self):
+        # Old recorded binary, new binary first in find_binary, proxy down, setup fails after the
+        # write. A later ensure runs the recorded binary: it must be the one that can read the file.
+        PLUGIN.state_dir().mkdir(parents=True)
+        (PLUGIN.state_dir() / "install.json").write_text(
+            json.dumps({"port": 8791, "binary": "/old/proxy"}))
+        PLUGIN.main_config().parent.mkdir(parents=True)
+        PLUGIN.main_config().write_text('model_provider = "openai"\n')
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/new/proxy"), \
+             mock.patch.object(PLUGIN, "healthy", return_value=False), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=8791), \
+             mock.patch.object(PLUGIN, "start_proxy", return_value=None), \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(PLUGIN.setup(args), 1)
+        self.assertIn("strategy: 30-min-ping", PLUGIN.proxy_config().read_text())
+        self.assertEqual(PLUGIN.read_record()["binary"], "/new/proxy")
+        # ensure now starts the binary that validated the file, never the old one.
+        with mock.patch.object(PLUGIN, "is_routed", return_value=True), \
+             mock.patch.object(PLUGIN, "healthy", return_value=False), \
+             mock.patch.object(PLUGIN, "start_proxy", return_value=mock.Mock(pid=1)) as start, \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            PLUGIN.ensure(None)
+        self.assertEqual(start.call_args[0][0], "/new/proxy")
+
+    def test_setup_with_the_proxy_down_and_a_new_binary_that_cannot_list_writes_nothing(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        (PLUGIN.state_dir() / "install.json").write_text(
+            json.dumps({"port": 8791, "binary": "/old/proxy"}))
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        error = RuntimeError("cannot list cache strategies; update the proxy to v0.7.1 or later")
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/other/proxy"), \
+             mock.patch.object(PLUGIN, "healthy", return_value=False), \
+             mock.patch.object(PLUGIN, "load_strategy_table", side_effect=error), \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(PLUGIN.setup(args), 2)
+        self.assertFalse(PLUGIN.proxy_config().exists())
+        self.assertEqual(PLUGIN.read_record()["binary"], "/old/proxy")
+
+
 if __name__ == "__main__":
     unittest.main()
