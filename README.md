@@ -89,7 +89,7 @@ It is experimental: it is new, and it ran in a real OpenCode only once (1.19.5).
 4. Restart OpenCode.
 
 Commands: `/context-guru-status`, `/context-guru-preset`, `/context-guru-strategy`, `/context-guru-update`, `/context-guru-uninstall` (and `/context-guru-install` to undo an uninstall).
-To remove it, run `/context-guru-uninstall`, then delete the plugin entry. See the [full guide](docs/how-to/install-opencode-plugin.md).
+The plugin never stores message text; the dashboard shows metadata only. To remove it, run `/context-guru-uninstall`, then delete the plugin entry. See the [full guide](docs/how-to/install-opencode-plugin.md).
 
 
 ## What's cool

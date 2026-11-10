@@ -38,6 +38,8 @@ export function stubProxyBinary(table = FAKE_STRATEGIES) {
   writeFileSync(stub, `#!/usr/bin/env node
 const { createServer } = require("node:http")
 if (process.argv[2] === "strategies") { console.log(${JSON.stringify(JSON.stringify(table))}); process.exit(0) }
+const record = (label) => { if (process.env.CG_TEST_RECORD) require("node:fs").appendFileSync(process.env.CG_TEST_RECORD, JSON.stringify({ label, argv: process.argv.slice(2), dashboardContent: process.env.DASHBOARD_CONTENT ?? null }) + String.fromCharCode(10)) }
+record("serve")
 const listen = process.argv.indexOf("--listen")
 const port = Number(process.argv[listen + 1].split(":")[1])
 createServer((request, response) => {
@@ -71,6 +73,8 @@ export function pickyProxyBinary(table = FAKE_STRATEGIES, { refuse = [] } = {}) 
 const { createServer } = require("node:http")
 const { readFileSync } = require("node:fs")
 if (process.argv[2] === "strategies") { console.log(${JSON.stringify(JSON.stringify(table))}); process.exit(0) }
+const record = (label) => { if (process.env.CG_TEST_RECORD) require("node:fs").appendFileSync(process.env.CG_TEST_RECORD, JSON.stringify({ label, argv: process.argv.slice(2), dashboardContent: process.env.DASHBOARD_CONTENT ?? null }) + String.fromCharCode(10)) }
+record("serve")
 const arg = (name) => process.argv[process.argv.indexOf(name) + 1]
 const text = readFileSync(arg("--config"), "utf8")
 const preset = /^preset: (.+)$/m.exec(text)?.[1]

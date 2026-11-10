@@ -60,6 +60,18 @@ function strategyFiles(table, dialects) {
   }
 }
 
+// Content capture is always off for a proxy this plugin starts. The owner decided this on 2026-11-10.
+// The flag wins over the environment in the proxy, and the environment is set too, so no start path can
+// miss it. Every start path goes through these two helpers: the first start, the recovery spawn
+// (which also fixes an older install.json that was written without the flag), and the start script.
+const CAPTURE_FLAG = "--dashboard-content=false"
+export function withCaptureOff(args) {
+  return [...args.filter((arg) => !/^--dashboard-content(=|$)/.test(arg)), CAPTURE_FLAG]
+}
+export function captureOffEnv(env = process.env) {
+  return { ...env, DASHBOARD_CONTENT: "0" }
+}
+
 export function stateDirectory(directory) {
   const root = process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
   return join(root, createHash("sha256").update(directory).digest("hex").slice(0, 16))
@@ -445,7 +457,9 @@ printf '%s\\n' "undo=/context-guru-install"
 }
 
 function startScript(state, binary, args, port) {
-  const command = [binary, ...args].map(shQuote).join(" ")
+  // "env DASHBOARD_CONTENT=0" sets the variable for the proxy only. The flag is in args already, and
+  // withCaptureOff keeps it there even if a caller passes an args list without it.
+  const command = ["env", "DASHBOARD_CONTENT=0", binary, ...withCaptureOff(args)].map(shQuote).join(" ")
   return `#!/bin/sh
 # context-guru: start this project's proxy with the arguments the plugin recorded.
 set -u
@@ -972,8 +986,8 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
     writeAtomic(configPath, configText, 0o600)
     const logPath = join(state, "proxy.log")
     const log = openSync(logPath, "a", 0o600)
-    const args = ["--listen", `127.0.0.1:${port}`, "--config", configPath, "--dashboard", "--dashboard-db", join(state, "dashboard.db"), "--idle-exit", "24h", "--anthropic-upstream", upstreamFor(routes, "anthropic"), "--openai-upstream", upstreamFor(routes, "openai")]
-    const child = spawn(binary.path, args, { detached: true, stdio: ["ignore", log, log] })
+    const args = ["--listen", `127.0.0.1:${port}`, "--config", configPath, "--dashboard", "--dashboard-db", join(state, "dashboard.db"), "--idle-exit", "24h", "--anthropic-upstream", upstreamFor(routes, "anthropic"), "--openai-upstream", upstreamFor(routes, "openai")].concat(CAPTURE_FLAG)
+    const child = spawn(binary.path, args, { detached: true, stdio: ["ignore", log, log], env: captureOffEnv() })
     const exited = new Promise((resolve) => { child.once("exit", (code, signal) => resolve({ code, signal })); child.once("error", (error) => resolve({ error })) })
     child.unref()
     closeSync(log)
@@ -1030,7 +1044,7 @@ async function recoverProxy(state, record, client) {
   const log = openSync(logPath, "a", 0o600)
   let child
   try {
-    child = spawn(record.binary, record.args, { detached: true, stdio: ["ignore", log, log] })
+    child = spawn(record.binary, withCaptureOff(record.args ?? []), { detached: true, stdio: ["ignore", log, log], env: captureOffEnv() })
     child.once("error", () => {})
   } catch {
     return

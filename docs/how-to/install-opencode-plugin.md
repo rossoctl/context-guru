@@ -59,6 +59,14 @@ credential while you are away. Set other values with the tuple form:
 - **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy.
 - `none` sends no keep-alive requests.
 
+## What the plugin stores
+
+The plugin never stores message text; the dashboard shows metadata only.
+
+- Every proxy the plugin starts runs with `--dashboard-content=false` and `DASHBOARD_CONTENT=0`. This holds even when `DASHBOARD_CONTENT` is set in your environment.
+- The dashboard still keeps counts, sizes, ids, and the names and text of tool declarations.
+- There is no option to turn content capture on. The plugin has no way to attach to a proxy you start yourself.
+
 ## Change the preset or strategy in a session
 
 - `/context-guru-preset` shows the saved preset. It lists the choices.

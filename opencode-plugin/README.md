@@ -101,6 +101,7 @@ export both `server` and `tui`. Add it to `~/.config/opencode/tui.json`:
 
 ## Safety
 
+- The plugin never stores message text; the dashboard shows metadata only. Every proxy it starts gets `--dashboard-content=false` and `DASHBOARD_CONTENT=0`, even when `DASHBOARD_CONTENT` is set in your environment.
 - Only a provider the plugin routed gets the `x-context-guru-session` header.
 - Two OpenCode instances share one lock for choosing a port, starting the proxy, and writing the records. The holder refreshes the lock every 5 s, and a lock nobody refreshed for 30 s is broken. The download of the release does not hold the lock. The plugin counts a proxy as started only while its own child process is alive.
 - A stop or reset signals a process only when it runs the binary path the plugin recorded.
