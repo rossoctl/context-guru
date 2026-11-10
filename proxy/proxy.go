@@ -2225,6 +2225,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		upMs := float64(time.Since(upStart).Microseconds()) / 1000.0
 		status = resp.StatusCode
 		cp.noteUpstream(upMs, resp.StatusCode)
+		cp.noteLimits(resp.Header)
 		if h.agg != nil {
 			h.agg.RecordUpstreamLatency(upMs, bypassed)
 		}

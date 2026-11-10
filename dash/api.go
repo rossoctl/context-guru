@@ -811,6 +811,8 @@ func (a *API) routes() []route {
 	rs = append(rs, a.adaptRoutes()...)
 	rs = append(rs, a.compactEpisodeRoutes()...)
 	rs = append(rs, a.insightsRoutes()...)
+	// The subscription limit values (#984), declared beside their handler in limits.go.
+	rs = append(rs, a.limitsRoutes()...)
 	return rs
 }
 
@@ -1360,7 +1362,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	if statsLean(r) && (f.Session != "" || f.Since != 0 || f.Until != 0) {
 		// ?lean=1 answers every field the status line's _fetch_stats actually reads
 		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, keepalive_net_usd,
-		// keepalive_misses_avoided, upstream_ms_avg) plus what scripts/cg.py reads
+		// keepalive_misses_avoided, upstream_ms_avg, and saved_unique / replay_tokens for
+		// `rd / wr`) plus what scripts/cg.py reads
 		// (cost_usd, baseline_cost_usd, cache_saved_usd and 7 waterfall keys) at FULL
 		// precision for a SESSION, and at a small, disclosed, bounded discount (the two
 		// read-time-priced credits below) for a time window — see

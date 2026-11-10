@@ -75,6 +75,18 @@ jobs:
           CGO_ENABLED: "1"
         run: go test ./...
 
+      # The IBM Bob installer: one zip with both Mac proxies, the Bob plugin and its status bar
+      # (bob-plugin/release). It is a release file, never a file in git, so a clone stays small.
+      # Built BEFORE GoReleaser publishes, so a failed build stops the tag before a release exists
+      # without the Bob files. Built into bob-dist/, which GoReleaser's --clean does not empty.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the Bob installer zip
+        run: |
+          make bob-release BOB_DIST=bob-dist
+          cd bob-dist && shasum -a 256 context-guru-bob-*.zip | tee context-guru-bob-SHA256SUMS
+
       - name: Release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -84,6 +96,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Attach the Bob installer to the release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # install-bob.sh keeps its name, so releases/latest/download/install-bob.sh always works.
+        run: >-
+          gh release upload "$GITHUB_REF_NAME" bob-dist/context-guru-bob-*.zip
+          bob-dist/context-guru-bob-SHA256SUMS bob-plugin/release/install-bob.sh
+
       - name: Upload snapshot artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
@@ -92,4 +113,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/checksums.txt
+            bob-dist/context-guru-bob-*.zip
+            bob-dist/context-guru-bob-SHA256SUMS
+            bob-plugin/release/install-bob.sh
           retention-days: 7

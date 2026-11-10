@@ -1026,6 +1026,10 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// What the ping actually asked for, so the row says it rather than reading as a request
 	// with no output budget.
 	ev.MaxTokens = r.MaxTokens
+	// The subscription limit headers of the ping's answer (#995), read by the same parser as a
+	// request's. GET /api/me/limits reads the newest row that has them, so the share stays
+	// current while the user is idle. auth_subscription stays 0: a ping carries no client auth kind.
+	ev.Limits = proxy.PingLimits(r)
 	// ev.Price still has to run: it is what fills TokenAccounting, BilledTokenFactor,
 	// BaselineCostUSD, CachesplitSavedUSD and KeepAliveSavedUSD, none of which the report
 	// carries. But r.CostUSD is already the authoritative figure — record1 computed it,

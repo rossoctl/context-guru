@@ -85,6 +85,11 @@ type capture struct {
 	cpointSrc  string
 	inherits   string
 	hasInherit bool
+	// limits are the subscription limit headers of the upstream answer (#984; noteLimits).
+	limits *dash.Limits
+	// authSub is true when the client sent a Claude subscription (OAuth) token (#984). Only the
+	// kind is kept, never the token.
+	authSub bool
 	// Issue #424's RECORD half. waits is the handler's shared tracker (nil-checked like
 	// everything else here); waitBody is the PRISTINE request body, stashed by noteWaitBody —
 	// a plain slice-header copy, no scan. finish() builds a CLOSURE around both of these
@@ -175,6 +180,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		terminal: h.opts.TerminalTools,
 		savings:  h.savings, pings: h.opts.Pings,
 		observe: tn.Mode == components.ModeObserve,
+		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
 	}
 }
 
@@ -547,6 +553,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {
 		e.CompactionPoint, e.CompactionPointSource = c.cpoint, c.cpointSrc
 	}
+	e.Limits, e.AuthSubscription = c.limits, c.authSub
 	// The provider's terminal reason, off the same response bytes the token tiers came
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason

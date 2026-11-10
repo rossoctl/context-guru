@@ -204,10 +204,12 @@ type Recorder struct {
 	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
 	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
 	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
-	// seedTier holds, per thread.Key(session, thread), the billed one-hour tier of the thread's
-	// latest request before a restart (SeedSessions). ObservePrefix reads it only while the
-	// thread has no lastFacts. Absent means unknown, which keeps the five-minute lifetime.
-	seedTier  map[string]bool
+	// seedTier holds, per thread.Key(session, thread) + "\x00" + model, when that thread last
+	// wrote a cache entry at the billed one-hour tier on that model, before a restart
+	// (SeedSessions). The value is the write's epoch ms, so the age prune can drop it. ObservePrefix
+	// reads it only while the thread has no lastFacts, and only for the request's own model.
+	// Absent means unknown, which keeps the five-minute lifetime.
+	seedTier  map[string]int64
 	seenModel map[string]bool
 	// graceSeen holds, per thread.Key(session, thread), when that thread's cached prefix was
 	// last REFRESHED: by its own last request or by a keep-alive ping that read the cache. It
@@ -267,7 +269,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
 		lastFacts: map[string]PrefixFacts{},
-		seedTier:  map[string]bool{},
+		seedTier:  map[string]int64{},
 		seenModel: map[string]bool{},
 		graceSeen: map[string]int64{},
 		seenKeys:  map[string]struct{}{},
@@ -733,6 +735,11 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 		if now-ts > staleSession {
 			delete(r.lastSeen, k)
 			delete(r.lastTail, k)
+		}
+	}
+	// seedTier is keyed per thread and model, so it ages by its own write time.
+	for k, ts := range r.seedTier {
+		if now-ts > staleSession {
 			delete(r.seedTier, k)
 		}
 	}
@@ -753,7 +760,7 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
 		r.lastFacts = map[string]PrefixFacts{}
-		r.seedTier = map[string]bool{}
+		r.seedTier = map[string]int64{}
 		r.graceSeen = map[string]int64{}
 	}
 }
@@ -767,7 +774,8 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 // over-claim the prefix-cache figure exists to avoid. It also fixes cache_miss_reason, which
 // reported a cold start for every session in flight across a restart.
 //
-// One indexed group-by at startup, bounded to sessions young enough to still matter.
+// Three queries at startup (recency and tail, tiers, models), bounded to sessions young enough to
+// still matter.
 func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
@@ -784,9 +792,16 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	//
 	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
 	// session, or a restart would re-date the main thread with a subagent's last request.
+	//
+	// 2xx only (#994), as SeedGraceSessions does and as the live path does for the gap that
+	// matters (ObservePrefix commits a request only when it succeeded). A failed request wrote no
+	// cache entry, so counting it makes the entry look younger than it is and turns a ttl_expiry
+	// into a prefix_change or unknown. A thread with no 2xx row is not seeded: it has no entry.
 	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
-		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
+		WHERE r.ts >= ? AND r.keepalive = 0 AND r.status >= 200 AND r.status < 300
+			AND r.id = (SELECT r2.id FROM requests r2
 			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
+				AND r2.status >= 200 AND r2.status < 300
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
 		now-staleSession)
 	if err != nil {
@@ -819,6 +834,10 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	models, err := r.seedModels(now - staleSession)
+	if err != nil {
+		return 0, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, ts := range seeded {
@@ -829,43 +848,76 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 			if t, ok := tails[id]; ok {
 				r.lastTail[id] = t
 			}
-			if oneHour[id] {
-				if r.seedTier == nil {
-					r.seedTier = map[string]bool{}
-				}
-				r.seedTier[id] = true
-			}
 		}
+	}
+	// A tier belongs to a thread and a model. It is not tied to the thread's recency, so a thread
+	// whose latest 2xx row is a read still gets the tier of its latest write.
+	for k, ts := range oneHour {
+		if r.seedTier == nil {
+			r.seedTier = map[string]int64{}
+		}
+		if _, ok := r.lastFacts[k]; !ok {
+			r.seedTier[k] = ts
+		}
+	}
+	if r.seenModel == nil {
+		r.seenModel = map[string]bool{}
+	}
+	for _, mk := range models {
+		r.seenModel[mk] = true
 	}
 	return len(seeded), nil
 }
 
-// seedOneHourTiers returns the threads whose billed tier is the one-hour tier. The source is the
-// thread's latest successful, non-ping row that WROTE cache (cache_write > 0): a failed request
-// writes no entry, and a full hit leaves the tier of the earlier write as it was. This is the
-// live rule (ObservePrefix keeps the tier over a read-only turn; only a 2xx request commits).
-// It is a second query, with the shape of the first, so recency and tail still come from the
-// latest row. The FactsOf rule decides the tier: the write is all one-hour.
-func (r *Recorder) seedOneHourTiers(since int64) (map[string]bool, error) {
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.cache_write, r.cache_write_1h FROM requests r
-		WHERE r.ts >= ? AND r.keepalive = 0 AND r.cache_write > 0 AND r.status >= 200 AND r.status < 300
-			AND r.id = (SELECT r2.id FROM requests r2
-			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
-				AND r2.cache_write > 0 AND r2.status >= 200 AND r2.status < 300
-			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`, since)
+// seedModels returns the tenant+model keys (the keys observe() uses) of every real request in the
+// window, so the first request on a known model after a restart is not a cold start (#994). Only
+// 2xx rows count: a failed request wrote no entry, and the live path labels the next request on a
+// model with only failed rows first_on_model (cold_start) through a marker that a restart clears.
+// A model never seen in the window stays unseeded.
+func (r *Recorder) seedModels(since int64) ([]string, error) {
+	rows, err := r.db.sql.Query(`SELECT DISTINCT tenant_id, model FROM requests
+		WHERE ts >= ? AND keepalive = 0 AND model != '' AND status >= 200 AND status < 300`, since)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	var out []string
 	for rows.Next() {
-		var sid, tid string
-		var write, write1h int64
-		if err := rows.Scan(&sid, &tid, &write, &write1h); err != nil {
+		var tenant, model string
+		if err := rows.Scan(&tenant, &model); err != nil {
+			return nil, err
+		}
+		out = append(out, tenant+"\x00"+model)
+	}
+	return out, rows.Err()
+}
+
+// seedOneHourTiers returns, per thread and model (the key is thread.Key + "\x00" + model), the
+// time of the write when the thread's latest successful, non-ping WRITE on that model was billed at
+// the one-hour tier. A failed request writes no entry, and a full hit leaves the tier of the
+// earlier write as it was. This is the live rule (ObservePrefix keeps the tier over a read-only
+// turn; only a 2xx request commits). The FactsOf rule decides the tier: the write is all one-hour.
+// An entry belongs to one model, so the tier does too (#994).
+func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
+	rows, err := r.db.sql.Query(`SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h FROM (
+			SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h,
+				ROW_NUMBER() OVER (PARTITION BY session_id, thread_id, model ORDER BY ts DESC, id DESC) AS rn
+			FROM requests
+			WHERE ts >= ? AND keepalive = 0 AND cache_write > 0 AND status >= 200 AND status < 300)
+		WHERE rn = 1`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var sid, tid, model string
+		var ts, write, write1h int64
+		if err := rows.Scan(&sid, &tid, &model, &ts, &write, &write1h); err != nil {
 			return nil, err
 		}
 		if write1h >= write {
-			out[thread.Key(sid, tid)] = true
+			out[thread.Key(sid, tid)+"\x00"+model] = ts
 		}
 	}
 	return out, rows.Err()
