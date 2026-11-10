@@ -809,6 +809,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 		if cgPriced {
 			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
+		} else {
+			e.CGCostUnpriced = true
 		}
 	}
 
