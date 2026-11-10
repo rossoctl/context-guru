@@ -1638,11 +1638,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// control arm of every published comparison in this repo — and including presets
 				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
 				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Responses has one; Chat Completions does not.
+				// matching wire adapter. Anthropic, Responses and Chat Completions have one
+				// (chatPrefixAsker, #1030); every other wire does not.
 				//
 				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
 				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
+				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
 				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
