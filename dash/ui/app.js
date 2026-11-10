@@ -104,6 +104,12 @@ function usd(v) {
 }
 // estUsd renders a held-out estimate: a negative figure is a cost, so it reads as one.
 function estUsd(v) { return v < 0 ? 'a cost of ' + usd(-v) : usd(v); }
+// estRange shows the held estimate as the range it is: the true saving lies between the floor
+// (every removed token at the read rate) and the ceiling (every one at the write rate). Without a
+// usable floor it falls back to the ceiling alone.
+function estRange(low, high) {
+  return (low > 0 && high > low) ? usd(low) + ' to ' + usd(high) : estUsd(high);
+}
 function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.toFixed(digits) + '%'; }
 /**
  * usdOrNA renders a dollar figure, or `n/a` WITH ITS REASON when the figure is not a
@@ -1861,8 +1867,8 @@ function renderSavedLedger(o, ka, partial) {
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, sub ? null : usd) }) : null,
       o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
         text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
-          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm.'
-          + (sub ? '' : ' Estimated saving, not in any total: ' + estUsd(o.estimated_saved_usd || 0) + '.') }) : null,
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm. '
+          + 'Estimated saving, not in any total: ' + estRange(o.estimated_saved_low_usd || 0, o.estimated_saved_usd || 0) + '.' }) : null,
     ]));
 
   // Tools and skills filter.
@@ -3867,8 +3873,8 @@ async function openRequest(id, fromURL) {
       kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'
           + (e.estimate_held ? ' Not counted: there was no history to tell whether the cache was already warm, so no saving is booked. The estimate is shown on the next line.' : '')),
         priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
-      e.estimate_held ? kv(term('Estimated saving (not counted)', 'What the accountant would have booked with no history. It can be about 2x too high when the cache was already warm, so it is in no total. A negative figure is a cost.'),
-        priced ? (e.estimated_saved_usd < 0 ? '' : '≈ ') + estUsd(e.estimated_saved_usd || 0) : '—') : null,
+      e.estimate_held ? kv(term('Estimated saving (not counted)', 'What the accountant would have booked with no history, shown as a range: the low end prices every removed token at the cache-read rate, the high end at the write rate. The true saving lies between them, so it is in no total. A negative figure is a cost.'),
+        priced ? (e.estimated_saved_usd < 0 ? '' : '≈ ') + estRange(e.estimated_saved_low_usd || 0, e.estimated_saved_usd || 0) : '—') : null,
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
