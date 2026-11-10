@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -266,6 +267,12 @@ type KeepAliveSummaryResult struct {
 	// modelinfo.Price.CostWithCacheWrite1h the same way record1 prices an ordinary ping, instead
 	// of folding every write into the five-minute rate.
 	CacheWrite1h int
+	// Header is the call's response headers, or nil when no answer came back. The keeper puts them
+	// on the ping row it books (KeepAliveReport.Header), so the host can read the subscription limit
+	// headers from them as it does for an ordinary ping (#1016). Nothing here reads them. It is nil
+	// too when the call went to the operator's configured model and not with the user's own
+	// credential: that answer carries the operator's limits (KeepAliveSubstitute clears it).
+	Header http.Header
 	// Committed is false either because the call could not be started (another commission —
 	// async or keep-alive — is already in flight for this session, or the global concurrency
 	// bound is full), or because it ran and produced nothing usable (error, timeout, empty
@@ -337,7 +344,7 @@ func (s *CacheAwareSummarizer) commissionSync(c *components.Ctx, call summaryCal
 	cw, cr := callSink.CacheTotals()
 	res := KeepAliveSummaryResult{Model: callSink.Model(),
 		FreshInput: int(in), Output: int(outTok), CacheWrite: int(cw), CacheRead: int(cr),
-		CacheWrite1h: int(callSink.CacheWrite1h())}
+		CacheWrite1h: int(callSink.CacheWrite1h()), Header: callSink.Header()}
 	recordCacheAwareCacheTokens(callSink)
 	defer func() {
 		if res.Committed {

@@ -34,6 +34,11 @@ type keepAliveCandidate struct {
 	path         string
 	span         []bschemas.ChatMessage
 	coveredCount int
+	// ownCredential is true when the call is sent with the user's own credential. Only then does
+	// the keeper get the answer's headers (KeepAliveSummaryResult.Header, #1016): an answer from
+	// the operator's configured model carries the operator's subscription limit headers, which
+	// must not land on the user's ping row.
+	ownCredential bool
 	// cacheState/preExpirySeconds are the component's OWN trigger.cache_state and
 	// trigger.pre_expiry_seconds, carried so the keeper can tell whether ITS idea of "due for a
 	// ping right now" also satisfies what THIS candidate was configured to wait for — see
@@ -150,7 +155,7 @@ func pruneStaleKeepAliveCandidatesLocked(now time.Time) {
 // stored copy is only ever read later, between requests, and a newer turn's conversation is a
 // strict superset of an older one's for the same session).
 func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, call summaryCaller, path string,
-	span []bschemas.ChatMessage, coveredCount int) {
+	span []bschemas.ChatMessage, coveredCount int, ownCredential bool) {
 	if c == nil || c.Session == "" || call == nil {
 		return
 	}
@@ -167,6 +172,7 @@ func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, cal
 		call: call, path: path,
 		span:             append([]bschemas.ChatMessage(nil), span...),
 		coveredCount:     coveredCount,
+		ownCredential:    ownCredential,
 		cacheState:       s.trigger.CacheState,
 		preExpirySeconds: s.trigger.PreExpirySeconds,
 		registeredAt:     time.Now(),
@@ -326,7 +332,11 @@ func KeepAliveSubstitute(session string) (dispatch func(timeout time.Duration) K
 	// a PreExpiry-phase turn in Offload — see commitAsyncSummary's own comment on Reserved.
 	reserved := cand.cacheState == components.CacheStatePreExpiry
 	return func(timeout time.Duration) KeepAliveSummaryResult {
-		return cand.s.commissionSync(cand.ctx, cand.call, cand.path, reserved, cand.span, cand.coveredCount, timeout)
+		res := cand.s.commissionSync(cand.ctx, cand.call, cand.path, reserved, cand.span, cand.coveredCount, timeout)
+		if !cand.ownCredential {
+			res.Header = nil
+		}
+		return res
 	}, info, KeepAliveReasonNone, true
 }
 
@@ -354,15 +364,31 @@ func RegisterKeepAliveCandidateForTest(session string, st store.Store,
 }
 
 // RegisterThreadKeepAliveCandidateForTest is RegisterKeepAliveCandidateForTest for one thread of
-// the session. The registry key is then thread.Key(session, threadID).
+// the session. The registry key is then thread.Key(session, threadID). The call counts as sent
+// with the user's own credential, as on the incoming and PrefixAsk paths.
 func RegisterThreadKeepAliveCandidateForTest(session, threadID string, st store.Store,
 	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
 	cacheState string, preExpirySeconds int) {
+	registerKeepAliveCandidateForTest(session, threadID, st, call, path, span, coveredCount,
+		cacheState, preExpirySeconds, true)
+}
+
+// RegisterConfigKeepAliveCandidateForTest is RegisterKeepAliveCandidateForTest for a call that
+// goes to the operator's configured model, not with the user's own credential. Its answer's
+// headers then never reach the keeper (#1016).
+func RegisterConfigKeepAliveCandidateForTest(session string, st store.Store,
+	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int) {
+	registerKeepAliveCandidateForTest(session, thread.Primary, st, call, path, span, coveredCount, "", 0, false)
+}
+
+func registerKeepAliveCandidateForTest(session, threadID string, st store.Store,
+	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
+	cacheState string, preExpirySeconds int, ownCredential bool) {
 	(&CacheAwareSummarizer{mode: markerFull,
 		trigger: components.Trigger{CacheState: cacheState, PreExpirySeconds: preExpirySeconds},
 	}).registerKeepAliveCandidate(
 		&components.Ctx{Session: session, Thread: threadID, Store: st, Ctx: context.Background()},
-		call, path, span, coveredCount)
+		call, path, span, coveredCount, ownCredential)
 }
 
 // SeedReservedCheckpointForTest writes a `Reserved` checkpoint directly to the store, covering

@@ -40,6 +40,8 @@ type fakeDispatcher struct {
 	released []Key
 	events   []string // "hold:<key>" and "release:<key>", in call order
 	next     int
+	// respHeader, when set, is the header every answer carries (a test of what a sink reads).
+	respHeader http.Header
 }
 
 func newFake(resp func(DispatchRequest) (Usage, int, error)) *fakeDispatcher {
@@ -56,13 +58,13 @@ func (f *fakeDispatcher) Do(_ context.Context, r dispatch.Request) (dispatch.Res
 	dr := DispatchRequest{Key: key, Route: r.Path, Model: gjson.GetBytes(r.Body, "model").String(),
 		Body: append([]byte(nil), r.Body...), Headers: r.Header.Clone()}
 	f.sent = append(f.sent, dr)
-	resp := f.resp
+	resp, hdr := f.resp, f.respHeader.Clone()
 	f.mu.Unlock()
 	u, status, err := resp(dr)
 	if err != nil {
 		return dispatch.Response{}, err
 	}
-	return dispatch.Response{Status: status, Body: anthropicUsageBody(u)}, nil
+	return dispatch.Response{Status: status, Header: hdr, Body: anthropicUsageBody(u)}, nil
 }
 
 // anthropicUsageBody is the response a provider would send for u.

@@ -32,7 +32,8 @@ Setup shows one question and changes nothing until you answer yes. On yes it:
 1. Downloads the latest `context-guru-proxy` release and checks it against the release's SHA-256
    list. A `context-guru-proxy` already on `PATH` is used instead.
 2. Starts the proxy as a user service: a LaunchAgent on macOS, `systemd --user` on Linux. The
-   service starts at login and restarts after a crash. No Pi session starts or checks it.
+   service starts at login and restarts after a crash. Each Pi session start checks it once (see
+   [Proxy check at session start](#proxy-check-at-session-start)).
 3. Sets `providers.anthropic.baseUrl` and `providers.openai.baseUrl` in `~/.pi/agent/models.json`
    to the proxy URLs in the table above. Your models and login stay as they are. On Anthropic, an API
    key and a Claude Pro/Max login both work. On OpenAI, an API key works; for Sign in with ChatGPT
@@ -49,6 +50,44 @@ stay as they are. Until you do, `/context-guru status` reports that a provider i
 
 **A port someone else took.** If another program now holds the port the proxy used, setup picks a
 free port and moves both routes to it. It does not refuse because of its own old URL.
+
+## An existing baseUrl (a company gateway)
+
+If `models.json` already sends `anthropic` or `openai` to another endpoint, setup asks one question
+with three answers. Only a provider with its own `baseUrl` is affected. The other provider is routed
+as usual.
+
+| Answer | Route | Use it when |
+|---|---|---|
+| **Chain** (recommended) | Pi -> proxy -> your endpoint | Usually right. The endpoint still gets every request, with the same path, headers and key |
+| **Replace** | Pi -> proxy -> the provider's public API | You want to stop using that endpoint. This usually breaks its auth |
+| **Don't change anything** | As before | Nothing is written |
+
+- Chain keeps the provider entry as it is (`headers`, `apiKey` and the rest). Only `baseUrl` changes.
+- The proxy forwards the client's headers, so the endpoint's key and custom headers still arrive.
+  The proxy removes its own `x-context-guru-*` headers, `Cookie`, `Accept-Encoding` and hop-by-hop
+  headers.
+- **Keep-alive pings and custom headers.** A ping carries only the standard auth headers
+  (`Authorization`, `x-api-key`), not the `headers` from `models.json`. If the endpoint needs those
+  headers, it refuses the pings, and keep-alive stops for that provider. Requests are not affected.
+  Then run `/context-guru cache-strategy none`. Setup says this in its question when a chained provider
+  sets `headers`.
+- Keep-alive pings go to the endpoint, so they spend quota there.
+- The proxy appends `/v1/messages` (Anthropic) or `/v1/responses` (OpenAI) to its upstream. So an
+  OpenAI `baseUrl` of `https://gw.example/openai/v1` becomes the upstream `https://gw.example/openai`.
+- The upstream goes on the service command (`--anthropic-upstream`, `--openai-upstream`) and into the
+  install record. `preset`, `cache-strategy`, `update` and a new `setup` keep it.
+- `/context-guru status` shows each route, for example `anthropic -> proxy -> https://gw.example/anthropic`.
+- **One answer for both providers.** If both providers have a `baseUrl` and one of them cannot be
+  chained, setup does not offer chain. Replace then applies to both.
+- **A chain stays until uninstall.** The install record keeps the upstream. If you later delete the
+  `baseUrl` key from `models.json`, a new setup routes the provider to the proxy again, and the proxy
+  still forwards to the recorded endpoint. Run `/context-guru uninstall` to remove the chain.
+- Uninstall and the reset command put your old `baseUrl` back.
+
+From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `confirm_command_chain`,
+and `consent_question_replace` with `confirm_command_replace`. Setup with a conflict and no
+`--on-conflict chain|replace` refuses and changes nothing.
 
 ## Commands
 
@@ -86,7 +125,8 @@ cache has no lifetime the proxy can plan for.
 
 ## What the extension does in a session
 
-The extension makes **no network call** when a session starts or when Pi sends a request.
+The extension makes **no network call** when Pi sends a request. When a session starts, it makes one
+call to the local proxy, described below.
 
 - **Session id.** It adds the header `x-context-guru-session: <Pi session id>` to requests that go to
   the proxy, on both providers. The proxy then keeps one session across a compaction, instead of two.
@@ -98,15 +138,50 @@ The extension makes **no network call** when a session starts or when Pi sends a
   (`prompt_cache_retention`, `prompt_cache_options`, `max_output_tokens`, `temperature`). Pi does
   that only when the model's URL is `https://api.openai.com/v1`, which a routed model no longer has.
   So for a routed `openai` model with a stored ChatGPT login, the extension removes the same four
-  fields. An API key request is not changed.
+  fields. An API key request is not changed. A chained `openai` provider is not changed either: Pi
+  sent those fields to that endpoint before setup.
+- **Proxy check at session start.** See the next section.
 - **Session signals.** When a session ends or compacts, it tells the proxy. It sends only the session
   id, the event and the reason. The proxy then stops pinging a cache that no later request will read.
   The signal is sent after the fact and never delays Pi.
 
+## Proxy check at session start
+
+When a Pi session starts, the extension checks that the proxy answers. It checks only when context-guru
+is installed and at least one Pi model goes to the proxy (the session's model or any other).
+
+1. It sends `GET http://127.0.0.1:<port>/healthz`, with a 5-second limit. This is a local call. It
+   makes no model call and uses no tokens.
+2. If the proxy does not answer, it restarts the service once: `launchctl kickstart -k` on macOS
+   (it loads the LaunchAgent first if it is not loaded), `systemctl --user restart` on Linux. It
+   restarts only a service that setup wrote. Before it restarts, it checks `/healthz` once more with
+   the same 5-second limit, so a proxy that is slow but alive is not restarted.
+3. It checks `/healthz` again, with the same 5-second limit.
+4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down and
+   why: the restart did not help, the service file is missing, the service file is not ours, or the
+   platform has no user service. It tells you to run `/context-guru status`. It names the reset
+   command only when that file exists.
+
+The check runs in the background. The session does not wait for it. It runs once per session start
+and never loops. When the session ends, Pi stops that session's check, the restart included. So
+`pi -p` exits as soon as it has the answer, and an ended session gets no warning.
+
+One restart runs at a time. If two Pi sessions start together, the second one waits for the first
+restart, checks `/healthz` again, and does not restart a proxy that now answers.
+
+In print mode (`pi -p`) and JSON mode there is no UI, so the warning goes to stderr. stdout carries
+the answer, and a script reads errors on stderr.
+
+You can run the same restart from a shell:
+
+```sh
+python3 /path/to/context-guru/pi-package/scripts/pi_plugin.py restart
+```
+
 ## Data
 
 The package sends the proxy only metadata: the session id, and the session end and compaction
-events. The proxy stores what its preset and storage level say. See
+events. The session-start check sends a bare `GET /healthz` with no body. The proxy stores what its preset and storage level say. See
 [docs/data-dependence.md](../docs/data-dependence.md).
 
 ## If Pi cannot talk
@@ -142,9 +217,11 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
   classifier (`/v1/decisions`). The proxy serves only `/v1/responses` and `/v1/chat/completions`, so a
   classifier call on a routed `openai` provider gets a 404.
 - **One proxy for all Pi sessions on the machine,** because `models.json` is per user, not per project.
-- If `models.json` already sends Anthropic or OpenAI somewhere else (a company gateway, for example),
-  setup refuses and changes nothing, for both providers. If an earlier context-guru install left that
-  URL behind, the message names the reset command.
+- **Chain needs a URL the proxy can reproduce.** An OpenAI `baseUrl` must end in `/v1`. A URL with a
+  query, a user name or password, or one that is not `http(s)` cannot be chained. Setup then offers
+  only replace or no change. See [An existing baseUrl](#an-existing-baseurl-a-company-gateway).
+- **A `baseUrl` on one model** (`models.<id>.baseUrl` in `models.json`) wins over the provider's.
+  Setup does not read or change it, so that model goes direct, as before.
 
 ## Development
 

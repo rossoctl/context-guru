@@ -196,9 +196,9 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held,
 	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
-	r.compaction_point, r.compaction_point_source,
+	r.compaction_point, r.compaction_point_source, r.defer_cost_usd,
 	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
-	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, ` + requestTokenSelect + ``
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, ` + requestTokenSelect + ``
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -229,8 +229,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held,
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
-		&e.CompactionPoint, &e.CompactionPointSource,
-		&u5, &r5, &s5, &u7, &r7, &s7, &authSub}, requestTokenDest(&e.AccTokens)...)...)
+		&e.CompactionPoint, &e.CompactionPointSource, &e.DeferCostUSD,
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm}, requestTokenDest(&e.AccTokens)...)...)
 	e.AuthSubscription = authSub != 0
 	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
 		e.Limits = &l
