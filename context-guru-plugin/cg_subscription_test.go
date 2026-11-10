@@ -1,5 +1,6 @@
-// On a Claude subscription, `home` and `insights savings` lead with the tokens saved in this session and in the
-// current 5-hour window, then the 5-hour share as an estimate (#986). Anything else is today's dollar view.
+// On a Claude subscription, `home` and `insights savings` show everything in tokens, by tier (`tokens` in /api/stats,
+// #998): this session, the current 5-hour window with the 5-hour share as an estimate, then the period, and in
+// `insights savings` each feature. No dollars (#986). Anything else is today's dollar view.
 package plugin
 
 import (
@@ -7,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,7 +56,8 @@ func cgSubscriptionStubCounted(t *testing.T, limits, window string) (string, *at
 		q := r.URL.Query()
 		switch {
 		case q.Get("lean") == "1" && q.Get("session") == "session-A":
-			w.Write([]byte(`{"saved_unique":42000,"replay_tokens":610000,"cost_usd":3.1,"total_saved_usd":0.2}`))
+			w.Write([]byte(`{"tokens":{"saved":{"input":0,"cache_read":610000,"cache_write_5m":42000,"cache_write_1h":0},` +
+				`"caused":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0}},"cost_usd":3.1,"total_saved_usd":0.2}`))
 		case q.Get("lean") == "1" && q.Get("since") == subWindowStart:
 			w.Write([]byte(window))
 		case q.Get("lean") == "1":
@@ -70,7 +73,19 @@ func cgSubscriptionStubCounted(t *testing.T, limits, window string) (string, *at
 	return srv.URL, &reads
 }
 
-const subWindow = `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":12.4,"total_saved_usd":0.7}`
+// subWindowTokens is a lean /api/stats answer for the 5-hour window, with the given dollars for the estimate.
+func subWindowTokens(cost, saved string) string {
+	return `{"tokens":{"saved":{"input":0,"cache_read":1200000,"cache_write_5m":85000,"cache_write_1h":0},` +
+		`"caused":{"input":0,"cache_read":9000,"cache_write_5m":0,"cache_write_1h":0}},` +
+		`"tokens_unmeasured_requests":0,"cost_usd":` + cost + `,"total_saved_usd":` + saved + `}`
+}
+
+var subWindow = subWindowTokens("12.4", "0.7")
+
+const (
+	subSessionLine = "This session:       saved 42.0k wr · 610.0k rd"
+	subWindowLine  = "This 5-hour window: saved 85.0k wr · 1.2M rd · cost 9.0k rd"
+)
 
 func TestCGSubscriptionGoldens(t *testing.T) {
 	base := cgSubscriptionStub(t, subLimits, subWindow)
@@ -101,28 +116,27 @@ func TestCGSubscriptionEstimateNeedsEnoughData(t *testing.T) {
 		lines, notLines      []string
 	}{
 		{"low use", strings.Replace(subLimits, "0.54", "0.01", 1), subWindow,
-			[]string{"This session:       saved 610.0k rd / 42.0k wr", "This 5-hour window: saved 1.2M rd / 85.0k wr"}, []string{est}},
-		{"small spend", subLimits, `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":0.49,"total_saved_usd":0.2}`,
-			[]string{"This 5-hour window: saved 1.2M rd / 85.0k wr"}, []string{est}},
-		{"nothing saved", subLimits, `{"saved_unique":0,"replay_tokens":0,"cost_usd":4,"total_saved_usd":0}`,
+			[]string{subSessionLine, subWindowLine}, []string{est}},
+		{"small spend", subLimits, subWindowTokens("0.49", "0.2"), []string{subWindowLine}, []string{est}},
+		{"nothing saved", subLimits, `{"tokens":{"saved":{},"caused":{}},"cost_usd":4,"total_saved_usd":0}`,
 			[]string{"This 5-hour window: nothing saved yet"}, []string{est}},
 		{"window over", strings.Replace(subLimits, subReset, "1791473000", 1), subWindow,
-			[]string{"This session: saved 610.0k rd / 42.0k wr"}, []string{"5-hour window", est}},
+			[]string{"This session: saved 42.0k wr · 610.0k rd"}, []string{"5-hour window", est}},
 		{"no window", `{"subscription":true}`, subWindow,
-			[]string{"This session: saved 610.0k rd / 42.0k wr"}, []string{"5-hour window", est}},
+			[]string{"This session: saved 42.0k wr · 610.0k rd"}, []string{"5-hour window", est}},
 		{"estimate", subLimits, subWindow, []string{"                    ≈ 3% " + est}, nil},
 		// The provider stops a user at 100%, so the share saved is at most 100 - used (here 55).
-		{"over the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":45}`,
+		{"over the cap", strings.Replace(subLimits, "0.54", "0.45", 1), subWindowTokens("15", "45"),
 			[]string{"                    ≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"}, []string{est}},
-		{"at the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":18.4}`,
+		{"at the cap", strings.Replace(subLimits, "0.54", "0.45", 1), subWindowTokens("15", "18.4"),
 			[]string{"                    ≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"}, []string{est}},
-		{"just below the cap", strings.Replace(subLimits, "0.54", "0.45", 1), `{"saved_unique":85000,"replay_tokens":1200000,"cost_usd":15,"total_saved_usd":18}`,
+		{"just below the cap", strings.Replace(subLimits, "0.54", "0.45", 1), subWindowTokens("15", "18"),
 			[]string{"                    ≈ 54% " + est}, []string{"would have hit"}},
 	} {
 		base := cgSubscriptionStub(t, c.limits, c.window)
 		out := runCG(t, base, nil, "home")
-		if !strings.HasPrefix(out, "This session:") || !strings.Contains(out, "\nAt API prices") {
-			t.Errorf("%s: want the token lead and the API-price note:\n%s", c.name, out)
+		if !strings.HasPrefix(out, "This session:") || strings.Contains(out, "$") {
+			t.Errorf("%s: want the token lead and no dollars:\n%s", c.name, out)
 		}
 		for _, l := range c.lines {
 			if !strings.Contains(out, l+"\n") {
@@ -137,12 +151,36 @@ func TestCGSubscriptionEstimateNeedsEnoughData(t *testing.T) {
 	}
 }
 
-// A subscription with no session id and no open window has no tokens to show: the screen is today's dollar view.
+// A subscription with no session id and no open window still shows the period in tokens, with no dollars.
 func TestCGSubscriptionNoSessionNoWindow(t *testing.T) {
 	base := cgSubscriptionStub(t, `{"subscription":true}`, subWindow)
-	got := runCG(t, base, []string{"CLAUDE_CODE_SESSION_ID="}, "home")
-	if want := string(cgRead(t, "cg", "home.golden")); got != want {
-		t.Errorf("want the home golden.\n--- got\n%s\n--- want\n%s", got, want)
+	for _, args := range [][]string{{"home"}, {"insights", "savings"}} {
+		got := runCG(t, base, []string{"CLAUDE_CODE_SESSION_ID="}, args...)
+		if !regexp.MustCompile(`(?m)^7 days: +saved 214\.0k wr · 1\.6M rd · 12\.0k in · cost 3\.0k wr · 96\.0k rd$`).MatchString(got) ||
+			strings.Contains(got, "$") || strings.Contains(got, "5-hour") {
+			t.Errorf("%v: want the period in tokens, no dollars, no window:\n%s", args, got)
+		}
+	}
+}
+
+// The tiers are never added: each shows on its own, in the order wr, wr1h, rd, in; a tier at 0 is left out; the
+// cost part shows only when a tier was paid. Requests with no token figure say "not measured", not "saved 0".
+func TestCGSubscriptionTokenLines(t *testing.T) {
+	for _, c := range []struct{ name, window, want string }{
+		{"all tiers", `{"tokens":{"saved":{"input":7,"cache_read":3000,"cache_write_5m":2000,"cache_write_1h":1500000},` +
+			`"caused":{"input":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0}}}`,
+			"This 5-hour window: saved 2.0k wr · 1.5M wr1h · 3.0k rd · 7 in"},
+		{"cost only", `{"tokens":{"saved":{},"caused":{"cache_read":40000}}}`, "This 5-hour window: cost 40.0k rd"},
+		{"no tokens field", `{"cost_usd":4}`, "This 5-hour window: nothing saved yet"},
+	} {
+		base := cgSubscriptionStub(t, subLimits, c.window)
+		if out := runCG(t, base, nil, "home"); !strings.Contains(out, c.want+"\n") {
+			t.Errorf("%s: want line %q in:\n%s", c.name, c.want, out)
+		}
+	}
+	base := cgSubscriptionStub(t, subLimits, subWindow)
+	if out := runCG(t, base, nil, "home"); !strings.Contains(out, "\n                    3 requests not measured in tokens\n") {
+		t.Errorf("want the not-measured note under the 7 days line:\n%s", out)
 	}
 }
 
@@ -150,7 +188,7 @@ func TestCGSubscriptionNoSessionNoWindow(t *testing.T) {
 func TestCGSubscriptionReadsLimitsOncePerRun(t *testing.T) {
 	base, reads := cgSubscriptionStubCounted(t, subLimits, subWindow)
 	out := runCG(t, base, nil, "insights")
-	if !strings.Contains(out, "This 5-hour window: saved 1.2M rd / 85.0k wr") {
+	if !strings.Contains(out, subWindowLine) {
 		t.Errorf("want the token lead in the Savings section:\n%s", out)
 	}
 	if n := reads.Load(); n != 1 {

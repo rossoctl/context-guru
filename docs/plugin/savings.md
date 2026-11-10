@@ -31,34 +31,39 @@ More: /context-guru:insights savings details
 
 ## On a Claude subscription
 
-A subscription pays in usage limits, not dollars. So on a subscription the screen starts with the tokens saved:
+A subscription pays in usage limits, not dollars. So on a subscription the screen shows everything in tokens:
 
 ```text
-This session:       saved 610.0k rd / 42.0k wr
-This 5-hour window: saved 1.2M rd / 85.0k wr
+This session:       saved 42.0k wr · 610.0k rd
+This 5-hour window: saved 85.0k wr · 1.2M rd · cost 9.0k rd
                     ≈ 3% of the 5-hour limit (estimate at API-price weights)
 
-At API prices (a subscription does not pay these):
-Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost).
+7 days:             saved 214.0k wr · 1.6M rd · 12.0k in · cost 3.0k wr · 96.0k rd
+                    3 requests not measured in tokens
 
-✓ Saved   (vs the same requests without Context Guru, at gateway prices)  ▇▁▁█▇▇█
-  Compaction                      $33.90  ████████████
-  Keep-alive pings                 $6.30  ██░░░░░░░░░░
-  Tool filtering                   $7.85  ███░░░░░░░░░
-  Context Guru's own model spend  -$4.10  ░░░░░░░░░░░░
+✓ By feature   (tokens by tier: wr = cache write, wr1h = 1-hour cache write, rd = cache read, in = input)
+  mask                                 saved 160.0k wr · 1.3M rd · cost 3.0k wr
+  toolfilter                           saved 30.0k wr · 300.0k rd · 12.0k in
+  Keep-alive rescue                    saved 24.0k wr · cost 96.0k rd
+  Keep-alive pings (not in the total)  cost 900 wr · 410.0k rd · 30 in
 
-≈ Estimated   (spend you could still avoid; rows overlap, do not add them)
-  You paused longer than the cache lasts, 214 times  $107.79  measured
-  Settings or tools changed mid-session               $23.31  measured
+≈ Estimated   (waste you could still avoid; rows overlap)
+  You paused longer than the cache lasts, 214 times  measured
+  Settings or tools changed mid-session              measured
 
 More: /context-guru:insights savings details
 ```
 
-- **This session** and **This 5-hour window** count the tokens that compaction kept out of the prompts. `rd` is tokens that would have been re-sent as cache reads. `wr` is tokens that would have been written to the cache once.
-- The line that starts with `≈` is an estimate. It says what share of the 5-hour limit the savings are worth if the limit weighted tokens like the API prices them. Anthropic does not publish those weights, and the limit header has whole percents only. The line shows only when the window cost at least $0.50 at API prices and you used at least 2% of the limit.
+- Every figure is in tokens, by tier. `wr` is a 5-minute cache write, `wr1h` a 1-hour cache write, `rd` a cache read and `in` fresh input. The screen never adds the tiers into one number: Anthropic does not publish how the 5-hour limit weights them.
+- `saved` is tokens the requests did not send or write. `cost` is tokens a change made the requests pay. A feature can save in one tier and pay in another. For example, the keep-alive rescue saves a cache write and pays cache reads.
+- **This session**, **This 5-hour window** and **7 days** are the totals of every feature.
+- **✓ By feature** has one line for each compaction component (by its name), then `Cache split`, `Keep-alive rescue`, `1-hour cache` and `Ended change`. A feature with no tokens has no line.
+- **Keep-alive pings** is what the cache strategy's pings paid. A ping is not agent traffic, so it is not in the total. The keep-alive's net is the rescue line less the pings line.
+- The line that starts with `≈` and ends with `(estimate at API-price weights)` is an estimate. It says what share of the 5-hour limit the savings are worth if the limit weighted tokens like the API prices them. Anthropic does not publish those weights, and the limit header has whole percents only. The line shows only when the window cost at least $0.50 at API prices and you used at least 2% of the limit.
 - The provider stops you at 100% of the limit, so the share saved is at most 100% minus the share you used. At that cap the line says `≈ without context-guru you would have hit the 5-hour limit`.
-- The window comes from the limit headers that the proxy saw on your last response. When the window is over, only the session line shows.
-- The dollar screen follows, at API prices. A subscription does not pay these dollars. They show where the savings came from.
+- The window comes from the limit headers that the proxy saw on your last response. When the window is over, the window line does not show.
+- `N requests not measured in tokens` counts requests with no token figure: requests from before the token count, and requests the proxy could not price. That is "not measured", not "saved nothing".
+- The screen shows no dollars. A subscription does not pay them. So `details` adds nothing here: the bill and the manual pings are in dollars.
 - With an API key, Bedrock or Vertex, the screen is the dollar view above, unchanged.
 
 ## Details

@@ -1,18 +1,18 @@
-This session:       saved 610.0k rd / 42.0k wr
-This 5-hour window: saved 1.2M rd / 85.0k wr
+This session:       saved 42.0k wr · 610.0k rd
+This 5-hour window: saved 85.0k wr · 1.2M rd · cost 9.0k rd
                     ≈ 3% of the 5-hour limit (estimate at API-price weights)
 
-At API prices (a subscription does not pay these):
-Saved $41.20 in 7 days, net of Context Guru's own spend (4.6% of the $898.05 the same work would have cost).
+7 days:             saved 214.0k wr · 1.6M rd · 12.0k in · cost 3.0k wr · 96.0k rd
+                    3 requests not measured in tokens
 
-✓ Saved   (vs the same requests without Context Guru, at gateway prices)  ▇▁▁█▇▇█
-  Compaction                      $33.90  ████████████
-  Keep-alive pings                 $6.30  ██░░░░░░░░░░
-  Tool filtering                   $7.85  ███░░░░░░░░░
-  Context Guru's own model spend  -$4.10  ░░░░░░░░░░░░
+✓ By feature   (tokens by tier: wr = cache write, wr1h = 1-hour cache write, rd = cache read, in = input)
+  mask                                 saved 160.0k wr · 1.3M rd · cost 3.0k wr
+  toolfilter                           saved 30.0k wr · 300.0k rd · 12.0k in
+  Keep-alive rescue                    saved 24.0k wr · cost 96.0k rd
+  Keep-alive pings (not in the total)  cost 900 wr · 410.0k rd · 30 in
 
-≈ Estimated   (spend you could still avoid; rows overlap, do not add them)
-  You paused longer than the cache lasts, 214 times  $107.79  measured
-  Settings or tools changed mid-session               $23.31  measured
+≈ Estimated   (waste you could still avoid; rows overlap)
+  You paused longer than the cache lasts, 214 times  measured
+  Settings or tools changed mid-session              measured
 
 More: /context-guru:insights savings details
