@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The /context-guru:* commands. Each answers ONE question: a bottom line, then a small picture, then (with
-`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked.
+`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked. On a Claude
+subscription, `home` and `insights savings` show the tokens saved instead, by tier, and the 5-hour share as an estimate.
 
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
@@ -463,6 +464,130 @@ def session_id(api: Api, a_session: str | None) -> tuple[str | None, str]:
 
 
 # ---------------------------------------------------------------------------------------------
+# a Claude subscription: everything in tokens, the 5-hour share only as an estimate (#986, #998)
+
+FIVE_HOURS_MS = 5 * 3600 * 1000
+# The /api/stats token tiers in display order, with their labels. The tiers are never added into one number: the
+# provider does not publish how the 5-hour limit weights them (docs/dashboard.md, "Savings in tokens").
+TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
+# `tokens.by_feature` keys that are cache effects, in display order, after the compaction components (by name).
+EFFECTS = {"cachesplit": "Cache split", "keepalive": "Keep-alive rescue", "ttl": "1-hour cache", "ended_change": "Ended change"}
+
+
+def _statusline():
+    """The status line module, for its token formatter `_human`; None in the Codex copy, which has no status line."""
+    try:
+        import statusline as sl  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    return sl if hasattr(sl, "_human") else None  # a stray `statusline` module is not ours
+
+
+def _real(doc: dict | None, key: str) -> float | None:
+    v = doc.get(key) if isinstance(doc, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def subscription(api: Api, o: dict) -> dict | None:
+    """The account's latest limit headers (GET /api/me/limits): {"used": percent, "start": ms} on a Claude
+    subscription, with both None when no 5-hour window is open now. None (today's dollar view) for an API key,
+    Bedrock, Vertex, an older proxy (404), no answer, or the Codex copy. Read once per run: `insights` draws
+    several screens with the same `o`."""
+    if "_sub" not in o:
+        o["_sub"] = _subscription(api, o)
+    return o["_sub"]
+
+
+def _subscription(api: Api, o: dict) -> dict | None:
+    if _statusline() is None:
+        return None
+    doc = api.get("/api/me/limits", timeout=3)
+    if not isinstance(doc, dict) or doc.get("subscription") is not True:
+        return None
+    five = doc.get("five_hour") if isinstance(doc.get("five_hour"), dict) else None
+    util, reset = _real(five, "utilization"), _real(five, "reset_s")
+    if util is None or reset is None or not 0 <= util <= 10 or reset * 1000 <= o["now"]:  # a window that is over is absent
+        return {"used": None, "start": None}
+    return {"used": util * 100, "start": int(reset * 1000) - FIVE_HOURS_MS}
+
+
+def limit_estimate(used: float | None, win: dict | None) -> str | None:
+    """`≈ 3% of the 5-hour limit (estimate at API-price weights)`: the share of the limit the savings are worth, if
+    the limit weighted tokens as the API prices them. Anthropic does not publish those weights, and the header has
+    whole percents only, so it is an estimate, and shown only with enough data. The provider stops a user at 100%,
+    so the share saved is at most `100 - used`; at that cap the line says the limit would have been hit."""
+    saved, cost = _real(win, "total_saved_usd"), _real(win, "cost_usd")
+    if used is None or used < 2 or cost is None or cost < 0.50 or saved is None or saved <= 0:
+        return None
+    pct = used * saved / cost
+    if pct >= 100 - used:
+        return "≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"
+    return f"≈ {f'{pct:.0f}%' if pct >= 0.5 else '<1%'} of the 5-hour limit (estimate at API-price weights)"
+
+
+def tier_text(tiers: dict | None) -> str:
+    """`85.0k wr · 12.0k in`: the tiers that are not 0, in the order wr, wr1h, rd, in. "" when all are 0."""
+    sl = _statusline()
+    vals = [(_real(tiers, k) or 0.0, tag) for k, tag in TIERS]
+    return " · ".join(f"{sl._human(n)} {tag}" for n, tag in vals if n > 0)
+
+
+def flow_text(flow: dict | None) -> str | None:
+    """`saved 85.0k wr · cost 40.0k rd`: a `{saved, caused}` token figure. The cost part shows only when the feature
+    made the requests pay a tier (keep-alive saves a write and pays reads). None when both are 0."""
+    flow = flow if isinstance(flow, dict) else {}
+    s, c = tier_text(flow.get("saved")), tier_text(flow.get("caused"))
+    return " · ".join((["saved " + s] if s else []) + (["cost " + c] if c else [])) or None
+
+
+def tokens_text(st: dict | None) -> str:
+    """The total of a /api/stats answer (`tokens.saved`, `tokens.caused`), lean or full."""
+    return flow_text(st.get("tokens") if isinstance(st, dict) else None) or "nothing saved yet"
+
+
+def unmeasured_note(st: dict | None) -> str | None:
+    """Requests with no token figure (from before the accountant, or not priced): "not measured", not "saved 0"."""
+    n = int(_real(st, "tokens_unmeasured_requests") or 0)
+    return f"{n} request{'s' if n != 1 else ''} not measured in tokens" if n > 0 else None
+
+
+def feature_rows(st: dict) -> list[list[str]]:
+    """One row per `tokens.by_feature` entry (full read): the compaction components by name, then the cache effects.
+    The keep-alive pings come last, apart: a ping is not agent traffic, so its tokens are not in the total."""
+    by = (st.get("tokens") or {}).get("by_feature") if isinstance(st.get("tokens"), dict) else None
+    by = by if isinstance(by, dict) else {}
+    keys = sorted(k for k in by if k not in EFFECTS) + [k for k in EFFECTS if k in by]
+    rows = [[EFFECTS.get(k, k), t] for k in keys if (t := flow_text(by[k]))]
+    ping = tier_text(st.get("keepalive_ping_tokens") if isinstance(st.get("keepalive_ping_tokens"), dict) else None)
+    if ping:
+        rows.append(["Keep-alive pings (not in the total)", "cost " + ping])
+    return rows
+
+
+def subscription_head(api: Api, o: dict, sub: dict) -> list[tuple[str, str] | None]:
+    """On a subscription, the rows that lead a screen: the tokens saved in this session and in the current 5-hour
+    window (lean reads), then the estimate, then a blank row. [] when there is neither."""
+    rows: list[tuple[str, str] | None] = []
+    sid, how = session_id(api, o["session"])
+    if sid:
+        rows.append((how.capitalize(), tokens_text(api.get("/api/stats", {"lean": 1, "session": sid}))))
+    if sub["start"]:
+        win = api.get("/api/stats", {"lean": 1, "since": sub["start"]})
+        rows.append(("This 5-hour window", tokens_text(win)))
+        est = limit_estimate(sub["used"], win)
+        if est:
+            rows.append(("", est))
+    return rows + [None] if rows else []
+
+
+def aligned(rows: list[tuple[str, str] | None]) -> list[str]:
+    """`label: text` rows with the texts in one column; a row with no label continues the one above; None is a
+    blank line."""
+    w = max((len(r[0]) for r in rows if r), default=0) + 2
+    return [(f"{r[0] + ':' if r[0] else '':<{w}}{r[1]}" if r else "") for r in rows]
+
+
+# ---------------------------------------------------------------------------------------------
 # /context-guru:status
 
 def preset_gap_line(api: Api) -> str | None:
@@ -487,6 +612,9 @@ def cmd_home(api: Api, o: dict) -> list[str]:
     saved, bill = st.get("total_saved_usd", 0.0), st.get("cost_usd", 0.0)
     sp, (tools, last) = spend_doc(api, o, d), tools_doc(api, o, d)
     recs = C.recommendations(sp, tools, d) if sp else []
+    sub = subscription(api, o)
+    if sub is not None:
+        return home_tokens(api, o, sub, st, recs, d, now)
     L = [f"Saved {dollars(saved)} in {d} days ({share(saved, st.get('baseline_cost_usd') or bill)} of what the same work would have cost)."]
     gap = preset_gap_line(api)
     if gap:
@@ -505,9 +633,30 @@ def cmd_home(api: Api, o: dict) -> list[str]:
         L.append(f"  {i}. {dollars(r['usd']):>8}  {r['short']}: {r['do']}")
     if not recs:
         L.append("  Nothing worth acting on right now.")
-    L += ["", "/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills",
-          "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
-    return L
+    return L + HOME_MORE
+
+
+HOME_MORE = ["", "/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills",
+             "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
+
+
+def home_tokens(api: Api, o: dict, sub: dict, st: dict, recs: list[dict], d: int, now: int) -> list[str]:
+    """`home` on a subscription: the same screen in tokens, no dollars. The estimates keep their order, unpriced."""
+    t0 = window(o, 1)[0]
+    today, yest = stats(api, t0, now), stats(api, t0 - DAY_MS, t0)
+    rows = subscription_head(api, o, sub)
+    rows += [(n, tokens_text(x)) for n, x in (("Today", today), ("Yesterday", yest)) if x]
+    rows.append((f"{d} days", tokens_text(st)))
+    note = unmeasured_note(st)
+    if note:
+        rows.append(("", note))
+    L = aligned(rows)
+    gap = preset_gap_line(api)
+    if gap:
+        L.append(gap + ". Run /context-guru:preset-picker to restart the proxy now, or start a new session.")
+    L += ["", "≈ Estimated   (waste you could still avoid; rows overlap)"]
+    L += [f"  {i}. {r['short']}: {r['do']}" for i, r in enumerate(recs[:3], 1)] or ["  Nothing worth acting on right now."]
+    return L + HOME_MORE
 
 
 # ---------------------------------------------------------------------------------------------
@@ -519,6 +668,9 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
     st = stats(api, since, now)
     if not st:
         return ["No data yet. Run a few prompts through the proxy, then try again."]
+    sub = subscription(api, o)
+    if sub is not None:
+        return savings_tokens(api, o, sub, st, d)
     saved, bill = st["total_saved_usd"], st["cost_usd"]
     L = [f"Saved {dollars(saved)} in {d} days, net of Context Guru's own spend "
          f"({share(saved, st.get('baseline_cost_usd') or bill)} of the {dollars(st.get('baseline_cost_usd') or bill)} "
@@ -541,6 +693,22 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
     if o["details"]:
         L += ["", f"Billed {dollars(bill)}; prompt cache alone saved a further {dollars(st.get('cache_saved_usd', 0))} "
                   "versus no caching at all (a provider feature, not counted above)."]
+    return L
+
+
+def savings_tokens(api: Api, o: dict, sub: dict, st: dict, d: int) -> list[str]:
+    """`insights savings` on a subscription: the totals and each feature in tokens, by tier, no dollars."""
+    rows = subscription_head(api, o, sub) + [(f"{d} days", tokens_text(st))]
+    note = unmeasured_note(st)
+    if note:
+        rows.append(("", note))
+    L = aligned(rows)
+    L += ["", "✓ By feature   (tokens by tier: wr = cache write, wr1h = 1-hour cache write, rd = cache read, in = input)"]
+    L += C.table(feature_rows(st) or [["Nothing saved yet", ""]], "ll")
+    sp = spend_doc(api, o, d)
+    est = [[r["short"], r["cls"].split(";")[0]] for r in (C.recommendations(sp, None, d)[:2] if sp else [])]
+    if est:
+        L += ["", "≈ Estimated   (waste you could still avoid; rows overlap)"] + C.table(est, "ll")
     return L
 
 

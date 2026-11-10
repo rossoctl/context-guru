@@ -25,5 +25,27 @@
    "key": "cg_llm",
    "delta_usd": 0.55
   }
- ]
+ ],
+ "tokens": {
+  "saved": {
+   "input": 0,
+   "cache_read": 240000,
+   "cache_write_5m": 31000,
+   "cache_write_1h": 0
+  },
+  "caused": {
+   "input": 0,
+   "cache_read": 15000,
+   "cache_write_5m": 0,
+   "cache_write_1h": 0
+  }
+ },
+ "tokens_unmeasured_requests": 0,
+ "keepalive_ping_tokens": {
+  "input": 0,
+  "cache_read": 0,
+  "cache_write_5m": 0,
+  "cache_write_1h": 0
+ },
+ "keepalive_ping_output_tokens": 0
 }
