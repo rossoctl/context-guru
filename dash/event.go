@@ -447,6 +447,16 @@ type Event struct {
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
 	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 
+	// Limits are the subscription limit values the provider's answer carried in its
+	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
+	// nil when it carried none (an API key, Bedrock, Vertex) and on every earlier row. Numbers and
+	// status words only.
+	Limits *Limits `json:"limits,omitempty"`
+	// AuthSubscription is true when the client authenticated this Anthropic request with a Claude
+	// subscription token (an OAuth bearer token), false for an API key or anything else. The host
+	// decides it from the credential's fixed prefix; only this flag is kept, never the token.
+	AuthSubscription bool `json:"auth_subscription,omitempty"`
+
 	TokenAccounting string `json:"token_accounting"`
 	// PriceEstimated is true when the accountant library priced this request without knowing whether a
 	// change broke the cache (penalty_unknown): the gross saving is right and the net may be too
@@ -471,9 +481,13 @@ type Event struct {
 	// removal figure was kept out of every total. It is the marker readers use for "not counted". It is
 	// not the same as PriceEstimated: a row written before #915 has price_estimated = 1 and DID book its
 	// figure, and it reads here as false (the column defaults to 0, as acc_priced does). Stored.
-	EstimateHeld       bool   `json:"estimate_held,omitempty"`
-	CacheMissReason    string `json:"cache_miss_reason"`
-	UncompressedReason string `json:"uncompressed_reason"`
+	EstimateHeld bool `json:"estimate_held,omitempty"`
+	// AccTokens is the accountant library's cache effects in tokens by tier: the keep-alive rescue,
+	// the split, the head-TTL legs and the ended-change break (#998). The component figures are
+	// CompRow.Tokens. Stored (requests.tok_*). Zero when AccountantPriced is false.
+	AccTokens          AccEffectTokens `json:"acc_tokens,omitzero"`
+	CacheMissReason    string          `json:"cache_miss_reason"`
+	UncompressedReason string          `json:"uncompressed_reason"`
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
 	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
 	CacheMissCause string `json:"cache_miss_cause,omitempty"`
@@ -660,8 +674,13 @@ type CompRow struct {
 	SavedFirstUSD  float64 `json:"saved_first_usd"`
 	SavedReplayUSD float64 `json:"saved_replay_usd"`
 	PricedBy       string  `json:"priced_by,omitempty"`
-	DurationMs     float64 `json:"duration_ms"`
-	Err            string  `json:"err,omitempty"`
+	// Tokens is the accountant library's figure for this component in tokens by tier: what it
+	// saved and what it caused (#998). Its dollars are SavedUSD. Stored (request_components.tok_*);
+	// zero on a row the library did not price (PricedBy not "accountant"), on a held estimate, and
+	// on the headttl and ended_change rows' effect legs, which are Event.AccTokens.
+	Tokens     TokenFlow `json:"tokens,omitzero"`
+	DurationMs float64   `json:"duration_ms"`
+	Err        string    `json:"err,omitempty"`
 	// Gates counts, per named gate, the candidates this component turned away. It is the
 	// only answer to "why did nothing happen?", and it never left the pipeline before:
 	// /stats had it service-wide, the log line had it per request, and the dashboard —
@@ -879,6 +898,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.accFallback, e.PriceEstimated, e.AccountantPriced = "", false, false
 	e.EstimatedSavedUSD, e.EstimateHeld = 0, false
+	e.clearAccTokens()
 	e.priceCost(p, accountingComplete)
 }
 

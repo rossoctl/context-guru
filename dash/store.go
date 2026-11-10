@@ -595,18 +595,21 @@ func (d *DB) insertBatch(evs []*Event) error {
 		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
 		price_estimated, acc_priced, estimated_saved_usd, estimate_held,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
-		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source
+		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
+		` + limitCols + `, auth_subscription, ` + strings.Join(requestStoredTokenColumns(), ", ") + `
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `)`)
 	if err != nil {
 		return err
 	}
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by,
+		` + strings.Join(compTokenColumns, ", ") + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
 	if err != nil {
 		return err
 	}
@@ -646,7 +649,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		if e.KeepAliveStrategyID != "" {
 			strategyID = e.KeepAliveStrategyID
 		}
-		res, err := reqStmt.Exec(
+		res, err := reqStmt.Exec(append([]any{
 			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
@@ -677,7 +680,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
 			e.CompactionPoint, e.CompactionPointSource,
-		)
+		}, append(limitArgs(e.Limits), append([]any{boolInt(e.AuthSubscription)}, requestStoredTokenArgs(e)...)...)...)...)
 		if err != nil {
 			return err
 		}
@@ -693,10 +696,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 			}
 		}
 		for _, c := range e.Components {
-			if _, err := compStmt.Exec(id, c.Component, c.Kind,
+			if _, err := compStmt.Exec(append([]any{id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy); err != nil {
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy},
+				c.Tokens.args()...)...); err != nil {
 				return err
 			}
 		}

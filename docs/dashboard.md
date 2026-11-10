@@ -373,6 +373,89 @@ transcript-class data and needs the same operator + tenant consent that gates an
 captured content — see [Access](#access) above. Without that consent the measurement
 still works; only the text is withheld.
 
+## Subscription limits
+
+`GET /api/me/limits` returns the newest subscription limit values the proxy saw for your account.
+
+- **Where they come from:** Anthropic sends `anthropic-ratelimit-unified-5h-*` and `-7d-*` headers
+  on each answer to a Claude subscription. The proxy reads the used share (`utilization`), the reset
+  time (`reset_s`, unix seconds) and the status word of each window.
+- **Where they go:** the proxy stores them on the request's row, beside its token counts. A missing
+  or bad value is left out. The proxy never changes the answer it forwards.
+- **Subscription or not:** the proxy also stores the auth kind on each Anthropic request. It is a
+  subscription when the client sent `Authorization: Bearer sk-ant-oat…` (a Claude sign-in token).
+  The proxy tests only that fixed prefix and stores only the yes or no, never the token.
+- **`{}`** when the account's newest Anthropic request did not use a subscription token: an API key,
+  Bedrock or Vertex. This holds even when older rows carry limit values, so an account that moves to
+  an API key stops showing the old share at once. Keep-alive pings do not count.
+
+```json
+{
+  "subscription": true,
+  "at_ms": 1794233089000,
+  "five_hour": {"utilization": 0.54, "reset_s": 1794249600, "status": "allowed"},
+  "seven_day": {"utilization": 0.08, "reset_s": 1794348000, "status": "allowed"}
+}
+```
+
+- `subscription` comes from the auth kind, not from the headers.
+- `utilization` is a fraction 0..1, in steps of 0.01 (`0.54`).
+- `at_ms` is the time of the request that carried the values. On a subscription whose answers never
+  had the headers, the answer is `{"subscription": true}` alone.
+- A window whose `reset_s` is in the past is over. Treat it as absent.
+- A window, or a field, is left out when the newest answer did not carry it.
+- In hosted mode it is always the caller's own account, a manager's too. A single-tenant proxy has
+  one account.
+
+
+## Savings in tokens
+
+`/api/stats` returns every saving the accountant library measured in **tokens**, beside the
+dollars. A subscription is limited in tokens, so a screen can show tokens and no dollars.
+
+The full read has every field below. The lean read (`lean=1` with a session or a window) has
+`tokens.saved`, `tokens.caused` and `tokens_unmeasured_requests` only. It has no `by_feature` and no
+ping tokens: they cost the status line's read 1.3x to 4x its time budget (#502). The lean totals
+equal the full totals.
+
+- **Tiers.** Each figure has four tiers: `input` (fresh input), `cache_read`, `cache_write_5m` and
+  `cache_write_1h`. The tiers are never added into one number. The provider does not say how a
+  usage limit weights them.
+- **Saved and caused.** Each figure has `saved` (tokens the request did not send or write) and
+  `caused` (tokens the change made the request pay). A feature can save in one tier and pay in
+  another: the keep-alive rescue saves a cache write and pays cache reads.
+- **`tokens.saved`, `tokens.caused`.** The sums over every feature.
+- **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
+  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
+  (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
+  ended). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
+  any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
+  plus the `cachesplit` component's `saved_usd`. Full read only.
+- **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
+  `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
+  not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is
+  `tokens.by_feature.keepalive` less this. Full read only.
+- **`tokens_unmeasured_requests`.** The requests in the period with no token figure: rows from
+  before the accountant, and rows it could not price. That is "not measured", not "saved nothing".
+- A request whose estimate is held out of the totals (`estimated_requests`) is held out of the
+  component tokens too, as its dollars are.
+
+```json
+"tokens": {
+  "saved":  {"input": 0, "cache_read": 600,  "cache_write_5m": 6000, "cache_write_1h": 0},
+  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 600,  "cache_write_1h": 0},
+  "by_feature": {
+    "mask":      {"saved": {"input": 0, "cache_read": 600, "cache_write_5m": 2000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 0, "cache_write_5m": 600, "cache_write_1h": 0}},
+    "keepalive": {"saved": {"input": 0, "cache_read": 0, "cache_write_5m": 4000, "cache_write_1h": 0},
+                  "caused": {"input": 0, "cache_read": 4000, "cache_write_5m": 0, "cache_write_1h": 0}}
+  }
+},
+"tokens_unmeasured_requests": 2,
+"keepalive_ping_tokens": {"input": 3, "cache_read": 9000, "cache_write_5m": 20, "cache_write_1h": 10},
+"keepalive_ping_output_tokens": 1
+```
+
 ## KV-cache panel
 
 *How long your conversations actually stay idle, what the prompt cache is costing you
