@@ -3689,15 +3689,15 @@ STRATEGIES: dict[str, dict] = {
             "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_min_prefix_tokens": 80000,
             "keepalive_idle_seconds_1h": 3540,
             "keepalive_max_pings_1h": 1,
         },
         "spends": True,
         "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
                 "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
-                ">=20k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
-                "is at the keyboard.",
+                "prefix floor 80k tokens, but 20k for a tool wait or a subagent; <=$0.50/ping. "
+                "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-ping": {
         "cache": {
@@ -3705,7 +3705,7 @@ STRATEGIES: dict[str, dict] = {
             "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 1,
             "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_min_prefix_tokens": 80000,
             "keepalive_idle_seconds_1h": 3540,
             "keepalive_max_pings_1h": 1,
         },
@@ -3720,7 +3720,7 @@ STRATEGIES: dict[str, dict] = {
             "keepalive_idle_seconds": 240,
             "keepalive_max_pings": 2,
             "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 20000,
+            "keepalive_min_prefix_tokens": 80000,
             "keepalive_idle_seconds_1h": 3540,
             "keepalive_max_pings_1h": 2,
         },

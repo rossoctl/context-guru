@@ -28,7 +28,9 @@ import (
 // The numbers are written out here, not read from the Default* constants, on purpose: a later
 // change to a default must not silently re-tune a strategy that an install already uses. A drift
 // test pins this table to context-guru-plugin/scripts/settings.py until the plugin reads it from
-// the proxy.
+// the proxy. A test also pins the floor in this table to DefaultKeepAliveMinPrefix, so the two are
+// changed together. The table does not write keepalive_tool_wait_min_prefix_tokens: the default
+// (20000) applies, so an old strategy file gets the tool-wait floor without a re-render.
 
 // DefaultStrategy is the name the plugin picks when the user has not chosen one. The proxy does
 // NOT apply it: a file with no `strategy` behaves as before.
@@ -69,14 +71,14 @@ var Strategies = []Strategy{
 	{
 		Name:      "auto",
 		Spends:    true,
-		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. >=20k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. prefix floor 80k tokens, but 20k for a tool wait or a subagent; <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
 			{"keepalive_max_usd_per_ping", 0.5},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
+			{"keepalive_min_prefix_tokens", 80000},
 			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 		},
@@ -91,7 +93,7 @@ var Strategies = []Strategy{
 			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 1},
 			{"keepalive_max_usd_per_ping", 0.5},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
+			{"keepalive_min_prefix_tokens", 80000},
 			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 		},
@@ -106,7 +108,7 @@ var Strategies = []Strategy{
 			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
 			{"keepalive_max_usd_per_ping", 0.5},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
+			{"keepalive_min_prefix_tokens", 80000},
 			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 2},
 		},

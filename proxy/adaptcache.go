@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
@@ -150,11 +152,17 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
-		if f.turn < 1 || f.prefix < int64(pol.MinPrefixTokens) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
+		// The floor follows the wait (Policy.WaitMinPrefix). A row has the stop reason, not the cause: a
+		// tool stop is a tool wait, any other stop is read as a wait for a person.
+		cause := waitcause.WaitingHuman
+		if slices.Contains(keepalive.ToolStopReasons, f.stop) {
+			cause = waitcause.WaitingOwnTool
+		}
+		if f.turn < 1 || f.prefix < int64(pol.WaitMinPrefix(cause, f.subagent)) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
 			return 0, x, se
 		}
 		return pol.MaxPings, x, se
-	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens, <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.Ceiling()), true
+	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens (%d for a tool wait or a subagent), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
 }
 
 func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {

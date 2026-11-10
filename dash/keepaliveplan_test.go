@@ -65,7 +65,7 @@ func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) 
 		Go:        func(f func()) { f() },
 		OpenTasks: func(string, string, string) (int, int) { return bg, tm }})
 	pol := keepalive.Policy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: base,
-		MaxUSDPerPing: 0.25, MinPrefixTokens: 20000, WaitPlan: true}
+		MaxUSDPerPing: 0.25, MinPrefixTokens: 80000, WaitPlan: true}
 	key := keepalive.Key{Tenant: "t1", Session: "s1", Thread: thread}
 	for i, r := range seq {
 		if i > 0 {
@@ -85,7 +85,7 @@ func keeperPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) 
 			}
 			body = strings.Replace(body, `"cache_control":{"type":"ephemeral"}`, `"cache_control":{"type":"ephemeral","ttl":"1h"}`, n)
 		}
-		u := keepalive.Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop}
+		u := keepalive.Usage{CacheRead: 98576, CacheWrite: 1200, StopReason: r.stop}
 		if r.read {
 			u.CacheWrite = 0
 		}
@@ -111,7 +111,7 @@ func dashPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) (i
 	var evs []*Event
 	for i, r := range seq {
 		e := kaAgent(1_000_000+int64(i)*1000, "s1", 0.01)
-		e.CacheRead, e.CacheWrite, e.ThreadID, e.StopReason = 48576, 1200, thread, r.stop
+		e.CacheRead, e.CacheWrite, e.ThreadID, e.StopReason = 98576, 1200, thread, r.stop
 		if r.read {
 			e.CacheWrite = 0
 		}
@@ -136,7 +136,7 @@ func dashPings(t *testing.T, base int, thread string, bg, tm int, seq []turn) (i
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
 	}
-	spans, err := db.pingSpans(Filter{TenantAll: true}, kaGateMinPrefix, true)
+	spans, err := db.pingSpans(Filter{TenantAll: true}, DefaultWaitPolicy(base), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestPlanReplayStaysNearTheFixedKCost(t *testing.T) {
 	f := Filter{TenantAll: true}
 	run := func(plan bool) time.Duration {
 		t0 := time.Now()
-		if _, err := db.pingSpans(f, kaGateMinPrefix, plan); err != nil {
+		if _, err := db.pingSpans(f, keepalive.Policy{}, plan); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.expiries(f, plan); err != nil {
@@ -401,5 +401,25 @@ func TestDashboardReplayKnownGapMixedBreakpointTier(t *testing.T) {
 	_, dIdle := dashPings(t, 2, "", 0, 0, seq)
 	if kIdle >= time.Hour || dIdle < 50*time.Minute {
 		t.Errorf("keeper spacing %v, replay spacing %v: want a 5-minute keeper and a 1-hour replay", kIdle, dIdle)
+	}
+}
+
+// The replay gates each span on the floor of its own wait, as the keeper does.
+func TestSpanPrefixOKFollowsTheWaitCause(t *testing.T) {
+	pol := DefaultWaitPolicy(2)
+	tool := keepalive.SpanFacts{Cause: "own_tool", StopReason: "tool_use"}
+	human := keepalive.SpanFacts{Cause: "human", StopReason: "end_turn"}
+	sub := keepalive.SpanFacts{Cause: "human", StopReason: "end_turn", Subagent: true}
+	for _, c := range []struct {
+		name string
+		f    keepalive.SpanFacts
+		want bool
+	}{{"main tool wait", tool, true}, {"main person wait", human, false}, {"subagent person wait", sub, true}} {
+		if got := pol.SpanPrefixOK(c.f, 30000); got != c.want {
+			t.Errorf("%s at 30k: %v, want %v", c.name, got, c.want)
+		}
+		if !pol.SpanPrefixOK(c.f, 80000) || pol.SpanPrefixOK(c.f, 19999) {
+			t.Errorf("%s: wrong at 80k or 19999", c.name)
+		}
 	}
 }

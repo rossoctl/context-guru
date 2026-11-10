@@ -178,7 +178,7 @@ type CacheConfig struct {
 	// KeepAliveWaitPlan turns on the per-wait ping plan (#858). Absent: on. `false` is the one switch
 	// that brings back the behavior before #858: MaxPings for every wait, time windows for every wait,
 	// sweep questions during tool waits, and pings for a thread with no tool call yet. It does not
-	// bring back the 80k minimum prefix, which is only a default (keepalive_min_prefix_tokens).
+	// bring back one floor for every wait: with it false, keepalive_min_prefix_tokens applies to all.
 	//
 	// With the plan on, the ping count follows what the thread waits for. "Base" is
 	// keepalive_max_pings:
@@ -191,10 +191,15 @@ type CacheConfig struct {
 	// Manager-strategy time windows then apply only to a wait for a person, and the sweep question is
 	// not asked while a thread waits for its own tool. It applies to the 5-minute tier. 0 on the three
 	// counts means the default. The three counts are at most 11, the highest strategy ping count.
-	KeepAliveWaitPlan             *bool `yaml:"keepalive_wait_plan"`
-	KeepAliveToolWaitMaxPings     int   `yaml:"keepalive_tool_wait_max_pings"`
-	KeepAliveBackgroundExtraPings int   `yaml:"keepalive_background_extra_pings"`
-	KeepAliveHumanExtraPings      int   `yaml:"keepalive_human_extra_pings"`
+	KeepAliveWaitPlan         *bool `yaml:"keepalive_wait_plan"`
+	KeepAliveToolWaitMaxPings int   `yaml:"keepalive_tool_wait_max_pings"`
+	// KeepAliveToolWaitMinPrefixTokens is the billed-prefix floor for a tool wait (main or subagent)
+	// and for every wait of a subagent thread. A main thread that waits for a person, background work
+	// or a teammate keeps keepalive_min_prefix_tokens. It never raises the general floor: the lower of
+	// the two applies. 0 = DefaultKeepAliveToolWaitMinPrefix. Read only while the plan is on.
+	KeepAliveToolWaitMinPrefixTokens int `yaml:"keepalive_tool_wait_min_prefix_tokens"`
+	KeepAliveBackgroundExtraPings    int `yaml:"keepalive_background_extra_pings"`
+	KeepAliveHumanExtraPings         int `yaml:"keepalive_human_extra_pings"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -260,9 +265,13 @@ const (
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
-	// DefaultKeepAliveMinPrefix is 20000 since #858. No long subagent idle span had a prefix under
-	// 20k, so any floor at or under 20k gives the same result there. It was 80000 (#435).
-	DefaultKeepAliveMinPrefix = 20000
+	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
+	// waits for anything but its own tool. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait
+	// and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
+	DefaultKeepAliveMinPrefix = 80000
+	// DefaultKeepAliveToolWaitMinPrefix is 20000. No long subagent idle span had a prefix under 20k, and
+	// a 20k floor cut subagent tool-wait misses from 65 to 31 (#858). Mirrors keepalive.DefaultToolWaitMinPrefix.
+	DefaultKeepAliveToolWaitMinPrefix = 20000
 	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
 	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.
 	DefaultKeepAliveToolWaitMaxPings     = 8
@@ -315,6 +324,9 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveToolWaitMaxPings <= 0 {
 		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
 	}
+	if c.KeepAliveToolWaitMinPrefixTokens <= 0 {
+		c.KeepAliveToolWaitMinPrefixTokens = DefaultKeepAliveToolWaitMinPrefix
+	}
 	if c.KeepAliveBackgroundExtraPings <= 0 {
 		c.KeepAliveBackgroundExtraPings = DefaultKeepAliveBackgroundExtraPings
 	}
@@ -339,7 +351,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
 		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")

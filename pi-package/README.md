@@ -119,7 +119,7 @@ One cache strategy drives both providers. What each one spends:
 | `2-ping` | At most 2 pings per idle gap, on both cache lifetimes | At most 2 pings per idle gap, after 28 minutes |
 
 A ping goes to the provider with your own credential, so it uses your API quota (or your
-subscription's limits). The proxy pings only a session with a prefix of 20,000 tokens or more, and
+subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more (20,000 while a tool runs, and on a subagent), and
 never a ping that would cost more than $0.50. It does not ping OpenAI models before GPT-5.6: their
 cache has no lifetime the proxy can plan for.
 

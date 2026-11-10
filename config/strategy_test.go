@@ -84,7 +84,7 @@ func TestStrategyFillsKeys(t *testing.T) {
 	}
 	k := c.Cache
 	if !k.KeepAlive || k.KeepAliveIdleSeconds != 240 || k.KeepAliveMaxPings != 2 ||
-		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 20000 ||
+		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 80000 ||
 		k.KeepAliveIdleSeconds1h != 3540 || k.KeepAliveMaxPings1h != 2 {
 		t.Fatalf("2-ping keys wrong: %+v", k)
 	}
@@ -233,23 +233,42 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	}
 }
 
-// TestStrategiesUseTheDefaultMinPrefix fails when a keep-alive strategy writes a prefix floor that
-// differs from the default. An explicit value beats the default, so a stale 80000 here kept the old
-// floor for every user on the strategy after #858 lowered the default to 20000.
-func TestStrategiesUseTheDefaultMinPrefix(t *testing.T) {
+// TestStrategiesPinTheGeneralFloorToTheDefault: the table writes literals on purpose, but its prefix
+// floor is the general one. A change of DefaultKeepAliveMinPrefix has to change the table with it, or
+// strategy users keep the old floor (an explicit value beats the default). The table does not write the
+// tool-wait floor, so that default reaches every strategy file, old or new.
+func TestStrategiesPinTheGeneralFloorToTheDefault(t *testing.T) {
 	seen := 0
 	for _, s := range Strategies {
 		for _, k := range s.Cache {
-			if k.Key != "keepalive_min_prefix_tokens" {
-				continue
-			}
-			seen++
-			if k.Value != DefaultKeepAliveMinPrefix {
-				t.Errorf("%s: keepalive_min_prefix_tokens = %v, want the default %d", s.Name, k.Value, DefaultKeepAliveMinPrefix)
+			switch k.Key {
+			case "keepalive_min_prefix_tokens":
+				seen++
+				if k.Value != DefaultKeepAliveMinPrefix {
+					t.Errorf("%s: keepalive_min_prefix_tokens = %v, want the default %d", s.Name, k.Value, DefaultKeepAliveMinPrefix)
+				}
+			case "keepalive_tool_wait_min_prefix_tokens":
+				t.Errorf("%s writes keepalive_tool_wait_min_prefix_tokens: a strategy file would pin the tool-wait floor", s.Name)
 			}
 		}
 	}
 	if seen < 3 {
 		t.Errorf("found the prefix floor in %d strategies, want at least 3 (auto, 1-ping, 2-ping)", seen)
+	}
+}
+
+func TestToolWaitMinPrefixDefaultAndOverride(t *testing.T) {
+	if got := (CacheConfig{}).Resolved().KeepAliveToolWaitMinPrefixTokens; got != 20000 {
+		t.Errorf("default tool-wait floor = %d, want 20000", got)
+	}
+	c, err := LoadBytes([]byte("cache:\n  strategy: auto\n  keepalive_tool_wait_min_prefix_tokens: 30000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens != 30000 || c.Cache.KeepAliveMinPrefixTokens != 80000 {
+		t.Errorf("floors = %d / %d", c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens, c.Cache.KeepAliveMinPrefixTokens)
+	}
+	if _, err := LoadBytes([]byte("cache:\n  keepalive_tool_wait_min_prefix_tokens: -1\n")); err == nil {
+		t.Error("a negative tool-wait floor was accepted")
 	}
 }
