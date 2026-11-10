@@ -125,6 +125,13 @@ spends your own quota; `/context-guru:cache-strategy-picker` names it or turns i
 A fresh session has no idle gap to keep warm yet, so its first request reads zero savings — that's
 expected, not broken.
 
+**The proxy owns the cache strategies.** The plugin keeps no list. It runs
+`context-guru-proxy strategies`, and it offers only the strategies that fit Anthropic. The file
+`keepalive-<port>.yaml` holds the name (`cache.strategy: <name>`), and the proxy fills in the keys.
+Files written by an older plugin hold the keys themselves. They keep working and stay as they are.
+**The proxy must be v0.7.1 or later.** An older binary (v0.7.0 included) cannot list its strategies.
+The plugin then says so and tells you to run `/context-guru:update`.
+
 Other presets (`conservative`, `medium`, `high`, `xhigh` — `/context-guru:preset-picker`'s
 effort ladder) add components that edit the request body too — see
 [docs/reference/presets.md](../reference/presets.md).

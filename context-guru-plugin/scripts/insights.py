@@ -521,7 +521,7 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
         rep.fact(f"options_file.{key}", opt_sources[key])
 
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.default_strategy()))
     rep.fact("preset", preset)
     rep.fact("preset_configured", "preset" in opts)
     rep.fact("cache_strategy", strategy)
@@ -2062,7 +2062,7 @@ def main() -> int:
     window = Window(stats)
     opts, _ = _configured_options()
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.default_strategy()))
 
     # Nothing below has anything to say about an account with no retained requests, and each
     # collector would say it separately: measured against an empty store they produce

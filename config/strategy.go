@@ -26,9 +26,9 @@ import (
 //     accepts the name.)
 //
 // The numbers are written out here, not read from the Default* constants, on purpose: a later
-// change to a default must not silently re-tune a strategy that an install already uses. A drift
-// test pins this table to context-guru-plugin/scripts/settings.py until the plugin reads it from
-// the proxy.
+// change to a default must not silently re-tune a strategy that an install already uses. The
+// Claude Code plugin keeps no copy: it reads this table with `context-guru-proxy strategies`.
+// TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys keeps the files it wrote before that valid.
 
 // DefaultStrategy is the name the plugin picks when the user has not chosen one. The proxy does
 // NOT apply it: a file with no `strategy` behaves as before.
