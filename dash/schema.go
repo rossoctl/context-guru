@@ -116,6 +116,25 @@ CREATE TABLE IF NOT EXISTS requests (
   -- 0 on every row written before this column existed, including an old estimated row that DID book its
   -- figure (price_estimated alone does not say which meaning a row has).
   estimate_held      INTEGER NOT NULL DEFAULT 0,
+  -- The accountant library's cache effects in TOKENS by tier (#998), beside their dollars: the
+  -- keep-alive rescue (tok_ka_*), the split (tok_split_*), the head-TTL legs (tok_ttl_*) and the
+  -- ended-change break (tok_ended_*). Each is saved and caused, by tier: in = fresh input,
+  -- rd = cache read, w5m / w1h = the 5-minute / 1-hour cache write. Stored at write time for the
+  -- reason saved_first_usd is: the library prices from the thread's history, which a row does not
+  -- keep. 0 on a request the library did not price (acc_priced = 0) and on every older row, which is
+  -- "not measured", not "saved nothing". Additive (acctokens.go).
+  tok_ka_saved_in INTEGER NOT NULL DEFAULT 0, tok_ka_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ka_caused_in INTEGER NOT NULL DEFAULT 0, tok_ka_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_saved_in INTEGER NOT NULL DEFAULT 0, tok_split_saved_rd INTEGER NOT NULL DEFAULT 0, tok_split_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_split_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_caused_in INTEGER NOT NULL DEFAULT 0, tok_split_caused_rd INTEGER NOT NULL DEFAULT 0, tok_split_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_split_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_saved_in INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_caused_in INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_saved_in INTEGER NOT NULL DEFAULT 0, tok_ended_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_caused_in INTEGER NOT NULL DEFAULT 0, tok_ended_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  -- The request's whole token figure: the sum of its request_components tok_* figures and the four
+  -- effects above, written with them, so the lean stats read takes the totals from its one scan (#502).
+  tok_total_saved_in INTEGER NOT NULL DEFAULT 0, tok_total_saved_rd INTEGER NOT NULL DEFAULT 0, tok_total_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_total_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_total_caused_in INTEGER NOT NULL DEFAULT 0, tok_total_caused_rd INTEGER NOT NULL DEFAULT 0, tok_total_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_total_caused_w1h INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -376,6 +395,10 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_first_usd  REAL NOT NULL DEFAULT 0,
   saved_replay_usd REAL NOT NULL DEFAULT 0,
   priced_by        TEXT NOT NULL DEFAULT '',
+  -- The same figure as saved_usd in TOKENS by tier (#998): what the component saved and what it
+  -- caused. 0 unless priced_by = 'accountant'. Additive (acctokens.go).
+  tok_saved_in INTEGER NOT NULL DEFAULT 0, tok_saved_rd INTEGER NOT NULL DEFAULT 0, tok_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_caused_in INTEGER NOT NULL DEFAULT 0, tok_caused_rd INTEGER NOT NULL DEFAULT 0, tok_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_caused_w1h INTEGER NOT NULL DEFAULT 0,
   duration_ms  REAL    NOT NULL DEFAULT 0,
   err          TEXT    NOT NULL DEFAULT '',
   -- Why this component turned candidates away, as {"gate_name":count} — the only answer
