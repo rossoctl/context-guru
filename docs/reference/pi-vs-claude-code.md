@@ -9,8 +9,7 @@ they route, which providers they cover and what they show you.
 - Pi package: [`pi-package/`](https://github.com/rossoctl/context-guru/tree/main/pi-package),
   documented in its [README](https://github.com/rossoctl/context-guru/blob/main/pi-package/README.md).
 
-State on 2026-11-10: Claude Code plugin 0.6.7, Pi package as merged in #977 and #982. Rows marked
-**(open PR)** describe a change that is not merged yet.
+State on 2026-11-10: Claude Code plugin 0.6.7, Pi package as merged in #977, #982, #1010 and #1011.
 
 ## What is the same
 
@@ -30,9 +29,9 @@ State on 2026-11-10: Claude Code plugin 0.6.7, Pi package as merged in #977 and 
 | **Providers** | Anthropic | Anthropic and OpenAI. `openai-codex` (ChatGPT backend) is not routed |
 | **Scope** | One project by default, or the whole machine with `--global`. One port per project | Always the whole machine: one proxy for all Pi sessions, because `models.json` is per user |
 | **How the proxy starts** | The `SessionStart` hook starts it. The `UserPromptSubmit` hook restarts it when it is down | A user service (launchd on macOS, systemd on Linux) starts it at login and restarts it after a crash |
-| **Check from inside a session** | Every session start and every prompt | **(open PR #1011)** At session start: a health check with a 5-second limit, in the background. If the proxy does not answer, one service restart, then one notice |
+| **Check from inside a session** | Every session start and every prompt | At session start: a health check with a 5-second limit, in the background. If the proxy does not answer, one service restart, then one notice |
 | **After a laptop restart** | The next Claude Code session starts the proxy | The service starts the proxy at login, before Pi opens |
-| **Existing base URL** | Asks: chain behind it, or replace it | Today: refuses and changes nothing. **(open PR #1010)** Asks: chain, replace, or no change |
+| **Existing base URL** | Asks: chain behind it, or replace it | Asks: chain behind it, replace it, or change nothing |
 | **Session id** | Claude Code sends it | The extension adds the `x-context-guru-session` header |
 | **Lifecycle signals** | Session start, session end, notification | Session end and compaction |
 | **Client's own cache warming** | Not applicable | Stopped for routed models, so only the proxy pings |
@@ -52,4 +51,4 @@ In order of value:
    reports could read it.
 3. **Per-project scope.** Pi has no per-project `models.json`, so this needs another way to route.
 
-Chain mode (#1010) and the session-start check (#1011) were gaps too. Both PRs are open.
+Chain mode (#1010) and the session-start check (#1011) were gaps too. Both are merged.
