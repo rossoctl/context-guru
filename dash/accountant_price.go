@@ -223,6 +223,10 @@ const KindEnvelope = "envelope"
 // EndedChangeComponent is the row that carries the break an ended change left behind.
 const EndedChangeComponent = "ended_change"
 
+// DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
+// proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
+const DeferComponent = "tooldefer"
+
 // envelopeComponents are the operators that change the request envelope (tools, system, cache
 // marks) and may have no pipeline row: the proxy reports them from a body diff
 // (proxy/accountant_envelope.go). expand and adjudicate are never pipeline components; headttl is
@@ -402,6 +406,29 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// counted twice.
 	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
+	// Tool deferral is priced here, from the bodies (accountant R56): the definitions it left out as a shrink
+	// of tools positions, the search tool and the names list as growth. The library's figure for it sits on the
+	// tooldefer row and in the baseline delta above, which the Overview shows as the preset's saving. It is the
+	// deferral's saving, so it leaves the baseline and goes to the lever Overview adds beside it (DeferNetUSD),
+	// where the deferral card reads it. The total is the same: the figure is moved, not added. What the bodies
+	// cannot show is the searches and the definitions they loaded, which come back in the response: the ledger
+	// still owns that cost, and the lever takes it off (#908, review of #1003).
+	//
+	// A request the library held (below) keeps the ledger's net on the lever as before, and the deferral is
+	// left out of the held estimate, so the figure appears in one place and not in two.
+	deferFig := fig.ByComponent[DeferComponent]
+	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || deferFig != 0 {
+		if !estimated {
+			e.BaselineCostUSD -= deferFig
+			e.DeferNetUSD = deferFig - e.DeferSearchUSD
+			if e.DeferNetUSD == 0 {
+				// A guard, not a known case. -0 - +0 is -0 under IEEE 754, but deferFig comes from a map entry that
+				// starts at +0, and +a + -a and +0 + -0 are +0, so deferFig is never -0 and this branch is not
+				// reached today. If it ever were, a plain zero is what the field should serialize.
+				e.DeferNetUSD = 0
+			}
+		}
+	}
 	if estimated {
 		// The library could not rule out a break: it had no history for the thread, so it priced
 		// each removal as a write the provider would have made. When the cache was in fact warm
@@ -412,15 +439,17 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
 		// keep-alive tab and the API still agree.
 		//
-		// What is held out: fig.DeltaUSD, which is every component's figure, the head-TTL premium and
-		// rescue legs (the headttl row), the ended-change break, and the filter's part. The figure can
+		// What is held out: fig.DeltaUSD less the deferral's own figure, which is every other component's
+		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
+		// filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
+		// on the lever, so it appears once (review of #1003). The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
 		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
-		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -450,11 +479,14 @@ func inAdded(rows []CompRow, name string) bool {
 
 // toolSectionOperators are the operators whose operations act on the tools section, not on messages:
 // the declaration filter and the schema rewrite (proxy/accountant_envelope.go reports them from a body
-// diff), and the two declarations the proxy injects. Their tokens are not in TokensBefore, which counts
-// message text only.
+// diff), the two declarations the proxy injects, and tool deferral, whose deferred definitions are a
+// shrink of tools positions (accountant R56, #908). Their tokens are not in TokensBefore, which counts
+// message text only. Deferral's names list is a growth in messages and saves nothing, so it adds
+// no saved tokens to the bound.
 var toolSectionOperators = map[string]bool{
 	"context-guru.toolfilter": true, "context-guru.toolschema": true,
 	"context-guru.expand": true, "context-guru.adjudicate": true,
+	"context-guru.tooldefer": true,
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed

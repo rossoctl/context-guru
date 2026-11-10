@@ -132,7 +132,109 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	if int64(e.DeferWrongGuesses) != st.WrongGuesses || int64(e.DeferDroppedSearches) != st.DroppedSearches {
 		t.Errorf("row wrong %d dropped %d, ledger %d and %d", e.DeferWrongGuesses, e.DeferDroppedSearches, st.WrongGuesses, st.DroppedSearches)
 	}
-	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferNetUSD-st.Net) > 1e-12 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
-		t.Errorf("row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st.Money)
+	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
+		t.Errorf("row gross %v, ledger %+v", e.DeferGrossUSD, st.Money)
+	}
+	// The row's net is one figure whichever page reads it. On a request the accountant priced it is the
+	// library's tooldefer row minus the cost of the search and the definition it loaded (the ledger's
+	// SearchCost, exact); on a request it held, or could not price, it is the ledger's net, so the deferral is
+	// not lost from the total (review of #1003).
+	if e.AccountantFallback() != "" || e.EstimateHeld {
+		// This request is the first of its thread: no history, so it is held.
+		if !e.EstimateHeld {
+			t.Errorf("expected a held first request, got fallback %q", e.AccountantFallback())
+		}
+		if math.Abs(e.DeferNetUSD-st.Net) > 1e-12 {
+			t.Errorf("row net %v on a held or unpriced request, want the ledger's net %v", e.DeferNetUSD, st.Net)
+		}
+		return
+	}
+	var lib float64
+	for _, c := range e.Components {
+		if c.Component == "tooldefer" {
+			lib = c.SavedUSD
+		}
+	}
+	if st.SearchCost <= 0 {
+		t.Fatalf("the ledger priced no search cost for a request that ran one search: %+v", st.Money)
+	}
+	if want := lib - st.SearchCost; math.Abs(e.DeferNetUSD-want) > 1e-12 {
+		t.Errorf("row net %v, want the library's %v less the search cost %v = %v", e.DeferNetUSD, lib, st.SearchCost, want)
+	}
+}
+
+// The priced path of the same fact: a second request of the thread has history, so the accountant prices it. Its
+// deferral figure is the library's tooldefer row minus the cost of the search and the definition it loaded, exactly.
+// A held first request keeps the ledger's net instead (the test above). The cost comes from the event the capture
+// priced, because the ledger's totals do not sum it.
+func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
+	us := httptest.NewServer(sseUpstream{})
+	defer us.Close()
+	h, rec, tap := accHandlerOpts(t, us.URL, "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n", func(o *Options) {
+		o.ToolDeferPath = filepath.Join(t.TempDir(), tooldefer.FileName)
+		o.Prices = tdPrices{}
+		o.InjectExpand = "never"
+	})
+	ds := h.toolDefer()
+	for i, s := range []string{"p1", "p2", "p3"} {
+		ds.hist.Observe("", s, "/w", tdBody(), int64(i+1))
+	}
+	ds.prober.Seed(tooldefer.ProbeKey{Upstream: us.URL, Model: "claude-sonnet-5-5", Route: "/v1/messages"}, tooldefer.Pass, time.Now())
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	b := bytes.Replace(tdBody(), []byte(`"max_tokens":64,`), []byte(`"max_tokens":64,"stream":true,`), 1)
+	for i := 0; i < 2; i++ {
+		if resp, out := tdPost(t, srv, b); resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d: %s", i, resp.StatusCode, out)
+		}
+	}
+	waitForRows(t, rec, 2)
+	var priced int
+	for i, e := range tap.all() {
+		if e.DeferSearches == 0 {
+			t.Fatalf("request %d ran no search: the test does not exercise the search cost", i)
+		}
+		if e.EstimateHeld || e.AccountantFallback() != "" {
+			continue
+		}
+		priced++
+		var lib float64
+		for _, c := range e.Components {
+			if c.Component == "tooldefer" {
+				lib = c.SavedUSD
+			}
+		}
+		if lib <= 0 || e.DeferSearchUSD <= 0 {
+			t.Errorf("request %d: library figure %v, search cost %v: want both positive", i, lib, e.DeferSearchUSD)
+		}
+		if want := lib - e.DeferSearchUSD; math.Abs(e.DeferNetUSD-want) > 1e-12 {
+			t.Errorf("request %d: net %v, want the library's %v less the search cost %v = %v", i, e.DeferNetUSD, lib, e.DeferSearchUSD, want)
+		}
+		// The cost the Tools page shows is the ledger's own, taken before the net moved onto the library's figure.
+		// The search cost is part of it, so it cannot be less. It can exceed the gross: the ledger's net is gross
+		// less this cost, and the net is negative when the searches cost more than the deferral saved.
+		if e.DeferCostUSD < e.DeferSearchUSD {
+			t.Errorf("request %d: cost %v is less than the search cost %v it contains", i, e.DeferCostUSD, e.DeferSearchUSD)
+		}
+		// On a priced request the stored net is the library's figure less the search cost, so gross less that net is
+		// NOT the ledger's cost: the two must differ, or this test could not tell the old derivation from the new.
+		if math.Abs((e.DeferGrossUSD-e.DeferNetUSD)-e.DeferCostUSD) < 1e-12 {
+			t.Errorf("request %d: gross less net equals the cost %v: the test does not separate the two figures", i, e.DeferCostUSD)
+		}
+	}
+	if priced != 1 {
+		t.Fatalf("priced requests = %d, want 1 (the second of the thread): the test must reach the priced path", priced)
+	}
+	// /api/tool-defer sums the ledger's cost per request, so its total is exactly that sum.
+	rep, err := rec.DB().ToolDeferReportFor(dash.Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var costSum float64
+	for _, e := range tap.all() {
+		costSum += e.DeferCostUSD
+	}
+	if math.Abs(rep.Total.CostUSD-costSum) > 1e-12 {
+		t.Errorf("/api/tool-defer cost %v, want the sum of the per-request ledger costs %v", rep.Total.CostUSD, costSum)
 	}
 }

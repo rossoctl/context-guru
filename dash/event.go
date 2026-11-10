@@ -445,7 +445,16 @@ type Event struct {
 	DeferLoaded           int     `json:"defer_loaded,omitempty"`
 	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
-	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
+	// DeferCostUSD is the ledger's own cost of the deferral, gross less the ledger's net: the names list and the
+	// searches. It is set from the ledger before PriceMode can move the net, and the Tools page reads it, because
+	// gross less the stored net is not a cost on a request the accountant priced.
+	DeferCostUSD float64 `json:"defer_cost_usd,omitempty"`
+	DeferNetUSD  float64 `json:"defer_net_usd,omitempty"`
+	// DeferSearchUSD is the part of the ledger's cost that no body shows: the searches and the loaded
+	// definitions (tooldefer.Money.SearchCost). The accountant prices the deferral itself from the bodies (R56),
+	// so on a priced request PriceMode sets DeferNetUSD to the library's tooldefer row minus this cost, and takes
+	// that row out of the baseline. Not stored.
+	DeferSearchUSD float64 `json:"-"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
@@ -662,7 +671,8 @@ type CompRow struct {
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
 	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
-	// request-level saving. It exists because the components view had
+	// request-level saving, except that on a request the accountant priced the tooldefer row's
+	// dollars sit in the deferral lever (DeferNetUSD) and not in the baseline delta. It exists because the components view had
 	// only a bare COST for the components that spend, and a dollar value improvised
 	// client-side from hardcoded rates is wrong by whatever the deployment's model
 	// actually charges.

@@ -255,6 +255,11 @@ CREATE TABLE IF NOT EXISTS requests (
   defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
   defer_net_usd       REAL    NOT NULL DEFAULT 0,
+  -- The ledger's own cost of the deferral: the names list and the searches, gross less the ledger's net.
+  -- defer_net_usd is the deferral lever, which on a request the accountant priced is the library's figure less
+  -- the search cost, so gross less net no longer says what the deferral cost. Filled by the migration for rows
+  -- written before this column existed (see backfillDeferCost).
+  defer_cost_usd      REAL    NOT NULL DEFAULT 0,
   -- C, the client's own compaction point in billed tokens, and its source, written only when the
   -- user's own client setting set it (#948). 0 and '' otherwise: the table value is read back from
   -- the table. A number from a config file.
@@ -386,7 +391,9 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_gross  INTEGER NOT NULL DEFAULT 0,
   saved_unique INTEGER NOT NULL DEFAULT 0,
   -- This component's share of the request's baseline delta, in DOLLARS, priced at write
-  -- time from the request's own model and the cache tier the request itself paid (see
+  -- time from the request's own model and the cache tier the request itself paid. The tooldefer
+  -- row is the exception on a request the accountant priced: its dollars are in the deferral
+  -- lever (defer_net_usd), not in the baseline delta, and the row still carries them (see
   -- Event.Price). Stored rather than derived on read because the rate has to be the one
   -- that was in force, and because the UI was otherwise left improvising a dollar value
   -- from hardcoded rates.
@@ -908,6 +915,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "defer_net_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "defer_cost_usd", "REAL NOT NULL DEFAULT 0"},
 	// The user's own compaction point (#948). Additive: an earlier row has none.
 	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
@@ -923,6 +931,18 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The auth kind (#984): 1 for a subscription (OAuth) token. 0 on an earlier row, which reads as
 	// "not known to be a subscription" until the account's next request.
 	{"requests", "auth_subscription", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+// backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
+// written by a build that stored the ledger's own net in defer_net_usd, so gross less net IS the ledger's cost
+// of the deferral, exactly. A row written since carries its cost from the ledger, and a row with no cost
+// (deferral changed it and the ledger priced it at zero) has gross equal to net, so the same update leaves it at
+// 0. The update touches only rows whose cost is still 0 and whose gross exceeds the net, so a second run finds
+// nothing to change.
+func backfillDeferCost(db *sql.DB) error {
+	_, err := db.Exec(`UPDATE requests SET defer_cost_usd = defer_gross_usd - defer_net_usd
+		WHERE defer_tokens > 0 AND defer_cost_usd = 0 AND defer_gross_usd > defer_net_usd`)
+	return err
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
@@ -1096,6 +1116,9 @@ func migrate(db *sql.DB) error {
 		if _, err = db.Exec(additiveDDL2); err != nil {
 			return err
 		}
+		if err := backfillDeferCost(db); err != nil {
+			return err
+		}
 		warnPurge(purgeImportedHistory(db))
 		return nil
 	}
@@ -1103,6 +1126,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(additiveDDL2); err != nil {
+		return err
+	}
+	if err := backfillDeferCost(db); err != nil {
 		return err
 	}
 	warnPurge(purgeImportedHistory(db))
