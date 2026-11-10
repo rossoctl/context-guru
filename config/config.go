@@ -193,9 +193,9 @@ type CacheConfig struct {
 	// counts means the default. The three counts are at most 11, the highest strategy ping count.
 	KeepAliveWaitPlan         *bool `yaml:"keepalive_wait_plan"`
 	KeepAliveToolWaitMaxPings int   `yaml:"keepalive_tool_wait_max_pings"`
-	// KeepAliveToolWaitMinPrefixTokens is the billed-prefix floor for a tool wait (main or subagent)
-	// and for every wait of a subagent thread. A main thread that waits for a person, background work
-	// or a teammate keeps keepalive_min_prefix_tokens. It never raises the general floor: the lower of
+	// KeepAliveToolWaitMinPrefixTokens is the billed-prefix floor for a tool wait, a wait for background
+	// work or a teammate, and every wait of a subagent thread. A main thread that waits for a person, or
+	// for an unknown cause, keeps keepalive_min_prefix_tokens. It never raises the general floor: the lower of
 	// the two applies. 0 = DefaultKeepAliveToolWaitMinPrefix. Read only while the plan is on.
 	KeepAliveToolWaitMinPrefixTokens int `yaml:"keepalive_tool_wait_min_prefix_tokens"`
 	KeepAliveBackgroundExtraPings    int `yaml:"keepalive_background_extra_pings"`
@@ -266,7 +266,7 @@ const (
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
-	// waits for anything but its own tool. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait
+	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait
 	// and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
 	DefaultKeepAliveMinPrefix = 80000
 	// DefaultKeepAliveToolWaitMinPrefix is 20000. No long subagent idle span had a prefix under 20k, and

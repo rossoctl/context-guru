@@ -60,14 +60,14 @@ cache:
   keepalive_idle_seconds: 240          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
-  keepalive_min_prefix_tokens: 80000   # the gate for a main thread that waits for a person, background work or a teammate
+  keepalive_min_prefix_tokens: 80000   # the gate for a main thread that waits for a person or for an unknown cause
   keepalive_max_usd_per_ping: 0.50
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
   keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
   keepalive_wait_plan: true            # false: one fixed K for every wait, as before #858
   keepalive_tool_wait_max_pings: 8     # a tool wait: ping until the result comes, at most this many
-  keepalive_tool_wait_min_prefix_tokens: 20000  # the gate for a tool wait, and for every wait of a subagent
+  keepalive_tool_wait_min_prefix_tokens: 20000  # the gate for a tool wait, background work, a teammate, and every wait of a subagent
   keepalive_background_extra_pings: 3  # end_turn, waiting for background work: K + 3
   keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
@@ -117,9 +117,9 @@ open-task counts, and whether the thread id starts with `a:` (a subagent).
 - **One switch:** `keepalive_wait_plan: false` brings back one fixed K for every wait, time windows for
   every wait, sweep questions as before, and pings for a thread with no tool call yet. It also brings back
   one prefix floor for every wait: `keepalive_min_prefix_tokens` (80,000).
-- **The prefix floor follows the wait.** A tool wait (main or subagent) needs a prefix of 20,000 tokens
-  (`keepalive_tool_wait_min_prefix_tokens`). A subagent thread needs 20,000 for every wait. A main thread
-  that waits for a person, background work, a teammate or an unknown cause needs 80,000
+- **The prefix floor follows the wait.** A tool wait, a wait for background work and a wait for a teammate
+  need a prefix of 20,000 tokens (`keepalive_tool_wait_min_prefix_tokens`). A subagent thread needs 20,000
+  for every wait. A main thread that waits for a person, or for an unknown cause, needs 80,000
   (`keepalive_min_prefix_tokens`). Reason: for a main thread that waits for a person, a prefix under 50k never
   paid; for a subagent tool wait, a 20k floor cut misses from 65 to 31 (#858). The tool-wait floor never
   raises the general one. The dashboard replay uses the same two floors.

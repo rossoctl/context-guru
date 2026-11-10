@@ -18,8 +18,8 @@ func TestWaitMinPrefixByCause(t *testing.T) {
 		{waitcause.WaitingOwnTool, false, 20000},
 		{waitcause.WaitingOwnTool, true, 20000},
 		{waitcause.WaitingHuman, false, 80000},
-		{waitcause.WaitingBackground, false, 80000},
-		{waitcause.WaitingTeammate, false, 80000},
+		{waitcause.WaitingBackground, false, 20000},
+		{waitcause.WaitingTeammate, false, 20000},
 		{waitcause.WaitingUnknown, false, 80000},
 		{waitcause.WaitingHuman, true, 20000},
 		{waitcause.WaitingBackground, true, 20000},
@@ -56,6 +56,12 @@ func TestPingableUsesTheFloorOfTheWait(t *testing.T) {
 	}
 	if !mk(waitcause.WaitingHuman, "a:x").pingable() {
 		t.Error("a subagent wait at 30k was not pingable")
+	}
+	if !mk(waitcause.WaitingBackground, "").pingable() || !mk(waitcause.WaitingTeammate, "").pingable() {
+		t.Error("a main wait for background work or a teammate at 30k was not pingable")
+	}
+	if mk(waitcause.WaitingUnknown, "").pingable() {
+		t.Error("a main wait with an unknown cause at 30k was pingable")
 	}
 	if mk(waitcause.WaitingHuman, "").pingable() {
 		t.Error("a main wait for a person at 30k was pingable")

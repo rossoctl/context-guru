@@ -28,7 +28,7 @@ import (
 // cached prefix and reset the provider's TTL. A prefix ask does the same read. So when this component
 // has candidates for a thread, the keeper sends the sweep's question INSTEAD of the ping: same
 // refresh, and the only extra cost is the answer. There is no timer of its own. No keep-alive means
-// no question, and a prompt under the keep-alive floor of its wait (80k tokens, #444; 20k for a tool wait or a subagent) gets none, because the
+// no question, and a prompt under the keep-alive floor of its wait (80k tokens, #444; 20k for a tool wait, background work, a teammate or a subagent) gets none, because the
 // keeper never pings it.
 //
 // THE SAME PATTERN AS cache_aware_summarizer's substitute (cache_aware_keepalive.go), deliberately:

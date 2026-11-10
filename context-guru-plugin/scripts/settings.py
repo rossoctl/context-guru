@@ -3696,7 +3696,8 @@ STRATEGIES: dict[str, dict] = {
         "spends": True,
         "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
                 "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
-                "prefix floor 80k tokens, but 20k for a tool wait or a subagent; <=$0.50/ping. "
+                "prefix floor 20k tokens for a tool wait, background work, a teammate or a subagent, "
+                "80k for a main thread that waits for a person; <=$0.50/ping. "
                 "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
     },
     "1-ping": {

@@ -589,7 +589,7 @@ type KeepAliveBehaviour struct {
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
 	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
 	// costs almost nothing at 20k (the pre-#435 gate), and the panel says so. The shipped floors are 20k for a
-	// tool wait or a subagent and 80k for a main thread's other waits (#858).
+	// tool wait, background work, a teammate or a subagent and 80k for a main thread that waits for a person (#858).
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -609,7 +609,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped floor for a tool wait or a subagent (#858); 80,000 is the general floor. Both are edges.
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped floor for all but a main thread that waits for a person (#858); 80,000 is the general floor. Both are edges.
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -1418,7 +1418,7 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at the shipped floors by wait cause (80k, and 20k for a tool wait or a subagent wait): the host hands this package the plan settings and both floors (SetWaitPolicy);
+// gates at the shipped floors by wait cause (80k for a main thread that waits for a person, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
 // a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //
 // THE COUNT (#858, #868). The live policy picks the count per wait (keepalive.Policy.WaitPings: a tool

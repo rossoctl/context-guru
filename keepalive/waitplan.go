@@ -19,7 +19,8 @@ import (
 //	done, or no tool call yet on the thread   0
 //
 // The prefix floor follows the same cause (WaitMinPrefix): a tool wait and any subagent wait use the
-// lower tool-wait floor (20k); a main thread that waits for anything else uses MinPrefixTokens (80k).
+// lower tool-wait floor (20k); so do a main thread's waits for background work and for a teammate. A main
+// thread that waits for a person, or for an unknown cause, uses MinPrefixTokens (80k).
 //
 // The plan applies to the 5-minute tier only. A 1-hour thread keeps its own schedule
 // (Policy.ForOneHour), whose credential hold is already bounded at (K+1) x 59 min.
@@ -80,14 +81,17 @@ func (p Policy) WaitPings(cause string, subagent bool) int {
 }
 
 // WaitMinPrefix is the billed-prefix floor for a thread that waits for cause. With WaitPlan off, or
-// when the cause is unknown ("": the plan did not apply), it is MinPrefixTokens. A tool wait, and any
-// wait of a subagent thread, use the tool-wait floor, which never raises MinPrefixTokens. A main thread
-// that waits for a person, background work or a teammate keeps MinPrefixTokens.
+// when the cause is unknown ("": the plan did not apply), it is MinPrefixTokens. A tool wait, a wait for
+// background work or a teammate, and any wait of a subagent thread, use the tool-wait floor, which never
+// raises MinPrefixTokens. A main thread that waits for a person, or for an unknown cause, keeps
+// MinPrefixTokens.
 func (p Policy) WaitMinPrefix(cause string, subagent bool) int {
 	if !p.WaitPlan || cause == "" {
 		return p.MinPrefixTokens
 	}
-	if subagent || cause == waitcause.WaitingOwnTool {
+	switch {
+	case subagent, cause == waitcause.WaitingOwnTool, cause == waitcause.WaitingBackground,
+		cause == waitcause.WaitingTeammate:
 		return min(p.MinPrefixTokens, orDefault(p.ToolWaitMinPrefix, DefaultToolWaitMinPrefix))
 	}
 	return p.MinPrefixTokens

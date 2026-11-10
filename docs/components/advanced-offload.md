@@ -200,7 +200,7 @@ So the two halves happen at different moments:
 1. **Ask at the keep-alive ping, in place of the ping.** The ping already reads the cached prefix to
    refresh it; the question is the same read plus an answer, so the answer is the only extra cost. There
    is no timer of its own. No keep-alive means no question, and a prompt under the keep-alive floor
-   (80k tokens, or 20k for a tool wait or a subagent; #444, #858) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
+   (80k tokens, or 20k except for a main thread that waits for a person; #444, #858) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
    it has material.
 2. **Ask whenever there is at least one candidate.** No economic gate and no minimum of ten
    (`min_inventory` defaults to 1).

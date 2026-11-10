@@ -414,7 +414,10 @@ func TestSpanPrefixOKFollowsTheWaitCause(t *testing.T) {
 		name string
 		f    keepalive.SpanFacts
 		want bool
-	}{{"main tool wait", tool, true}, {"main person wait", human, false}, {"subagent person wait", sub, true}} {
+	}{{"main tool wait", tool, true}, {"main person wait", human, false}, {"subagent person wait", sub, true},
+		{"main background wait", keepalive.SpanFacts{Cause: "background", StopReason: "end_turn"}, true},
+		{"main teammate wait", keepalive.SpanFacts{Cause: "teammate", StopReason: "end_turn"}, true},
+		{"main unknown wait", keepalive.SpanFacts{Cause: "unknown", StopReason: "end_turn"}, false}} {
 		if got := pol.SpanPrefixOK(c.f, 30000); got != c.want {
 			t.Errorf("%s at 30k: %v, want %v", c.name, got, c.want)
 		}
