@@ -14,6 +14,7 @@ func noBinaryEnv(t *testing.T, home, state string) []string {
 	return append(routeEnv(t, home, state, ""), "PATH=/usr/bin:/bin", "CONTEXT_GURU_DEST="+t.TempDir(), "CONTEXT_GURU_BIN=")
 }
 
+// (The base URLs below end in /anthropic: install.sh refuses any other path.)
 // An unchecked --cache-strategy name must never become a fact. With no binary, attach mode installs
 // none, so the name is refused before routing is written. --plan says it is unchecked.
 func TestAttachModeRefusesAnUncheckedStrategyName(t *testing.T) {
