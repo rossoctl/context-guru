@@ -80,7 +80,7 @@ func TestToolDeferIsPricedByTheLibraryFromAStubSizedBody(t *testing.T) {
 		t.Fatal("nothing was deferred: the test does not exercise deferral")
 	}
 
-	var rowSum float64
+	var rowSum, leverSum, defSum float64
 	for i, e := range tap.all() {
 		if fb := e.AccountantFallback(); fb != "" {
 			t.Fatalf("request %d fell back: %q", i, fb)
@@ -94,20 +94,42 @@ func TestToolDeferIsPricedByTheLibraryFromAStubSizedBody(t *testing.T) {
 		if i > 0 && def <= 0 {
 			t.Errorf("request %d: the library books %v for tool deferral, want a saving", i, def)
 		}
+		// A priced row: the library's deferral figure left the baseline for the lever, and the tooldefer row keeps
+		// it, so the rows add up to the baseline delta plus the lever. The first request of the thread has no
+		// history and is held (estimate_held): it books no component figure, and its lever is the ledger's net,
+		// so the deferral does not vanish from the total.
+		if e.EstimateHeld {
+			if e.DeferNetUSD <= 0 || e.BaselineCostUSD != e.CostUSD {
+				t.Errorf("request %d is held: lever %v, baseline delta %v, want the ledger's net and no delta",
+					i, e.DeferNetUSD, e.BaselineCostUSD-e.CostUSD)
+			}
+		} else {
+			if got, want := e.BaselineCostUSD-e.CostUSD+e.DeferNetUSD, rowSavedSum(e); math.Abs(got-want) > 1e-12 {
+				t.Errorf("request %d: baseline delta + lever = %v, rows sum %v", i, got, want)
+			}
+			if math.Abs(e.DeferNetUSD-def) > 1e-12 {
+				t.Errorf("request %d: lever %v, the library's tooldefer row %v: no search ran", i, e.DeferNetUSD, def)
+			}
+			defSum += def
+		}
 		rowSum += e.BaselineCostUSD - e.CostUSD
+		leverSum += e.DeferNetUSD
 	}
 
-	// Deferral is counted once. The library's figure is in the baseline delta; the lever beside it is the
-	// search cost alone, which these requests do not have (the fake provider runs no search).
+	// Deferral is counted once, on the deferral card. The library's figure is on the tooldefer row and in the
+	// lever, not in the baseline delta the preset card shows; the fake provider runs no search, so the lever is
+	// the library's figure whole. The total is the sum of the two, the same as before the split.
 	o, err := rec.DB().Overview(dash.Filter{TenantAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.DeferNetUSD != 0 {
-		t.Errorf("deferral lever %v, want 0: no search ran, and the library's figure is already in the net", o.DeferNetUSD)
+	if math.Abs(o.DeferNetUSD-leverSum) > 1e-12 || o.DeferNetUSD <= defSum {
+		t.Errorf("deferral lever %v, want the stored %v: the library's %v on the priced requests plus the ledger's net on the held one",
+			o.DeferNetUSD, leverSum, defSum)
 	}
-	if math.Abs(o.NetSavedUSD-rowSum) > 1e-12 || math.Abs(o.TotalSavedUSD-o.NetSavedUSD) > 1e-12 {
-		t.Errorf("net %v, total %v, want both %v: deferral counted once", o.NetSavedUSD, o.TotalSavedUSD, rowSum)
+	if math.Abs(o.NetSavedUSD-rowSum) > 1e-12 || math.Abs(o.TotalSavedUSD-(o.NetSavedUSD+o.DeferNetUSD)) > 1e-12 {
+		t.Errorf("net %v, total %v, lever %v: want net %v and total = net + lever (deferral counted once)",
+			o.NetSavedUSD, o.TotalSavedUSD, o.DeferNetUSD, rowSum)
 	}
 	rep, err := rec.DB().ToolDeferReportFor(dash.Filter{TenantAll: true})
 	if err != nil {
@@ -243,4 +265,13 @@ func TestAccBilledKeepsTheBodyAndNamesTheReasonWhenAStubCannotShrink(t *testing.
 	if got := c.accBilled(body); !bytes.Equal(got, body) || c.accNoResult != "" {
 		t.Errorf("an unchanged request got reason %q", c.accNoResult)
 	}
+}
+
+// rowSavedSum is what an event's component rows add up to.
+func rowSavedSum(e dash.Event) float64 {
+	var sum float64
+	for _, c := range e.Components {
+		sum += c.SavedUSD
+	}
+	return sum
 }

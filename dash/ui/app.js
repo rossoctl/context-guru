@@ -1847,7 +1847,7 @@ function renderSavedLedger(o, ka, partial) {
   // Tool deferral (ultrahigh). Drawn only on an account that deferred: no card for 0.
   if (parts.defer !== 0) {
     grid.appendChild(card('tooldefer', 'saved-defer', 'Tool deferral', '#/tools',
-      'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches.',
+      'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches. Not counted in Your preset.',
       [money('saved-defer-usd', parts.defer, true)]));
   }
   host.appendChild(grid);

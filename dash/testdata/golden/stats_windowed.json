@@ -257,7 +257,7 @@
   },
   {
    "delta_usd": -0,
-   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them. On a request the accountant priced, the library books the saving and the names list (in the baseline), and this line holds the searches that cost and the definitions they loaded, as a cost. On any other request it is the ledger's net. Either way it is the same figure as the Tools page. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
+   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, net of what that cost. On a request the accountant priced, this line holds the library's whole deferral saving (the definitions left out, less the names list) minus the searches and the definitions they loaded; the saving is not in \"Your preset\". On a request it held, or could not price, it is the ledger's net. The same figure as the Tools page and /api/tool-defer. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
    "key": "defer_net",
    "label": "Tool deferral",
    "total": false

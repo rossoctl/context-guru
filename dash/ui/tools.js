@@ -1187,7 +1187,7 @@ function renderDeferNet(host) {
   const priced = t.requests > t.unpriced_requests;
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-defer-net' },
     el('div', { class: 'section' }, el('h2', {}, 'What did tool deferral save?'),
-      el('span', { class: 'section-note' }, 'net of the names list and every search, measured on real requests')));
+      el('span', { class: 'section-note' }, 'net of the names list and every search; the same figure as the Overview card')));
   host.appendChild(panel);
   panel.appendChild(el('div', { class: 'tiles' },
     tile('inv-defer-net-usd', 'Net saving', priced ? usd(t.net_usd) : compact(t.tokens_deferred) + ' tok',
