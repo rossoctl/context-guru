@@ -409,10 +409,11 @@ func TestBobReplyWithAnIDButNoUsageIsCountedApart(t *testing.T) {
 // later, really different change logged nothing.
 func TestBobBackendAlarmIsOncePerKindOfShapeNotPerID(t *testing.T) {
 	logs := bobLogs(t)
-	// IBM changes backend B: it now sends cache_creation_token_details. 20 replies, 20 random ids.
-	letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	// IBM changes backend B: it now sends cache_creation_token_details. 20 replies, 20 random ids,
+	// of varying length and characters, as real B ids have (22 and 23 chars, some with - or _).
+	letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 	for i := 0; i < 20; i++ {
-		id := make([]byte, 23)
+		id := make([]byte, 22+i%3)
 		for j := range id {
 			id[j] = letters[(i*7+j*13)%len(letters)]
 		}

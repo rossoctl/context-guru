@@ -222,11 +222,11 @@ func bobNoteBackend(m bobMarks) string {
 	default:
 		bobBackendOther.Add(1)
 		prefix := bobWarnPrefix(m.id)
-		// The kind of shape, never the id's own letters: backend B ids are random, so a key on them
-		// would make every reply of one changed backend a "new" shape and use up every slot.
+		// The kind of shape: only the facts the rule uses. Not the id's letters, length or characters:
+		// backend B ids vary in all 3, so a key on them would make every reply of one changed backend
+		// a "new" shape and use up every slot. The WARN line still shows length and characters.
 		key := strings.Join([]string{
-			strconv.FormatBool(strings.HasPrefix(m.id, bobIDPrefixA)), strconv.Itoa(len(m.id)),
-			strconv.FormatBool(bobAlnum(m.id)), strconv.FormatBool(m.cacheWrite),
+			strconv.FormatBool(strings.HasPrefix(m.id, bobIDPrefixA)), strconv.FormatBool(m.cacheWrite),
 			strconv.FormatBool(m.creationDetails), strconv.FormatBool(m.mixedIDs),
 		}, "|")
 		bobShapeMu.Lock()
