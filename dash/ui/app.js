@@ -1743,14 +1743,17 @@ function renderSavedLedger(o, ka, partial) {
 
   // ── The total ──
   const totalTok = presetTok + filterTok;
-  // A Claude subscription does not bill per token: the headline is saved tokens, with the 5-hour
-  // share as an estimate below. null keeps the dollar view.
+  // A Claude subscription does not bill per token: every saving is in tokens (/api/stats `tokens`),
+  // with the 5-hour share as an estimate below the total. null keeps the dollar view.
   const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact) : null;
+  const unmeasured = o.tokens_unmeasured_requests || 0;
   const heroMain = sub
     ? el('div', { class: 'ov-hero-money' },
       el('div', { class: 'ov-hero-v ov-hero-sub', 'data-testid': 'saved-total-subscription', text: sub.main }),
-      el('div', { class: 'ov-hero-of', text: 'tokens context-guru kept out of your requests in this period' }),
-      sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null)
+      el('div', { class: 'ov-hero-of', text: 'tokens in this period, by kind: wr cache write, rd cache read, in fresh input' }),
+      sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null,
+      unmeasured > 0 ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-unmeasured',
+        text: num(unmeasured) + (unmeasured === 1 ? ' request' : ' requests') + ' not measured in tokens.' }) : null)
     : el('div', { class: 'ov-hero-money' },
       el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
       el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
@@ -1758,8 +1761,10 @@ function renderSavedLedger(o, ka, partial) {
       el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
       el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' }));
   const subInfo = [
-    'On a Claude subscription the total is in tokens, not dollars. A subscription does not bill per token.',
-    'wr is the tokens context-guru removed, each removal counted once. rd is the same removals again on each later turn that did not re-send them.',
+    'On a Claude subscription every saving is in tokens, not dollars. A subscription does not bill per token.',
+    'The total is the sum of the parts below, kind by kind. wr is cache write (wr1h: the 1-hour cache), rd is cache read, in is fresh input.',
+    'Kinds are never added into one number: Anthropic does not say how the limit weights them. "cost" is what a saving made you pay, for example the cache reads a keep-alive ping makes.',
+    'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing".',
     'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
     'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
   ];
@@ -1792,12 +1797,23 @@ function renderSavedLedger(o, ka, partial) {
       el('h3', {}, el('a', { href, title: 'Open the tab for ' + title }, title)), info || null),
     el('p', { class: 'ov-what', text: what }),
     el('div', { class: 'ov-figs' }, kids));
+  // On a subscription each card shows tokens (tokens.by_feature, full read only) in place of money.
+  const ft = sub ? featureTokens(o) : null;
+  const tokens = (tid, flow, ran) => !ran ? el('p', { class: 'ov-none', text: 'Nothing saved yet in this period.' })
+    : partial ? el('p', { class: 'ov-none', text: 'Loading…' })
+      : ovFigure(tid, 'Tokens saved', tokenLine(flow, compact) || 'not measured', '', '', 'ov-fig-tok');
+  const saving = (tid, v, flow, ran) => sub ? tokens(tid.replace(/-usd$/, '-tok'), flow, ran) : money(tid, v, ran);
   const grid = el('div', { class: 'ov-cards' });
 
   // Cache: the automatic pings (and the cache reorder), plus your manual pings.
   const cacheUSD = parts.cache + parts.manual;
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
-  const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
+  const tokRow = (label, flow) => hasTokens(flow) ? el('li', {}, el('span', { text: label }), el('strong', { text: tokenLine(flow, compact) })) : null;
+  const brk = sub ? el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
+    tokRow('Automatic pings (cost includes the pings)', ft.keepalive),
+    tokRow('Cache reorder', ft.cachesplit),
+    tokRow('1-hour cache', ft.ttl))
+    : el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
     el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
       el('strong', { text: usd(parts.manual) })),
@@ -1810,9 +1826,9 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('cache', 'saved-cache', 'Cache' + (sName ? ' (' + sName + ')' : ''), '#/keepalive',
     'Keeps your prompt cache warm while you think, so the next turn reads it instead of writing it again.',
     [
-      money('saved-cache-usd', cacheUSD, cacheRan),
-      cacheRan && priced ? brk : null,
-      cacheRan && ready ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
+      saving('saved-cache-usd', cacheUSD, ft && ft.cache, cacheRan),
+      cacheRan && (sub ? !partial : priced) ? brk : null,
+      cacheRan && ready && !sub ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
         cacheTok === null ? '—' : '≈ ' + compact(cacheTok), 'of ' + compact(inputWithout) + ' tokens',
         cacheTok === null ? '' : share(cacheTok, inputWithout)) : null,
       cacheRan ? el('div', { class: 'ov-fig', 'data-testid': 'saved-cache-latency' },
@@ -1840,14 +1856,14 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('compaction', 'saved-compaction', 'Preset' + (named ? ' (' + named + ')' : ''), '#/components',
     'Removes old tool output and repeated text before it reaches the model.',
     [
-      money('saved-compaction-usd', parts.compaction, o.requests > 0),
+      saving('saved-compaction-usd', parts.compaction, ft && ft.compaction, o.requests > 0),
       o.requests > 0 && !partial ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
-      capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
+      capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, sub ? null : usd) }) : null,
       o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
         text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
-          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm. '
-          + 'Estimated saving, not in any total: ' + estUsd(o.estimated_saved_usd || 0) + '.' }) : null,
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm.'
+          + (sub ? '' : ' Estimated saving, not in any total: ' + estUsd(o.estimated_saved_usd || 0) + '.') }) : null,
     ]));
 
   // Tools and skills filter.
@@ -1855,16 +1871,16 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('filter', 'saved-filter', 'Tools and skills filter', '#/tools',
     'Leaves tool and skill definitions the model does not need out of the prompt.',
     partial && !filterRan ? [el('p', { class: 'ov-none', text: 'Loading…' })] : [
-      money('saved-filter-usd', parts.filter, filterRan),
+      saving('saved-filter-usd', parts.filter, ft && ft.filter, filterRan),
       filterRan ? ovFigure('saved-filter-tokens', 'Tokens removed', compact(filterTok),
         'of ' + compact(inputWithout) + ' tokens', share(filterTok, inputWithout)) : null,
     ]));
 
   // Tool deferral (ultrahigh). Drawn only on an account that deferred: no card for 0.
-  if (parts.defer !== 0) {
+  if (parts.defer !== 0 || (ft && hasTokens(ft.defer))) {
     grid.appendChild(card('tooldefer', 'saved-defer', 'Tool deferral', '#/tools',
       'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches.',
-      [money('saved-defer-usd', parts.defer, true)]));
+      [saving('saved-defer-usd', parts.defer, ft && ft.defer, true)]));
   }
   host.appendChild(grid);
 }
@@ -1884,9 +1900,9 @@ function keepAliveLedger() {
   return state.kaLedgerP;
 }
 /**
- * The Claude subscription's 5-hour window (GET /api/me/limits), and that window's own stats for the
- * estimate under the headline. On a subscription the headline shows saved tokens. Any failure, `{}`
- * (an API key, Bedrock, Vertex) or a window that is over leaves state.sub null: the dollar view.
+ * The Claude subscription (GET /api/me/limits), and the open 5-hour window's own stats for the
+ * estimate under the headline. On a subscription every saving shows in tokens. Any failure, or `{}`
+ * (an API key, Bedrock, Vertex), leaves state.sub null: the dollar view.
  * A manager's Overview spans other accounts, so it keeps the dollar view (readsLimits).
  */
 async function loadOverviewLimits() {
@@ -1901,11 +1917,13 @@ async function loadOverviewLimits() {
   let sub = null;
   try {
     const limits = await ctl('/api/me/limits');
-    const f = liveFiveHour(limits, Date.now());
-    if (f) {
+    if (isSubscription(limits, Date.now())) {
       sub = { limits, win: null };
-      // The estimate needs the window's spend and saving. Without them the tokens still show.
-      try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+      // The estimate needs an open 5-hour window and its spend and saving. Without them the tokens still show.
+      const f = liveFiveHour(limits, Date.now());
+      if (f) {
+        try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+      }
     }
   } catch (e) { /* no subscription signal: the dollar view */ }
   done(sub);

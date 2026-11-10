@@ -59,23 +59,24 @@ function strategyName(c) {
 }
 
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.
-// '' when there is nothing to say. `fmt` formats dollars.
+// '' when there is nothing to say. `fmt` formats dollars; null leaves the dollars out (a subscription).
 function capNote(o, fmt) {
   if (o.replay_cap_not_applied) {
     return 'Cap not applied: the replay cap could not be computed in time, so this figure may be too high.';
   }
   const c = o.replay_cap_correction_usd || 0;
   if (c < 0) {
-    return 'Capped: ' + fmt(-c) + ' of replay credit earned after the client would have compacted is not counted.';
+    return 'Capped: ' + (fmt ? fmt(-c) + ' of ' : '') + 'replay credit earned after the client would have compacted is not counted.';
   }
   return '';
 }
 
 // ── Claude subscription (GET /api/me/limits) ──
 //
-// A subscription does not bill per token, so its Overview headline is saved tokens, not dollars.
-// /api/me/limits holds the latest anthropic-ratelimit-unified-* headers the proxy saw for the
-// account: `{}` for an API key, Bedrock or Vertex. Only a 5-hour window that is still open counts.
+// A subscription does not bill per token, so its Overview shows every saving in tokens, not dollars.
+// /api/me/limits holds the auth kind (`subscription`) and the latest anthropic-ratelimit-unified-*
+// headers the proxy saw for the account: `{}` for an API key, Bedrock or Vertex. For the estimate,
+// only a 5-hour window that is still open counts.
 
 // The open 5-hour window, or null: no answer, `{}`, or a window whose reset is in the past.
 function liveFiveHour(limits, nowMs) {
@@ -108,13 +109,82 @@ function fiveHourSavedPct(f, w) {
 // manager keeps the dollar view and the page does not ask. A local proxy has no tenant: it asks.
 function readsLimits(tenant) { return !(tenant && tenant.role === 'manager'); }
 
+// A Claude subscription: the auth kind says so (`subscription`), or a 5-hour window is open.
+function isSubscription(limits, nowMs) {
+  return !!(limits && (limits.subscription === true || liveFiveHour(limits, nowMs)));
+}
+
+// ── Savings in tokens (/api/stats `tokens`, #998) ──
+//
+// Every saving the accountant measured, by tier. The tiers are never added into one number: the
+// provider does not say how a usage limit weights them. A feature can save in one tier and cost in
+// another, so a line shows both: `saved 85.0k wr · 12.0k in · cost 40.0k rd`.
+
+// The tiers in display order, with their short labels.
+const TOKEN_TIERS = [['cache_write_5m', 'wr'], ['cache_write_1h', 'wr1h'], ['cache_read', 'rd'], ['input', 'in']];
+
+// The tiers that are not 0, as `85.0k wr · 12.0k in`. '' when all are 0. `fmt` formats a count.
+function tierText(t, fmt) {
+  return TOKEN_TIERS.filter(([k]) => t && t[k]).map(([k, l]) => fmt(t[k]) + ' ' + l).join(' · ');
+}
+
+// The sum of tier figures, tier by tier (never across tiers). A missing figure counts as 0.
+function addTiers(...ts) {
+  const out = { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 };
+  for (const t of ts) if (t) for (const k of Object.keys(out)) out[k] += t[k] || 0;
+  return out;
+}
+
+// One saving in tokens: `saved 85.0k wr · cost 40.0k rd`. '' when the flow has no tokens at all.
+function tokenLine(flow, fmt) {
+  const s = tierText(flow && flow.saved, fmt), c = tierText(flow && flow.caused, fmt);
+  if (!s && !c) return '';
+  return 'saved ' + (s || '0') + (c ? ' · cost ' + c : '');
+}
+
+// True when the flow has a token in any tier.
+function hasTokens(flow) { return tokenLine(flow, String) !== ''; }
+
+// The request-level cache effects (`cachesplit` is one entry: the split plus its component's own).
+const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
+
+// The Overview cards in tokens, from tokens.by_feature (full read only):
+//   keepalive   the rescue; its cost includes what the pings paid (keepalive_ping_tokens)
+//   cachesplit, ttl
+//   cache       the three above together: the Cache card
+//   filter      toolfilter;   defer  tooldefer
+//   compaction  every other entry (the preset's components and ended_change)
+function featureTokens(o) {
+  const bf = (o && o.tokens && o.tokens.by_feature) || {};
+  const flow = (...fs) => ({ saved: addTiers(...fs.map((f) => f && f.saved)), caused: addTiers(...fs.map((f) => f && f.caused)) });
+  const ping = { saved: null, caused: o && o.keepalive_ping_tokens };
+  const rest = Object.keys(bf).filter((k) => !CACHE_FEATURES.includes(k) && k !== 'toolfilter' && k !== 'tooldefer');
+  return {
+    keepalive: flow(bf.keepalive, ping),
+    cachesplit: flow(bf.cachesplit),
+    ttl: flow(bf.ttl),
+    cache: flow(bf.keepalive, bf.cachesplit, bf.ttl, ping),
+    filter: flow(bf.toolfilter),
+    defer: flow(bf.tooldefer),
+    compaction: flow(...rest.map((k) => bf[k])),
+  };
+}
+
+// The total in tokens: tokens.saved, and tokens.caused plus the pings, which are not agent traffic
+// and so are not in tokens.caused. The cards add up to it, tier by tier.
+function totalTokens(o) {
+  const t = (o && o.tokens) || {};
+  return { saved: addTiers(t.saved), caused: addTiers(t.caused, o && o.keepalive_ping_tokens) };
+}
+
 // The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
-// stats (rd = replay_tokens, wr = saved_unique), `w` the 5-hour window's, `fmt` formats a count.
+// stats, `w` the 5-hour window's (for the estimate), `fmt` formats a count. The estimate needs an
+// open 5-hour window; the token line does not.
 function subscriptionHeadline(limits, o, w, nowMs, fmt) {
+  if (!isSubscription(limits, nowMs)) return null;
+  const main = tokenLine(totalTokens(o), fmt) || 'saved 0 tokens';
   const f = liveFiveHour(limits, nowMs);
-  if (!f) return null;
-  const main = 'saved ' + fmt((o && o.replay_tokens) || 0) + ' rd / ' + fmt((o && o.saved_unique) || 0) + ' wr';
-  const p = fiveHourSavedPct(f, w);
+  const p = f ? fiveHourSavedPct(f, w) : null;
   const tail = ' (estimate at API-price weights)';
   const estimate = p === null ? ''
     : p.hit ? '≈ without context-guru you would have hit the 5-hour limit' + tail
@@ -123,4 +193,5 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
-  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, subscriptionHeadline };
+  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
+  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens };

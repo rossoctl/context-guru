@@ -1565,8 +1565,9 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .ov-hero-v { font-family: var(--serif); font-size: 56px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.05;
   font-variant-numeric: tabular-nums; color: var(--good); }
 .ov-hero-v.neg { color: var(--bad); }
-/* A subscription's headline is a token line (saved 1.2M rd / 85k wr), longer than a dollar figure. */
-.ov-hero-v.ov-hero-sub { font-size: 40px; }
+/* On a subscription the headline and the cards are token lines (saved 85.0k wr · cost 40.0k rd),
+   longer than a dollar figure. */
+.ov-hero-v.ov-hero-sub { font-size: 32px; }
 .ov-hero-of { font-size: 16px; color: var(--fg); margin-top: var(--sp-1); }
 .ov-hero-pct { font-family: var(--serif); font-size: 28px; font-weight: 600; color: var(--good); margin-top: var(--sp-2); font-variant-numeric: tabular-nums; }
 .ov-hero-spent { font-size: 13px; color: var(--fg-muted); margin-top: var(--sp-1); }
@@ -1583,6 +1584,7 @@ main { max-width: 1120px; padding: var(--sp-5) var(--sp-5) 72px; }
 .ov-fig-v.good { color: var(--good); }
 .ov-fig-v.neg { color: var(--bad); }
 .ov-hero-tok .ov-fig-v { font-size: 34px; }
+.ov-fig-v.ov-fig-tok { font-size: 18px; color: var(--good); }
 .ov-fig-of { font-size: 13px; color: var(--fg-muted); display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; }
 .ov-pct { font-weight: 700; color: var(--fg); padding: 0 var(--sp-2); border-radius: 999px; background: var(--bg-sunken); }
 .ov-split { list-style: none; margin: calc(-1 * var(--sp-2)) 0 0; padding: var(--sp-2) var(--sp-3); background: var(--bg-sunken); border-radius: var(--r); font-size: 13px; }
@@ -1637,7 +1639,7 @@ details.diag[open] > summary::before { content: "\2212"; }
 @media (max-width: 860px) {
   .ov-cards { grid-template-columns: 1fr; }
   .ov-hero-v { font-size: 44px; }
-  .ov-hero-v.ov-hero-sub { font-size: 30px; }
+  .ov-hero-v.ov-hero-sub { font-size: 24px; }
   .reco-row { grid-template-columns: 1fr auto; }
   .reco-kind { grid-column: 1 / -1; }
   .reco-note { grid-column: 1 / -1; }

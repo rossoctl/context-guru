@@ -42,6 +42,9 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
   upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
   and fresh; time added per request and requests with cache misses) and a live requests table.
   Every plot shows exact figures on hover.
+  On a Claude subscription the Overview shows every saving in **tokens**, not dollars, with an
+  estimate of the 5-hour limit share below the total. See
+  [On a subscription, the Overview shows tokens](#on-a-subscription-the-overview-shows-tokens).
 - **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)), Cleanup (what to remove, with one command) and Usage over time.
 - **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
   Requests, including a git-style diff of exactly what was rewritten on the wire.
@@ -455,6 +458,31 @@ equal the full totals.
 "keepalive_ping_tokens": {"input": 3, "cache_read": 9000, "cache_write_5m": 20, "cache_write_1h": 10},
 "keepalive_ping_output_tokens": 1
 ```
+
+### On a subscription, the Overview shows tokens
+
+When `GET /api/me/limits` says the account is on a Claude subscription (`subscription: true`, or an
+open 5-hour window), the Overview shows every saving in tokens. Dollars do not show.
+
+- **Who sees it.** A member or a local proxy on a subscription. A manager's Overview spans other
+  accounts, so it keeps dollars and shows no estimate. API-key, Bedrock and Vertex users keep
+  dollars. In hosted mode `/api/me/limits` answers `{}` for now, so hosted users keep dollars (#997).
+- **The display rule.** One line per saving: the saved tiers that are not 0, in the order `wr`
+  (`cache_write_5m`), `wr1h` (`cache_write_1h`), `rd` (`cache_read`), `in` (`input`). The caused
+  tiers follow as `cost`. Example: `saved 85.0k wr · cost 40.0k rd`. Tiers are never added.
+- **The total.** `tokens.saved`, and `tokens.caused` plus `keepalive_ping_tokens` as the cost. The
+  cards add up to it, tier by tier.
+- **The cards** read `tokens.by_feature`:
+  - Cache: `keepalive`, `cachesplit` and `ttl`, with one row each. The keep-alive cost includes
+    `keepalive_ping_tokens`. Manual pings have no token figure, so they do not show.
+  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
+  - Preset: every other entry (the preset's components and `ended_change`).
+- **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
+  weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
+  `min(used% × saved_usd / cost_usd, 100 − used%)` for the window. At the cap the line says that
+  without context-guru the limit would have been hit.
+- **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
+  how many requests have no token figure.
 
 ## KV-cache panel
 

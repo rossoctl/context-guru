@@ -32,7 +32,8 @@ func TestSharedKeepAliveLedgerIsKeyedByTheQuery(t *testing.T) {
 	}
 }
 
-// On a Claude subscription the Overview headline is saved tokens, from GET /api/me/limits (#985).
+// On a Claude subscription the Overview shows every saving in tokens (/api/stats `tokens`, #998), and
+// the 5-hour share as an estimate, from GET /api/me/limits (#985).
 // The decision itself is tested in savings.test.mjs (subscriptionHeadline). This checks the wiring:
 // the page asks for the limits, the headline uses the decision, and the dollar view stays for the
 // rest (`{}`, a failed call, a window that is over).
@@ -46,6 +47,10 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 		"loadOverviewLimits();",
 		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
 		"if (seq !== state.subSeq) return;",                                    // an older answer is dropped
+		"if (isSubscription(limits, Date.now())) {",                            // the auth kind, not only a live window
+		"const ft = sub ? featureTokens(o) : null;",                            // the cards read tokens.by_feature
+		"saving('saved-compaction-usd', parts.compaction, ft && ft.compaction", // a card shows tokens on a subscription
+		"o.tokens_unmeasured_requests",                                         // the "not measured" note
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)
