@@ -808,3 +808,18 @@ func TestStartProxyDoesNotRecordWhenAnotherProcessOwnsThePort(t *testing.T) {
 		t.Errorf("said nothing about another process holding the port:\n%s", out)
 	}
 }
+
+// TestStrategyFileHasNoToolWaitFloor: the table writes the general floor (80000) and no
+// tool-wait floor, so an old strategy file stays correct, and a sync leaves it unchanged.
+func TestStrategyFileHasNoToolWaitFloor(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	port := "8787"
+	if facts, code := settingsIn(t, state, home,
+		"strategy", "set", "--name", "auto", "--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("arming failed: %v", facts)
+	}
+	got := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if !strings.Contains(got, "keepalive_min_prefix_tokens: 80000") || strings.Contains(got, "tool_wait_min_prefix") {
+		t.Errorf("the file must state the general floor 80000 and leave the tool-wait floor to the default:\n%s", got)
+	}
+}

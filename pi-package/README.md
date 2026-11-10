@@ -140,7 +140,7 @@ the package's marker. The second line names the cache strategy.
   `config=not_owned` and start the proxy with your file. `setup` and `configure` refuse.
 
 A ping goes to the provider with your own credential, so it uses your API quota (or your
-subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more, and
+subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more (20,000 while a tool runs, for background work or a teammate, and on a subagent), and
 never a ping that would cost more than $0.50. It does not ping OpenAI models before GPT-5.6: their
 cache has no lifetime the proxy can plan for.
 

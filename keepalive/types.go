@@ -168,7 +168,10 @@ type Policy struct {
 	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
 	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
 	// while WaitPlan is on.
-	ToolWaitMaxPings     int
+	ToolWaitMaxPings int
+	// ToolWaitMinPrefix is the floor for a tool wait, background work, a teammate and for any wait of a subagent thread (see
+	// WaitMinPrefix). Zero means DefaultToolWaitMinPrefix. Read only while WaitPlan is on.
+	ToolWaitMinPrefix    int
 	BackgroundExtraPings int
 	HumanExtraPings      int
 	// ManualHold is the host's reading of an opt-in on THIS request (the proxy: the
