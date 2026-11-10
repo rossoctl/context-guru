@@ -29,6 +29,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -265,6 +267,8 @@ type Handler struct {
 	// bobWin is Bob's own max_input_tokens for each model id, from its model/info response (#963).
 	bobWinMu sync.Mutex
 	bobWin   map[string]int
+	// agentFor finds the client agent that owns a route: agent.ForPath, or a test's own registry.
+	agentFor func(path string) agent.Agent
 	pipe     *components.Pipeline
 	store    store.Store
 	agg      *metrics.Aggregator
@@ -435,7 +439,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
-	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
+	h := &Handler{agentFor: agent.ForPath, pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
 	// The tracker needs a dashboard: the Result is attached to the recorded event.
@@ -728,23 +732,39 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // one response the catch-all does not forward verbatim. See forwardBobProfile.
 const bobProfilePath = "/admin/v1/profile"
 
-// bobModelPath is Bob's model route. Only a request on it may take its session from
-// X-Task-Id (see explicitSessionOf).
-const bobModelPath = "/inference/v1/chat/completions"
+// bobModelPath is Bob's model route.
+const bobModelPath = bob.ModelPath
 
 // explicitSessionOf is the explicit session id a chat request gives to apply. Every place that
 // derives this request's session calls it. So the pipeline, the expand repair, the observe
 // record and the wire recorder use the same id.
 //
-// The Bob IDE sends its task id only in the X-Task-Id header. The header has no vendor prefix,
-// so any client can send it. So only the Bob model route reads it. It comes after every other
-// id (session.Explicit). Other routes get the session header unchanged.
-func explicitSessionOf(r *http.Request, upPath string, body []byte) string {
+// The agent that owns the route may add a session id from a header (agent.Agent.SessionID). It
+// comes after every other id (session.Explicit). With no agent id, the request gets the session
+// header unchanged, as a route no agent owns does. So an agent that does not override SessionID
+// changes nothing on its route. (The body's own ids, such as Bob Shell's metadata.taskId, are read
+// downstream either way: sessionIDFrom.)
+func (h *Handler) explicitSessionOf(r *http.Request, upPath string, body []byte) string {
 	sess := r.Header.Get("x-context-guru-session")
-	if upPath != bobModelPath {
+	id := agentSessionID(r, h.agentFor(upPath))
+	if id == "" {
 		return sess
 	}
-	return apply.ExplicitSession(sess, body, r.Header.Get("X-Task-Id"))
+	return apply.ExplicitSession(sess, body, id)
+}
+
+// agentSessionID is a.SessionID, fail open: a panic in the agent gives "", no agent id, so the
+// request keeps the session it has without one.
+func agentSessionID(r *http.Request, a agent.Agent) (id string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			logging.From(r.Context()).Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", a), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return a.SessionID(r.Header)
 }
 
 func isBobProfile(r *http.Request) bool {
@@ -1320,7 +1340,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
 		// Once, so the pipeline, the expand repair and the wire recorder use one id.
-		explicitSess := explicitSessionOf(r, static.path, body)
+		explicitSess := h.explicitSessionOf(r, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -2051,7 +2071,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSessionOf(r, up.path, body),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the

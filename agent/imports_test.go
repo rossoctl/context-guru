@@ -8,9 +8,9 @@ import (
 
 const module = "github.com/rossoctl/context-guru"
 
-// agent is a library package: a host (the proxy, the bifrost adapter) imports it, never the
-// reverse. This test enforces that rule. It reads the full dependency list, so an indirect
-// import through another package also fails it.
+// agent and every agent package under it (agent/bob) are library packages: a host (the proxy,
+// the bifrost adapter) imports them, never the reverse. This test enforces that rule. It reads
+// the full dependency list of ./..., so an indirect import, or a new agent package, is covered.
 func TestAgentDoesNotImportAHost(t *testing.T) {
 	// The go on PATH: the toolchain running this test. runtime.GOROOT is deprecated and can be
 	// empty under -trimpath or a moved toolchain.
@@ -18,18 +18,20 @@ func TestAgentDoesNotImportAHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go is not on PATH: %v", err)
 	}
-	out, err := exec.Command(goBin, "list", "-deps", ".").CombinedOutput()
+	out, err := exec.Command(goBin, "list", "-deps", "./...").CombinedOutput()
 	if err != nil {
 		// Fatal, not Skip: a guard that skips proves nothing.
 		t.Fatalf("go list failed: %v\n%s", err, out)
 	}
 	deps := strings.Fields(string(out))
-	if !contains(deps, module+"/agent") {
-		t.Fatalf("go list did not list the agent package; the guard would prove nothing:\n%s", out)
+	for _, want := range []string{module + "/agent", module + "/agent/bob"} {
+		if !contains(deps, want) {
+			t.Fatalf("go list did not list %s; the guard would prove nothing:\n%s", want, out)
+		}
 	}
 	for _, pkg := range deps {
 		if isHost(pkg) {
-			t.Errorf("package agent depends on host package %s; move the logic into a library package", pkg)
+			t.Errorf("an agent package depends on host package %s; move the logic into a library package", pkg)
 		}
 	}
 }
