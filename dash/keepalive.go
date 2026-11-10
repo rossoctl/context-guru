@@ -588,7 +588,8 @@ type KeepAliveBehaviour struct {
 	Gaps        []AccountGaps `json:"account_gaps"`
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
 	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
-	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is 20k since #858), and the panel says so.
+	// costs almost nothing at 20k (the pre-#435 gate), and the panel says so. The shipped floors are 20k for a
+	// tool wait or a subagent and 80k for a main thread's other waits (#858).
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -608,7 +609,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate and is the shipped floor again since #858 (80,000 in between).
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped floor for a tool wait or a subagent (#858); 80,000 is the general floor. Both are edges.
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -1661,6 +1662,9 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		k = recMaxPings
 	}
 	// The keeper applies per-wait counts only below 300 s of Idle: at 300 s or more it keeps the base.
+	// Known gap: this also turns the per-cause floor off (one general floor), while the keeper at 300 s or
+	// more keeps the per-cause floor and only the base count. So at 300 s or more the replay can
+	// under-count pings on 20k-80k tool waits and subagent spans.
 	if idleSeconds >= 300 {
 		wait.WaitPlan = false
 	}

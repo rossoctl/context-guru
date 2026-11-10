@@ -848,3 +848,25 @@ func TestAdaptLabelsStateTheSpacingTheArmsRunAt(t *testing.T) {
 		}
 	}
 }
+
+// The adapt replay gives a row the floor of its wait, as the keeper does: 20k for a tool stop or a
+// subagent, the general floor otherwise, and the general floor only for OpenAI (the keeper plans no
+// wait for OpenAI).
+func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
+	pol := CachePolicy{WaitPlan: true, MinPrefixTokens: 80000}
+	for _, c := range []struct {
+		name string
+		f    rowFacts
+		want int
+	}{
+		{"main tool stop", rowFacts{stop: "tool_use"}, 20000},
+		{"main end_turn", rowFacts{stop: "end_turn"}, 80000},
+		{"subagent end_turn", rowFacts{stop: "end_turn", subagent: true}, 20000},
+		{"openai tool stop", rowFacts{stop: "tool_calls", openai: true}, 80000},
+		{"openai subagent", rowFacts{stop: "end_turn", openai: true, subagent: true}, 80000},
+	} {
+		if got := rowFloor(pol, &c.f); got != c.want {
+			t.Errorf("%s: floor %d, want %d", c.name, got, c.want)
+		}
+	}
+}

@@ -9471,8 +9471,8 @@ async function loadKABehaviour() {
   $('#ka-prefix-note').textContent =
     'Each bar is a range of cached-prompt sizes at the moment the cache ran out. ' +
     `Half were under ${compact(b.prefix_p50)} tokens (10% under ${compact(b.prefix_p10)}, 90% under ${compact(b.prefix_p90)}). ` +
-    `${above} were already past 20k tokens, so the default "only sessions ` +
-    'with a large cached prompt" filter costs almost nothing.';
+    `${above} were already past 20k tokens, so the 20k floor for a tool wait or a subagent ` +
+    'costs almost nothing. A main thread that waits for a person needs 80k.';
   barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
     label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
     color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
@@ -9661,7 +9661,7 @@ async function loadKACalc() {
   host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
     el('p', {},
     'PINGS is every ping the policy would have sent over this window, gated as the ' +
-    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
+    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens for a tool wait or a subagent, 80k otherwise) and ' +
     'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
     'session has ended and sends its full K anyway. It counts only expiries that were ' +
     'addressable (the provider wrote a prefix that a ping could have refreshed). The live-plan row ' +
@@ -9719,7 +9719,7 @@ async function loadKARecommend() {
       rec.lo_usd > 0 ? 'good' : 'bad'),
     tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings'
       + (rec.plan === 'wait_plan' ? ' (base)' : ''),
-      'on sessions past their first request with a cached prompt over 20k tokens', 'accent'),
+      'on sessions past their first request with a cached prompt over 20k tokens for a tool wait or a subagent, 80k otherwise', 'accent'),
   ]));
   if (rec.plan === 'wait_plan' && rec.fixed_k) {
     host.appendChild(el('p', { class: 'note', 'data-testid': 'ka-rec-fixed' },

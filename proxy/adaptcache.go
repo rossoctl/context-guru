@@ -152,17 +152,27 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
-		// The floor follows the wait (Policy.WaitMinPrefix). A row has the stop reason, not the cause: a
-		// tool stop is a tool wait, any other stop is read as a wait for a person.
-		cause := waitcause.WaitingHuman
-		if slices.Contains(keepalive.ToolStopReasons, f.stop) {
-			cause = waitcause.WaitingOwnTool
-		}
-		if f.turn < 1 || f.prefix < int64(pol.WaitMinPrefix(cause, f.subagent)) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
+		if f.turn < 1 || f.prefix < int64(rowFloor(pol, f)) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
 			return 0, x, se
 		}
 		return pol.MaxPings, x, se
 	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens (%d for a tool wait or a subagent), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
+}
+
+// rowFloor is the prefix floor the keeper would apply to a replayed row (Policy.WaitMinPrefix). A row
+// has the stop reason, not the wait cause or the tool names: a tool stop is read as a tool wait, any
+// other stop as a wait for a person. So a main-thread tool stop that asks a person reads as a tool wait
+// here, as dash's storedWait reads it, and the replay can admit a few rows the keeper would refuse.
+// An OpenAI row gets the general floor only: the keeper plans no wait for OpenAI.
+func rowFloor(pol CachePolicy, f *rowFacts) int {
+	if f.openai {
+		return pol.MinPrefixTokens
+	}
+	cause := waitcause.WaitingHuman
+	if slices.Contains(keepalive.ToolStopReasons, f.stop) {
+		cause = waitcause.WaitingOwnTool
+	}
+	return pol.WaitMinPrefix(cause, f.subagent)
 }
 
 func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {

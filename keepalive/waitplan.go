@@ -100,7 +100,9 @@ func (p Policy) LowestMinPrefix() int {
 }
 
 // SpanPrefixOK reports whether a stored span of the given prefix clears the floor of its wait. It is
-// the replay's form of the keeper's gate, with the cause read as storedWait reads it.
+// the replay's form of the keeper's gate, with the cause read as storedWait reads it. A row with no
+// stored cause and no stop reason (an old row) gets the general floor, also on a subagent thread: the
+// replay then under-counts those rows, the safe direction.
 func (p Policy) SpanPrefixOK(s SpanFacts, prefix int64) bool {
 	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
 		return prefix >= int64(p.MinPrefixTokens)
