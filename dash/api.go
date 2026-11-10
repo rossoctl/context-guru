@@ -1461,7 +1461,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 				return nil
 			})
 		}
-		// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
+		// The declarations the filter stopped sending. Needs no pricer for the token counts, so it
 		// runs outside the block above; best-effort and non-fatal, because it is an addition to the
 		// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
 		// error swallowed here returns zeros, and a zero in a savings figure is a claim.

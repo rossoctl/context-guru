@@ -554,3 +554,24 @@ func TestFilterCreditKeepsDollarsForAHeldEstimatedRequest(t *testing.T) {
 		t.Errorf("baseline delta %g, held requests %d, want 0 and 4", d, o.EstimatedRequests)
 	}
 }
+
+// TestSelfRemovalsWithoutRatesLeavesTheRowUnpriced. A deployment with no pricer passes a nil price
+// function (API.priceFn). The savings-since-removal estimate (adaptToolsSaved) reaches
+// SelfRemovals with that nil, and the dollars are then unknown, not zero and not a panic.
+func TestSelfRemovalsWithoutRatesLeavesTheRowUnpriced(t *testing.T) {
+	db := seedCredit(t, 1000)
+	rows, err := db.SelfRemovals(Filter{Tenant: "t1"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d removed rows, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].Priced || rows[0].AvoidedUSD != 0 {
+		t.Errorf("priced=%v avoidedUSD=%g without rates, want unpriced and 0",
+			rows[0].Priced, rows[0].AvoidedUSD)
+	}
+	if rows[0].AvoidedReads == 0 {
+		t.Error("the token count is known without rates and must still stand")
+	}
+}

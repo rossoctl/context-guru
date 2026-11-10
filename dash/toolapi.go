@@ -1601,7 +1601,13 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 			r.SessionsAfter++
 			n := int64(s.reads + s.writes + s.fresh)
 			r.AvoidedReads += int64(c.tokens) * n
-			p, ok := price(s.model)
+			// A nil price function is a deployment with no rates (API.priceFn). The row stays
+			// unpriced and keeps its token count: unknown dollars are not zero dollars.
+			var p modelinfo.Price
+			ok := false
+			if price != nil {
+				p, ok = price(s.model)
+			}
 			if !ok || p.Zero() {
 				priced = false
 				continue
