@@ -1654,6 +1654,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// Deferral adds its names list to the messages after the pipeline reported its
 				// operations. Report it as an operation of its own, after theirs (#908).
 				if di != nil && !bytes.Equal(preDefer, body) {
+					if cp != nil {
+						cp.accPreDefer = preDefer
+					}
 					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], messageOps("tooldefer", preDefer, body)...)
 				}
 			}

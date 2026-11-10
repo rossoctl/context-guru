@@ -682,12 +682,30 @@ func seedStopReasonHistory(t *testing.T, f *mgrFixture, tid string) {
 			f.rec.Record(e)
 		}
 	}
-	for end := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		if p, _ := f.rec.DB().Requests(dash.Filter{Tenant: tid}, 0, 1); p != nil && p.Total >= sessions*perSession {
-			return
+	// The writer stores each row in its own transaction (the fixture sets BatchSize 1), so under -race on a loaded runner 160 rows can take
+	// longer than any short fixed wait. The recorder has no flush call, so wait on its counters: every captured row ends as written, dropped or
+	// errored. A drop or an error fails at once with the counts. The long bound is only a safety net.
+	for end := time.Now().Add(2 * time.Minute); ; time.Sleep(5 * time.Millisecond) {
+		st := f.rec.Stats()
+		if st.Dropped > 0 || st.Errors > 0 {
+			t.Fatalf("the writer lost rows: captured %d, written %d, dropped %d, errors %d", st.Captured, st.Written, st.Dropped, st.Errors)
+		}
+		if st.Written >= st.Captured {
+			p, err := f.rec.DB().Requests(dash.Filter{Tenant: tid}, 0, 1)
+			if err != nil {
+				t.Fatalf("reading the seeded rows: %v (captured %d, written %d)", err, st.Captured, st.Written)
+			}
+			if p != nil && p.Total >= sessions*perSession {
+				return
+			}
+			var total int64
+			if p != nil {
+				total = p.Total
+			}
+			t.Fatalf("the writer stored every captured row but the tenant has %d of %d: captured %d, written %d", total, sessions*perSession, st.Captured, st.Written)
 		}
 		if time.Now().After(end) {
-			t.Fatal("the writer did not persist the rows")
+			t.Fatalf("the writer did not persist the rows in time: captured %d, written %d, dropped %d, errors %d, queued %d", st.Captured, st.Written, st.Dropped, st.Errors, st.Queued)
 		}
 	}
 }

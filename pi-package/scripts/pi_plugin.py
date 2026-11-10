@@ -8,7 +8,8 @@ Design, in short:
   * Routing is one key per provider in Pi's models.json (`providers.<name>.baseUrl`). Nothing is
     checked per session: Pi reads the file, and the request goes to the proxy.
   * The proxy runs as a user service (launchd on macOS, systemd --user on Linux), so it is up before
-    Pi starts and restarts by itself after a crash or a login. No Pi session starts or checks it.
+    Pi starts and restarts by itself after a crash or a login. At session start the extension checks
+    /healthz once, and if the proxy does not answer it calls `restart` here once.
   * Every file it writes carries an ownership marker or a routing record, and uninstall and the reset
     hatch remove only what they own.
 """
@@ -143,12 +144,26 @@ def facts(**values):
         print(f"{key}=" + " ".join(str(value).split("\n")).replace("\r", " "))
 
 
-def healthy(port):
+# The time limit of the extension's session-start check. `restart` uses the same limit before it
+# restarts, so a proxy that is slow but alive is not killed.
+START_CHECK_SECONDS = 5
+
+
+def healthy(port, timeout=1):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
             return response.status == 200
     except Exception:
         return False
+
+
+def wait_healthy(port, tries=50):
+    """True once /healthz answers, checking every 0.1 s, about 5 s in all."""
+    for _ in range(tries):
+        if healthy(port):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def first_free_port():
@@ -200,6 +215,15 @@ def owned(path):
     try:
         return path.read_text().startswith(MARKER)
     except OSError:
+        return False
+
+
+def plist_owned(path):
+    """True when the LaunchAgent at `path` carries our ownership key."""
+    try:
+        with open(path, "rb") as handle:
+            return plistlib.load(handle).get("ContextGuruManaged") is True
+    except (OSError, ValueError, plistlib.InvalidFileException):
         return False
 
 
@@ -420,13 +444,8 @@ def start_service(executable, port, upstreams=None):
     elif kind == "launchd":
         plist = launchd_plist()
         plist.parent.mkdir(parents=True, exist_ok=True)
-        if plist.exists():
-            try:
-                with open(plist, "rb") as handle:
-                    if plistlib.load(handle).get("ContextGuruManaged") is not True:
-                        return False
-            except (OSError, ValueError, plistlib.InvalidFileException):
-                return False
+        if plist.exists() and not plist_owned(plist):
+            return False
         with open(plist, "wb") as handle:
             plistlib.dump({"Label": LAUNCHD_LABEL, "ContextGuruManaged": True, "ProgramArguments": command,
                            "RunAtLoad": True, "KeepAlive": True, "ProcessType": "Background",
@@ -442,11 +461,41 @@ def start_service(executable, port, upstreams=None):
             return False
     else:
         return False
-    for _ in range(50):
-        if healthy(port):
-            return True
-        time.sleep(0.1)
-    return False
+    return wait_healthy(port)
+
+
+def restart_service():
+    """Restart the user service we own, and nothing else. Returns restarted | no_service | not_owned |
+    failed | unsupported. A LaunchAgent that is not loaded is bootstrapped from its plist first."""
+    kind = service_kind()
+    try:
+        if kind == "systemd":
+            unit = systemd_unit()
+            if not unit.exists():
+                return "no_service"
+            if not owned(unit):
+                return "not_owned"
+            subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True,
+                           timeout=30)
+            return "restarted"
+        if kind == "launchd":
+            plist = launchd_plist()
+            if not plist.exists():
+                return "no_service"
+            if not plist_owned(plist):
+                return "not_owned"
+            domain = f"gui/{os.getuid()}"
+            target = f"{domain}/{LAUNCHD_LABEL}"
+            kick = ["launchctl", "kickstart", "-k", target]
+            if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
+                # Not loaded (a bootout, or a failed login start): load the plist, then start it.
+                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
+                               timeout=30)
+                subprocess.run(kick, check=True, capture_output=True, timeout=30)
+            return "restarted"
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return "failed"
+    return "unsupported"
 
 
 def stop_service():
@@ -460,11 +509,7 @@ def stop_service():
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
         return "stopped"
     if plist.exists():
-        try:
-            with open(plist, "rb") as handle:
-                if plistlib.load(handle).get("ContextGuruManaged") is not True:
-                    return "not_owned"
-        except (OSError, ValueError, plistlib.InvalidFileException):
+        if not plist_owned(plist):
             return "not_owned"
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True)
         plist.unlink()
@@ -690,6 +735,45 @@ def status(args):
     return 0 if values["result"] == "ok" else 1
 
 
+def restart_lock():
+    """An exclusive lock on a file in the state directory, held until the returned file is closed.
+    A second caller waits here until the first one is done."""
+    import fcntl  # Unix only, like the services this restarts.
+    path = state_dir() / "restart.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+def restart(args):
+    """Restart the proxy service once, for the extension's session-start check. One restart runs at a
+    time (a lock file). A caller that waited for the lock checks health again first, so when two Pi
+    sessions start together, the second one finds the proxy up and does not restart it again. The
+    health check here has the extension's 5-second limit, so a slow but live proxy is left alone."""
+    record = read_record()
+    port = int(record.get("port") or 0)
+    if not port:
+        facts(result="not_installed")
+        return 2
+    where = {"port": port, "log": state_dir() / "proxy.log"}
+    # Only a hatch that exists is named, as in setup: a failed setup can leave a record without one.
+    if reset_hatch().exists():
+        where["reset_hatch"] = reset_hatch()
+    with restart_lock():
+        if healthy(port, timeout=START_CHECK_SECONDS):
+            facts(result="already_up", **where)
+            return 0
+        service = restart_service()
+        up = service == "restarted" and wait_healthy(port)
+    facts(result="up" if up else "down", service=service, **where)
+    return 0 if up else 1
+
+
 def configure(args):
     record = read_record()
     if not record.get("port"):
@@ -816,10 +900,11 @@ def main():
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--install", action="store_true")
+    commands.add_parser("restart")
     remove = commands.add_parser("uninstall")
     remove.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    return {"setup": setup, "status": status, "configure": configure, "update": update,
+    return {"setup": setup, "status": status, "restart": restart, "configure": configure, "update": update,
             "uninstall": uninstall}[args.command](args)
 
 

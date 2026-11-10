@@ -256,7 +256,7 @@ def name_agents(doc: dict, transcript: str) -> None:
 TOKEN_TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
 
 
-def tokens_text(stats: dict | None, human) -> str | None:
+def band_tokens_text(stats: dict | None, human) -> str | None:
     """`saved 85.0k wr · cost 40.0k rd`: the tokens every feature saved, and what they cost, by tier, from /api/stats
     `tokens`. The tiers are never added into one number: the provider does not say how a usage limit weights them. A
     tier at 0 is left out; `cost …` only when a tier was paid. None when the answer has no `tokens` (a proxy before
@@ -283,7 +283,7 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
     """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
     longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
     from the status line's own cached /api/stats), and on a subscription the tokens this session saved and cost in the
-    current 5-hour window (`tokens_text`). Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
+    current 5-hour window (`band_tokens_text`). Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
     try:
         import statusline as sl  # noqa: PLC0415
         strip = lambda t: re.sub(r"\033\[[0-9;]*m", "", t or "")  # noqa: E731
@@ -299,7 +299,7 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
             mine, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}&session={sid}", f"win-{window_start_ms // 1000}-{sid}", sl.WINDOW_TTL_SECONDS)
             # A proxy before #999 has no `tokens`: it keeps its compaction-only `rd / wr` figure.
             has_tokens = isinstance(mine, dict) and isinstance(mine.get("tokens"), dict)
-            saved = tokens_text(mine, sl._human) if has_tokens else sl._saved_tokens_text(mine)
+            saved = band_tokens_text(mine, sl._human) if has_tokens else sl._saved_tokens_text(mine)
             if saved:
                 doc["window_saved"] = saved
     except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
