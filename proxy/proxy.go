@@ -375,6 +375,8 @@ type Handler struct {
 	// never on the keep-alive ping path, so a ping can never make itself "current".
 	// Empty until the first real request arrives.
 	lastSession string
+	// capCache holds the cap's correction per /stats scope for capCacheTTL (savings.go).
+	capCache capCorrectionCache
 
 	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
 	defer_ deferHost

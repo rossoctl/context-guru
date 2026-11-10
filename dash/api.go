@@ -1558,18 +1558,13 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 }
 
 // capCorrection is the headline's correction for the filter f, for the readers that sum stored
-// rows and so cannot apply a ledger row by row. notApplied is true when there is nothing to cap
-// against or the scan failed: the reader's totals are then the stored, uncapped credit.
+// rows and so cannot apply a ledger row by row. notApplied is true when a ledger did not run: the
+// reader's totals then hold the stored, uncapped credit in whole or in part. It goes through
+// a.replayLedger, like the headline, so a test can fail the replay ledger for every reader.
 func (a *API) capCorrection(r *http.Request, f Filter) (corr float64, notApplied bool) {
-	if a.pricer == nil || a.windows == nil {
-		return 0, true
-	}
-	c, err := a.db(r).CapCorrectionUSD(f, a.windows, a.pricer)
-	if err != nil {
-		slog.Warn("context-guru: replay cap unavailable; the totals keep their stored credit", "err", err)
-		return 0, true
-	}
-	return c, false
+	db := a.db(r)
+	c := db.capCorrection(f, a.windows, a.pricer, func(f Filter) (*ReplayLedger, error) { return a.replayLedger(db, f) })
+	return c.CorrectionUSD, c.NotApplied
 }
 
 func (a *API) requests(w http.ResponseWriter, r *http.Request) {
