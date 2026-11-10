@@ -39,6 +39,8 @@ DEFAULT_STRATEGY = "30-min-ping"
 # Codex routes OpenAI traffic. A strategy for "any" provider fits too.
 PROVIDERS = ("openai", "any")
 STRATEGIES_TIMEOUT = 5
+PROBE_SCRUBBED_PREFIXES = ("DASHBOARD_", "SESSION_STATE", "CG_RECORD_", "ARCHIVE_")
+PROBE_SCRUBBED_NAMES = {"CONTROL_DB", "UPSTREAMS", "STORE", "IDLE_EXIT"}
 
 
 def codex_home():
@@ -251,12 +253,20 @@ def load_strategy_table(binary):
     hint = update_hint()
     if not binary:
         raise RuntimeError(f"no proxy binary found to list cache strategies; {hint}")
-    env = dict(os.environ, LISTEN_ADDR="127.0.0.1:0", CONFIG="")
+    # A v0.7.0 binary serves instead. The probe must not open the user's dashboard DB, session
+    # state, control DB, record dirs or store. So scrub every setting that turns one on, and run in
+    # a fresh directory so a relative default path cannot land in the user's folder.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(PROBE_SCRUBBED_PREFIXES) and k not in PROBE_SCRUBBED_NAMES}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
     try:
-        run = subprocess.run([binary, "strategies"], capture_output=True, text=True,
-                             timeout=STRATEGIES_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as scratch:
+            run = subprocess.run([binary, "strategies"], capture_output=True, text=True,
+                                 timeout=STRATEGIES_TIMEOUT, env=env, cwd=scratch,
+                                 stdin=subprocess.DEVNULL)
         table, code = json.loads(run.stdout), run.returncode
     except (OSError, ValueError, subprocess.TimeoutExpired):
+        # ValueError includes UnicodeDecodeError from output that is not UTF-8.
         table, code = None, 1
     rows = table.get("strategies") if isinstance(table, dict) else None
     valid = (code == 0 and isinstance(rows, list) and rows and isinstance(table.get("presets"), list)

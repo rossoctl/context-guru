@@ -752,5 +752,29 @@ screen_reader_detection_done = true
         self.assertEqual(PLUGIN.read_record()["binary"], "/old/proxy")
 
 
+    def test_the_probe_scrubs_state_settings_and_runs_in_a_scratch_directory(self):
+        out = Path(self.temp.name) / "probe.txt"
+        binary = write_script(
+            Path(self.temp.name) / "probe",
+            f'{{ env | grep -E "^(DASHBOARD|SESSION_STATE|CONTROL_DB|UPSTREAMS|STORE|IDLE_EXIT|CG_RECORD)"; '
+            f'echo "PWD=$(pwd)"; }} > {out}\ncat <<\'EOF\'\n' + json.dumps(TABLE) + "\nEOF\n")
+        parent = {"DASHBOARD": "1", "DASHBOARD_DB": "/x", "DASHBOARD_CONTENT": "1", "SESSION_STATE": "1",
+                  "CONTROL_DB": "/c", "UPSTREAMS": "/u", "CG_RECORD_DIR": "/r", "STORE": "/s",
+                  "IDLE_EXIT": "1s"}
+        with mock.patch.dict(os.environ, parent):
+            self.real_table(binary)
+        lines = out.read_text().splitlines()
+        self.assertIn("DASHBOARD=0", lines)
+        self.assertEqual([l for l in lines if l.split("=")[0] != "PWD" and l != "DASHBOARD=0"], [])
+        cwd = [l for l in lines if l.startswith("PWD=")][0][4:]
+        self.assertIn("cg-strategies-", cwd)
+        self.assertFalse(Path(cwd).exists())
+
+    def test_output_that_is_not_utf8_is_the_old_binary_error(self):
+        binary = write_script(Path(self.temp.name) / "bin", "printf '\\377\\376 not utf8'\n")
+        with self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+            self.real_table(binary)
+
+
 if __name__ == "__main__":
     unittest.main()
