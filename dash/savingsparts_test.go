@@ -67,9 +67,12 @@ func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
 	app := stripComments(readUI(t, "ui/app.js"))
 	for _, want := range []string{
 		"if (!readsLimits(account && account.tenant)) return Promise.resolve(false);", // a manager keeps dollars
-		"state.subLimitsP = ctl('/api/me/limits').catch(() => null);",
-		"return state.subLimitsP.then((l) => isSubscription(l, Date.now()));",
+		"p.catch(() => { if (state.subLimitsP === p) state.subLimitsP = null; });", // a failed answer is not kept
+		"return state.subLimitsP.then((l) => isSubscription(l, Date.now()), () => false);",
 		"sessionHeaders(sub);",
+		"paint(!!state.sessSub);", // the table paints without waiting for the limits
+		"subP.then((sub) => { if (seq === state.sessSeq && sub !== state.sessSub) paint(sub); });",
+		"usdOrNA(0, false, 'no turn in this session reported the provider usage a cost needs')", // n/a, not 0
 		"sub ? sessionTokenCost(s) :",
 		"sub ? sessionTokenSaved(s) :",
 		"sub ? sessionTokenKeepAlive(s) :",

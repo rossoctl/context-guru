@@ -617,8 +617,10 @@ type SessionRow struct {
 //   - Tokens is the accountant's figure for the session, less the keep-alive rescue: the token form of
 //     saved_usd. It also has the split, the 1-hour head and the ended-change break, which the dollar
 //     row has no column for.
-//   - KeepAliveTokens is the keep-alive rescue (the tok_ka columns): the token form of
-//     keepalive_saved_usd. Tokens and KeepAliveTokens add up to the tok_total columns.
+//   - KeepAliveTokens is the accountant's own keep-alive rescue figure (the tok_ka columns). It is a
+//     different measurement from keepalive_saved_usd, which is the legacy credit gated on read
+//     (kaSavedSince): the two can disagree on a row. Tokens and KeepAliveTokens add up to the
+//     tok_total columns.
 //   - KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens: the token form of
 //     keepalive_ping_usd. It is never added into a cost: the view shows it on its own line.
 //   - UsedTokens is the session's agent requests' billed input tokens: the token form of cost_usd.
