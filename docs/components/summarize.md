@@ -17,7 +17,7 @@ The summarizer is grounded in the **current task** (first user turn + recent tur
 
 `summarize` calls a model chosen by `model.source`: `incoming` (default — reuse the proxied
 request's own model + key) or `config` (a dedicated cheap model set via `CHEAP_MODEL*` env / the
-gateway's `CheapModel`). When no model is available it degrades to a no-op.
+gateway's `CheapModel`). When no cheap model is set, `cache_aware_summarizer` sends its summary instruction to the caller's own model, over the previous turn's cached request. This works on Anthropic, Responses and Chat Completions routes (Chat since #1030). When no model is available at all it degrades to a no-op.
 
 **Gating + reuse:** a `trigger` (`min_request_tokens`, `min_messages`; legacy `start_from_message`
 folds into `min_messages`) gates the first summary so it fires only on a large/deep transcript.

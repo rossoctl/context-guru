@@ -631,7 +631,6 @@ func (o *Overview) ApplyReplayLedger(l *ReplayLedger) {
 	o.BaselineCostUSD += delta
 	o.NetSavedUSD += delta
 	o.TotalSavedUSD += delta
-	o.TotalReducedUSD += delta
 }
 
 // applyReplayLedgerToRow moves one component's row onto the ledger. Credit the walk did not see

@@ -158,7 +158,6 @@ func (o *Overview) ApplySummarizeLedger(l *SummarizeLedger) {
 	o.BaselineCostUSD += delta
 	o.NetSavedUSD += delta
 	o.TotalSavedUSD += delta
-	o.TotalReducedUSD += delta
 }
 
 // applySummarizeLedgerToRow moves summarize's component row onto the ledger: the saved figure,

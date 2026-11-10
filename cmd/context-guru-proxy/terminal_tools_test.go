@@ -40,12 +40,12 @@ func TestHostConfigWithTerminalToolsStillBuilds(t *testing.T) {
 // switch the keep-alive on for it), and the off switch reaches it.
 func TestCachePolicyCarriesTheWaitPlan(t *testing.T) {
 	p := cachePolicy(config.CacheConfig{})
-	if !p.WaitPlan || p.On() || p.ToolWaitMaxPings != 8 || p.BackgroundExtraPings != 3 || p.HumanExtraPings != 1 {
+	if !p.WaitPlan || p.On() || p.ToolWaitMaxPings != 8 || p.BackgroundExtraPings != 3 || p.HumanExtraPings != 1 || p.ToolWaitMinPrefix != 20000 {
 		t.Errorf("parked block: %+v", p)
 	}
 	off := false
 	p = cachePolicy(config.CacheConfig{KeepAlive: true, KeepAliveWaitPlan: &off})
-	if p.WaitPlan || !p.On() || p.MinPrefixTokens != 20000 {
+	if p.WaitPlan || !p.On() || p.MinPrefixTokens != 80000 {
 		t.Errorf("switch off: %+v", p)
 	}
 }

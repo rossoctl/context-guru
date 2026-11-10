@@ -326,7 +326,7 @@ func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.term
 // ~$8.8 of avoided misses, and 45 never came back, ~$5.8 of pings. A blanket gate would lose more
 // than it saves there.
 func (e *kaEntry) pingable() bool {
-	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
+	if e.turn < 1 || e.prefix < int64(e.pol.WaitMinPrefix(e.wait, IsSubagentThread(e.thread))) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
 	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no

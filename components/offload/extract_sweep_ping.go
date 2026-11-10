@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ import (
 // cached prefix and reset the provider's TTL. A prefix ask does the same read. So when this component
 // has candidates for a thread, the keeper sends the sweep's question INSTEAD of the ping: same
 // refresh, and the only extra cost is the answer. There is no timer of its own. No keep-alive means
-// no question, and a prompt under the keep-alive floor (80k tokens, #444) gets none, because the
+// no question, and a prompt under the keep-alive floor of its wait (80k tokens, #444; 20k for a tool wait, background work, a teammate or a subagent) gets none, because the
 // keeper never pings it.
 //
 // THE SAME PATTERN AS cache_aware_summarizer's substitute (cache_aware_keepalive.go), deliberately:
@@ -106,6 +107,9 @@ type SweepPingResult struct {
 	Model                                     string
 	FreshInput, Output, CacheWrite, CacheRead int
 	CacheWrite1h                              int
+	// Header is the response headers of the newest question that got an answer, or nil. The keeper
+	// puts them on the ping row it books, as for KeepAliveSummaryResult.Header (#1016).
+	Header http.Header
 	// Substituted is true when the question reached the provider and touched the prefix (read or
 	// wrote it). The keeper then counts it as the ping for this idle span. False means the keeper
 	// sends the ordinary ping: the call never left, or failed before using the cache.
@@ -635,7 +639,7 @@ func (cand *sweepPingCandidate) ask(cands []sweepCand, collected *components.Rep
 	in, out := br.prompt, br.completion
 	res := SweepPingResult{Model: sink.Model(), FreshInput: int(in), Output: int(out),
 		CacheWrite: int(br.cacheWrite), CacheRead: int(br.cacheRead),
-		CacheWrite1h: int(sink.CacheWrite1h()), Offered: len(cands), Gates: gates, Events: events}
+		CacheWrite1h: int(sink.CacheWrite1h()), Header: sink.Header(), Offered: len(cands), Gates: gates, Events: events}
 	if res.Model == "" {
 		res.Model = c.ModelName
 	}

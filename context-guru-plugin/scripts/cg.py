@@ -160,8 +160,8 @@ def levers(st: dict) -> list[tuple[str, float]]:
     Sign convention of `delta_usd` (dash/overview.go, waterfall()): a saving is NEGATIVE (money not
     spent), a cost is POSITIVE. So the saving keys are negated here, and the cost keys are read as
     they are. A key that really is a net loss then shows as negative. `self_removed` is left out on
-    purpose: the waterfall keeps it OUTSIDE total_saved (it is the account's own doing, not ours),
-    so with it the rows could not add up to the headline.
+    purpose: a proxy older than #584 still sends it, OUTSIDE total_saved (it is the account's own
+    doing, not ours), so with it the rows could not add up to the headline.
     """
     w = {x["key"]: x["delta_usd"] for x in (st.get("waterfall") or [])}
     rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),

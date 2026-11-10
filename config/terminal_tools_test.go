@@ -62,12 +62,14 @@ func TestKeepAliveWaitPlanYAML(t *testing.T) {
 	}
 }
 
-// #858: the default minimum prefix is 20000; an explicit value stays.
-func TestKeepAliveMinPrefixDefaultIs20k(t *testing.T) {
-	if got := (CacheConfig{}).Resolved().KeepAliveMinPrefixTokens; got != 20000 {
-		t.Errorf("default = %d, want 20000", got)
+// #858: the general minimum prefix is 80000 and the tool-wait one is 20000; an explicit value stays.
+func TestKeepAliveMinPrefixDefaults(t *testing.T) {
+	r := (CacheConfig{}).Resolved()
+	if r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 {
+		t.Errorf("defaults = %d / %d, want 80000 / 20000", r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens)
 	}
-	if got := (CacheConfig{KeepAliveMinPrefixTokens: 80000}).Resolved().KeepAliveMinPrefixTokens; got != 80000 {
-		t.Errorf("explicit 80000 became %d", got)
+	r = (CacheConfig{KeepAliveMinPrefixTokens: 50000, KeepAliveToolWaitMinPrefixTokens: 10000}).Resolved()
+	if r.KeepAliveMinPrefixTokens != 50000 || r.KeepAliveToolWaitMinPrefixTokens != 10000 {
+		t.Errorf("explicit 50000 / 10000 became %d / %d", r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens)
 	}
 }
