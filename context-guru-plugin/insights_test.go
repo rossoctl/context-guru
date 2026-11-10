@@ -2151,7 +2151,16 @@ func TestAnAccountsOwnRemovalIsNotShownAsOurSaving(t *testing.T) {
 	}
 	stub := newAPIStub(t, map[string]string{"/api/stats": window(30), "/api/tools": body})
 	dir := insightsProject(t, map[string]any{"port": stub.port, "cache_strategy": "none"})
-	out, _ := runInsights(t, dir, nil, "all")
+	out, code := runInsights(t, dir, nil, "all")
+	// A crashed report has no findings, no facts and no figures, so every absence check below would
+	// pass. The exit code and one finding that this fixture always raises show the report ran.
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if !contains(findingIDs(out), "declarations-unused-share") {
+		t.Fatalf("the report did not raise the finding this fixture always raises, so it did not "+
+			"run to the end and the absence checks prove nothing:\n%s", out)
+	}
 	if contains(findingIDs(out), "self-removed-credit") {
 		t.Errorf("an account's own removal came back as a finding:\n%s", out)
 	}
