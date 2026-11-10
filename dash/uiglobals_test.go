@@ -64,4 +64,3 @@ func TestDashboardScriptsDeclareEachTopLevelNameOnce(t *testing.T) {
 		t.Fatalf("checked only %d top-level names in ui/*.js; the pattern or the path is wrong", checked)
 	}
 }
-
