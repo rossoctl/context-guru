@@ -9080,7 +9080,7 @@ function renderKADecision(o, rec) {
     el('p', { class: 'ka-sentence' }, sentence),
     setting ? el('p', { class: 'ka-setting', 'data-testid': 'ka-setting' }, setting) : null,
     tk ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured-tokens' },
-      el('strong', {}, 'Measured on the sessions where it ran: ' + tk.rescue),
+      el('strong', {}, tk.measuredText),
       el('br'), el('strong', {}, 'Pings: ' + tk.pings),
       el('br'), 'On ' + num(o.sessions_touched) + ' sessions. The saving is an ',
       term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
@@ -9108,7 +9108,7 @@ function renderKAVerdict(o) {
   const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
-      ran ? (tk ? 'Ahead or behind at API-price weights · ' : '') + num(o.sessions_touched) + ' sessions touched — see the decision row above'
+      ran ? (tk && o.pings ? 'Ahead or behind at API-price weights · ' : '') + num(o.sessions_touched) + ' sessions touched — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
     tk ? tile('ka-net-tok', 'Cache strategy, measured', ran ? tk.rescue : '—',
       ran ? 'pings: ' + tk.pings + ' — on the sessions it fired on, an upper bound, not the decision' : 'none')
@@ -9142,7 +9142,7 @@ function renderKAVerdict(o) {
     row('Cache-strategy requests sent', num(o.pings) + (tk ? ' · ' + tk.pings : ' for ' + usd(o.ping_usd)),
       ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'),
         tk ? ' counts against your limit.' : ' is billed to your own key.']);
-    row('Cache rewrites avoided', 'up to ' + (tk ? tk.rescue : usd(o.saved_usd)),
+    row('Cache rewrites avoided', tk ? tk.avoidedText : 'up to ' + usd(o.saved_usd),
       [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
   }
   if (tk && o.tokens_unmeasured_requests > 0) {
@@ -9214,7 +9214,7 @@ function renderKADownside(o) {
   if (o.net_usd < 0) {
     worst.appendChild(el('div', { class: 'banner bad', 'data-testid': 'ka-turn-off' },
       tk ? el('div', {}, el('strong', {}, 'At API-price weights this costs more than it saves. '),
-        'Over this window the pings: ' + tk.pings + '. The rescues: ' + tk.rescue + '.')
+        'Over this window the pings: ' + tk.pings + '. ' + tk.rescuesText)
         : el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
           'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
           usd(o.saved_usd) + '.'),

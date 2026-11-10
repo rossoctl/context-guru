@@ -208,10 +208,22 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt) {
 // are not added into the rescue's cost, and the tiers have no common unit. `fmt` formats a count.
 // An all-zero rescue is an absence when requests went unpriced (`tokens_unmeasured_requests`):
 // it says `not measured`, as the Overview card does. Only a priced zero says `saved 0 tokens`.
+// `measured` is false for that absence. The sentences that carry the rescue branch on it, so an
+// absence never reads as a figure ("up to not measured"):
+//   measuredText  the line under the forecast
+//   avoidedText   the "Cache rewrites avoided" fact
+//   rescuesText   the "costs more than it saves" banner
 function kaTokenLines(o, fmt) {
-  const rescue = tokenLine(o && o.tokens, fmt)
-    || ((o && o.tokens_unmeasured_requests) > 0 ? 'not measured' : 'saved 0 tokens');
-  return { rescue, pings: pingLine(o, fmt) || 'cost 0 tokens' };
+  const line = tokenLine(o && o.tokens, fmt);
+  const measured = line !== '' || !((o && o.tokens_unmeasured_requests) > 0);
+  const rescue = measured ? (line || 'saved 0 tokens') : 'not measured';
+  return {
+    measured, rescue, pings: pingLine(o, fmt) || 'cost 0 tokens',
+    measuredText: measured ? 'Measured on the sessions where it ran: ' + rescue
+      : 'Not measured in tokens on the sessions where it ran',
+    avoidedText: measured ? 'up to ' + rescue : 'not measured',
+    rescuesText: measured ? 'The rescues: ' + rescue + '.' : 'The rescues are not measured in tokens.',
+  };
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,

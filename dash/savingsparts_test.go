@@ -77,6 +77,10 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 		"'data-testid': 'ka-split-tokens'",
 		"tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd)", // the dollar view stays for everyone else
 		"o.tokens_unmeasured_requests > 0",
+		"el('strong', {}, tk.measuredText)", // an absence never reads as a figure (#1042)
+		"tk ? tk.avoidedText : 'up to ' + usd(o.saved_usd)",
+		"'. ' + tk.rescuesText",
+		"tk && o.pings ? 'Ahead or behind at API-price weights · ' : ''", // no prefix beside "No pings yet"
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)

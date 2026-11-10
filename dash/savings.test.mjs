@@ -237,13 +237,20 @@ test('the Cache strategy tab shows the rescue and the pings in tokens, never net
     keepalive_ping_tokens: { input: 0, cache_read: 410000, cache_write_5m: 900, cache_write_1h: 0 },
   };
   const t = kaTokenLines(l, k);
-  assert.deepEqual(t, { rescue: 'saved 85.0k wr · cost 40.0k rd', pings: 'cost 0.9k wr · 410.0k rd' });
+  assert.deepEqual(t, { measured: true, rescue: 'saved 85.0k wr · cost 40.0k rd', pings: 'cost 0.9k wr · 410.0k rd',
+    measuredText: 'Measured on the sessions where it ran: saved 85.0k wr · cost 40.0k rd',
+    avoidedText: 'up to saved 85.0k wr · cost 40.0k rd',
+    rescuesText: 'The rescues: saved 85.0k wr · cost 40.0k rd.' });
   assert.ok(!/\$/.test(t.rescue + t.pings), 'no dollars');
   // The pings are not in the rescue's cost.
   assert.ok(!/410/.test(t.rescue));
   // A ledger with no tokens yet, or an old server without the fields.
-  assert.deepEqual(kaTokenLines({}, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
-  assert.deepEqual(kaTokenLines(null, k), { rescue: 'saved 0 tokens', pings: 'cost 0 tokens' });
+  for (const o of [{}, null]) {
+    const z = kaTokenLines(o, k);
+    assert.equal(z.measured, true);
+    assert.equal(z.rescue, 'saved 0 tokens');
+    assert.equal(z.pings, 'cost 0 tokens');
+  }
 });
 
 // A zero is a measurement only when the requests were priced (#1042 review).
@@ -253,10 +260,22 @@ test('an all-zero rescue with unpriced requests says not measured; a priced zero
   // The golden fixture's ledger (dash/testdata/golden/keepalive.json): no row priced.
   const golden = JSON.parse(readFileSync(new URL('./testdata/golden/keepalive.json', import.meta.url), 'utf8'));
   assert.equal(golden.tokens_unmeasured_requests, 591);
-  assert.equal(kaTokenLines(golden, String).rescue, 'not measured');
-  assert.equal(kaTokenLines(golden, String).pings, 'cost 720540 rd · 150 in');
+  const g = kaTokenLines(golden, String);
+  assert.equal(g.measured, false);
+  assert.equal(g.rescue, 'not measured');
+  assert.equal(g.pings, 'cost 720540 rd · 150 in');
+  // The sentences that carry the rescue say the absence in words, never as a figure.
+  assert.equal(g.measuredText, 'Not measured in tokens on the sessions where it ran');
+  assert.equal(g.avoidedText, 'not measured');
+  assert.equal(g.rescuesText, 'The rescues are not measured in tokens.');
   // Every request priced, and nothing rescued: a true zero.
-  assert.equal(kaTokenLines({ tokens: { saved: zero, caused: zero }, tokens_unmeasured_requests: 0 }, String).rescue, 'saved 0 tokens');
+  const p = kaTokenLines({ tokens: { saved: zero, caused: zero }, tokens_unmeasured_requests: 0 }, String);
+  assert.equal(p.measured, true);
+  assert.equal(p.rescue, 'saved 0 tokens');
+  assert.equal(p.measuredText, 'Measured on the sessions where it ran: saved 0 tokens');
+  assert.equal(p.avoidedText, 'up to saved 0 tokens');
   // Some requests unpriced, but a rescue measured: the measured line shows.
-  assert.equal(kaTokenLines({ tokens: { saved: { cache_write_5m: 7 } }, tokens_unmeasured_requests: 3 }, String).rescue, 'saved 7 wr');
+  const m = kaTokenLines({ tokens: { saved: { cache_write_5m: 7 } }, tokens_unmeasured_requests: 3 }, String);
+  assert.equal(m.measured, true);
+  assert.equal(m.rescue, 'saved 7 wr');
 });
