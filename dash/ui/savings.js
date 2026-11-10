@@ -149,32 +149,41 @@ function hasTokens(flow) { return tokenLine(flow, String) !== ''; }
 const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
 
 // The Overview cards in tokens, from tokens.by_feature (full read only):
-//   keepalive   the rescue; its cost includes what the pings paid (keepalive_ping_tokens)
+//   keepalive   the rescue (what the pings paid is not in it: see pingLine)
 //   cachesplit, ttl
 //   cache       the three above together: the Cache card
 //   filter      toolfilter;   defer  tooldefer
 //   compaction  every other entry (the preset's components and ended_change)
+// The cards add up to the total (totalTokens), tier by tier.
 function featureTokens(o) {
   const bf = (o && o.tokens && o.tokens.by_feature) || {};
   const flow = (...fs) => ({ saved: addTiers(...fs.map((f) => f && f.saved)), caused: addTiers(...fs.map((f) => f && f.caused)) });
-  const ping = { saved: null, caused: o && o.keepalive_ping_tokens };
   const rest = Object.keys(bf).filter((k) => !CACHE_FEATURES.includes(k) && k !== 'toolfilter' && k !== 'tooldefer');
   return {
-    keepalive: flow(bf.keepalive, ping),
+    keepalive: flow(bf.keepalive),
     cachesplit: flow(bf.cachesplit),
     ttl: flow(bf.ttl),
-    cache: flow(bf.keepalive, bf.cachesplit, bf.ttl, ping),
+    cache: flow(bf.keepalive, bf.cachesplit, bf.ttl),
     filter: flow(bf.toolfilter),
     defer: flow(bf.tooldefer),
     compaction: flow(...rest.map((k) => bf[k])),
   };
 }
 
-// The total in tokens: tokens.saved, and tokens.caused plus the pings, which are not agent traffic
-// and so are not in tokens.caused. The cards add up to it, tier by tier.
+// The total in tokens: tokens.saved and tokens.caused. The pings are not in it (pingLine).
 function totalTokens(o) {
   const t = (o && o.tokens) || {};
-  return { saved: addTiers(t.saved), caused: addTiers(t.caused, o && o.keepalive_ping_tokens) };
+  return { saved: addTiers(t.saved), caused: addTiers(t.caused) };
+}
+
+// What the cache strategy's keep-alive pings paid, on a line of its own: `cost 900 wr · 410.0k rd`,
+// or '' when they paid nothing. A ping is not agent traffic, so it is not in the total or in any
+// card's cost. Every screen follows this rule, because the band's lean read has no ping tokens.
+// The keep-alive's net is its rescue line less this line.
+const PING_LABEL = 'Keep-alive pings (not in the total)';
+function pingLine(o, fmt) {
+  const t = tierText(o && o.keepalive_ping_tokens, fmt);
+  return t ? 'cost ' + t : '';
 }
 
 // The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
@@ -183,15 +192,17 @@ function totalTokens(o) {
 function subscriptionHeadline(limits, o, w, nowMs, fmt) {
   if (!isSubscription(limits, nowMs)) return null;
   const main = tokenLine(totalTokens(o), fmt) || 'saved 0 tokens';
+  const ping = pingLine(o, fmt);
+  const pings = ping ? PING_LABEL + ': ' + ping : '';
   const f = liveFiveHour(limits, nowMs);
   const p = f ? fiveHourSavedPct(f, w) : null;
   const tail = ' (estimate at API-price weights)';
   const estimate = p === null ? ''
     : p.hit ? '≈ without context-guru you would have hit the 5-hour limit' + tail
       : '≈ ' + (p.pct < 1 ? '< 1' : String(Math.round(p.pct))) + '% of the 5-hour limit' + tail;
-  return { main, estimate };
+  return { main, pings, estimate };
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens };
+  tierText, addTiers, tokenLine, hasTokens, featureTokens, totalTokens, pingLine, PING_LABEL };

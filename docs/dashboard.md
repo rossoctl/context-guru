@@ -470,11 +470,14 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
 - **The display rule.** One line per saving: the saved tiers that are not 0, in the order `wr`
   (`cache_write_5m`), `wr1h` (`cache_write_1h`), `rd` (`cache_read`), `in` (`input`). The caused
   tiers follow as `cost`. Example: `saved 85.0k wr · cost 40.0k rd`. Tiers are never added.
-- **The total.** `tokens.saved`, and `tokens.caused` plus `keepalive_ping_tokens` as the cost. The
-  cards add up to it, tier by tier.
+- **The total.** `tokens.saved` and `tokens.caused`. The cards add up to it, tier by tier.
+- **Keep-alive pings** show on a line of their own, under the total and on the Cache card:
+  `Keep-alive pings (not in the total): cost 900 wr · 410.0k rd`. A ping is not agent traffic, so
+  `keepalive_ping_tokens` is not in the total or in any card's cost. Every screen follows this rule:
+  the band's lean read has no ping tokens. The keep-alive's net is its rescue line less the pings line.
 - **The cards** read `tokens.by_feature`:
-  - Cache: `keepalive`, `cachesplit` and `ttl`, with one row each. The keep-alive cost includes
-    `keepalive_ping_tokens`. Manual pings have no token figure, so they do not show.
+  - Cache: `keepalive`, `cachesplit` and `ttl`, with one row each, and the pings line. Manual pings
+    have no token figure, so they do not show.
   - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
   - Preset: every other entry (the preset's components and `ended_change`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price

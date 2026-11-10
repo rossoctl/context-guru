@@ -51,6 +51,8 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 		"const ft = sub ? featureTokens(o) : null;",                            // the cards read tokens.by_feature
 		"saving('saved-compaction-usd', parts.compaction, ft && ft.compaction", // a card shows tokens on a subscription
 		"o.tokens_unmeasured_requests",                                         // the "not measured" note
+		"'data-testid': 'saved-total-pings'",                                   // the pings: a line of their own
+		"'data-testid': 'saved-cache-pings'",                                   // on the Cache card too
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)

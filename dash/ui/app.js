@@ -1751,6 +1751,7 @@ function renderSavedLedger(o, ka, partial) {
     ? el('div', { class: 'ov-hero-money' },
       el('div', { class: 'ov-hero-v ov-hero-sub', 'data-testid': 'saved-total-subscription', text: sub.main }),
       el('div', { class: 'ov-hero-of', text: 'tokens in this period, by kind: wr cache write, rd cache read, in fresh input' }),
+      sub.pings ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-pings', text: sub.pings }) : null,
       sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null,
       unmeasured > 0 ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-unmeasured',
         text: num(unmeasured) + (unmeasured === 1 ? ' request' : ' requests') + ' not measured in tokens.' }) : null)
@@ -1763,7 +1764,8 @@ function renderSavedLedger(o, ka, partial) {
   const subInfo = [
     'On a Claude subscription every saving is in tokens, not dollars. A subscription does not bill per token.',
     'The total is the sum of the parts below, kind by kind. wr is cache write (wr1h: the 1-hour cache), rd is cache read, in is fresh input.',
-    'Kinds are never added into one number: Anthropic does not say how the limit weights them. "cost" is what a saving made you pay, for example the cache reads a keep-alive ping makes.',
+    'Kinds are never added into one number: Anthropic does not say how the limit weights them. "cost" is what a saving made you pay, for example the cache reads after a keep-alive rescue.',
+    'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic. The keep-alive\'s net is its saving less the pings.',
     'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing".',
     'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
     'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
@@ -1810,7 +1812,9 @@ function renderSavedLedger(o, ka, partial) {
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
   const tokRow = (label, flow) => hasTokens(flow) ? el('li', {}, el('span', { text: label }), el('strong', { text: tokenLine(flow, compact) })) : null;
   const brk = sub ? el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
-    tokRow('Automatic pings (cost includes the pings)', ft.keepalive),
+    tokRow('Automatic pings', ft.keepalive),
+    pingLine(o, compact) ? el('li', { 'data-testid': 'saved-cache-pings' }, el('span', { text: PING_LABEL }),
+      el('strong', { text: pingLine(o, compact) })) : null,
     tokRow('Cache reorder', ft.cachesplit),
     tokRow('1-hour cache', ft.ttl))
     : el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },

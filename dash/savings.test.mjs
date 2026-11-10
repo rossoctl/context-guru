@@ -170,13 +170,13 @@ test('a subscription with no open 5-hour window still shows tokens, with no esti
   const o = { tokens: { saved: { cache_write_5m: 7 } } };
   assert.equal(isSubscription({ subscription: true }, now), true);
   const h = subscriptionHeadline({ subscription: true, five_hour: { utilization: 0.5, reset_s: now / 1000 - 1 } }, o, null, now, String);
-  assert.deepEqual(h, { main: 'saved 7 wr', estimate: '' });
+  assert.deepEqual(h, { main: 'saved 7 wr', pings: '', estimate: '' });
   assert.equal(subscriptionHeadline({ subscription: true }, {}, null, now, String).main, 'saved 0 tokens');
   assert.equal(isSubscription({ subscription: false }, now), false);
 });
 
-test('the cards split tokens.by_feature: cache (with the pings as cost), filter, deferral, preset', () => {
-  const { featureTokens, totalTokens, tokenLine } = createRequire(import.meta.url)('./ui/savings.js');
+test('the cards split tokens.by_feature: cache, filter, deferral, preset; the pings stay apart', () => {
+  const { featureTokens, totalTokens, tokenLine, pingLine, subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
   const f = (saved, caused) => ({ saved, caused });
   const o = {
     tokens: {
@@ -195,17 +195,26 @@ test('the cards split tokens.by_feature: cache (with the pings as cost), filter,
     keepalive_ping_tokens: { input: 3, cache_read: 9000, cache_write_5m: 20, cache_write_1h: 10 },
   };
   const t = featureTokens(o);
-  assert.equal(tokenLine(t.keepalive, String), 'saved 4000 wr · cost 20 wr · 10 wr1h · 13000 rd · 3 in');
-  assert.equal(tokenLine(t.cache, String), 'saved 4200 wr · 300 wr1h · cost 20 wr · 10 wr1h · 13000 rd · 3 in');
+  // The rescue's own cost only: the pings are not added into it.
+  assert.equal(tokenLine(t.keepalive, String), 'saved 4000 wr · cost 4000 rd');
+  assert.equal(tokenLine(t.cache, String), 'saved 4200 wr · 300 wr1h · cost 4000 rd');
   assert.equal(tokenLine(t.compaction, String), 'saved 2100 wr · 600 rd · cost 600 wr');
   assert.equal(tokenLine(t.filter, String), 'saved 150 wr');
   assert.equal(tokenLine(t.defer, String), 'saved 50 wr');
-  // The cards add up to the total, tier by tier; the total's cost includes the pings.
+  // The cards add up to the total, tier by tier. The total is tokens.saved and tokens.caused: no pings.
   const tot = totalTokens(o);
+  assert.deepEqual(tot.caused, o.tokens.caused);
   for (const k of ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h']) {
     assert.equal(t.cache.saved[k] + t.compaction.saved[k] + t.filter.saved[k] + t.defer.saved[k], tot.saved[k], 'saved ' + k);
     assert.equal(t.cache.caused[k] + t.compaction.caused[k] + t.filter.caused[k] + t.defer.caused[k], tot.caused[k], 'caused ' + k);
   }
+  // The pings are a line of their own, on the card and under the total.
+  assert.equal(pingLine(o, String), 'cost 20 wr · 10 wr1h · 9000 rd · 3 in');
+  const h = subscriptionHeadline({ subscription: true }, o, null, 0, String);
+  assert.equal(h.main, 'saved 6500 wr · 300 wr1h · 600 rd · cost 600 wr · 4000 rd');
+  assert.equal(h.pings, 'Keep-alive pings (not in the total): cost 20 wr · 10 wr1h · 9000 rd · 3 in');
+  assert.equal(subscriptionHeadline({ subscription: true }, { tokens: o.tokens }, null, 0, String).pings, ''); // no pings: no line
+  assert.equal(pingLine({ keepalive_ping_tokens: { input: 0, cache_read: 0 } }, String), '');
   // A read with no tokens (a server from before #999) gives empty lines, not NaN.
   assert.equal(tokenLine(featureTokens({}).cache, String), '');
   assert.equal(tokenLine(totalTokens({}), String), '');
