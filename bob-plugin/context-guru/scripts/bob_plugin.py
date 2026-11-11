@@ -45,11 +45,64 @@ RELEASE_REPO = "rossoctl/context-guru"
 RELEASE_BASE = f"https://github.com/{RELEASE_REPO}/releases"
 # The first release with the Bob gateway and its region fix for the profile reply.
 MINIMUM_BOB_RELEASE = (0, 3, 1)
-# The presets Bob may use: name -> the config body under the marker line. Only presets with no
-# lossy component. Every other CG preset can drop content, and CG must be able to give it back
-# (the expand loop). That is not proven for Bob yet (plan phase P2, test T4). Phase P2 widens this.
-BOB_PRESETS = {"off": "preset: off\n", "lossless": "pipeline: [format, toon, cachesplit]\n"}
-DEFAULT_PRESET = "lossless"
+# The presets Bob may use: name -> the config body under the marker line. Only tested presets.
+# bob-ultrahigh is ultrahigh with 4 Bob changes (proxy/bobultrahigh_test.go): extract_llm names no
+# model (Bob picks its own) and runs on a caching backend, the sweep may apply on a warm cache, and
+# tool deferral keeps Bob's core tools. It cuts content, and CG gives it back through the expand
+# repair: test T4 passed on the real Bob IDE (2026-11-11). proxy/testdata/bob_ultrahigh.yaml is this
+# text; the proxy's test runs it.
+BOB_PRESETS = {
+    "off": "preset: off\n",
+    "lossless": "pipeline: [format, toon, cachesplit]\n",
+    "bob-ultrahigh": """\
+pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: true
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+    warm: true
+  toolfilter:
+    defer: auto
+    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,
+           execute_command, grep, glob, list_files, ask_followup_question, use_skill,
+           switch_mode, update_todo_list, spawn_subagent, start_subtask]
+""",
+}
+DEFAULT_PRESET = "bob-ultrahigh"
+# What the default preset does. setup --plan shows it, so the user's yes covers it.
+PRESET_EFFECTS = ("This preset stores content on this Mac (originals, summaries and held "
+                  "answers, so the model can get cut content back), sends summary calls to "
+                  "Bob's server with your own Bob key (they use your Bob quota), and uses "
+                  "Bob's flat prices on the dashboard. To keep requests uncut, run "
+                  "configure --preset lossless after setup.")
+# The presets that get Bob's flat prices (prices.yaml) as the proxy's MODEL_PRICES. The sweep's warm
+# cost gate needs them: without them it prices a cache rewrite at Claude rates and cuts nothing warm.
+PRICED_PRESETS = ("bob-ultrahigh",)
+# The oldest proxy release that accepts a preset's settings. An older proxy refuses unknown keys and
+# does not start (bob-ultrahigh's `warm: true` came in v0.7.2). A dev build has no release number;
+# for it, the restart check in change_and_restart is the guard.
+PRESET_MINIMUM_RELEASE = {"bob-ultrahigh": (0, 7, 2)}
+PRICES_SOURCE = Path(__file__).resolve().parent.parent / "prices.yaml"
 # The cache strategies Bob may use. Only none: see NO_KEEPALIVE_REASON.
 BOB_CACHE_STRATEGIES = ("none",)
 NO_KEEPALIVE_REASON = (
@@ -86,6 +139,10 @@ def hooks_state():
 
 def proxy_config(port):
     return state_dir() / f"bob-{port}.yaml"
+
+
+def proxy_prices(port):
+    return state_dir() / f"bob-{port}-prices.yaml"
 
 
 def dashboard_db(port):
@@ -454,13 +511,36 @@ def write_proxy_config(port, preset=None):
     temporary.write_text(f"{CONFIG_MARKER}\n{BOB_PRESETS[preset]}")
     temporary.chmod(0o600)
     os.replace(temporary, path)
+    prices = proxy_prices(port)
+    if preset in PRICED_PRESETS:
+        temporary = prices.with_suffix(".tmp")
+        temporary.write_bytes(PRICES_SOURCE.read_bytes())
+        temporary.chmod(0o600)
+        os.replace(temporary, prices)
+    else:
+        prices.unlink(missing_ok=True)
     return preset
 
 
+def service_environment(port):
+    """The proxy's environment: MODEL_PRICES while the price copy exists (see write_proxy_config)."""
+    prices = proxy_prices(port)
+    return {"MODEL_PRICES": str(prices)} if prices.exists() else {}
+
+
+def set_service_environment(port):
+    """Rewrite only the environment of our launchd agent, to match service_environment(port)."""
+    job = plistlib.loads(launchd_plist().read_bytes())
+    job.pop("EnvironmentVariables", None)
+    if env := service_environment(port):
+        job["EnvironmentVariables"] = env
+    _write_plist(plistlib.dumps(job))
+
+
 def preset_refusal(name):
-    allowed = " and ".join(BOB_PRESETS)
-    return (f"{name} can drop content that Bob cannot get back yet. Only {allowed} are allowed "
-            "for Bob until reversibility is proven.")
+    *rest, last = BOB_PRESETS
+    allowed = f"{', '.join(rest)} and {last}" if rest else last
+    return f"{name} is not tested on Bob. Only {allowed} are allowed for Bob."
 
 
 def start_service(executable, port, upstream):
@@ -470,11 +550,14 @@ def start_service(executable, port, upstream):
         raise RuntimeError(f"refusing to overwrite a launchd agent that is not ours: {plist}")
     plist.parent.mkdir(parents=True, exist_ok=True)
     log = state_dir() / "proxy.log"
-    _write_plist(plistlib.dumps({"Label": LABEL, "ContextGuruManaged": True,
-                                 "ProgramArguments": proxy_command(executable, port, upstream),
-                                 "RunAtLoad": True, "KeepAlive": True,
-                                 "ProcessType": "Background", "StandardOutPath": str(log),
-                                 "StandardErrorPath": str(log)}))
+    job = {"Label": LABEL, "ContextGuruManaged": True,
+           "ProgramArguments": proxy_command(executable, port, upstream),
+           "RunAtLoad": True, "KeepAlive": True,
+           "ProcessType": "Background", "StandardOutPath": str(log),
+           "StandardErrorPath": str(log)}
+    if env := service_environment(port):
+        job["EnvironmentVariables"] = env
+    _write_plist(plistlib.dumps(job))
     load_service()
 
 
@@ -541,9 +624,11 @@ def setup(args):
               settings=bob_settings(), service_file=launchd_plist(), state=state_dir(),
               upstream=args.upstream, reset=reset_path(),
               note=LOGIN_NOTE + ", and once more after you remove it.",
+              preset=DEFAULT_PRESET, preset_effects=PRESET_EFFECTS,
               consent_question="Send IBM Bob's model traffic on this Mac through a local "
-                               "context-guru proxy that always runs, and add a block to your "
-                               "shell startup file and two hooks to Bob's settings?")
+                               "context-guru proxy that always runs, add a block to your "
+                               "shell startup file and two hooks to Bob's settings, and use the "
+                               f"{DEFAULT_PRESET} preset? " + PRESET_EFFECTS)
         if advice:
             facts(rc_advice=advice)
         return 0
@@ -904,6 +989,17 @@ def configure(args):
         facts(result="refused", reason="preset_not_allowed_for_bob", preset=args.preset,
               detail=preset_refusal(args.preset))
         return 2
+    if need := PRESET_MINIMUM_RELEASE.get(args.preset):
+        version = binary_version(record.get("binary") or "")
+        try:
+            too_old = release_version(version) < need
+        except RuntimeError:
+            too_old = False
+        if too_old:
+            facts(result="refused", reason="proxy_too_old", preset=args.preset,
+                  detail=f"{args.preset} needs context-guru-proxy v{'.'.join(map(str, need))} or "
+                         f"newer; this one is {version}. Run the update skill first.")
+            return 2
     if args.cache_strategy and args.cache_strategy not in BOB_CACHE_STRATEGIES:
         facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
               cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
@@ -917,8 +1013,11 @@ def configure(args):
     if preset == current:
         facts(result="unchanged", preset=preset, cache_strategy="none")
         return 0
-    outcome = change_and_restart(port, lambda: write_proxy_config(port, preset),
-                                 [proxy_config(port)])
+    def change():
+        write_proxy_config(port, preset)
+        set_service_environment(port)
+
+    outcome = change_and_restart(port, change, [proxy_config(port), proxy_prices(port)])
     ok = outcome["proxy_restarted"] == "true"
     facts(result="configured" if ok else "restart_failed", preset=preset if ok else current,
           cache_strategy="none", **outcome)
@@ -1152,8 +1251,21 @@ def doctor(args):
         else:
             report("preset", "warn", (
                 f"{proxy_config(port)} is not one of the Bob presets ({', '.join(BOB_PRESETS)}). "
-                "It may run a lossy component, and Bob cannot get dropped content back yet. "
+                "It is not tested on Bob and may run a lossy component. "
                 "Run: configure --preset lossless"))
+        if up and preset == "bob-ultrahigh":
+            try:
+                counts = tool_defer_facts(tool_defer_stats(port))
+            except Exception:
+                counts = {}
+            off = [counts[k] for k in ("tool_defer_turned_off", "tool_defer_break") if k in counts]
+            if off:
+                report("tool_defer", "ok" if sum(off) == 0 else "warn", None if sum(off) == 0 else (
+                    "The proxy turned tool deferral off at least once since it started: Bob's "
+                    "gateway refused a request with deferred tools. Bob still got all its tools. "
+                    "While it is off, this preset saves no more than lossless. The proxy tries "
+                    "again after 24 hours or a restart. If it keeps happening, run: configure "
+                    "--preset lossless"))
         try:
             hooks = bob_hooks.is_installed(bob_settings())
         except Exception:
@@ -1203,6 +1315,36 @@ def last_bob_request_ms(port):
     return rows[0].get("ts") if rows else None
 
 
+def tool_defer_stats(port):
+    """The proxy's /stats tool_defer block, or {} when it has none (deferral never ran)."""
+    with LOOPBACK.open(f"http://127.0.0.1:{port}/stats", timeout=2) as reply:
+        block = json.load(reply).get("tool_defer")
+    return block if isinstance(block, dict) else {}
+
+
+# status name -> its place in /stats tool_defer. Counts only, never a tool name.
+TOOL_DEFER_FACTS = {
+    "tool_defer_requests": ("requests",),
+    "tool_defer_deferred_tokens": ("ledger", "deferred_tokens"),
+    "tool_defer_add_backs": ("add_backs",),
+    "tool_defer_wrong_guesses": ("wrong_guesses",),
+    "tool_defer_turned_off": ("turned_off",),
+    "tool_defer_break": ("client_search_disabled", "break"),
+}
+
+
+def tool_defer_facts(block):
+    """The TOOL_DEFER_FACTS counts that block has. A field it lacks is left out."""
+    shown = {}
+    for name, keys in TOOL_DEFER_FACTS.items():
+        value = block
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            shown[name] = value
+    return shown
+
+
 def status(_args):
     record = read_record()
     port = record_port(record)
@@ -1225,6 +1367,11 @@ def status(_args):
         except Exception as error:
             values["traffic_error"] = type(error).__name__
     values["last_bob_request_age_s"] = "(none)" if age is None else age
+    if up:
+        try:
+            values.update(tool_defer_facts(tool_defer_stats(port)))
+        except Exception:
+            pass  # an older proxy, or /stats unreadable: the counts are extra, not a check
     if record.get("complete") is False:
         values["result"] = "setup_incomplete"
         values["hint"] = (f"Setup did not finish. Run the context-guru-setup skill again, or "
@@ -1361,6 +1508,7 @@ def uninstall(args):
         try:
             if config.exists() and config.read_text().startswith(CONFIG_MARKER):
                 config.unlink()
+            proxy_prices(port).unlink(missing_ok=True)
         except OSError:
             pass
     if clean:

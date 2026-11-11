@@ -15,7 +15,7 @@ says what each one does at three storage levels: off, metadata only, and everyth
 - **13 of 24 components need no stored content to do their job:**
   - 5 keep nothing.
   - 2 keep only hashes or names: `cacheinject` keeps hashes, and `toolfilter` keeps tool names when
-    tool deferral is on (the `ultrahigh` preset).
+    tool deferral is on (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`).
   - 1 keeps only a speed-up cache.
   - 5 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
 - **5 more could work on metadata only**, with a small change: one "already done" flag per message.

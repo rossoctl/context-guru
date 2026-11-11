@@ -1,0 +1,32 @@
+# Managed by the context-guru Bob plugin.
+pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: true
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+    warm: true
+  toolfilter:
+    defer: auto
+    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,
+           execute_command, grep, glob, list_files, ask_followup_question, use_skill,
+           switch_mode, update_todo_list, spawn_subagent, start_subtask]

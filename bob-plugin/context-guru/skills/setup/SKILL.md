@@ -11,9 +11,9 @@ description: Set up context-guru for IBM Bob on this Mac. Use when asked to inst
    python3 "$HOME/.bob/plugins/context-guru/scripts/bob_plugin.py" setup --plan
    ```
 
-2. Show the user what it found: `rc_file=`, `settings=`, `service_file=` and `note=`. If it printed
+2. Show the user what it found: `rc_file=`, `settings=`, `service_file=`, `preset=`, `preset_effects=` and `note=`. If it printed
    `rc_advice=`, say that setup cannot edit the startup file and will print a block to add by hand.
-3. Ask the `consent_question=` as one yes/no question. A missing or unclear answer is no. Stop there
+3. Tell the user what the `preset=` does, from `preset_effects=`. Then ask the `consent_question=` as one yes/no question. A missing or unclear answer is no. Stop there
    on a no.
 4. Only after a clear yes, run:
 

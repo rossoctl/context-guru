@@ -245,6 +245,10 @@ fi
 if [ -n "$PORT" ] && [ "$(head -n 1 "$STATE_DIR/bob-$PORT.yaml" 2>/dev/null)" = "# Managed by the context-guru Bob plugin." ]; then
   rm -f "$STATE_DIR/bob-$PORT.yaml"
 fi
+# bob-ultrahigh's copy of Bob's prices. Only public rates, and only the plugin writes this name.
+if [ -n "$PORT" ]; then
+  rm -f "$STATE_DIR/bob-$PORT-prices.yaml"
+fi
 if [ "$clean" = 1 ]; then
   rm -f "$RECORD"
   echo "result=removed"
