@@ -265,6 +265,12 @@ const (
 	// to an off value, so new threads of that session are not deferred. A flag only (metadata),
 	// pinned for the same reason as ToolDeferPrefix: losing it would change a later decision.
 	ToolSearchOffPrefix = "cg:tso:"
+	// KeptPrefix is the "keep in full" mark (#1097): the agent expanded this output, so no offloader
+	// may compact it again in this session. The key is the session id and a content hash, and the
+	// value is one byte, so it is metadata. It is session state: it takes the state lifetime and the
+	// disk copy, and a rebuilt tenant pipeline carries it over (CarryPrefix). It is NOT pinned:
+	// pinning is a separate decision about eviction under load.
+	KeptPrefix = "cg:keep:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
@@ -1273,4 +1279,56 @@ func (m *Memory) remove(el *list.Element) {
 	}
 	m.ll.Remove(el)
 	delete(m.items, e.key)
+}
+
+// PrefixCopier is an OPTIONAL Store capability: listing the live entries under one key prefix.
+// CarryPrefix uses it to move a small namespace from one store to another.
+type PrefixCopier interface {
+	// EntriesWithPrefix returns a copy of every live (not expired) entry whose key starts with prefix.
+	EntriesWithPrefix(prefix string) map[string][]byte
+}
+
+// EntriesWithPrefix lists the live entries under prefix. It does not change any lifetime or order.
+func (m *Memory) EntriesWithPrefix(prefix string) map[string][]byte {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	out := map[string][]byte{}
+	for k, el := range m.items {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		e := el.Value.(*entry)
+		if now.After(e.expires) {
+			continue
+		}
+		out[k] = append([]byte(nil), e.payload...)
+	}
+	return out
+}
+
+// CarryPrefix copies every entry under prefix from one store to another and returns how many it
+// copied. It does nothing, and returns 0, when either store is nil or the source cannot list. It
+// never fails: the caller treats a store that cannot carry as today's behavior (a fresh store).
+func CarryPrefix(from, to Store, prefix string) (n int) {
+	if from == nil || to == nil {
+		return 0
+	}
+	defer func() {
+		if recover() != nil {
+			n = 0 // fail open
+		}
+	}()
+	pc, ok := from.(PrefixCopier)
+	if !ok {
+		return 0
+	}
+	for k, v := range pc.EntriesWithPrefix(prefix) {
+		to.Put(k, v)
+		n++
+	}
+	return n
 }
