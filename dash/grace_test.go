@@ -117,6 +117,30 @@ func TestALiveRecorderCountsRequestsAndPingsOnTheGraceClock(t *testing.T) {
 	}
 }
 
+// A ping that found the entry gone and re-wrote it started a fresh lifetime, so it counts on the
+// grace clock like a reading one (#580). A ping that billed neither a read nor a write does not.
+func TestAPingThatReWroteTheEntryCountsOnTheGraceClock(t *testing.T) {
+	rec, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "d.db"),
+		BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	const now = int64(1_700_000_000_000)
+	key := thread.Key("s1", "")
+	rec.ObserveThread("t1", "s1", "", "m", now-twoHours, 0)
+	rec.Record(&Event{TS: now - 120_000, TenantID: "t1", SessionID: "s1", Model: "m",
+		TokensBefore: 10, KeepAlive: true, FreshInput: 900})
+	if at, _ := rec.ThreadRefreshedAt(key); at != now-twoHours {
+		t.Fatalf("a ping that billed no cache moved the grace clock to %d", at)
+	}
+	rec.Record(&Event{TS: now - 60_000, TenantID: "t1", SessionID: "s1", Model: "m",
+		TokensBefore: 10, KeepAlive: true, CacheWrite: 900})
+	if at, _ := rec.ThreadRefreshedAt(key); at != now-60_000 {
+		t.Fatalf("a re-writing ping did not move the grace clock: %d, want %d", at, now-60_000)
+	}
+}
+
 // A request under an EXPLICIT header id also refreshes the provider entry its conversation's
 // HEADERLESS turns read, so the seed must cover the alias key a row stored (#766, round 3):
 // after a restart, a headerless turn asks for the alias key alone — its own derived id IS

@@ -1716,9 +1716,11 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// away?" must not. The recency map answers the second and stays untouched; this writes only
 	// the first, so the dashboard's idle-gap statistics are unaffected.
 	//
-	// GATED ON CacheRead > 0, because only a ping that actually read the entry refreshed it. A ping
-	// that WROTE (the entry was already gone) refreshed nothing that was there before, and claiming
-	// otherwise would make the clock lie in the expensive direction.
+	// GATED ON CacheRead > 0 || CacheWrite > 0, because only a ping that billed the cache touched the
+	// entry. A ping that READ it refreshed it. A ping that WROTE (the entry was already gone) re-created
+	// it, which starts a fresh lifetime at that ping all the same: left on the earlier clock, the next
+	// real request is aged by the whole gap and a live entry reads as ttl_expiry (#580). A ping that
+	// billed neither left the entry alone.
 	//
 	// Anchored on the ping's START, not its completion, for the same reason kaEntry.startedAt is:
 	// the provider's lifetime runs from request start.
@@ -1726,14 +1728,14 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// j.raw is the UNMASKED body copy, and reading it here is safe: fire zeroizes it in a defer that
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
-	if status >= 200 && status < 300 && u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		j.touch(provider, startedAt.UnixMilli())
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
-	if u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()
