@@ -45,25 +45,54 @@ RELEASE_REPO = "rossoctl/context-guru"
 RELEASE_BASE = f"https://github.com/{RELEASE_REPO}/releases"
 # The first release with the Bob gateway and its region fix for the profile reply.
 MINIMUM_BOB_RELEASE = (0, 3, 1)
-# The presets Bob may use: name -> the config body under the marker line. Only presets with no
-# lossy component. Every other CG preset can drop content, and CG must be able to give it back
-# (the expand loop). That is not proven for Bob yet (plan phase P2, test T4). Phase P2 widens this.
-# lossless-defer adds tool deferral: it removes the tools Bob's last 3 sessions did not use, and the
-# model loads one back with a search (context_guru_tools). Nothing is lost. The keep list holds
-# Bob's core tools. proxy/testdata/bob_lossless_defer.yaml is this text; the proxy's test runs it.
+# The presets Bob may use: name -> the config body under the marker line. Only tested presets.
+# bob-ultrahigh is ultrahigh with 4 Bob changes (proxy/bobultrahigh_test.go): extract_llm names no
+# model (Bob picks its own) and runs on a caching backend, the sweep may apply on a warm cache, and
+# tool deferral keeps Bob's core tools. It cuts content, and CG gives it back through the expand
+# repair: test T4 passed on the real Bob IDE (2026-11-11). proxy/testdata/bob_ultrahigh.yaml is this
+# text; the proxy's test runs it.
 BOB_PRESETS = {
     "off": "preset: off\n",
     "lossless": "pipeline: [format, toon, cachesplit]\n",
-    "lossless-defer": (
-        "pipeline: [format, toon, cachesplit, toolfilter]\n"
-        "components:\n"
-        "  toolfilter:\n"
-        "    defer: auto\n"
-        "    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,\n"
-        "           execute_command, grep, glob, list_files, ask_followup_question, use_skill,\n"
-        "           switch_mode, update_todo_list, spawn_subagent, start_subtask]\n"),
+    "bob-ultrahigh": """\
+pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+components:
+  cache_aware_summarizer:
+    model:
+      source: incoming
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: true
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      source: incoming
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+  extract_llm_sweep:
+    min_tokens: 1000
+    warm: true
+  toolfilter:
+    defer: auto
+    keep: [read_file, write_file, apply_diff, search_and_replace, insert_content,
+           execute_command, grep, glob, list_files, ask_followup_question, use_skill,
+           switch_mode, update_todo_list, spawn_subagent, start_subtask]
+""",
 }
 DEFAULT_PRESET = "lossless"
+# The presets that get Bob's flat prices (prices.yaml) as the proxy's MODEL_PRICES. The sweep's warm
+# cost gate needs them: without them it prices a cache rewrite at Claude rates and cuts nothing warm.
+PRICED_PRESETS = ("bob-ultrahigh",)
+PRICES_SOURCE = Path(__file__).resolve().parent.parent / "prices.yaml"
 # The cache strategies Bob may use. Only none: see NO_KEEPALIVE_REASON.
 BOB_CACHE_STRATEGIES = ("none",)
 NO_KEEPALIVE_REASON = (
@@ -100,6 +129,10 @@ def hooks_state():
 
 def proxy_config(port):
     return state_dir() / f"bob-{port}.yaml"
+
+
+def proxy_prices(port):
+    return state_dir() / f"bob-{port}-prices.yaml"
 
 
 def dashboard_db(port):
@@ -468,14 +501,36 @@ def write_proxy_config(port, preset=None):
     temporary.write_text(f"{CONFIG_MARKER}\n{BOB_PRESETS[preset]}")
     temporary.chmod(0o600)
     os.replace(temporary, path)
+    prices = proxy_prices(port)
+    if preset in PRICED_PRESETS:
+        temporary = prices.with_suffix(".tmp")
+        temporary.write_bytes(PRICES_SOURCE.read_bytes())
+        temporary.chmod(0o600)
+        os.replace(temporary, prices)
+    else:
+        prices.unlink(missing_ok=True)
     return preset
+
+
+def service_environment(port):
+    """The proxy's environment: MODEL_PRICES while the price copy exists (see write_proxy_config)."""
+    prices = proxy_prices(port)
+    return {"MODEL_PRICES": str(prices)} if prices.exists() else {}
+
+
+def set_service_environment(port):
+    """Rewrite only the environment of our launchd agent, to match service_environment(port)."""
+    job = plistlib.loads(launchd_plist().read_bytes())
+    job.pop("EnvironmentVariables", None)
+    if env := service_environment(port):
+        job["EnvironmentVariables"] = env
+    _write_plist(plistlib.dumps(job))
 
 
 def preset_refusal(name):
     *rest, last = BOB_PRESETS
     allowed = f"{', '.join(rest)} and {last}" if rest else last
-    return (f"{name} can drop content that Bob cannot get back yet. Only {allowed} are allowed "
-            "for Bob until reversibility is proven.")
+    return f"{name} is not tested on Bob. Only {allowed} are allowed for Bob."
 
 
 def start_service(executable, port, upstream):
@@ -485,11 +540,14 @@ def start_service(executable, port, upstream):
         raise RuntimeError(f"refusing to overwrite a launchd agent that is not ours: {plist}")
     plist.parent.mkdir(parents=True, exist_ok=True)
     log = state_dir() / "proxy.log"
-    _write_plist(plistlib.dumps({"Label": LABEL, "ContextGuruManaged": True,
-                                 "ProgramArguments": proxy_command(executable, port, upstream),
-                                 "RunAtLoad": True, "KeepAlive": True,
-                                 "ProcessType": "Background", "StandardOutPath": str(log),
-                                 "StandardErrorPath": str(log)}))
+    job = {"Label": LABEL, "ContextGuruManaged": True,
+           "ProgramArguments": proxy_command(executable, port, upstream),
+           "RunAtLoad": True, "KeepAlive": True,
+           "ProcessType": "Background", "StandardOutPath": str(log),
+           "StandardErrorPath": str(log)}
+    if env := service_environment(port):
+        job["EnvironmentVariables"] = env
+    _write_plist(plistlib.dumps(job))
     load_service()
 
 
@@ -932,8 +990,11 @@ def configure(args):
     if preset == current:
         facts(result="unchanged", preset=preset, cache_strategy="none")
         return 0
-    outcome = change_and_restart(port, lambda: write_proxy_config(port, preset),
-                                 [proxy_config(port)])
+    def change():
+        write_proxy_config(port, preset)
+        set_service_environment(port)
+
+    outcome = change_and_restart(port, change, [proxy_config(port), proxy_prices(port)])
     ok = outcome["proxy_restarted"] == "true"
     facts(result="configured" if ok else "restart_failed", preset=preset if ok else current,
           cache_strategy="none", **outcome)
@@ -1167,9 +1228,9 @@ def doctor(args):
         else:
             report("preset", "warn", (
                 f"{proxy_config(port)} is not one of the Bob presets ({', '.join(BOB_PRESETS)}). "
-                "It may run a lossy component, and Bob cannot get dropped content back yet. "
+                "It is not tested on Bob and may run a lossy component. "
                 "Run: configure --preset lossless"))
-        if up and preset == "lossless-defer":
+        if up and preset == "bob-ultrahigh":
             try:
                 counts = tool_defer_facts(tool_defer_stats(port))
             except Exception:

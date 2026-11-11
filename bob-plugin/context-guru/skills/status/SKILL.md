@@ -17,7 +17,7 @@ Report these facts in plain words:
 - `proxy_up=`: the proxy answers on `/healthz`.
 - `hooks_installed=`: our hooks are in Bob's settings.
 - `last_bob_request_age_s=`: how long ago the newest Bob request reached the proxy.
-- `tool_defer_*=` (only with the `lossless-defer` preset, after it ran): `requests` held tools
+- `tool_defer_*=` (only with the `bob-ultrahigh` preset, after it ran): `requests` held tools
   back, `deferred_tokens` is the tool tokens not sent, `add_backs` is the tools a search brought
   back, `wrong_guesses` is the held-back tools a search loaded, `turned_off` and `break` above 0
   mean the proxy stopped deferral at least once since it started. Leave out a line that is not printed.

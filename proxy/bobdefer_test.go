@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -21,8 +22,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// The Bob plugin's lossless-defer preset, offline, on Bob's own route (plan P2). The preset text is
-// testdata/bob_lossless_defer.yaml; the plugin's test checks that BOB_PRESETS holds the same text.
+// Tool deferral in the Bob plugin's bob-ultrahigh preset, offline, on Bob's own route (plan P2). The
+// preset text is testdata/bob_ultrahigh.yaml; the plugin's test checks that BOB_PRESETS holds the
+// same text, and bobultrahigh_test.go that it is ultrahigh with the 4 Bob changes.
 // The tools are Bob 2.3.0's own (testdata/bob_tools.json says where they come from).
 //
 // Limits of the fixture: a one-line system prompt (Bob's real one is long), no MCP tools, and the
@@ -103,7 +105,7 @@ func bobDeferHandlerBare(t *testing.T, preset []byte, upstream string) *Handler 
 
 func bobPreset(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "bob_lossless_defer.yaml"))
+	b, err := os.ReadFile(filepath.Join("testdata", "bob_ultrahigh.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,7 @@ func removedTools(t *testing.T, sent []byte) []string {
 // The history comes from Bob's own traffic: 3 tasks, told apart only by X-Task-Id (their first
 // messages are the same, so a hash of the transcript would merge them into one session), each
 // calling one keep-list tool. A 4th task then defers the 7 candidates. Nothing is seeded by hand.
-func TestBobLosslessDeferHistoryFromThreeBobTasks(t *testing.T) {
+func TestBobDeferHistoryFromThreeBobTasks(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -171,7 +173,7 @@ func TestBobLosslessDeferHistoryFromThreeBobTasks(t *testing.T) {
 
 // T1 and the deferred set: the 7 heavy tools no past session used are removed, our search tool is
 // declared, and the names list goes in after Bob's system message.
-func TestBobLosslessDeferRemovesTheUnusedHeavyTools(t *testing.T) {
+func TestBobDeferRemovesTheUnusedHeavyTools(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -184,10 +186,11 @@ func TestBobLosslessDeferRemovesTheUnusedHeavyTools(t *testing.T) {
 		t.Fatalf("client got %d %s", st, out)
 	}
 	sent := up.all()[0]
-	// The preset has no offload component, so the proxy adds no context_guru_expand.
-	if got, want := len(gjson.GetBytes(sent, "tools").Array()), len(bobKeep)+1; got != want {
-		t.Fatalf("tools sent = %d (%s), want %d: Bob's 15 kept tools and our search",
-			got, csTools(sent), want)
+	// The preset has offload components and the sweep, so the proxy also declares its expand and
+	// adjudicate tools: Bob's 15 kept tools, then our 3, in this order.
+	if got, want := csTools(sent), strings.Join(append(append([]string{}, bobKeep...),
+		expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName), ","); got != want {
+		t.Fatalf("tools sent = %s, want %s", got, want)
 	}
 	if !tooldefer.HasClientSearch("openai", sent) {
 		t.Fatalf("no %s in tools: %s", tooldefer.ClientSearchName, csTools(sent))
@@ -214,7 +217,7 @@ func TestBobLosslessDeferRemovesTheUnusedHeavyTools(t *testing.T) {
 }
 
 // A candidate a past session used stays loaded: the set is the unused candidates only.
-func TestBobLosslessDeferKeepsACandidateAPastSessionUsed(t *testing.T) {
+func TestBobDeferKeepsACandidateAPastSessionUsed(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -230,7 +233,7 @@ func TestBobLosslessDeferKeepsACandidateAPastSessionUsed(t *testing.T) {
 }
 
 // T2: no keep-list tool is removed, though no past session used any of them.
-func TestBobLosslessDeferNeverRemovesAKeepListTool(t *testing.T) {
+func TestBobDeferNeverRemovesAKeepListTool(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -252,7 +255,7 @@ func TestBobLosslessDeferNeverRemovesAKeepListTool(t *testing.T) {
 
 // A streamed reply that calls our search is answered in band on Bob's route: Bob gets the tool's
 // own call, never ours, and the follow-up declares the tool at the end of `tools`.
-func TestBobLosslessDeferStreamedSearchIsAnsweredInBand(t *testing.T) {
+func TestBobDeferStreamedSearchIsAnsweredInBand(t *testing.T) {
 	r1 := ccRole("r1") + ccCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
 		ccCallArgs("r1", 0, `{"names":["office_edit"]}`) + ccFinish("r1", "tool_calls") + ccUsage("r1") + ccDone
 	r2 := ccRole("r2") + ccCallStart("r2", 0, "c2", "office_edit") + ccCallArgs("r2", 0, `{"path":"/w/a.docx"}`) +
@@ -291,7 +294,7 @@ func TestBobLosslessDeferStreamedSearchIsAnsweredInBand(t *testing.T) {
 // Anthropic client-search path (tooldefer.Apply), not on our own search (ApplySearch). Here a
 // direct call to a removed tool costs the model a turn; the names list tells it to search first.
 // The thread keeps its set, so its cached prefix stays.
-func TestBobLosslessDeferKnownGapDirectCallIsNotDetected(t *testing.T) {
+func TestBobDeferKnownGapDirectCallIsNotDetected(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -318,7 +321,7 @@ func TestBobLosslessDeferKnownGapDirectCallIsNotDetected(t *testing.T) {
 // The off-switch that does work on Bob's route is a 400: the gateway refuses the changed request,
 // the proxy sends the original, Bob gets that answer, and deferral turns off for the model (/stats
 // tool_defer.turned_off). A new thread then defers nothing.
-func TestBobLosslessDefer400TurnsDeferralOff(t *testing.T) {
+func TestBobDefer400TurnsDeferralOff(t *testing.T) {
 	up := &csUpstream{script: []string{csText("ok")}, reject400: true}
 	us := httptest.NewServer(up)
 	defer us.Close()

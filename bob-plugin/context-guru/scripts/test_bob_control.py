@@ -26,7 +26,9 @@ from test_bob_plugin import (  # noqa: E402
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
 # The proxy's own test runs this exact file through the real pipeline on Bob's route
 # (proxy/bobdefer_test.go), so the preset the plugin writes is the preset that was tested.
-LOSSLESS_DEFER = (PLUGIN_ROOT.parents[1] / "proxy/testdata/bob_lossless_defer.yaml").read_text()
+BOB_ULTRAHIGH = (PLUGIN_ROOT.parents[1] / "proxy/testdata/bob_ultrahigh.yaml").read_text()
+# Loaded the proxy's way by bob-plugin/prices_test.go, so the file the plugin copies parses.
+PRICES = (PLUGIN_ROOT / "prices.yaml").read_bytes()
 
 
 class Installed(TempHome):
@@ -57,7 +59,7 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 0, out)
         self.assertIn("preset=lossless\n", out)
         self.assertIn("cache_strategy=none\n", out)
-        self.assertIn("allowed_presets=off,lossless,lossless-defer\n", out)
+        self.assertIn("allowed_presets=off,lossless,bob-ultrahigh\n", out)
         self.assertIn("allowed_cache_strategies=none\n", out)
         self.assertEqual(self.tree(), before)
 
@@ -74,15 +76,15 @@ class ConfigureTest(Installed):
         self.assertEqual(self.config.read_text(), LOSSLESS)
 
     def test_lossy_presets_are_refused_and_nothing_changes(self):
-        for name in ("conservative", "medium", "high", "xhigh", "coding", "house"):
+        for name in ("conservative", "medium", "high", "xhigh", "ultrahigh", "coding", "house",
+                     "lossless-defer"):
             with self.subTest(preset=name):
                 before, calls = self.tree(), len(self.launchctl_calls())
                 code, out, _ = self.run_main("configure", "--preset", name)
                 self.assertEqual(code, 2)
                 self.assertIn("result=refused\nreason=preset_not_allowed_for_bob\n", out)
-                self.assertIn(f"{name} can drop content that Bob cannot get back yet. Only off, "
-                              "lossless and lossless-defer are allowed for Bob until "
-                              "reversibility is proven.", out)
+                self.assertIn(f"{name} is not tested on Bob. Only off, lossless and bob-ultrahigh "
+                              "are allowed for Bob.", out)
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(len(self.launchctl_calls()), calls)
 
@@ -102,7 +104,8 @@ class ConfigureTest(Installed):
         self.assertEqual(PLUGIN.BOB_PRESETS, {
             "off": "preset: off\n",
             "lossless": "pipeline: [format, toon, cachesplit]\n",
-            "lossless-defer": LOSSLESS_DEFER.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
+            "bob-ultrahigh": BOB_ULTRAHIGH.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
+        self.assertEqual(PLUGIN.PRICED_PRESETS, ("bob-ultrahigh",))
         self.assertEqual(PLUGIN.DEFAULT_PRESET, "lossless")
         self.assertEqual(PLUGIN.BOB_CACHE_STRATEGIES, ("none",))
 
@@ -133,16 +136,52 @@ class ConfigureTest(Installed):
         self.assertIn("fix=", out)
         self.assertEqual(self.config.read_text(), LOSSLESS)
 
-    def test_preset_lossless_defer_writes_the_tested_config_and_restarts(self):
+    def plist_env(self):
+        return plistlib.loads(PLUGIN.launchd_plist().read_bytes()).get("EnvironmentVariables")
+
+    def test_preset_bob_ultrahigh_writes_the_tested_config_and_restarts(self):
         calls = len(self.launchctl_calls())
-        code, out, _ = self.run_main("configure", "--preset", "lossless-defer")
+        code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
         self.assertEqual(code, 0, out)
-        self.assertIn("result=configured\npreset=lossless-defer\n", out)
+        self.assertIn("result=configured\npreset=bob-ultrahigh\n", out)
         self.assertIn("proxy_restarted=true\n", out)
-        self.assertEqual(self.config.read_text(), LOSSLESS_DEFER)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
         self.assertEqual(self.bootstraps(calls), 1)
         self.assertEqual(self.run_main("configure", "--show")[1].split("\n")[1],
-                         "preset=lossless-defer")
+                         "preset=bob-ultrahigh")
+
+    def test_bob_ultrahigh_gives_the_proxy_bobs_flat_prices(self):
+        self.assertIsNone(self.plist_env())
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        prices = PLUGIN.proxy_prices(self.port)
+        self.assertEqual(prices.read_bytes(), PRICES)
+        self.assertEqual(stat.S_IMODE(prices.stat().st_mode), 0o600)
+        self.assertEqual(self.plist_env(), {"MODEL_PRICES": str(prices)})
+
+    def test_leaving_bob_ultrahigh_removes_the_prices(self):
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        self.assertIsNone(self.plist_env())
+        self.assertFalse(PLUGIN.proxy_prices(self.port).exists())
+        self.assertEqual(self.config.read_text(), LOSSLESS)
+
+    def test_a_failed_restart_on_bob_ultrahigh_puts_everything_back(self):
+        plist = PLUGIN.launchd_plist().read_bytes()
+        with mock.patch.object(PLUGIN, "wait_healthy", side_effect=[False, True]):
+            code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+        self.assertEqual(code, 1, out)
+        self.assertIn("rolled_back=true", out)
+        self.assertEqual(self.config.read_text(), LOSSLESS)
+        self.assertEqual(PLUGIN.launchd_plist().read_bytes(), plist)
+        self.assertFalse(PLUGIN.proxy_prices(self.port).exists())
+
+    def test_setup_again_keeps_the_prices_of_bob_ultrahigh(self):
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"):
+            self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
+        self.assertEqual(self.plist_env(), {"MODEL_PRICES": str(PLUGIN.proxy_prices(self.port))})
+        self.assertEqual(PLUGIN.proxy_prices(self.port).read_bytes(), PRICES)
 
     def test_setup_again_keeps_the_chosen_preset(self):
         self.assertEqual(self.run_main("configure", "--preset", "off")[0], 0)
@@ -435,7 +474,7 @@ class DoctorTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("binary=fail\n", out)
 
-    def defer_doctor(self, stats, preset="lossless-defer"):
+    def defer_doctor(self, stats, preset="bob-ultrahigh"):
         with FakeProxy(last_bob_ts_ms=self.proxy_bob_ts, stats=stats) as proxy:
             record = PLUGIN.read_record()
             record["port"] = proxy.port
@@ -465,7 +504,7 @@ class DoctorTest(Installed):
         self.assertEqual(facts.get("tool_defer"), "ok", out)
 
     def test_doctor_tool_defer_skips_absent_fields_and_other_presets(self):
-        for stats, preset in ((None, "lossless-defer"), ({}, "lossless-defer"),
+        for stats, preset in ((None, "bob-ultrahigh"), ({}, "bob-ultrahigh"),
                               ({"tool_defer": {"turned_off": 3}}, "lossless")):
             with self.subTest(stats=stats, preset=preset):
                 code, facts, out = self.defer_doctor(stats, preset)
@@ -729,7 +768,7 @@ class ControlSkillsTest(unittest.TestCase):
         preset = (PLUGIN_ROOT / "skills/preset-picker/SKILL.md").read_text()
         self.assertIn("lossless", preset)
         self.assertIn("only one bare word", preset)
-        self.assertIn("`lossless-defer`", preset)
+        self.assertIn("`bob-ultrahigh`", preset)
         self.assertIn("one extra turn", preset)
         self.assertIn("3 past Bob sessions", preset)
         self.assertIn("On Bob the proxy does not detect this", preset)
