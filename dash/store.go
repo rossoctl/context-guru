@@ -1012,12 +1012,16 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 	}
 	// Before the delete: afterwards the victims cannot be found. A failed pick returns its
 	// error rather than reading as an empty table (#775 review).
-	victims, err := d.oldestSessionIDs(n)
+	picked, err := d.oldestSessionKeys(n)
 	if err != nil {
 		return 0, err
 	}
-	if len(victims) == 0 {
+	if len(picked) == 0 {
 		return 0, nil
+	}
+	victims := make([]string, len(picked))
+	for i, k := range picked {
+		victims[i] = k.session
 	}
 	if d.dropProbe != nil {
 		d.dropProbe()
@@ -1028,9 +1032,14 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 		return 0, err
 	}
 	var affected int64
-	for _, chunk := range chunkStrings(victims) {
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (`+placeholders(len(chunk))+`)`,
-			anyArgs(chunk)...)
+	// By (tenant, session): a session id two tenants share must not take the other's rows (#1069).
+	for _, chunk := range chunkKeys(picked) {
+		pairs := strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ",")
+		args := make([]any, 0, 2*len(chunk))
+		for _, k := range chunk {
+			args = append(args, k.tenant, k.session)
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE (tenant_id, session_id) IN (VALUES `+pairs+`)`, args...)
 		if err != nil {
 			return affected, err
 		}
@@ -1041,17 +1050,17 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 	return affected, nil
 }
 
-func (d *DB) oldestSessionIDs(n int) ([]string, error) {
-	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+func (d *DB) oldestSessionKeys(n int) ([]sessKey, error) {
+	rows, err := d.sql.Query(`SELECT tenant_id, session_id FROM requests GROUP BY tenant_id, session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []sessKey
 	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			out = append(out, id)
+		var k sessKey
+		if rows.Scan(&k.tenant, &k.session) == nil {
+			out = append(out, k)
 		}
 	}
 	return out, rows.Err()
@@ -1080,6 +1089,21 @@ func chunkStrings(ss []string) [][]string {
 	}
 	if len(ss) > 0 {
 		out = append(out, ss)
+	}
+	return out
+}
+
+// chunkKeys is chunkStrings for (tenant, session) pairs. A pair binds two variables, so a chunk
+// holds half as many as chunkStrings does, keeping a statement under the same variable cap.
+func chunkKeys(ks []sessKey) [][]sessKey {
+	per := max(sqlChunk/2, 1)
+	var out [][]sessKey
+	for len(ks) > per {
+		out = append(out, ks[:per])
+		ks = ks[per:]
+	}
+	if len(ks) > 0 {
+		out = append(out, ks)
 	}
 	return out
 }

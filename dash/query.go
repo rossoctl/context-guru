@@ -645,27 +645,27 @@ func sessionTokensQuery(f Filter, ids []string) (string, []any) {
 	agent := func(expr string) string {
 		return `COALESCE(SUM(CASE WHEN r.keepalive = 0 THEN ` + expr + ` ELSE 0 END),0)`
 	}
-	return `SELECT r.session_id, ` + tokenSumTerms(totalColumns) + `, ` + tokenSumTerms(flowColumns("tok_ka")) + `,
+	return `SELECT r.tenant_id, r.session_id, ` + tokenSumTerms(totalColumns) + `, ` + tokenSumTerms(flowColumns("tok_ka")) + `,
 		` + accTokenTailTerms + `,
 		` + agent("r.fresh_input") + `, ` + agent("r.cache_read") + `,
 		` + agent("MAX(r.cache_write - r.cache_write_1h, 0)") + `, ` + agent("r.cache_write_1h") + `
-		FROM requests r WHERE ` + cond + ` GROUP BY 1`, args
+		FROM requests r WHERE ` + cond + ` GROUP BY 1, 2`, args
 }
 
-// sessionTokens answers SessionTokens for each of the given sessions, keyed by session id.
-func (d *DB) sessionTokens(f Filter, ids []string) (map[string]SessionTokens, error) {
+// sessionTokens answers SessionTokens for each of the given sessions, keyed by tenant and session id.
+func (d *DB) sessionTokens(f Filter, ids []string) (map[sessKey]SessionTokens, error) {
 	q, args := sessionTokensQuery(f, ids)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]SessionTokens{}
+	out := map[sessKey]SessionTokens{}
 	for rows.Next() {
-		var id string
+		var id sessKey
 		var agg accTokensAgg
 		var used TierTokens
-		dest := append([]any{&id}, agg.dest(16)...)
+		dest := append([]any{&id.tenant, &id.session}, agg.dest(16)...)
 		dest = append(dest, &used.Input, &used.CacheRead, &used.CacheWrite5m, &used.CacheWrite1h)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
@@ -721,13 +721,13 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 	if byCost {
 		order = "SUM(r.cost_usd) DESC, MAX(r.ts) DESC"
 	}
-	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
+	q := `SELECT r.session_id, r.tenant_id, COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
 		-- The model with the most output_tokens for this session, picked by the same
 		-- correlated subquery pattern as pingsBySession's second query, but cheap enough
 		-- (one session's own rows) to inline rather than join.
-		(SELECT r2.model FROM requests r2 WHERE r2.session_id = r.session_id
+		(SELECT r2.model FROM requests r2 WHERE r2.tenant_id = r.tenant_id AND r2.session_id = r.session_id
 			GROUP BY r2.model ORDER BY SUM(r2.output_tokens) DESC, r2.model LIMIT 1),
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
 		SUM(r.attempted_tokens), SUM(r.frozen_tokens),
@@ -743,7 +743,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		-- is summed inside the window: both halves of the net must span the same pings (#678).
 		COALESCE(SUM(` + kaSavedSince("r.", f.Since) + `),0)
 		FROM requests r WHERE ` + cond + `
-		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+		GROUP BY r.tenant_id, r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -785,7 +785,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 			return nil, 0, err
 		}
 		for _, s := range out {
-			if p, ok := pings[s.SessionID]; ok {
+			if p, ok := pings[sessKey{s.TenantID, s.SessionID}]; ok {
 				s.KeepAlivePings, s.KeepAlivePingUSD = p.n, p.usd
 			}
 			s.KeepAliveNetUSD = s.KeepAliveSavedUSD - s.KeepAlivePingUSD
@@ -799,11 +799,11 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 			return nil, 0, err
 		}
 		for _, s := range out {
-			s.SessionTokens = toks[s.SessionID]
+			s.SessionTokens = toks[sessKey{s.TenantID, s.SessionID}]
 		}
 	}
 	var total int64
-	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT DISTINCT r.tenant_id, r.session_id FROM requests r WHERE `+cond+`)`, args...).Scan(&total)
 	return out, total, err
 }
 
@@ -814,21 +814,21 @@ type pingCount struct {
 }
 
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
-func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1`, args...)
+func (d *DB) pingsBySession(cond string, args []any) (map[sessKey]pingCount, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]pingCount{}
+	out := map[sessKey]pingCount{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var p pingCount
-		if err := rows.Scan(&s, &p.n, &p.usd); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &p.n, &p.usd); err != nil {
 			return nil, err
 		}
-		out[s] = p
+		out[k] = p
 	}
 	return out, rows.Err()
 }
