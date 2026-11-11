@@ -252,6 +252,9 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		return
 	}
 	turn.Redact(r.bodyCap)
+	// declMu is held across the export and the append below, so an opt-out cannot fall between the
+	// check and the write. That is cheap only because exp.export just hands the span to the OTel
+	// batcher; it must stay non-blocking, or POST /api/me/record/off waits on the network.
 	r.declMu.Lock()
 	defer r.declMu.Unlock()
 	if r.declinedLocked(e.tenantID, e.traceID, s) {
@@ -383,10 +386,10 @@ func (r *sessionRecorder) fillResponse(turn *record.Turn, e *recEvent) {
 // written. In hosted mode each tenant's files go in their own owner-only subdirectory, and a
 // proxy restart in the middle of a session appends to the same file.
 func (r *sessionRecorder) appendWire(e *recEvent) error {
-	dir := r.dir
+	// sessionDir and wirePath are shared with Decline, so the write path and the delete path cannot
+	// name different files.
 	if e.tenantID != "" {
-		dir = filepath.Join(r.dir, sanitizeTraceID(e.tenantID))
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := os.MkdirAll(r.sessionDir(e.tenantID), 0o700); err != nil {
 			return err
 		}
 	}
@@ -398,8 +401,7 @@ func (r *sessionRecorder) appendWire(e *recEvent) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, sanitizeTraceID(e.traceID)+".wire.jsonl")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(r.wirePath(e.tenantID, e.traceID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -445,38 +447,58 @@ func (r *sessionRecorder) declinedLocked(tenantID, traceID string, s *recSession
 	return false
 }
 
+// wirePath is the one file a session's calls are appended to.
+func (r *sessionRecorder) wirePath(tenantID, traceID string) string {
+	return filepath.Join(r.sessionDir(tenantID), sanitizeTraceID(traceID)+".wire.jsonl")
+}
+
+// HasSession reports whether a wire file exists for this session of this tenant.
+func (r *sessionRecorder) HasSession(tenantID, traceID string) bool {
+	if r == nil || r.dir == "" {
+		return false
+	}
+	_, err := os.Stat(r.wirePath(tenantID, traceID))
+	return err == nil
+}
+
 // Decline stops recording one session of one tenant and deletes what was already written for it.
-// It is the per-session opt-out (POST /api/me/record/off). It writes the .no-record marker FIRST,
-// then removes the wire file: if the removal fails, no further call is written anyway.
+// It is the per-session opt-out (POST /api/me/record/off).
 //
-// It returns whether a wire file was deleted. Spans already sent to an OTLP collector
-// (--record-otlp) cannot be called back; only later ones are stopped. With no --record dir the
-// opt-out holds in memory only, until the proxy restarts.
-func (r *sessionRecorder) Decline(tenantID, traceID string) (bool, error) {
+// The order, all under declMu: write the .no-record marker; only then mark the session in memory;
+// then remove the wire file. So:
+//   - stopped=false, err: the marker could not be written and NOTHING changed;
+//   - stopped=true, err: recording is stopped (and stays stopped after a restart), but the
+//     existing file could not be removed;
+//   - deleted reports whether a wire file was removed.
+//
+// Spans already sent to an OTLP collector (--record-otlp) cannot be called back; only later ones
+// are stopped. With no --record dir the opt-out holds in memory only, until the proxy restarts.
+func (r *sessionRecorder) Decline(tenantID, traceID string) (stopped, deleted bool, err error) {
 	if r == nil {
-		return false, nil
+		return false, false, nil
 	}
 	r.declMu.Lock()
 	defer r.declMu.Unlock()
-	r.declined[declKey(tenantID, traceID)] = true
+	key := declKey(tenantID, traceID)
 	if r.dir == "" {
-		return false, nil
+		r.declined[key] = true
+		return true, false, nil
 	}
-	dir := r.sessionDir(tenantID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, err
+	if err := os.MkdirAll(r.sessionDir(tenantID), 0o700); err != nil {
+		return false, false, err
 	}
-	base := filepath.Join(dir, sanitizeTraceID(traceID))
+	base := filepath.Join(r.sessionDir(tenantID), sanitizeTraceID(traceID))
 	if err := os.WriteFile(base+noRecordSuffix, nil, 0o600); err != nil {
-		return false, err
+		return false, false, err
 	}
-	switch err := os.Remove(base + ".wire.jsonl"); {
+	r.declined[key] = true
+	switch err := os.Remove(r.wirePath(tenantID, traceID)); {
 	case err == nil:
-		return true, nil
+		return true, true, nil
 	case errors.Is(err, fs.ErrNotExist):
-		return false, nil
+		return true, false, nil
 	default:
-		return false, err
+		return true, false, err
 	}
 }
 
