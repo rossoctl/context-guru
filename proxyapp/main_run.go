@@ -7,7 +7,7 @@
 // Config is loaded from --config (YAML); upstreams and listen address from
 // flags/env. Fail open: on any pipeline trouble the original request is
 // forwarded untouched.
-package main
+package proxyapp
 
 import (
 	"context"

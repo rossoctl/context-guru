@@ -1,4 +1,4 @@
-package main
+package proxyapp
 
 import (
 	"context"
@@ -122,7 +122,7 @@ func TestRowQuotaDefaultIsNonZero(t *testing.T) {
 // Finding C, part 2: the shipped unit must set it too — a default in the binary that the
 // deployed unit overrides back to 0 would be no defence at all.
 func TestShippedUnitSetsRowQuota(t *testing.T) {
-	b, err := os.ReadFile("../../deploy/service/context-guru.service")
+	b, err := os.ReadFile("../deploy/service/context-guru.service")
 	if err != nil {
 		t.Fatal(err)
 	}

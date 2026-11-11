@@ -1,6 +1,6 @@
 //go:build !cg_record
 
-package main
+package proxyapp
 
 import (
 	"os/exec"
