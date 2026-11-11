@@ -1,0 +1,402 @@
+{
+  "uid": "central-machines",
+  "title": "Machine comparison",
+  "description": "Which machines or configs save the most?",
+  "tags": [
+    "central",
+    "machines"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "proxy",
+        "label": "Proxy",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info, proxy)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "machine",
+        "label": "Machine",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info{proxy=~\"$proxy\"}, machine)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "bargauge",
+      "title": "Net saved by machine (USD, selected range)",
+      "description": "Every machine, best first.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 10,
+        "h": 12
+      },
+      "targets": [
+        {
+          "expr": "sort_desc((((sum by (machine)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (machine)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (machine)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (machine)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)))",
+          "legendFormat": "{{machine}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "By preset",
+      "description": "Saving rate (net divided by the cost with no change) needs the baseline counter, which is not built. Net per 1,000 requests compares a busy machine with a quiet one.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 14,
+        "h": 12
+      },
+      "targets": [
+        {
+          "expr": "count by (preset) (count by (preset, machine) (llm_proxy_info{proxy=~\"$proxy\", machine=~\"$machine\"}))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "(((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0))",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "1000 * (((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)) / clamp_min(sum by (preset)(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "sum by (preset)(increase(llm_savings_estimated_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) / clamp_min(sum by (preset)(increase(llm_savings_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "preset",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "machines",
+              "Value #B": "net saved",
+              "Value #C": "net per 1,000 requests",
+              "Value #D": "estimated"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "net saved"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "net per 1,000 requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "estimated"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Net saved by proxy (USD, selected range)",
+      "description": "Each proxy prices with its own rate table, so compare these by tokens, not by money, when the tables differ.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 10,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "(((sum by (proxy)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (proxy)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (proxy)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (proxy)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0))",
+          "legendFormat": "{{proxy}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Net saved per 1,000 requests, by machine",
+      "description": "A fair comparison between a busy machine and a quiet one.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 12,
+        "w": 14,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(1000 * (((sum by (machine)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (machine)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (machine)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (machine)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)) / clamp_min(sum by (machine)(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1))",
+          "legendFormat": "{{machine}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    }
+  ]
+}
