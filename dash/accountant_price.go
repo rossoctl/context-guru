@@ -450,7 +450,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
-		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD - deferFig)
+		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD-deferFig)
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {

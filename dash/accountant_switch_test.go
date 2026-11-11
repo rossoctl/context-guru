@@ -521,7 +521,6 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 	}
 }
 
-<<<<<<< HEAD
 // #908, accountant R56, reviewer proposal on #1003: the library prices tool deferral from the bodies, and its
 // figure is the deferral's saving. It is booked on the tooldefer row, so the components still sum to the baseline
 // delta, but the lever Overview adds beside the baseline (DeferNetUSD) is where the deferral card reads it. So the
