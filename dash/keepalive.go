@@ -62,6 +62,7 @@ const ttlTTL = modelinfo.AnthropicCacheTTL5m
 // a median 3.38x low.
 const addressableCTE = `WITH s AS (
 	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.provider, r.cache_miss_reason, r.cache_write,
+	       r.fresh_input, r.cache_read, r.cache_write_1h,
 	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
 	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
@@ -70,6 +71,20 @@ const addressableCTE = `WITH s AS (
 	SELECT *, (ts - prev_ts) / 1000.0 AS gap_s FROM s
 	WHERE cache_miss_reason = 'ttl_expiry' AND cache_write > 0 AND prev_ts IS NOT NULL
 )`
+
+// expiryTierTerms sums the billed input tokens of the `addressable` rows by tier: the token form of
+// their cost_usd, for a Claude subscription (#1048). In TierTokens order (input, read, 5-minute
+// write, 1-hour write). The tiers are never added. expiryTierCols is the same for one row.
+const (
+	expiryTierCols  = `fresh_input, cache_read, MAX(cache_write - cache_write_1h, 0), cache_write_1h`
+	expiryTierTerms = `COALESCE(SUM(fresh_input),0), COALESCE(SUM(cache_read),0),
+		COALESCE(SUM(MAX(cache_write - cache_write_1h, 0)),0), COALESCE(SUM(cache_write_1h),0)`
+)
+
+// tierDest is the scan targets of expiryTierCols or expiryTierTerms, in that order.
+func tierDest(t *TierTokens) []any {
+	return []any{&t.Input, &t.CacheRead, &t.CacheWrite5m, &t.CacheWrite1h}
+}
 
 // addressable renders the CTE for one filter.
 func addressable(f Filter) (string, []any) {
@@ -564,6 +579,9 @@ type Band struct {
 	Label string  `json:"label"`
 	N     int64   `json:"n"`
 	USD   float64 `json:"usd"`
+	// Tokens is the token form of USD: the billed input tokens of those expiries, by tier (#1048).
+	// Set by the Cache strategy tab only; nil (absent) on the KV-cache bands.
+	Tokens *TierTokens `json:"tokens,omitempty"`
 	// Beyond marks the bands the CURRENT policy's coverage cannot reach, which the chart draws
 	// in the de-emphasis gray beyond the coverage rule.
 	Beyond bool `json:"beyond,omitempty"`
@@ -571,14 +589,16 @@ type Band struct {
 
 // DayPoint is one day of the "how often, and what did it cost" series.
 type DayPoint struct {
-	Day        string  `json:"day"`
-	TS         int64   `json:"ts"`
-	Misses     int64   `json:"misses"`
-	USD        float64 `json:"usd"`
-	Requests   int64   `json:"requests"`
-	AllUSD     float64 `json:"all_usd"`
-	SharePct   float64 `json:"share_pct"`
-	MissRatePc float64 `json:"miss_rate_pct"`
+	Day    string  `json:"day"`
+	TS     int64   `json:"ts"`
+	Misses int64   `json:"misses"`
+	USD    float64 `json:"usd"`
+	// Tokens is the token form of USD: the billed input tokens of the day's expiries, by tier (#1048).
+	Tokens     TierTokens `json:"tokens"`
+	Requests   int64      `json:"requests"`
+	AllUSD     float64    `json:"all_usd"`
+	SharePct   float64    `json:"share_pct"`
+	MissRatePc float64    `json:"miss_rate_pct"`
 }
 
 // AccountGaps is panel 3d: how long between one account's own TTL expiries.
@@ -681,6 +701,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	type addrRow struct {
 		gap, prefix, usd float64
 		hour             int
+		tokens           TierTokens
 	}
 	var (
 		all       = map[string]dayAll{}
@@ -713,7 +734,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	})
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0)
+		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
 		FROM addressable GROUP BY 1 ORDER BY 1`, aArgs...)
 		if err != nil {
 			return err
@@ -721,7 +742,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		defer rows.Close()
 		for rows.Next() {
 			var p DayPoint
-			if err := rows.Scan(&p.Day, &p.TS, &p.Misses, &p.USD); err != nil {
+			if err := rows.Scan(append([]any{&p.Day, &p.TS, &p.Misses, &p.USD}, tierDest(&p.Tokens)...)...); err != nil {
 				return err
 			}
 			daily = append(daily, p)
@@ -734,7 +755,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
-		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
+		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER), `+expiryTierCols+`
 		FROM addressable`, aArgs...)
 		if err != nil {
 			return err
@@ -742,7 +763,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		defer rows.Close()
 		for rows.Next() {
 			var x addrRow
-			if err := rows.Scan(&x.gap, &x.prefix, &x.usd, &x.hour); err != nil {
+			if err := rows.Scan(append([]any{&x.gap, &x.prefix, &x.usd, &x.hour}, tierDest(&x.tokens)...)...); err != nil {
 				return err
 			}
 			addr = append(addr, x)
@@ -827,18 +848,24 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	preUSD := make([]float64, len(prefixEdges))
 	hourN := make([]int64, 24)
 	hourUSD := make([]float64, 24)
+	gapTok := make([]TierTokens, len(gapEdges))
+	preTok := make([]TierTokens, len(prefixEdges))
+	hourTok := make([]TierTokens, 24)
 	var gaps, prefixes []float64
 	for _, x := range addr {
 		out.Addressable++
 		gi := bandOf(gapEdges, x.gap)
 		gapN[gi]++
 		gapUSD[gi] += x.usd
+		gapTok[gi].add(x.tokens)
 		pi := bandOf(prefixEdges, x.prefix)
 		preN[pi]++
 		preUSD[pi] += x.usd
+		preTok[pi].add(x.tokens)
 		if x.hour >= 0 && x.hour < 24 {
 			hourN[x.hour]++
 			hourUSD[x.hour] += x.usd
+			hourTok[x.hour].add(x.tokens)
 		}
 		gaps = append(gaps, x.gap)
 		prefixes = append(prefixes, x.prefix)
@@ -870,15 +897,15 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		return trimZero(v)
 	}
 	for i, label := range bandLabels(gapEdges, secs) {
-		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i],
+		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i], Tokens: &gapTok[i],
 			Beyond: gapEdges[i] >= coverageSeconds})
 	}
 	for i, label := range bandLabels(prefixEdges, toks) {
-		out.PrefixBands = append(out.PrefixBands, Band{Label: label, N: preN[i], USD: preUSD[i]})
+		out.PrefixBands = append(out.PrefixBands, Band{Label: label, N: preN[i], USD: preUSD[i], Tokens: &preTok[i]})
 	}
 	for h := 0; h < 24; h++ {
 		out.HourBins = append(out.HourBins, Band{
-			Label: fmt.Sprintf("%02d", h), N: hourN[h], USD: hourUSD[h]})
+			Label: fmt.Sprintf("%02d", h), N: hourN[h], USD: hourUSD[h], Tokens: &hourTok[h]})
 	}
 	out.GapP10, out.GapP50, out.GapP90 = pctlF(gaps, 0.10), pctlF(gaps, 0.50), pctlF(gaps, 0.90)
 	out.PrefixP10 = int64(pctlF(prefixes, 0.10))
@@ -942,6 +969,41 @@ type KeepAliveSessionRow struct {
 	PingUSD    float64 `json:"ping_usd"`
 	SavedUSD   float64 `json:"saved_usd"`
 	NetUSD     float64 `json:"net_usd"`
+	// ExpiryTokens is the token form of ExpiryUSD: the billed input tokens of the session's
+	// expiries, by tier (#1048).
+	ExpiryTokens TierTokens `json:"expiry_tokens"`
+	KeepAliveSessionTokens
+}
+
+// KeepAliveSessionTokens is one session's keep-alive figures in tokens, by tier, for a Claude
+// subscription (#1048). They are the Sessions tab's own figures (sessionTokens, #1023), so the two
+// tabs cannot disagree about a session:
+//
+//   - KeepAliveTokens is the rescue: the accountant's keep-alive figure (tok_ka_*), the token form of
+//     saved_usd. It is a different measurement from saved_usd, which is the legacy credit gated on read.
+//   - KeepAlivePingTokens is what the pings paid, the token form of ping_usd. It is never netted
+//     against the rescue: the view shows it on its own line.
+//   - TokensUnmeasured counts the session's agent requests with no token figure.
+type KeepAliveSessionTokens struct {
+	KeepAliveTokens     TokenFlow  `json:"keepalive_tokens"`
+	KeepAlivePingTokens TierTokens `json:"keepalive_ping_tokens"`
+	TokensUnmeasured    int64      `json:"tokens_unmeasured_requests"`
+}
+
+// keepAliveSessionTokens answers KeepAliveSessionTokens for each of the given sessions, keyed by
+// session id. It reads through sessionTokens, the Sessions tab's query: one read of the given
+// sessions only, on a session index.
+func (d *DB) keepAliveSessionTokens(f Filter, ids []string) (map[string]KeepAliveSessionTokens, error) {
+	toks, err := d.sessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]KeepAliveSessionTokens, len(toks))
+	for id, t := range toks {
+		out[id] = KeepAliveSessionTokens{KeepAliveTokens: t.KeepAliveTokens,
+			KeepAlivePingTokens: t.KeepAlivePingTokens, TokensUnmeasured: t.TokensUnmeasured}
+	}
+	return out, nil
 }
 
 // KeepAliveSessions lists the sessions this window's addressable expiries are concentrated in,
@@ -956,7 +1018,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	}
 	aCond, aArgs := addressable(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0)
+		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
 		FROM addressable WHERE session_id <> ''
 		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
 		append(append([]any(nil), aArgs...), limit)...)
@@ -967,7 +1029,8 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	byID := map[string]*KeepAliveSessionRow{}
 	for rows.Next() {
 		var s KeepAliveSessionRow
-		if err := rows.Scan(&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD); err != nil {
+		if err := rows.Scan(append([]any{&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD},
+			tierDest(&s.ExpiryTokens)...)...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1016,9 +1079,18 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, len(out))
+	for i, s := range out {
+		ids[i] = s.SessionID
+	}
+	toks, err := d.keepAliveSessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
 	for _, s := range out {
 		s.SavedUSD, s.PingUSD, s.Pings = saved[s.SessionID], spent[s.SessionID], pings[s.SessionID]
 		s.NetUSD = s.SavedUSD - s.PingUSD
+		s.KeepAliveSessionTokens = toks[s.SessionID]
 	}
 	return out, nil
 }
@@ -1082,6 +1154,9 @@ type KeepAliveLiveRow struct {
 	// dearer and pays for more pings, and each ping buys an hour instead of five minutes.
 	Breakeven1hPings   int64   `json:"breakeven_1h_pings,omitempty"`
 	Breakeven1hMinutes float64 `json:"breakeven_1h_minutes,omitempty"`
+	// The same history as Pings/PingUSD/SavedUSD in tokens, by tier, for a Claude subscription
+	// (#1048). The per-ping and per-lapse figures above are a price what-if and have no token form.
+	KeepAliveSessionTokens
 }
 
 // KeepAliveLive is the live-session answer: the rows, and the clock they were computed against.
@@ -1234,10 +1309,19 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, len(out.Rows))
+	for i, r := range out.Rows {
+		ids[i] = r.SessionID
+	}
+	toks, err := d.keepAliveSessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out.Rows {
 		id := out.Rows[i].SessionID
 		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[id], spent[id]
 		out.Rows[i].Pings = pings[id]
+		out.Rows[i].KeepAliveSessionTokens = toks[id]
 	}
 	return out, nil
 }
