@@ -130,17 +130,26 @@ give each one back.
 **Why:** an `expand` call means the agent needed an output that a component removed. Each one
 costs a turn and the tokens it returns. A rising rate means a component removes too much.
 
-| # | Kind | Statement | Signal | Threshold (proposed) | Laptop baseline | cg2 baseline |
-|---|---|---|---|---|---|---|
-| E1 | side effect | The agent rarely needs a removed output back from the sweep. | `sum(sweep_expands)` per 100 sweep removals (`events.sweep_applied_cold`) | over 5 per 100 removals over 7 days | 2026-10-27 to 11-04: **0 expands for 1,153 removals** | **6 per 337 removals = 1.78 per 100** (5 of them false drops = 1.48 per 100), 22,564 tokens back |
-| E2 | side effect | The agent rarely needs a removed output back from `extract_llm`. | **Gap G9.** No expand can be tied to `extract_llm`. The upper bound is `expands − sweep_expands`, which also holds `extract`, `dedup`, `searchfold`, `textclean`, `cmdfilter` and the other offloads. | none until G9 is fixed: the upper bound is too loose | at most 3 for 5 fresh `extract_llm` removals | **at most 7 for 8 fresh `extract_llm` removals** (428 replays, 20,151 tokens saved) |
-| E3 | contract | A sweep expand is counted as a false drop at most once. | rows with `sweep_false_expands > sweep_expands`, and rows with `sweep_expands > expands` | any row | 0 and 0 | 0 and 0 |
-| E4 | side effect | Expands stay rare in total. | `sum(expands)` per 1,000 real requests | over 3 per 1,000 over 7 days | 0.29 per 1,000 (3 of 10,490) | **0.97 per 1,000** (13 of 13,338; 0.07% of requests) |
+| # | Kind | Statement | Signal | Threshold (proposed) | Laptop baseline | cg2, scan 1 (11-03 to 11-04) | cg2, scan 2 (11-10 to 11-11) |
+|---|---|---|---|---|---|---|---|
+| E1 | side effect | The agent rarely needs a removed output back from the sweep. | `sum(sweep_expands)` per 100 sweep removals (`events.sweep_applied_cold`) | over 5 per 100 removals over 7 days | 11-03 to 11-11: **0 expands for 460 removals** | **1.78 per 100** (6 of 337); false drops 1.48 per 100; 22,564 tokens back | **0.66 per 100** (2 of 301); false drops 0.33 per 100; 8,818 tokens back |
+| E1b | side effect | The same, weighted by tokens. | `sum(sweep_expand_tokens) / sum(saved_unique)` of the sweep | over 5% over 7 days | 0% (0 of 1,720,868 tokens) | not measured | **1.75%** (8,818 of 503,425 tokens) |
+| E1c | side effect | The sweep rarely drops an output that the agent names again later. | `events.sweep_apply_dropped_referenced_later` per 100 removals | over 15 per 100 over 7 days | **28.3 per 100** (130 of 460) | not measured | 9.97 per 100 (30 of 301) |
+| E2 | side effect | The agent rarely needs a removed output back from `extract_llm`. | **Gap G9.** No expand can be tied to `extract_llm`. The upper bound is `expands − sweep_expands`, which also holds `extract`, `dedup`, `searchfold`, `textclean`, `cmdfilter` and the other offloads. | none until G9 is fixed: the upper bound is too loose | at most 3 for 8 fresh removals | at most 7 for 8 fresh removals | at most 9 for 5 fresh removals |
+| E3 | contract | A sweep expand is counted as a false drop at most once. | rows with `sweep_false_expands > sweep_expands`, and rows with `sweep_expands > expands` | any row | 0 and 0 | 0 and 0 | 0 and 0 |
+| E4 | side effect | Expands stay rare in total. | `sum(expands)` per 1,000 real requests | over 3 per 1,000 over 7 days | 0.37 per 1,000 (3 of 8,118) | **0.97 per 1,000** (13 of 13,338; 0.07% of requests) | **0.97 per 1,000** (11 of 11,376; 0.10% of requests) |
 
-- **The cg2 window is short.** The scan ran on 2026-11-04. The cg2 database held 2 days. Nearly
-  all traffic is on one day: 12,200 of 13,338 real requests, and 335 of the 337 sweep removals.
-  98% of requests are on preset `xhigh`. Run the scan again after 7 days before you set the
-  thresholds.
+- **The cg2 window is always short.** The database holds about 2 days, because of its size cap.
+  Each scan covers one busy day: 12,200 of 13,338 requests on 11-04, and 11,119 of 11,376 on
+  11-10. About 98% of requests are on preset `xhigh`. So one scan is one day of fleet traffic.
+- **Scan 2:** 82 sessions and 1,574 threads. The laptop test of the same script covers
+  2026-11-03 to 11-11: 8,118 real requests, 35 sessions, 169 threads.
+- **The fleet is stable at 0.97 expands per 1,000 requests in both scans.** The sweep's expand
+  rate fell from 1.78 to 0.66 per 100. With 6 and 2 expands, that is within the noise.
+- **The laptop's referenced-later rate (28.3 per 100) is 3× the fleet's (9.97).** The laptop runs
+  `ultrahigh`. The fleet runs `xhigh`.
+- **Run the scan once a week,** and keep each result. The T1..Tn labels are per scan: the same
+  label is a different tenant in another scan.
 - **Why the `extract_llm` number is weak:** `expand` gives back the stored bytes for a hash, and it
   records no component (`expand/expand.go`, `Resolve`). Only the sweep keeps its own ledger of
   removals, so only the sweep's expands can be counted apart
@@ -384,7 +393,7 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 ## Monitor spec (draft)
 
 - **Daily:** K1, K3, K4, K7, K8, K9, K10, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, S2, S4, X2, X3, X6, D1, D3, D7, E1, E3, E4, and the per-component activity table.
+- **Weekly:** K2, K5, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
