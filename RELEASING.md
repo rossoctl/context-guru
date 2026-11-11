@@ -122,6 +122,7 @@ A review without this block does not count toward the 2.
   6. If the remerge-diff shows a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
   7. A resolution that needs a design choice goes back to the PR owner.
   8. Code fixes stay with the PR owner.
+  9. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;

@@ -31,8 +31,11 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Metadata first.** A component or feature works from metadata only (hashes, counts, sizes,
   ids, flags). Depending on stored customer data (transcript text, tool output, bodies,
   summaries) is a deliberate exception. Every PR that adds or changes a feature states its data
-  dependence and what it does at each storage level (off, metadata only, everything), and updates
-  [docs/data-dependence.md](docs/data-dependence.md) — the reason in plain words, not a code
+  dependence and what it does at each storage level (off, metadata only, everything). It adds or
+  edits that feature's row file under `docs/data-dependence/` (`components/<name>.md` or
+  `features/<slug>.md`), then runs `go run ./cmd/gen-datadep` to rebuild the generated page
+  [docs/data-dependence.md](docs/data-dependence.md). Never edit that page by hand, and on a
+  conflict in it, run the generator again. Write the reason in plain words, not a code
   reference. If the PR changes a feature's data dependence in either direction, say so at the top
   of the PR, and have the person in that row's "Decided by" confirm it before merge.
   `components/all/datadep_test.go` fails when a registered component has no row.

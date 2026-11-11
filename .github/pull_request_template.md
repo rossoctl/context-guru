@@ -10,6 +10,8 @@
 
 <!--
 Required for every PR that adds or changes a component or feature. See docs/data-dependence.md.
+Add or edit the row file under docs/data-dependence/ (not the page), then run
+`go run ./cmd/gen-datadep` and commit the page it rebuilds.
 Pick one and fill it in. Give the reason in plain words, not a file or line number.
 -->
 
