@@ -242,17 +242,17 @@ def machines():
     for s in ax.spines.values():
         s.set_color(EDGE)
     ax.set_title("By preset", color=TXT, fontsize=10.5, loc="left", pad=7)
-    head = ("preset", "machines", "net saved", "net / 1,000 req", "estimated")
-    data = [("house", "14", "$3,210", "$0.46", "2.8 %"), ("lean", "6", "$1,090", "$0.38", "3.0 %"),
-            ("max", "3", "$720", "$0.51", "6.9 %"), ("custom", "1", "$38", "$0.09", "11.0 %")]
-    xs = [0.04, 0.27, 0.45, 0.66, 0.84]
+    head = ("preset", "machines", "net saved", "saving rate", "net / 1,000 req", "estimated")
+    data = [("house", "14", "$3,210", "19.4 %", "$0.46", "2.8 %"), ("lean", "6", "$1,090", "14.1 %", "$0.38", "3.0 %"),
+            ("max", "3", "$720", "23.7 %", "$0.51", "6.9 %"), ("custom", "1", "$38", "5.2 %", "$0.09", "11.0 %")]
+    xs = [0.04, 0.20, 0.37, 0.54, 0.70, 0.88]
     for x, h in zip(xs, head):
         ax.text(x, 0.84, h, color=DIM, fontsize=10, weight="bold", transform=ax.transAxes)
     for i, row in enumerate(data):
         for x, cell in zip(xs, row):
-            ax.text(x, 0.68 - i * 0.14, cell, color=YEL if (x == 0.84 and float(cell.split()[0]) > 10) else TXT,
+            ax.text(x, 0.68 - i * 0.14, cell, color=YEL if (x == 0.88 and float(cell.split()[0]) > 10) else TXT,
                     fontsize=11, transform=ax.transAxes)
-    ax.text(0.04, 0.06, "Saving rate (net / baseline cost) arrives with the baseline counter.",
+    ax.text(0.04, 0.06, "Saving rate = net saved / (spend + net saved). The exact baseline counter is not built yet.",
             color=DIM, fontsize=8.5, transform=ax.transAxes)
     ax = panel(fig, [0.045, 0.06, 0.37, 0.35], "Net saved by proxy", "USD, last 30 days")
     ax.bar([0, 1], [3520, 1538], color=[BLUE, TEAL], width=0.5)

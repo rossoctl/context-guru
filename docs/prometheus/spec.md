@@ -504,7 +504,7 @@ Question: which machines or configs save the most?
 
 ![Machine comparison (fictive data)](img/dash-machines.png)
 
-The **saving rate** column needs the baseline counter (`llm_savings_baseline_usd_total`), which is not built yet. Until then, "Net saved per 1,000 requests" gives a fair comparison between a busy machine and a quiet one.
+The **saving rate** column is net saved / (spend + net saved). The exact baseline counter (`llm_savings_baseline_usd_total`) is not built, so spend plus net stands in for it. "Net saved per 1,000 requests" gives a fair comparison between a busy machine and a quiet one.
 
 | Panel | Type | Query idea |
 |---|---|---|
