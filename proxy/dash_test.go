@@ -557,7 +557,7 @@ func dashboardSpends(t *testing.T, n, results int, skip ...string) []time.Durati
 	var mu sync.Mutex
 	own := map[string]time.Duration{} // time per call name, a nested span taken out of its parent
 	done := make(chan struct{}, 1000)
-	parent := map[string]string{"accBilledTTL": "accCompute", "accCompute": "finish"}
+	parent := map[string]string{"accBilledTTL": "accCompute", "accCompute": "finish", "accWait": "finish"}
 	hook := func(call string, d time.Duration) {
 		mu.Lock()
 		own[call] += d
@@ -640,7 +640,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 const maxMaxContentSpend = 25 * time.Millisecond
 
 func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
-	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accBilledTTL", "accCompute"), maxMaxContentSpend)
+	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accWait", "accBilledTTL", "accCompute"), maxMaxContentSpend)
 }
 
 // TestDashboardUnderConcurrentTraffic drives the whole path (pipeline, capture,

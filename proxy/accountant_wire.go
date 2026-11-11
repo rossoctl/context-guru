@@ -67,6 +67,7 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 
 // accWait joins the accountant's work and takes its results into c. Idempotent. Nil-safe.
 func (c *capture) accWait() {
+	defer c.timed("accWait")()
 	if c == nil || c.accJob == nil {
 		return
 	}
