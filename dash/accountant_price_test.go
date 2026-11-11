@@ -279,3 +279,33 @@ func TestFigure_BreakCausedAsOneHourWrite(t *testing.T) {
 		t.Fatalf("got %v want %v", f.ByComponent["mask"], want)
 	}
 }
+
+// Issue #1076: Event.CostUSD (modelinfo) and the accountant figure (tierUSD) must price the same
+// 1h-written tokens alike, for every price shape: derived, a flat 1h rate (cache_write_1h_frac:
+// 1.0, as prices.example.yaml ships) and a stated 5m rate above the derived 1h one.
+func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
+	for name, p := range map[string]modelinfo.Price{
+		"derived":     accTestPrice,
+		"flat 1h":     {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Write1hFrac: 1.0},
+		"5m above 1h": {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 9e-6},
+	} {
+		const n = 1000
+		got := tierUSD(p, accountant.TierTokens{CacheWrite1h: n})
+		want := p.CostWithCacheWrite1h(0, 0, n, 0, n)
+		if !accNear(got, want) {
+			t.Errorf("%s: tierUSD = %v, CostWithCacheWrite1h = %v", name, got, want)
+		}
+	}
+}
+
+// NextRequestUSD names the 1h tier by the modelinfo TTL, not by a literal.
+func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
+	_, cold := NextRequestUSD(accTestPrice, 1000, 3600)
+	if want := 1000 * accTestPrice.CacheWrite1h(); !accNear(cold, want) {
+		t.Errorf("1h cold = %v, want %v", cold, want)
+	}
+	_, cold = NextRequestUSD(accTestPrice, 1000, 300)
+	if want := 1000 * accTestPrice.CacheWrite; !accNear(cold, want) {
+		t.Errorf("5m cold = %v, want %v", cold, want)
+	}
+}

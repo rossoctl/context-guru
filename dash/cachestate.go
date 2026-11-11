@@ -374,7 +374,7 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 // same derivation as CostWithCacheWrite1h). One definition for /api/cachestate and the manual ping,
 // so the "kept warm" credit is the cold figure the status line already showed.
 func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
-	if ttlS == 3600 {
+	if ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second) {
 		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
 	}
 	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
