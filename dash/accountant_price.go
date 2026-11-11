@@ -276,7 +276,7 @@ func (e *Event) UnpricedWhy() string {
 // library figure. Otherwise the event books no saving (Price set every saving to 0) and
 // AccountantFallback says why: a figure nothing measured is not shown.
 func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
-	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimateHeld = "", false, false, 0, false
+	e.accFallback, e.PriceEstimated, e.AccountantPriced, e.EstimatedSavedUSD, e.EstimatedSavedLowUSD, e.EstimateHeld = "", false, false, 0, 0, false
 	e.accUnpricedWhy = ""
 	e.clearAccTokens()
 	if !e.priceCost(p, accountingComplete) {
@@ -450,6 +450,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
+		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD-deferFig)
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -466,6 +467,27 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	e.PriceEstimated = estimated
 	e.AccountantPriced = true
 	return ""
+}
+
+// heldFloorUSD is the lower bound of a held figure. The ceiling (delta) prices each removed token as
+// the write the provider would have made on a cold cache. If the cache was warm, the client would have
+// paid the read rate for the tokens in the warm prefix and the write rate for the rest, so the saving is
+// lower; the read rate is the least a client token costs. The floor re-prices the same removed tokens
+// at the read rate: every Saved token as a read, Caused tokens and the cache effects unchanged in
+// dollars. It is never above the ceiling, and equals it when nothing was priced as a write.
+func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
+	low := delta
+	for _, o := range e.accRes.Ops {
+		if o.DryRun || o.Call != nil || o.Operator == "context-guru."+DeferComponent {
+			continue // the deferral's figure is out of the held ceiling, so its tokens are out of the floor
+		}
+		s := o.Saved
+		low -= tierUSD(p, s) - float64(s.Input+s.CacheRead+s.CacheWrite5m+s.CacheWrite1h)*p.CacheRead
+	}
+	if low > delta {
+		return delta // a price table with a read dearer than a write: the floor never exceeds the ceiling
+	}
+	return low
 }
 
 func inAdded(rows []CompRow, name string) bool {

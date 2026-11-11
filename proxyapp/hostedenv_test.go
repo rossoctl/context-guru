@@ -1,4 +1,4 @@
-package main
+package proxyapp
 
 import (
 	"context"
@@ -22,7 +22,11 @@ func TestMain(m *testing.M) {
 		// make main() reject its command line for the wrong reason.
 		os.Args = append([]string{"context-guru-proxy"},
 			strings.Fields(os.Getenv("CG_TEST_MAIN_ARGS"))...)
-		main()
+		hooks := Hooks{}
+		if os.Getenv("CG_TEST_HOOKS") == "1" {
+			hooks = testHooks() // hooks_test.go
+		}
+		Main(hooks)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -122,7 +126,7 @@ func TestRowQuotaDefaultIsNonZero(t *testing.T) {
 // Finding C, part 2: the shipped unit must set it too — a default in the binary that the
 // deployed unit overrides back to 0 would be no defence at all.
 func TestShippedUnitSetsRowQuota(t *testing.T) {
-	b, err := os.ReadFile("../../deploy/service/context-guru.service")
+	b, err := os.ReadFile("../deploy/service/context-guru.service")
 	if err != nil {
 		t.Fatal(err)
 	}

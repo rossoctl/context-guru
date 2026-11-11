@@ -3266,7 +3266,7 @@ func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
 
 // TestStrategySetWritesTheStatedPresetAndRecordsTheName is the old
 // TestKeepaliveEnableWritesAPresetPreservingConfig, moved to the script. --config REPLACES --preset
-// entirely (loadConfig in cmd/context-guru-proxy/main.go reads --preset only when --config is
+// entirely (loadConfig in proxyapp/main_run.go reads --preset only when --config is
 // ABSENT), so a strategy file that omitted its own `preset:` line would silently turn compaction off
 // at the moment a cache strategy was armed — the opposite of the intent.
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {

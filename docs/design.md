@@ -31,7 +31,8 @@ infrastructure the components sit on.
 | `config/` | strict YAML loader, presets, pipeline builder |
 | `proxy/` | the standalone/gateway HTTP proxy |
 | `adapters/bifrost/` | `LLMPlugin` adapter to embed the pipeline in a bifrost deployment |
-| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway |
+| `proxyapp/` | the proxy's startup, `proxyapp.Main`: flags, configuration, the dashboard, hosted mode and the server. A host adds its own parts through `proxyapp.Hooks` instead of copying the startup. Also a facade over the few `internal/` symbols a host needs |
+| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway: one call, `proxyapp.Main(proxyapp.Hooks{})` |
 
 ## The component model
 

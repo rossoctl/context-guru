@@ -1,0 +1,15 @@
+# Bob's prices for the context-guru proxy, used only with the bob-ultrahigh preset (MODEL_PRICES).
+#
+# Bob bills every input token at one flat rate: fresh input, a cache read and a cache write cost the
+# same (measured from IBM's own `credits` field on 20 calls, 2026-11-10; #1030). The sweep's warm cost
+# gate needs that, or it prices a cache rewrite at Claude rates and refuses every warm cut.
+#
+# The in/out dollar rates are ESTIMATES, copied from deploy/service/prices.example.yaml. Only the
+# ratio (read = write = input) is measured. Bob names a tier, not a model, so each tier is listed.
+models:
+  - {match: "premium",      in: 3.00, out: 15.00, cache_read: 3.00, cache_write: 3.00, cache_write_1h_frac: 1.0}
+  - {match: "premium-ide",  in: 3.00, out: 15.00, cache_read: 3.00, cache_write: 3.00, cache_write_1h_frac: 1.0}
+  - {match: "standard",     in: 0.76, out: 3.80, cache_read: 0.76, cache_write: 0.76, cache_write_1h_frac: 1.0}
+  - {match: "standard-ide", in: 0.76, out: 3.80, cache_read: 0.76, cache_write: 0.76, cache_write_1h_frac: 1.0}
+  - {match: "fast",         in: 0.15, out: 0.60, cache_read: 0.15, cache_write: 0.15, cache_write_1h_frac: 1.0}
+  - {match: "fast-ide",     in: 0.15, out: 0.60, cache_read: 0.15, cache_write: 0.15, cache_write_1h_frac: 1.0}

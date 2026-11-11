@@ -157,6 +157,10 @@ type CacheConfig struct {
 	// the window's pings per session at 20 drops the net from +$164 to $92.34, and at 10 to
 	// $54.04. So the guard bounds the outlier ping and never the productive session.
 	KeepAliveMaxUSDPerPing float64 `yaml:"keepalive_max_usd_per_ping"`
+	// KeepAliveMaxBodyBytes is the largest request body the keeper holds for one thread. It is a
+	// memory guard. The per-ping cost cap decides whether a ping is worth it. 0 =
+	// DefaultKeepAliveMaxBodyBytes (32 MiB). Set 8388608 for the limit before #1100.
+	KeepAliveMaxBodyBytes int `yaml:"keepalive_max_body_bytes"`
 	// KeepAliveMinPrefixTokens is the billed-prefix floor a session must reach before it is
 	// pinged at all, in the provider's own units (cache_read + cache_write of the previous
 	// request). 0 = DefaultKeepAliveMinPrefix.
@@ -265,6 +269,8 @@ const (
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
+	// DefaultKeepAliveMaxBodyBytes mirrors keepalive.MaxBodyBytes (32 MiB).
+	DefaultKeepAliveMaxBodyBytes = 32 << 20
 	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
 	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait,
 	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
@@ -318,6 +324,9 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMaxUSDPerPing <= 0 {
 		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
 	}
+	if c.KeepAliveMaxBodyBytes <= 0 {
+		c.KeepAliveMaxBodyBytes = DefaultKeepAliveMaxBodyBytes
+	}
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
@@ -351,7 +360,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMaxBodyBytes < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
 		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
@@ -629,7 +638,7 @@ var presets = map[string][]string{
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
 	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
 	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
-	// cmd/context-guru-proxy/main.go). Asserting it here is how five documents came to repeat
+	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
 	// tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by

@@ -1,4 +1,4 @@
-package main
+package proxyapp
 
 import (
 	"strings"
@@ -47,5 +47,18 @@ func TestCachePolicyCarriesTheWaitPlan(t *testing.T) {
 	p = cachePolicy(config.CacheConfig{KeepAlive: true, KeepAliveWaitPlan: &off})
 	if p.WaitPlan || !p.On() || p.MinPrefixTokens != 80000 {
 		t.Errorf("switch off: %+v", p)
+	}
+}
+
+// #1100: the per-body limit reaches the policy on the parked path too, so the 8 MiB switch holds there.
+func TestCachePolicyCarriesTheBodyLimit(t *testing.T) {
+	for _, c := range []config.CacheConfig{{}, {KeepAlive: true}} {
+		if p := cachePolicy(c); p.MaxBodyBytes != config.DefaultKeepAliveMaxBodyBytes {
+			t.Errorf("default, keepalive=%v: MaxBodyBytes = %d", c.KeepAlive, p.MaxBodyBytes)
+		}
+		c.KeepAliveMaxBodyBytes = 8 << 20
+		if p := cachePolicy(c); p.MaxBodyBytes != 8<<20 {
+			t.Errorf("switch, keepalive=%v: MaxBodyBytes = %d, want 8 MiB", c.KeepAlive, p.MaxBodyBytes)
+		}
 	}
 }
