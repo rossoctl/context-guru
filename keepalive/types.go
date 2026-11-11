@@ -140,6 +140,10 @@ type Policy struct {
 	// Read it through Ceiling(), never directly: zero here means UNCONFIGURED, and for a spend
 	// guard that has to resolve to the default rather than to infinity.
 	MaxUSDPerPing float64
+	// MaxBodyBytes is the largest request body the keeper holds for one thread (a memory guard).
+	// Zero means MaxBodyBytes (32 MiB). Set LegacyMaxBodyBytes (8 MiB) for the old limit. Read it through
+	// BodyLimit().
+	MaxBodyBytes int
 	// MinPrefixTokens is the billed-prefix floor (the previous request's cache_read +
 	// cache_write) a session must reach before it is pinged. With the first-request skip this
 	// sends 8.7x fewer pings for 3.3% less money.
@@ -244,15 +248,30 @@ const (
 	// Larger than the entry bound because it holds one int rather than a body, and it has to
 	// outlive the entry.
 	MaxTurnKeys = 20000
-	// MaxBodyBytes refuses to hold a single body larger than this. A body this big
-	// is a multi-million-token request whose ping would itself cost real money, and holding
-	// one would spend a fifth of the whole budget on one session.
-	MaxBodyBytes = 8 << 20
+	// MaxBodyBytes is the default limit on one held body: a memory guard, not a cost guard. Bytes
+	// are a poor proxy for tokens (base64 images and escaped text are big in bytes and cheap in
+	// tokens), so the per-ping cost cap (Policy.Ceiling) decides whether a ping is worth it. This
+	// limit only stops one thread from taking more than a quarter of MaxBytes. When the total goes
+	// over MaxBytes, evictLocked drops entries. Policy.MaxBodyBytes overrides it per policy.
+	MaxBodyBytes = 32 << 20
+	// LegacyMaxBodyBytes is the limit before #1100. Set Policy.MaxBodyBytes to it to restore the old behavior.
+	LegacyMaxBodyBytes = 8 << 20
 	// tick is how often the sweep runs. The window it is protecting is 300s wide and the
 	// default idle (config.DefaultKeepAliveIdle) fires well inside it, so a 2s granularity
 	// spends at most 2s of the slack that leaves.
 	tick = 2 * time.Second
 )
+
+// BodyLimit is the per-body byte limit in force: MaxBodyBytes when unset, never above MaxBytes.
+func (p Policy) BodyLimit() int {
+	switch {
+	case p.MaxBodyBytes <= 0:
+		return MaxBodyBytes
+	case p.MaxBodyBytes > MaxBytes:
+		return MaxBytes
+	}
+	return p.MaxBodyBytes
+}
 
 // Ceiling is the per-ping cost guard that is actually ENFORCED.
 //

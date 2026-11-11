@@ -860,7 +860,7 @@ func (k *Keeper) Record(r Record) {
 		}
 		return
 	}
-	if len(body) > MaxBodyBytes {
+	if len(body) > pol.BodyLimit() {
 		refuse(ReasonTooLarge)
 		k.retire(key)
 		k.skipped.Add(1)
