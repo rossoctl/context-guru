@@ -361,7 +361,7 @@ there. After a proxy restart the tracker's records are gone but the provider's c
 not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
 only while that thread's cached prefix was last refreshed inside the request's cache lifetime
 (5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended tier). A refresh is the
-thread's own last request or a keep-alive ping that read the cache, under either session id the
+thread's own last request or a keep-alive ping that read or wrote the cache, under either session id the
 conversation uses (an explicit header on some turns, a content-derived id on others). The
 refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
 the dashboard off the fallback is the proxy's start time, and `--restart-grace=false` switches
