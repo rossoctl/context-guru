@@ -693,7 +693,7 @@ func (h *Handler) renderMetrics() string {
 
 	// --- keep-alive credit wiring --------------------------------------------
 	promHeaderProc(&b, "cg_keepalive_rescue_facts_missing_total",
-		"Requests that followed keep-alive pings but found no ping facts, so keep-alive credit was lost on that return. Also counts a return after an unpriced ping (non-2xx or no usage), after an eviction, or after a pricing panic. If it keeps rising while cg_keepalive_pings_priced_total stays 0, the host does not wire the ping side or its pings keep failing (check the keeper counters pings, failed and skipped in /stats). Moves only with the dashboard on.", "counter")
+		"Requests that followed keep-alive pings but found no ping facts, so keep-alive credit was lost on that return. Also counts a return after an unpriced ping (non-2xx or no usage), after an eviction, or after a pricing panic. If it keeps rising while cg_keepalive_pings_priced_total stays 0, the host does not wire the ping side or its pings keep failing (compare the keeper counters pings and failed in /stats). Moves only with the dashboard on.", "counter")
 	promLine(&b, "cg_keepalive_rescue_facts_missing_total", "", float64(h.savings.RescueFactsMissing()))
 	promHeaderProc(&b, "cg_keepalive_pings_priced_total",
 		"Keep-alive pings the host priced (each PingSavings call that returned ok). Read it together with cg_keepalive_rescue_facts_missing_total.", "counter")
