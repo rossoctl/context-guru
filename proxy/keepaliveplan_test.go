@@ -101,10 +101,11 @@ func TestKeepAlivePlanCountsOnlyPingsThatRefreshed(t *testing.T) {
 	}
 }
 
-// TestAPingThatReadNothingIsNotARefresh: a 200 ping that reports no cache read (the entry was
-// gone, so the provider wrote it again) answered, but refreshed nothing that was there before.
-// refreshedAt must stay on the real request.
-func TestAPingThatReadNothingIsNotARefresh(t *testing.T) {
+// TestAPingThatReWroteTheEntryRestartsTheClock: a 200 ping that reports no cache read but a write
+// (the entry was gone, so the provider created it again) started a fresh lifetime at that ping, so
+// refreshedAt moves to it (#580). Left on the real request, the next request is aged by the whole
+// gap and a live entry reads as ttl_expiry.
+func TestAPingThatReWroteTheEntryRestartsTheClock(t *testing.T) {
 	k, fs, clock := testKeeper(t, Limits{})
 	t0 := clock.now()
 	recordOne(t, k, kaPolicy(), kaBody, t0, upstream{base: "http://up", path: "/v1/messages"})
@@ -112,10 +113,29 @@ func TestAPingThatReadNothingIsNotARefresh(t *testing.T) {
 	fs.usage = Usage{FreshInput: 10, CacheWrite: 48576, Output: 1}
 	fs.mu.Unlock()
 
+	at := clock.advance(281 * time.Second)
+	k.Sweep(at)
+	waitPings(t, k, 1)
+	got := k.Plans("t1", false, "sess-1")[""].RefreshedAt
+	if !got.Equal(at) {
+		t.Errorf("refreshedAt = %v after a ping that re-wrote the entry, want the ping's start %v", got, at)
+	}
+}
+
+// TestAPingThatBilledNoCacheIsNotARefresh: a 200 ping that read and wrote nothing touched no entry,
+// so refreshedAt stays on the real request.
+func TestAPingThatBilledNoCacheIsNotARefresh(t *testing.T) {
+	k, fs, clock := testKeeper(t, Limits{})
+	t0 := clock.now()
+	recordOne(t, k, kaPolicy(), kaBody, t0, upstream{base: "http://up", path: "/v1/messages"})
+	fs.mu.Lock()
+	fs.usage = Usage{FreshInput: 48586, Output: 1}
+	fs.mu.Unlock()
+
 	k.Sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 	got := k.Plans("t1", false, "sess-1")[""].RefreshedAt
 	if !got.Equal(t0) {
-		t.Errorf("refreshedAt = %v after a ping that read nothing, want the real request's start %v", got, t0)
+		t.Errorf("refreshedAt = %v after a ping that billed no cache, want the real request's start %v", got, t0)
 	}
 }
