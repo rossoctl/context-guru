@@ -31,15 +31,29 @@ CGO_ENABLED=0 go build -tags cg_record -o bin/context-guru-proxy ./cmd/context-g
 
 ## Leaving one session out
 
-An account that opted in is recorded in every session. To leave one session out, send
-`x-context-guru-record: off` on its requests (`false`, `no` and `0` work too, in any case).
-The proxy then writes nothing for that request.
+An account that opted in is recorded in every session. There are two ways to leave one
+session out.
 
-- It can only narrow consent. It never turns recording on for an account that did not opt
-  in, and the operator's `--record` stays the outer switch.
-- Any other value, including a typo, is ignored, so a mistake never stops a recording
-  that was wanted.
-- The header is not forwarded upstream, like every `x-context-guru-*` header.
+**`POST /api/me/record/off` with `{"session": "<id>"}`.** The id is the one Claude Code gives
+the session (`CLAUDE_CODE_SESSION_ID`), which is also the name of the session's file.
+
+- The proxy writes `<session>.no-record` beside the session's file, then deletes
+  `<session>.wire.jsonl`. It writes no later call of that session.
+- The marker keeps the session off after a proxy restart. An operator can see it.
+- The caller is authenticated like the Ping button, for its own account only. A `?tenant=`
+  override is refused.
+- The answer is `200 {"recording": <bool>, "deleted": <bool>}`. `recording` is false when the
+  proxy has no recorder.
+- Spans already sent to a collector (`--record-otlp`) cannot be called back. With no
+  `--record` directory, the opt-out holds only until the proxy restarts.
+
+**`x-context-guru-record: off` on a request** (`false`, `no` and `0` work too, in any case).
+The proxy does not record that request. Any other value, including a typo, is ignored, so a
+mistake never stops a recording that was wanted. Like every `x-context-guru-*` header, it is
+not forwarded upstream.
+
+Both can only narrow consent. Neither turns recording on for an account that did not opt in,
+and the operator's `--record` stays the outer switch.
 
 ## Tests
 

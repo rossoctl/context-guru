@@ -15,6 +15,9 @@ func (r *sessionRecorder) Record(*recEvent) {}
 
 func (r *sessionRecorder) Close() error { return nil }
 
+// Decline does nothing: this build records nothing, so there is nothing to stop or delete.
+func (r *sessionRecorder) Decline(string, string) (bool, error) { return false, nil }
+
 // Dir returns "": this build records nothing.
 func (r *sessionRecorder) Dir() string { return "" }
 
