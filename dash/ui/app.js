@@ -1730,7 +1730,7 @@ function renderSavedLedger(o, ka, partial) {
   const totalTok = presetTok + filterTok;
   // A Claude subscription does not bill per token: every saving is in tokens (/api/stats `tokens`),
   // with the 5-hour share as an estimate below the total. null keeps the dollar view.
-  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered()) : null;
+  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered(), state.sub.fit) : null;
   const unmeasured = o.tokens_unmeasured_requests || 0;
   const heroMain = sub
     ? el('div', { class: 'ov-hero-money' },
@@ -1753,6 +1753,7 @@ function renderSavedLedger(o, ka, partial) {
     'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic.',
     'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing". "saved 0 tokens" is a measured zero.',
     'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
+    'With enough history, the estimate uses learned 5-hour weights instead: how much of the limit one token of each kind used, learned from the share the provider reported after each request. It is then the saved tokens, less the tokens a saving cost and the keep-alive pings, each kind times its weight.',
     'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
     'The share saved can never be more than 100% less the share used: Anthropic stops you at 100%. When the estimate reaches that cap, the line says that without context-guru you would have hit the 5-hour limit.',
     'The estimate is for your whole account. It is hidden while a filter (a session, a time range, a model...) narrows this page.',
@@ -1922,6 +1923,8 @@ async function loadOverviewLimits() {
       const f = liveFiveHour(limits, Date.now());
       if (f) {
         try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+        // The learned 5-hour weights (#1047). Any failure keeps the estimate at API prices.
+        try { sub.fit = await ctl('/api/me/fivehour-weights?since=' + fiveHourStartMs(f)); } catch (e) { /* API prices */ }
       }
     }
   } catch (e) { /* no subscription signal: the dollar view */ }
@@ -9008,7 +9011,8 @@ Object.assign(loaders, { feedback: loadFeedback });
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
 const kaState = { ledger: null, recommend: null,
   // sub is true on a Claude subscription (#1022): the measured figures show in tokens, and the
-  // forecast keeps dollars with an "at API-price weights" label. False for a manager, an API key,
+  // forecast keeps dollars with an "at API-price weights" label, or "at learned 5-hour weights" when the
+  // fit passed its gate (#1047, forecastView). False for a manager, an API key,
   // Bedrock, Vertex and hosted mode (`{}`), which keep dollars.
   sub: false, behaviour: null, sessions: [], calc: null, armed: [], live: null,
   x: 280, k: 2,
@@ -9115,8 +9119,10 @@ function renderKACoverage(o) {
  * built with a placeholder and filled when that lands — the ledger must never wait on it
  * (see loadKeepAlive).
  */
-function renderKADecision(o, rec) {
+function renderKADecision(o, recIn) {
   const host = clear($('#ka-decision'));
+  // On a subscription with learned 5-hour weights, the forecast is the learned one (#1047).
+  const fv = forecastView(recIn, kaState.sub), rec = fv.rec;
   const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
   if (!rec && ledgerNet === null) { host.hidden = true; return; }
   host.hidden = false;
@@ -9149,8 +9155,7 @@ function renderKADecision(o, rec) {
   const tk = kaState.sub && ledgerNet !== null ? kaTokenLines(o, compact) : null;
   host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
     el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
-    kaState.sub ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' },
-      'Forecast at API-price weights. A subscription does not bill per token.') : null,
+    fv.label ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' }, fv.label) : null,
     el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
     el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
     el('p', { class: 'ka-sentence' }, sentence),

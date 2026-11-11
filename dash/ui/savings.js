@@ -105,6 +105,47 @@ function fiveHourSavedPct(f, w) {
   return { pct: Math.min(raw, room), hit: raw >= room };
 }
 
+// The same share at the learned 5-hour weights (#1047), or null when there are none: `fit` is
+// GET /api/me/fivehour-weights. It needs a fit that passed the gate (`ok`), the window's own token
+// figures (`w.tokens`) and the window's pings (`fit.window_ping`). The share saved is the saved
+// tokens less the tokens a saving cost and less the pings, each tier times its weight (the share of
+// the limit one token uses). The same floors and the same cap as fiveHourSavedPct.
+function fiveHourLearnedPct(f, w, fit) {
+  if (!fit || fit.ok !== true || !fit.weights || !fit.window_ping || !(w && w.tokens)) return null;
+  const used = 100 * ((f && f.utilization) || 0);
+  if (((w && w.cost_usd) || 0) < 0.5 || used < 2) return null;
+  const saved = w.tokens.saved || {}, caused = w.tokens.caused || {}, ping = fit.window_ping;
+  let share = -((ping.output || 0) * (fit.weights.output || 0));
+  for (const k of ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h']) {
+    const wt = fit.weights[k];
+    if (typeof wt !== 'number' || !(wt >= 0)) return null;
+    share += ((saved[k] || 0) - (caused[k] || 0) - (ping[k] || 0)) * wt;
+  }
+  const raw = 100 * share;
+  if (!(raw > 0)) return null;
+  const room = Math.max(0, 100 - used);
+  return { pct: Math.min(raw, room), hit: raw >= room };
+}
+
+// The words for where the weights came from: "learned 5-hour weights (from 1,234 requests)" for
+// `n` requests, or "API-price weights" without them.
+function weightsLabel(n) {
+  return n > 0 ? 'learned 5-hour weights (from ' + Number(n).toLocaleString('en-US') + ' requests)' : 'API-price weights';
+}
+
+// The Cache strategy forecast on a subscription (#1042, #1047). `rec` is /api/keepalive/recommend.
+// With `rec.learned` (a fit that passed the gate) the yes or no and the range are the learned ones;
+// without it, the API-price ones, as before. `label` is the line above the verdict, or null when
+// `sub` is false (a manager, an API key): no change there.
+function forecastView(rec, sub) {
+  if (!sub || !rec) return { rec, label: null };
+  const l = rec.learned;
+  if (!l) return { rec, label: 'Forecast at API-price weights. A subscription does not bill per token.' };
+  const merged = Object.assign({}, rec, { refused: l.refused || undefined, idle_seconds: l.idle_seconds,
+    max_pings: l.max_pings, lo_usd: l.lo_usd, hi_usd: l.hi_usd });
+  return { rec: merged, label: 'Forecast at ' + weightsLabel(l.requests) + ', in API dollars. A subscription does not bill per token.' };
+}
+
 // A manager's Overview spans other accounts, and the limits are the signed-in account's own, so a
 // manager keeps the dollar view and the page does not ask. A local proxy has no tenant: it asks.
 function readsLimits(tenant) { return !(tenant && tenant.role === 'manager'); }
@@ -204,14 +245,16 @@ function pingLine(o, fmt) {
 // stats, `w` the 5-hour window's (for the estimate), `fmt` formats a count. The estimate needs an
 // open 5-hour window; the token line does not. The estimate is for the whole account, so it is
 // hidden while a page filter (a session, a time range, a model...) narrows the figures: `filtered`.
-function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered) {
+// `fit` is the account's 5-hour weights: with a fit that passed the gate the estimate uses them, else API prices.
+function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered, fit) {
   if (!isSubscription(limits, nowMs)) return null;
   const main = tokenFigure(totalTokens(o), o, fmt).text;
   const ping = pingLine(o, fmt);
   const pings = ping ? PING_LABEL + ': ' + ping : '';
   const f = liveFiveHour(limits, nowMs);
-  const p = f && !filtered ? fiveHourSavedPct(f, w) : null;
-  const tail = ' (estimate at API-price weights)';
+  const learned = f && !filtered ? fiveHourLearnedPct(f, w, fit) : null;
+  const p = learned || (f && !filtered ? fiveHourSavedPct(f, w) : null);
+  const tail = ' (estimate at ' + weightsLabel(learned ? fit.requests : 0) + ')';
   const estimate = p === null ? ''
     : p.hit ? '≈ without context-guru you would have hit the 5-hour limit' + tail
       : '≈ ' + (p.pct < 1 ? '< 1' : String(Math.round(p.pct))) + '% of the 5-hour limit' + tail;
@@ -264,5 +307,5 @@ function kaTokenLines(o, fmt) {
 }
 
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
-  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
+  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, fiveHourLearnedPct, weightsLabel, forecastView, readsLimits, isSubscription, subscriptionHeadline,
   tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells, kaTokenLines };

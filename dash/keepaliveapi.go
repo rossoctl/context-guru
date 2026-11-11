@@ -187,12 +187,18 @@ func (a *API) keepAliveLive(w http.ResponseWriter, r *http.Request) {
 
 // keepAliveRecommend serves either a recommendation with its range and its n, or a refusal.
 func (a *API) keepAliveRecommend(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		a.unauthorized(w)
 		return
 	}
-	rec, err := a.db(r).KeepAliveRecommend(f, a.waitPolicy(f.Tenant))
+	// On the caller's own Claude subscription, the same forecast at the learned 5-hour weights too
+	// (#1047). A fit below the gate, or any error, leaves it out: the API-price forecast only.
+	var fit FiveHourFit
+	if own, sub := a.ownSubscription(r, f, p); sub {
+		fit = a.fiveHourFit(r, own)
+	}
+	rec, err := a.db(r).KeepAliveRecommendLearned(f, a.waitPolicy(f.Tenant), fit)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

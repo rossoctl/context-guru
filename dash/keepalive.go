@@ -1912,7 +1912,25 @@ type KeepAliveRecommendation struct {
 	// ServiceLoUSD/ServiceHiUSD is the service-wide interval, for scale in a refusal.
 	ServiceLoUSD float64 `json:"service_lo_usd,omitempty"`
 	ServiceHiUSD float64 `json:"service_hi_usd,omitempty"`
+	// Learned is the same forecast at the learned 5-hour weights (#1047), on a Claude subscription
+	// whose fit passed the gate. nil otherwise, and on a refusal for too little data, which no weight
+	// changes. The dashboard shows it in place of the API-price forecast on a subscription.
+	Learned *LearnedForecast `json:"learned,omitempty"`
 	KeepAliveCoverage
+}
+
+// LearnedForecast is the recommendation's yes or no and range at the learned 5-hour weights: the
+// same replay, with the saving and the ping cost each scaled by ForecastScale. Dollars at API
+// input prices, with the token kinds weighed as the 5-hour limit weighs them.
+type LearnedForecast struct {
+	Refused     string  `json:"refused,omitempty"`
+	IdleSeconds int     `json:"idle_seconds,omitempty"`
+	MaxPings    int     `json:"max_pings,omitempty"`
+	LoUSD       float64 `json:"lo_usd,omitempty"`
+	HiUSD       float64 `json:"hi_usd,omitempty"`
+	// Requests and Windows are what the weight fit used: the label says "from N requests".
+	Requests int `json:"requests"`
+	Windows  int `json:"windows"`
 }
 
 // PlanCounts are the counts of the per-wait plan in force: a tool wait up to ToolWaitMax pings,
@@ -1960,6 +1978,19 @@ const (
 // recMaxPings) and the fixed-K interval comes beside it; with WaitPlan off the interval is the
 // fixed-K one, as before #858.
 func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveRecommendation, error) {
+	return d.keepAliveRecommend(f, wait, nil)
+}
+
+// KeepAliveRecommendLearned is KeepAliveRecommend plus the forecast at the learned 5-hour weights
+// (Learned), from a fit that passed the gate.
+func (d *DB) KeepAliveRecommendLearned(f Filter, wait keepalive.Policy, fit FiveHourFit) (*KeepAliveRecommendation, error) {
+	if !fit.OK || fit.Forecast == nil {
+		return d.keepAliveRecommend(f, wait, nil)
+	}
+	return d.keepAliveRecommend(f, wait, &fit)
+}
+
+func (d *DB) keepAliveRecommend(f Filter, wait keepalive.Policy, fit *FiveHourFit) (*KeepAliveRecommendation, error) {
 	wait.MaxPings, wait.Idle = recMaxPings, recIdleSeconds*time.Second
 	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD, Plan: PlanFixed}
 	if wait.WaitPlan {
@@ -2049,31 +2080,47 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
 	// net is one session's value under a model: planned says "the per-wait plan with base k", else
-	// "k pings for every wait".
-	net := func(s string, k int, planned bool) float64 {
+	// "k pings for every wait". sc weighs the saving and the ping cost: API prices are all 1s, the
+	// learned 5-hour weights are the fit's ForecastScale (#1047).
+	net := func(s string, k int, planned bool, sc ForecastScale) float64 {
 		pol := wait
 		pol.MaxPings = k
 		var v float64
 		for _, m := range bySession[s] {
+			save := sc.Save5m
+			if m.ttl >= time.Hour || m.facts.OneHour {
+				save = sc.Save1h
+			}
 			if planned {
 				if planReaches(pol, m) {
-					v += m.usd * recRecoverableShare
+					v += m.usd * recRecoverableShare * save
 				}
 			} else if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
-				v += m.usd * recRecoverableShare
+				v += m.usd * recRecoverableShare * save
 			}
 		}
 		for _, sp := range bySpan[s] {
 			if planned {
-				v -= float64(sp.planPings(pol)) * pingUSD
+				v -= float64(sp.planPings(pol)) * pingUSD * sc.Ping
 			} else {
-				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD
+				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD * sc.Ping
 			}
 		}
 		return v
 	}
+	apiPrices := ForecastScale{Save5m: 1, Save1h: 1, Ping: 1}
 	planned := wait.WaitPlan
-	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned) })
+	if fit != nil {
+		sc := *fit.Forecast
+		llo, lhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, sc) })
+		out.Learned = &LearnedForecast{Refused: recRefusal(out.N, out.Sessions, llo, lhi),
+			Requests: fit.Requests, Windows: fit.Windows}
+		if out.Learned.Refused == "" {
+			out.Learned.IdleSeconds, out.Learned.MaxPings = recIdleSeconds, recMaxPings
+			out.Learned.LoUSD, out.Learned.HiUSD = llo, lhi
+		}
+	}
+	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, apiPrices) })
 	// Condition 3, and it is a ONE-SIDED test. An interval that spans zero cannot tell the
 	// effect from nothing; an interval entirely BELOW zero is worse than inconclusive — this
 	// account's own gaps say the mechanism would cost it money — and both are refusals. The
@@ -2081,33 +2128,41 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	// interval was -$39 to -$5, which is what the first live look at this route produced: an
 	// account whose median idle gap is 57 minutes has almost nothing inside any coverage worth
 	// having, so it pays for pings and converts nothing.
-	if lo <= 0 {
-		if hi < 0 {
-			out.Refused = fmt.Sprintf("your own history says this would COST you money: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
-				"below zero. Your idle gaps are mostly too long for any setting worth having to "+
-				"reach", out.N, out.Sessions, lo, hi)
-		} else {
-			out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
-				"includes no change at all", out.N, out.Sessions, lo, hi)
-		}
+	if out.Refused = recRefusal(out.N, out.Sessions, lo, hi); out.Refused != "" {
 		return out, nil
 	}
 	out.IdleSeconds, out.MaxPings = recIdleSeconds, recMaxPings
 	out.LoUSD, out.HiUSD = lo, hi
 	if planned {
-		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false) })
+		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false, apiPrices) })
 		out.FixedK = &RecInterval{LoUSD: flo, HiUSD: fhi}
 	}
 	// K=3 is offered only where it beats K=2 by more than this account's OWN noise — its
 	// interval has to clear K=2's entirely. Anything weaker than that is the comparison this
 	// project has got wrong five times: two numbers whose intervals overlap are a tie, and on
 	// the production corpus K=2 and K=3 ARE a tie for every account. The panel says so.
-	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned) }); lo3 > hi {
+	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned, apiPrices) }); lo3 > hi {
 		out.AltMaxPings = 3
 	}
 	return out, nil
+}
+
+// recRefusal is condition 3's refusal for a 90% interval, or "" when it does not refuse. A ONE-SIDED
+// test: an interval that spans zero cannot tell the effect from nothing, and one entirely below zero
+// says the mechanism would cost money. Both refuse.
+func recRefusal(n, sessions int64, lo, hi float64) string {
+	if lo > 0 {
+		return ""
+	}
+	if hi < 0 {
+		return fmt.Sprintf("your own history says this would COST you money: over %d "+
+			"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
+			"below zero. Your idle gaps are mostly too long for any setting worth having to "+
+			"reach", n, sessions, lo, hi)
+	}
+	return fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
+		"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
+		"includes no change at all", n, sessions, lo, hi)
 }
 
 // bootstrapCI resamples the units WITH REPLACEMENT and returns the 90% interval of the total.
