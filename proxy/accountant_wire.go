@@ -25,6 +25,7 @@ func accThreadID(id string) string {
 
 // accBegin opens the accountant record with the body the agent sent. Nil-safe.
 func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
+	defer c.timed("accBegin")()
 	if c == nil || c.savings == nil {
 		return
 	}
@@ -46,6 +47,7 @@ func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
 // Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when accBegin did not open a
 // record.
 func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
+	defer c.timed("accEnd")()
 	if c == nil || c.savings == nil || c.accReq == nil {
 		return
 	}
@@ -182,6 +184,7 @@ func accPingKey(session, threadID string) string { return session + "\x00" + thr
 // lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd and is not
 // redone; it matters only when another thread of the session touched the entry. Nil-safe.
 func (c *capture) accBilledTTL(u Usage) {
+	defer c.timed("accBilledTTL")()
 	if c == nil || c.accReq == nil {
 		return
 	}
