@@ -309,3 +309,37 @@ func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
 		t.Errorf("5m cold = %v, want %v", cold, want)
 	}
 }
+
+// Issue #1077: dash.TierTokens carries the stored JSON names, and the library owns the arithmetic. A
+// tier the library adds must reach dash.TierTokens, or add and less would drop it without an error:
+// set every library tier to 1 and require the round trip to keep them all.
+func TestTierTokensCarryEveryLibraryTier(t *testing.T) {
+	var lib accountant.TierTokens
+	v := reflect.ValueOf(&lib).Elem()
+	for i := range v.NumField() {
+		v.Field(i).SetInt(1)
+	}
+	if got := tiersOf(lib).lib(); got != lib {
+		t.Fatalf("a library tier is lost between accountant.TierTokens and dash.TierTokens: %+v -> %+v", lib, got)
+	}
+	var sum TierTokens
+	sum.add(tiersOf(lib))
+	sum.add(tiersOf(lib))
+	if got := sum.less(tiersOf(lib)); got != tiersOf(lib) {
+		t.Fatalf("add then less = %+v, want %+v", got, tiersOf(lib))
+	}
+}
+
+// A fatal library check this host has no name for still gates the figure (issue #1077). The library
+// decides which checks are fatal; a non-fatal one does not gate.
+func TestAnUnnamedFatalCheckStillGates(t *testing.T) {
+	if got := fatalCheckFallback("some_future_check"); got != FallbackCheckOther {
+		t.Errorf("fatalCheckFallback = %q, want %q", got, FallbackCheckOther)
+	}
+	e := switchEvent()
+	e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckConservation}}
+	e.PriceMode(accTestPrice, true)
+	if got := e.AccountantFallback(); got != "" {
+		t.Errorf("an informational check gated the figure: fallback %q", got)
+	}
+}

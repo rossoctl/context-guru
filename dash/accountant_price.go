@@ -107,7 +107,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//               host's added mark made the provider bill: value < 0 (a cost).
 		//   markPayback: Saved is the input the client body would have billed, Caused the read the host's
 		//               mark made possible on the next request: value > 0 (a saving).
-		value := tierUSD(p, ce.Saved) - tierUSD(p, ce.Caused)
+		value := tierUSD(p, ce.Net())
 		switch ce.Kind {
 		case accountant.EffectBreak:
 			switch c, ok := owner[ce.ChangeID]; {
@@ -172,6 +172,7 @@ const (
 	FallbackCheckSum           = "check_sum"            // the library's sum check failed
 	FallbackCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
 	FallbackCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
+	FallbackCheckOther         = "check_other"          // a fatal library check this host has no name for
 	FallbackSizeUnknown        = "size_unknown"         // TokensBefore is 0: the plausibility bound cannot be checked
 	FallbackImplausibleSize    = "implausible_size"     // the library saved more tokens than the request had
 	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
@@ -180,28 +181,20 @@ const (
 	FallbackUnsupportedWire    = "unsupported_wire"     // the request is on a wire the accountant does not read yet (OpenAI Responses)
 )
 
-// gatedChecks maps each library check (accountant internal/engine/compute.go checks() and conservation()) that
-// means "the operation list or its attribution is wrong" to its fallback reason. A check not in the
-// map is informational: it never gates.
-//
-//   - sum: the operations' byte changes per section do not equal the client-minus-forwarded body
-//     bytes. The op list is wrong (an op missing, a change reported twice under two ChangeIDs, sizes
-//     in the wrong unit, thread state lost on restart). Gated.
-//   - unique_change: two live operations share a ChangeID; the figure would follow whichever owner
-//     comes first. Gated.
-//   - spans: an operation's spans do not add up to its own sizes; its per-span tiers are then
-//     priced from numbers that contradict its total. The proxy reports no spans today, so it cannot
-//     fire, but if it does the op list is malformed. Gated.
-//   - conservation: the token form of sum (client tokens minus billed tokens against the net of the
-//     operations). With sum passing it differs only by the ratio's rounding beyond its tolerance, or
-//     by a usage that does not bill the forwarded body; the second case is what the plausibility
-//     bound below catches where it matters. Informational, not gated.
-//   - order, attribution: named in result.go but never emitted by compute.go (attribution holds by
-//     construction). Not gated; would be informational if ever emitted.
-var gatedChecks = map[string]string{
-	"sum":           FallbackCheckSum,
-	"unique_change": FallbackCheckUniqueChange,
-	"spans":         FallbackCheckSpans,
+// fatalCheckFallback is the fallback reason of a fatal library check (accountant CheckFailure.Fatal):
+// one that means the operation list or its attribution is wrong. The library decides which checks are
+// fatal; this only names them. A fatal check this switch does not know gates all the same, as
+// FallbackCheckOther, so a check the library adds later never passes silently.
+func fatalCheckFallback(check string) string {
+	switch check {
+	case accountant.CheckSum:
+		return FallbackCheckSum
+	case accountant.CheckUniqueChange:
+		return FallbackCheckUniqueChange
+	case accountant.CheckSpans:
+		return FallbackCheckSpans
+	}
+	return FallbackCheckOther
 }
 
 // PricedByAccountant is CompRow.PricedBy on a row the accountant library priced.
@@ -305,8 +298,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		return FallbackObserve
 	}
 	for _, c := range e.accRes.Checks {
-		if r, ok := gatedChecks[c.Check]; ok {
-			return r
+		if c.Fatal() {
+			return fatalCheckFallback(c.Check)
 		}
 	}
 	fig := e.AccountantFigure(p)

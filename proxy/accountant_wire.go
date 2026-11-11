@@ -53,7 +53,7 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
 		return
 	}
-	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer}
+	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer, accMeta: c.accMeta}
 	job := &accJob{done: make(chan struct{}), w: w}
 	meta, client := c.accMeta, c.accClient
 	ops = append([]accountant.Operation(nil), ops...)
@@ -75,7 +75,7 @@ func (c *capture) accWait() {
 	job := c.accJob
 	<-job.done
 	c.accJob = nil
-	c.accReq, c.accThread, c.accPingWindow = job.w.accReq, job.w.accThread, job.w.accPingWindow
+	c.accReq, c.accThread, c.accPingWindow, c.accFacts = job.w.accReq, job.w.accThread, job.w.accPingWindow, job.w.accFacts
 	if job.w.accNoResult != "" {
 		c.accNoResult = job.w.accNoResult
 	}
@@ -117,8 +117,8 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
 	billed := c.accBilled(forwarded)
 	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
-	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
-	c.accPingWindow = facts.PingWindow
+	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accMeta.Model, forwarded, c.pings, c.accMeta.Session, t)
+	c.accPingWindow, c.accFacts = facts.PingWindow, facts
 	c.savings.end(c.accReq, t, billed, ops, facts)
 }
 
@@ -242,11 +242,11 @@ func (c *capture) accBilledTTL(u Usage) {
 	if c == nil || c.accReq == nil {
 		return
 	}
-	f := &c.accReq.Facts
+	f := c.accFacts
 	if f.Lifetime != accountant.LifetimeExact || f.TTL <= 5*time.Minute {
 		return
 	}
-	key := accPingKey(c.accReq.Meta.Session, c.accThread)
+	key := accPingKey(c.accMeta.Session, c.accThread)
 	prev, known := c.savings.billed1h.get(key)
 	if !known {
 		prev = true // no earlier write: the asked tier stands on a read-only turn
@@ -256,13 +256,8 @@ func (c *capture) accBilledTTL(u Usage) {
 		c.savings.billed1h.set(key, oneHour) // a read-only turn leaves the remembered tier alone
 	}
 	if !oneHour {
-		f.TTL = 5 * time.Minute
-		// The library judges each part of the entry by the TTL of the breakpoint that wrote it, so the
-		// breakpoints must say 5m too. A copy: the slice may be the one the client hash cache holds.
-		bps := append([]accountant.Breakpoint(nil), c.accReq.Breakpoints...)
-		for i := range bps {
-			bps[i].TTL = "5m"
-		}
-		c.accReq.Breakpoints = bps
+		c.accFacts.TTL = 5 * time.Minute
+		// The library lowers the facts' TTL and the TTL of every 1h breakpoint together, on a copy.
+		c.accReq.LowerTTL(5 * time.Minute)
 	}
 }

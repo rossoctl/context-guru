@@ -16,7 +16,7 @@ type savingsTracker struct {
 	// clients holds the hash of each open request's client body, by request, from begin to end.
 	clients sync.Map // *accountant.Request -> clientHash
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
-	onEnd func(*accountant.Request)
+	onEnd func(*accountant.Request, endRecord)
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
 	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
@@ -26,9 +26,17 @@ type savingsTracker struct {
 // clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does
 // not hash the same bytes again. Hashing a 600 KB body costs 3 to 4 ms.
 type clientHash struct {
+	meta accountant.RequestMeta // the library keeps its record private, so end reads the meta from here
 	raw  []byte
 	body accountant.Body
 	bps  []accountant.Breakpoint
+}
+
+// endRecord is what end gave EndRequest. The library keeps its record in unexported fields, so a test
+// that checks the bodies the library saw reads them here.
+type endRecord struct {
+	Client, Forwarded accountant.Body
+	Breakpoints       []accountant.Breakpoint
 }
 
 // drop forgets the client hash of a request that will never end: a panic between accBegin and accEnd makes the proxy
@@ -48,7 +56,7 @@ func newSavingsTracker() *savingsTracker {
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
 	body, bps := accParse(client)
 	req := s.trackers.BeginRequest(meta, body, bps)
-	s.clients.Store(req, clientHash{raw: client, body: body, bps: bps})
+	s.clients.Store(req, clientHash{meta: meta, raw: client, body: body, bps: bps})
 	return req
 }
 
@@ -56,22 +64,31 @@ func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *acco
 // included: the library replaces an active change by the reported op with the same ChangeID
 // (accountant internal/engine/compute.go, items()), so a change is priced once and unique_change never fires.
 // Skipping a replay here would lose the op whenever Compute ends the change on this request.
-func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forwarded []byte, ops []accountant.Operation, facts accountant.EntryFacts) {
+func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forwarded []byte, ops []accountant.Operation, facts accountant.EntryFacts) endRecord {
 	for _, op := range ops {
 		req.Add(op)
 	}
 	var fwd accountant.Body
 	var bps []accountant.Breakpoint
-	if v, ok := s.clients.LoadAndDelete(req); ok && bytes.Equal(v.(clientHash).raw, forwarded) {
-		fwd, bps = v.(clientHash).body, v.(clientHash).bps
+	var client accountant.Body
+	var meta accountant.RequestMeta
+	if v, ok := s.clients.LoadAndDelete(req); ok {
+		client, meta = v.(clientHash).body, v.(clientHash).meta
+		if bytes.Equal(v.(clientHash).raw, forwarded) {
+			fwd, bps = client, v.(clientHash).bps
+		} else {
+			fwd, bps = accParse(forwarded)
+		}
 	} else {
 		fwd, bps = accParse(forwarded)
 	}
-	facts.SharedWarm = s.siblings.sharedWarm(req.Meta.Session, th.ID, req.Meta.At, facts.TTL, fwd, bps)
+	facts.SharedWarm = s.siblings.sharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
+	rec := endRecord{Client: client, Forwarded: fwd, Breakpoints: bps}
 	if s.onEnd != nil {
-		s.onEnd(req)
+		s.onEnd(req, rec)
 	}
+	return rec
 }
 
 // computeSafe is compute for the request path. The library asks the host to wrap Compute, and this repo's rule is
