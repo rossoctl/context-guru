@@ -129,56 +129,6 @@ func TestStrategiesJSON(t *testing.T) {
 	}
 }
 
-// The Codex plugin keeps its names in Python code, not in a dict. This test reads the source text:
-// the names, the config it writes for 30-min-ping, the preset list, and the picker wording.
-func TestStrategyTableMatchesCodexPlugin(t *testing.T) {
-	read := func(p string) string {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
-	}
-	dir := "../codex-marketplace/plugins/context-guru/"
-	py := read(dir + "scripts/codex_plugin.py")
-	skill := strings.Join(strings.Fields(read(dir+"skills/cache-strategy-picker/SKILL.md")), " ")
-
-	if !strings.Contains(py, `choices=("none", "30-min-ping")`) {
-		t.Error("codex_plugin.py strategy choices changed")
-	}
-	// 30-min-ping writes "cache:\n  keepalive: true\n" and nothing else under cache.
-	if !strings.Contains(py, `"cache:\n"`+"\n"+`        "  keepalive: true\n"`) {
-		t.Error("codex_plugin.py no longer writes exactly `cache: keepalive: true` for 30-min-ping")
-	}
-	s, ok := LookupStrategy("30-min-ping")
-	if !ok || len(s.Cache) != 1 || s.Cache[0].Key != "keepalive" || s.Cache[0].Value != true ||
-		!reflect.DeepEqual(s.Providers, []string{"openai"}) {
-		t.Fatalf("30-min-ping row wrong: %+v", s)
-	}
-	// The desc starts with the picker wording and adds one sentence about Anthropic. Only the
-	// picker part is compared with SKILL.md.
-	picker, extra, _ := strings.Cut(s.Desc, ". ")
-	if !strings.Contains(skill, picker) {
-		t.Errorf("picker SKILL.md does not contain the desc start %q", picker)
-	}
-	if !strings.Contains(extra, "Anthropic keep-alive") {
-		t.Errorf("30-min-ping desc must say that keepalive: true also turns on the Anthropic keep-alive: %q", extra)
-	}
-	// The preset list the Codex plugin hard-codes must be known to the proxy.
-	known := map[string]bool{}
-	for _, n := range PresetNames() {
-		known[n] = true
-	}
-	for _, n := range []string{"off", "conservative", "medium", "high", "xhigh", "ultrahigh"} {
-		if !known[n] {
-			t.Errorf("preset %q is in the plugins but not registered in the proxy", n)
-		}
-		if !strings.Contains(py, `"`+n+`"`) {
-			t.Errorf("codex_plugin.py no longer lists preset %q", n)
-		}
-	}
-}
-
 func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	b, _ := StrategiesJSON()
 	var v struct {

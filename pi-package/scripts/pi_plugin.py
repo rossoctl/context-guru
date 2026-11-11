@@ -155,6 +155,12 @@ def facts(**values):
 # restarts, so a proxy that is slow but alive is not killed.
 START_CHECK_SECONDS = 5
 
+# The longest a command waits for another one's restart lock. A restart usually holds it for a few
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has up to
+# 90 s of command time limits, and setup holds it across start_service). A caller that waits 40 s
+# reports `busy` and still finishes inside the extension's 60 s limit.
+LOCK_WAIT_SECONDS = 40
+
 
 def healthy(port, timeout=1):
     try:
@@ -619,8 +625,9 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
     if STRATEGIES[strategy]["spends"]:
-        spends = ("using quota where each request goes (for a chained provider, at the endpoint it is "
-                  "chained to)" if upstreams else "using your own quota on each provider")
+        chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
+        spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
+                  if upstreams else "using your own quota on each provider")
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
                      f"{spends}: Anthropic after 4 minutes idle (59 "
                      "minutes on a 1-hour cache), OpenAI GPT-5.6 and later after 28 minutes idle. "
@@ -628,7 +635,8 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
         headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
         if headered:
             names = " and ".join(NAMES[p] for p in headered)
-            question += (f" {names} sets headers in models.json. A keep-alive ping carries only the "
+            verb = "sets" if len(headered) == 1 else "set"
+            question += (f" {names} {verb} headers in models.json. A keep-alive ping carries only the "
                          "standard auth headers (Authorization, x-api-key), not those headers, so the "
                          f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
                          "/context-guru cache-strategy none.")
@@ -739,20 +747,33 @@ def setup(args):
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
-    # After the binary is known: the config names the strategy only for a binary that reads the name.
+    by_name = names_strategies(executable)
+    # The config, the start and the record happen under the restart lock: a session-start restart
+    # cannot re-render an older record over the new config between them.
     try:
-        write_proxy_config(preset, strategy, upstreams, names_strategies(executable))
-    except Exception as error:
-        facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="error", reason="busy", detail=error)
         return 2
-    # Proxy first, routing second: a route written while nothing answers makes every request fail.
-    if not start_service(executable, port, upstreams):
-        facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
-              routing_written="false")
-        return 1
-    record.update(port=port, binary=executable, service=service_kind(), preset=preset, cache_strategy=strategy,
-                  base_urls={p: models_route.base_url(port, p) for p in PROVIDERS}, upstreams=upstreams)
-    write_record(record)
+    with lock:
+        # Read again under the lock, so the fields setup does not set are not an old copy. The preset
+        # and the strategy stay the ones the consent question named.
+        record = read_record()
+        # After the binary is known: the config names the strategy only for a binary that reads the name.
+        try:
+            write_proxy_config(preset, strategy, upstreams, by_name)
+        except Exception as error:
+            facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+            return 2
+        # Proxy first, routing second: a route written while nothing answers makes every request fail.
+        if not start_service(executable, port, upstreams):
+            facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
+                  routing_written="false")
+            return 1
+        record.update(port=port, binary=executable, service=service_kind(), preset=preset,
+                      cache_strategy=strategy, upstreams=upstreams,
+                      base_urls={p: models_route.base_url(port, p) for p in PROVIDERS})
+        write_record(record)
     try:
         models_route.install(models_path(), routing_state(), port, PROVIDERS, earlier)
         hatch = install_escape_hatch()
@@ -805,19 +826,37 @@ def status(args):
     return 0 if values["result"] == "ok" else 1
 
 
-def restart_lock():
+class LockBusy(Exception):
+    """Another command held the restart lock for all of LOCK_WAIT_SECONDS."""
+
+
+def restart_lock(wait=None):
     """An exclusive lock on a file in the state directory, held until the returned file is closed.
-    A second caller waits here until the first one is done."""
-    import fcntl  # Unix only, like the services this restarts.
+    A second caller waits here until the first one is done, for at most `wait` seconds
+    (LOCK_WAIT_SECONDS), then raises LockBusy. On a platform without fcntl there is no service to
+    restart, so there is no lock either, and restart_service returns its own `unsupported` fact."""
     path = state_dir() / "restart.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        import fcntl  # Unix only, like the services this restarts.
+    except ImportError:
+        return handle
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockBusy(f"another context-guru command held {path} for more than "
+                                   f"{wait} seconds") from None
+                time.sleep(0.1)
     except BaseException:
         handle.close()
         raise
-    return handle
 
 
 def restart(args):
@@ -834,7 +873,20 @@ def restart(args):
     # Only a hatch that exists is named, as in setup: a failed setup can leave a record without one.
     if reset_hatch().exists():
         where["reset_hatch"] = reset_hatch()
-    with restart_lock():
+    try:
+        lock = restart_lock()
+    except LockBusy:
+        facts(result="busy", **where)
+        return 1
+    with lock:
+        # Read again under the lock: a `configure` or `setup` that ran while this one waited wrote a
+        # new record, and a setup can move the port.
+        record = read_record()
+        port = int(record.get("port") or 0)
+        if not port:
+            facts(result="not_installed")
+            return 2
+        where["port"] = port
         # Re-render first, so the next start (this one, or a later one by launchd or systemd) reads the
         # current strategy. A proxy that answers is not restarted for it: it reads the file at its
         # next start.
@@ -862,13 +914,24 @@ def configure(args):
     if args.show:
         facts(result="ok", preset=preset, cache_strategy=strategy)
         return 0
-    preset = args.preset or preset
-    strategy = args.cache_strategy or strategy
-    upstreams = recorded_upstreams(record)
-    by_name = names_strategies(record.get("binary"))
     # The config and the record change together under the restart lock, so a session-start restart
     # cannot re-render the old record over the new file between the two writes.
-    with restart_lock():
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="refused", reason="busy", detail=error)
+        return 2
+    with lock:
+        # Read again under the lock: a `setup` that ran while this one waited wrote a new record.
+        # Only the values given on the command line come from this call.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="not_installed")
+            return 2
+        preset = args.preset or record.get("preset", DEFAULT_PRESET)
+        strategy = args.cache_strategy or record.get("cache_strategy", DEFAULT_STRATEGY)
+        upstreams = recorded_upstreams(record)
+        by_name = names_strategies(record.get("binary"))
         try:
             write_proxy_config(preset, strategy, upstreams, by_name)
         except Exception as error:
@@ -922,10 +985,22 @@ def update(args):
     if not record.get("port"):
         facts(result="updated", version=version, restart="skipped")
         return 0
-    record["binary"] = executable
-    write_record(record)
-    # Re-render with the NEW binary: it decides whether the config names the strategy.
-    config = rerender_config(record, executable)
+    # The record and the config change together under the restart lock, as in configure.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="error", reason="busy", version=version, detail=error, restart="skipped")
+        return 1
+    with lock:
+        # Read again under the lock. An uninstall that ran during the wait leaves no port.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="updated", version=version, restart="skipped")
+            return 0
+        record["binary"] = executable
+        write_record(record)
+        # Re-render with the NEW binary: it decides whether the config names the strategy.
+        config = rerender_config(record, executable)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
     facts(result="updated", version=version, config=config, restart="completed" if restarted else "failed")
     return 0 if restarted else 1

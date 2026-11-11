@@ -22,8 +22,8 @@ import (
 //     so the row does not fill it and the library default applies.
 //   - No `strategy` key: nothing here runs, and the config is the same as before.
 //   - An unknown name is a config error. The alias in StrategyAliases is read as its new name.
-//   - `none` has no keys: it sets nothing. (The plugin writes no file for it; the proxy only
-//     accepts the name.)
+//   - `none` has no keys: it sets nothing. (The Claude Code plugin writes no file for it. The
+//     Codex plugin writes `strategy: none`. The proxy accepts the name.)
 //
 // The numbers are written out here, not read from the Default* constants, on purpose: a later
 // change to a default must not silently re-tune a strategy that an install already uses. The

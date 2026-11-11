@@ -5,7 +5,8 @@ description: Inspect or change how aggressively context-guru reduces Codex conte
 
 # Choose a context-reduction preset
 
-Run `python3 ../../scripts/codex_plugin.py configure --show`. Explain the choices without selecting
+Run `python3 ../../scripts/codex_plugin.py configure --show`. The `presets=` field lists the
+presets to offer, and `preset=` is the one that runs. Read the names from that output. Explain the choices without selecting
 one for the user: `off` changes no content; `conservative` performs deterministic cleanup; `medium`
 adds a paid relevance-model pass; `high` adds summarization; `xhigh` adds the deepest paid sweep; `ultrahigh` is `xhigh` plus tool
 deferral, and it is experimental. On OpenAI, GLM and Kimi models it uses Context Guru's own search tool (#825).

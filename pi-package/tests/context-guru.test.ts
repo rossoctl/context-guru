@@ -9,7 +9,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
-  CHAIN, checkAtStart, conflictPrompt, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
+  CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
   stripsChatGPTFields, type StartCheck,
 } from "../extensions/context-guru.ts";
@@ -161,6 +161,17 @@ test("the notice names the real reason the proxy is still down", () => {
   assert.match(downReason({ result: "not_installed" }), /no install record/);
   assert.match(downReason({ result: "already_up" }), /answered the restart check/);
   assert.equal(downReason({}), "the restart did not run");
+  assert.match(downReason({ result: "busy" }), /held the restart lock, so nothing was restarted/);
+  // A restart stopped at the time limit printed nothing, but it did run.
+  assert.match(downReason({ killed: "true" }), /did not finish within 60 seconds/);
+});
+
+test("a restart stopped at its time limit gets the killed fact", () => {
+  // pi.exec resolves with killed: true on a timeout or an abort (ExecResult in pi-coding-agent).
+  assert.deepEqual(restartFacts({ killed: true, facts: {} }), { killed: "true" });
+  assert.deepEqual(restartFacts({ killed: false, facts: { result: "up" } }), { result: "up" });
+  assert.deepEqual(restartFacts({ facts: { result: "busy" } }), { result: "busy" });
+  assert.equal(RESTART_TIMEOUT_MS, 60_000);
   assert.match(downNotice(8800, { service: "no_service" }), /port 8800 does not answer: its service file is missing/);
 });
 
@@ -286,7 +297,7 @@ test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
 
 test("conflicts read as plain words, and odd input is shown as it came", () => {
   assert.equal(conflictWords('{"anthropic":"https://a.example","openai":"https://o.example/v1"}'),
-    "anthropic: https://a.example, openai: https://o.example/v1");
+    "anthropic: https://a.example; openai: https://o.example/v1");
   assert.equal(conflictWords("not json"), "not json");
   assert.equal(conflictWords(undefined), "unknown");
 });
