@@ -291,7 +291,7 @@ class UpdateTest(TempHome):
         self.addCleanup(self.proxy.__exit__, None, None, None)
         managed = PLUGIN.managed_binary()
         managed.parent.mkdir(parents=True)
-        fake_binary(managed.parent, "context-guru-proxy v0.7.2 (commit old)")
+        fake_binary(managed.parent, "context-guru-proxy v0.5.1 (commit old)")
         self.old_bytes = managed.read_bytes()
         os.environ["CONTEXT_GURU_BIN"] = "/nonexistent/context-guru-proxy"
         with mock.patch.object(PLUGIN, "first_free_port", return_value=self.proxy.port):
@@ -313,7 +313,7 @@ class UpdateTest(TempHome):
         before = self.tree()
         code, out, _ = self.run_main("update", "--check")
         self.assertEqual(code, 0, out)
-        self.assertIn("installed_version=v0.7.2\n", out)
+        self.assertIn("installed_version=v0.5.1\n", out)
         self.assertIn("latest_version=v9.9.9\n", out)
         self.assertIn("update_available=true\n", out)
         self.assertEqual(self.tree(), before)
