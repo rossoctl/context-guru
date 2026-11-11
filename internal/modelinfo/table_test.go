@@ -519,3 +519,63 @@ models:
 		t.Fatalf("bare claude-sonnet-5: ok=%v in=$%.2f/MTok, want $1.52", ok, p.Input*1e6)
 	}
 }
+
+// Same rate is not enough: the entry also serves Window, WindowExact and CompactionPoint, so
+// two providers that differ there are ambiguous and the bare id must not report either one's
+// window as exact.
+func TestSameRateDifferentWindowTailIsAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 200000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 1000000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if w, ok, exact := tb.WindowExact(ctx, "claude-sonnet-5"); ok || exact {
+		t.Fatalf("bare claude-sonnet-5 reports window %d (exact=%v); the providers disagree", w, exact)
+	}
+	if w, ok, exact := tb.WindowExact(ctx, "aws/claude-sonnet-5"); !ok || !exact || w != 200000 {
+		t.Fatalf("aws/claude-sonnet-5: window=%d ok=%v exact=%v, want 200000 exact", w, ok, exact)
+	}
+}
+
+func TestSameRateDifferentCompactionPointTailIsAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 1000000, compaction_point: 150000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 1000000, compaction_point: 800000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp, ok := tb.CompactionPoint(context.Background(), "claude-sonnet-5"); ok {
+		t.Fatalf("bare claude-sonnet-5 compaction point = %d, want none (ambiguous)", cp)
+	}
+}
+
+func TestSameRateAndWindowTailKeepsItsWindow(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 200000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 200000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, ok, exact := tb.WindowExact(context.Background(), "claude-sonnet-5"); !ok || !exact || w != 200000 {
+		t.Fatalf("window=%d ok=%v exact=%v, want 200000 exact", w, ok, exact)
+	}
+}
+
+func TestParseTableRejectsDuplicateMatch(t *testing.T) {
+	_, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "AWS/claude-sonnet-5", in: 3.00, out: 15.00}
+`))
+	if err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("err = %v, want a duplicate-match error", err)
+	}
+}

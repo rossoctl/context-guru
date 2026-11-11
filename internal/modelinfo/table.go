@@ -118,11 +118,18 @@ func ParseTable(b []byte) (*Table, error) {
 		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
 	t := &Table{}
+	seen := map[string]bool{}
 	for i, m := range f.Models {
 		match := strings.ToLower(strings.TrimSpace(m.Match))
 		if match == "" {
 			return nil, fmt.Errorf("model price list: entry %d has no match", i)
 		}
+		// Two entries for one match are two rates for one model, and lookup would pick
+		// whichever sorted first. deriveBareTails relies on a match being unique.
+		if seen[match] {
+			return nil, fmt.Errorf("model price list: %q appears more than once", m.Match)
+		}
+		seen[match] = true
 		prefix := strings.HasSuffix(match, "*")
 		match = strings.TrimSuffix(match, "*")
 		if m.Window > 0 && m.CompactionPoint > m.Window {
@@ -186,7 +193,10 @@ func ParseTable(b []byte) (*Table, error) {
 //     first (exact) pass finds that entry before ever consulting this index.
 //   - A tail claimed by TWO OR MORE differently-priced providers is ambiguous — a
 //     bare request for it cannot be resolved without guessing which provider it
-//     meant, and guessing is exactly the mechanism that caused #324. Such a tail is
+//     meant, and guessing is exactly the mechanism that caused #324. "Differently
+//     priced" covers the window and compaction point the entry also serves, not only
+//     the rate: Window, WindowExact and CompactionPoint read the same entry, and a
+//     5x-too-high window reported as exact is as wrong as a wrong price. Such a tail is
 //     not indexed at all here, so it falls through to the family/public-map passes
 //     instead of silently picking one provider's rate for the other's traffic.
 func deriveBareTails(entries []tableEntry) map[string]tableEntry {
@@ -209,7 +219,8 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 			continue // an explicit bare entry for this tail already wins on its own
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
-			if prev.price != e.price { // two providers at one rate are not a guess
+			// Two providers at one rate and one window are not a guess.
+			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
 				ambiguous[tail] = true
 			}
 			continue
