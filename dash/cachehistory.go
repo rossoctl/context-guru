@@ -66,6 +66,9 @@ type CachesplitHistorical struct {
 	Uncovered int64 `json:"uncovered"`
 }
 
+// tenantModel keys a per-tenant valuation: the stable half is a tenant's own measurement (#501).
+type tenantModel struct{ tenant, model string }
+
 // CachesplitHistoricalUSD values the pre-instrumentation window. Read-only.
 func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHistorical, error) {
 	var out CachesplitHistorical
@@ -102,9 +105,9 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// #492: when the caller asked for one session, the CTE's own FROM may be narrowed to that
 	// session — NOT to `cond` (that would reintroduce exactly the bug the comment above warns
 	// against: rn=1 has to mean "nothing earlier in this session" even counting rows `cond`
-	// would otherwise filter out, like pings). Restricting to `r.session_id = ?` keeps every one
-	// of that session's rows, filtered or not, and excludes only OTHER sessions' rows, which
-	// PARTITION BY session_id never let affect this session's own rn values anyway. Unscoped
+	// would otherwise filter out, like pings). Restricting to the session (and its tenant) keeps
+	// every one of that session's rows, filtered or not, and excludes only OTHER sessions' rows,
+	// which PARTITION BY tenant_id, session_id never lets affect this session's own rn values. Unscoped
 	// callers (the whole-deployment view) still get the broad, unfiltered CTE.
 	q, qargs := cachesplitHistoricalQuery(f, cond, args)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, qargs...)
@@ -112,7 +115,7 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 		return out, err
 	}
 	defer rows.Close()
-	priced := map[string]float64{} // tenant|model -> value of one qualifying request
+	priced := map[tenantModel]float64{} // value of one qualifying request
 	seen := map[string]bool{}
 	for rows.Next() {
 		var tenant, model string
@@ -132,7 +135,7 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
-		v, done := priced[tenant+"|"+model]
+		v, done := priced[tenantModel{tenant, model}]
 		if !done {
 			price, ok := p.Price(context.Background(), model)
 			if !ok || price.Zero() {
@@ -146,7 +149,7 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 			if delta := miss - price.CacheRead; delta > 0 {
 				v = float64(stable) * delta
 			}
-			priced[tenant+"|"+model] = v
+			priced[tenantModel{tenant, model}] = v
 		}
 		if v <= 0 {
 			out.Uncovered++
@@ -167,13 +170,11 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 // may be scoped to the caller's session but never to `cond` (`cond`'s keepalive=0 would be
 // wrong INSIDE the ranking; tenant_id would not — see below).
 //
-// #502/#501: the session-scoped form adds `tenant_id = ?` alongside `session_id = ?`, which
-// #498 did not. Session ids are client-supplied, so two tenants can present the same one, and
-// without the tenant term the ranking would see BOTH tenants' rows as one session — exactly
-// #501's bug (overview.go's and this file's other per-session queries still have it; this is
-// the one lean's new bounded path actually calls, so it is the one fixed here, not a general
-// pass over #501). TenantAll (a manager's service-wide view) is the one caller that must NOT
-// gain this term — it has no single tenant to add.
+// #501: the ranking is per (tenant_id, session_id), and the session-scoped form adds
+// `tenant_id = ?` alongside `session_id = ?` (sessionScope). Session ids are client-supplied, so
+// two tenants can present the same one, and a ranking over session_id alone would see BOTH
+// tenants' rows as one session. TenantAll (a manager's service-wide view) has no single tenant
+// to add; the partition keeps the tenants apart there.
 func cachesplitHistoricalQuery(f Filter, cond string, args []any) (string, []any) {
 	rnCond, rnArgs := "", []any{}
 	if f.Session != "" {
@@ -229,7 +230,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 	defer rows.Close()
 	acc := map[string]*CachesplitHistorical{}
 	seen := map[string]map[string]bool{}
-	priced := map[string]float64{} // tenant|model -> value of one qualifying request
+	priced := map[tenantModel]float64{} // value of one qualifying request
 	for rows.Next() {
 		var tenant, model string
 		var read, write int64
@@ -251,7 +252,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
-		v, done := priced[tenant+"|"+model]
+		v, done := priced[tenantModel{tenant, model}]
 		if !done {
 			price, ok := p.Price(context.Background(), model)
 			if !ok || price.Zero() {
@@ -265,7 +266,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 			if delta := miss - price.CacheRead; delta > 0 {
 				v = float64(stable) * delta
 			}
-			priced[tenant+"|"+model] = v
+			priced[tenantModel{tenant, model}] = v
 		}
 		if v <= 0 {
 			h.Uncovered++

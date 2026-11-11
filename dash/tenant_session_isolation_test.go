@@ -195,3 +195,41 @@ func TestCachesplitSizeSpreadIsPerTenant(t *testing.T) {
 		t.Errorf("tenant A's credit went %+v -> %+v because tenant B recorded another stable size", a, m)
 	}
 }
+
+// The inflation correction deducts, per keep-alive ping, the savings already realised earlier in
+// the ping's session. A ping of tenant B must not deduct tenant A's savings from A's ceiling.
+func TestInflationCorrectionIgnoresOtherTenantsPingsInTheSameSession(t *testing.T) {
+	mkA := func() []*Event {
+		return []*Event{
+			mkEvent(1000, sharedSession, "m1", 100, 90),
+			mkEvent(1100, sharedSession, "m1", 100, 90),
+			kaPing(1150, sharedSession, 0.01, 50_000, 0), // between A's 2nd and 3rd turn
+			mkEvent(1200, sharedSession, "m1", 100, 90),
+		}
+	}
+	mkB := func() []*Event {
+		return []*Event{
+			mkEvent(2000, sharedSession, "m1", 100, 90),
+			kaPing(2500, sharedSession, 0.01, 50_000, 0),
+		}
+	}
+	alone, mixed := isolationDB(t, false, mkA(), mkB()), isolationDB(t, true, mkA(), mkB())
+	f := Filter{Tenant: "A"}
+	a, err := alone.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := mixed.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 x (2+1+0) = 30; A's ping sits before A's last turn only, so it deducts nothing a later
+	// turn could replay (see TestTheReplayCeilingCountsAgentTurnsNotPings).
+	if a.ReplayProjectedTokens != 30 {
+		t.Fatalf("baseline ceiling = %d, want 30", a.ReplayProjectedTokens)
+	}
+	if m.ReplayProjectedTokens != a.ReplayProjectedTokens {
+		t.Errorf("tenant A's ReplayProjectedTokens went %d -> %d when tenant B pinged the same session id",
+			a.ReplayProjectedTokens, m.ReplayProjectedTokens)
+	}
+}

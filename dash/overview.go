@@ -744,10 +744,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// TestPingRowsStayOutOfAgentAggregates, which compares the whole Overview key by key rather
 	// than the aggregates somebody thought of.
 	//
-	// Neither statement is scoped to the window or the tenant on its INNER side, and they agree
-	// about that, which is what matters: session ids are `tenant:uuid` so a cross-tenant
-	// collision is not reachable, and the ceiling is deliberately about the session's whole life
-	// rather than the filtered slice of it.
+	// Neither statement is scoped to the window on its INNER side, and they agree about that,
+	// which is what matters: the ceiling is deliberately about the session's whole life rather
+	// than the filtered slice of it. Both ARE scoped to the tenant (#501): session ids are
+	// client-supplied, so a cross-tenant collision is reachable, and the inner side names
+	// (tenant_id, session_id) — the pair idx_requests_tenant_session covers.
 	//
 	// NOT rewritten as a window function, despite looking like the same shape CompactionResets
 	// was fixed for. Tried it, verified against live production data: byte-identical result,
