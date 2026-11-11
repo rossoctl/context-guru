@@ -599,7 +599,7 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 			return off
 		}
 		c := tn.Cache
-		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
+		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings, ToolWaitMinPrefix: c.ToolWaitMinPrefix, MinPrefixTokens: c.MinPrefixTokens,
 			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
 		// With an active campaign the request path does not retry a closed window (resolvePolicyWindows),
 		// so a strategy counts only while its window is open and a closed one falls through to the

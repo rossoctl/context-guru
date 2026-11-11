@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
@@ -150,11 +152,30 @@ func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string,
 	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
-		if f.turn < 1 || f.prefix < int64(pol.MinPrefixTokens) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
+		if f.turn < 1 || f.prefix < int64(rowFloor(pol, f)) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
 			return 0, x, se
 		}
 		return pol.MaxPings, x, se
-	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens, <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.Ceiling()), true
+	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens for a main thread that waits for a person (%d otherwise), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
+}
+
+// rowFloor is the prefix floor the keeper would apply to a replayed row (Policy.WaitMinPrefix). A row
+// has the stop reason, not the wait cause or the tool names: a tool stop is read as a tool wait, any
+// other stop as a wait for a person (80k). A row that waited for background work or a teammate gets 80k
+// here, where the keeper gives it 20k, so the replay under-counts those rows. A row carries no stored
+// cause here, so every tool stop reads as a tool wait (20k). Dash's storedWait differs: it keeps a tool
+// stop with a stored human cause as human. So a main-thread tool stop that asks a person reads as a tool
+// wait here, and the replay can admit a few rows the keeper would refuse.
+// An OpenAI row gets the general floor only: the keeper plans no wait for OpenAI.
+func rowFloor(pol CachePolicy, f *rowFacts) int {
+	if f.openai {
+		return pol.MinPrefixTokens
+	}
+	cause := waitcause.WaitingHuman
+	if slices.Contains(keepalive.ToolStopReasons, f.stop) {
+		cause = waitcause.WaitingOwnTool
+	}
+	return pol.WaitMinPrefix(cause, f.subagent)
 }
 
 func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {

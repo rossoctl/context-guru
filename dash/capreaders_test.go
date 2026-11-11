@@ -146,7 +146,7 @@ func TestSavingsTotalsCappedCountsTheSummarizeLedger(t *testing.T) {
 	}
 	// The headline applies the same two deltas to the same three totals.
 	o := &Overview{BaselineCostUSD: plain.BaselineCostUSD, NetSavedUSD: plain.NetSavedUSD,
-		TotalSavedUSD: plain.TotalSavedUSD, TotalReducedUSD: plain.TotalSavedUSD}
+		TotalSavedUSD: plain.TotalSavedUSD}
 	o.ApplySummarizeLedger(sl)
 	o.ApplyReplayLedger(rl)
 	nearEq(t, "cap_correction_usd", capped.CapCorrectionUSD, sl.DeltaUSD()+rl.DeltaUSD())

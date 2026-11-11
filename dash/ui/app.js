@@ -1248,18 +1248,6 @@ const TILE_INFO = {
       + 'component configurations it EXCEEDS what the preset saved — check the '
       + "Preset steps tab, which shows each component's net separately.",
   },
-  'total-reduced-usd': {
-    what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
-      + 'removed yourself.',
-    how: '"Total dollars avoided" plus the declarations this account stopped carrying on its own: '
-      + 'an MCP server you removed, a skill you switched off. Those tokens genuinely stopped being '
-      + 'billed.',
-    catch: 'The two totals are separate on purpose. This one answers "how much smaller did my '
-      + 'bill get"; the other answers "how much of that did context-guru do". Rolling your own '
-      + 'work into the figure this product claims for itself would be taking credit for it. The '
-      + 'half that is yours is also MODELLED rather than measured \u2014 see the "Removed by you" '
-      + 'tile for exactly how, and when it is wrong.',
-  },
   'decl-filter-saved': {
     what: 'Money not spent because the removal filter stopped sending tool schemas, MCP tool '
       + 'schemas and skill listing entries you opted out of.',
@@ -1276,23 +1264,6 @@ const TILE_INFO = {
       + 'also costs one cache miss per session in flight, once, because the declarations sit at '
       + 'the front of the cached prompt; that charge is inside the billed cost and is not '
       + 'subtracted from this figure.',
-  },
-  'self-removed': {
-    what: 'Declarations YOU stopped carrying \u2014 an MCP server removed with `claude mcp '
-      + 'remove`, a skill switched off. Real money, and not ours.',
-    how: 'The inventory is a time series. A name present in the early sessions of this window and '
-      + 'absent from the later ones stopped being declared, and its weight times the requests of '
-      + 'the sessions that followed is what carrying it would have cost. Only COMPARABLE later '
-      + 'sessions count \u2014 one that declared no MCP tool at all cannot testify about a missing '
-      + 'MCP tool \u2014 and fewer than three of them is not reported at all.',
-    catch: 'MODELLED, not measured, and the difference matters. The method sees that the '
-      + 'declaration set changed; it cannot see WHY. On this deployment\u2019s own history the '
-      + 'largest candidate was the editor integration, which is declared only when a session runs '
-      + 'inside the IDE \u2014 so "you removed it" and "you worked in a terminal that day" look '
-      + 'identical here, and no threshold separates them. The reduction is real either way; the '
-      + 'attribution is a guess. That is why this is outside "Total dollars avoided" and inside '
-      + '"Total the bill came down". Anything the removal filter is already credited for is '
-      + 'excluded rather than counted twice, and the count of exclusions is on the tile.',
   },
   'cachesplit-saved': {
     what: 'Money saved by splitting the prompt so that the stable part stays cached when '
@@ -3583,9 +3554,6 @@ function attributionChips(c, components) {
       : '· inferred from the absence of a marker' }));
   return box;
 }
-
-function kv(k, v) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })); }
-
 
 /**
  * kvUnset prints a value the client never set as the WORD "unset", styled as absent.
@@ -9610,8 +9578,8 @@ async function loadKABehaviour() {
   $('#ka-prefix-note').textContent =
     'Each bar is a range of cached-prompt sizes at the moment the cache ran out. ' +
     `Half were under ${compact(b.prefix_p50)} tokens (10% under ${compact(b.prefix_p10)}, 90% under ${compact(b.prefix_p90)}). ` +
-    `${above} were already past 20k tokens, so the default "only sessions ` +
-    'with a large cached prompt" filter costs almost nothing.';
+    `${above} were already past 20k tokens, so the 20k floor costs almost nothing. ` +
+    'A main thread that waits for a person or an unknown cause needs 80k.';
   barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
     label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
     color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
@@ -9800,7 +9768,7 @@ async function loadKACalc() {
   host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
     el('p', {},
     'PINGS is every ping the policy would have sent over this window, gated as the ' +
-    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
+    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens, or 80k for a main thread that waits for a person or an unknown cause) and ' +
     'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
     'session has ended and sends its full K anyway. It counts only expiries that were ' +
     'addressable (the provider wrote a prefix that a ping could have refreshed). The live-plan row ' +
@@ -9858,7 +9826,7 @@ async function loadKARecommend() {
       rec.lo_usd > 0 ? 'good' : 'bad'),
     tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings'
       + (rec.plan === 'wait_plan' ? ' (base)' : ''),
-      'on sessions past their first request with a cached prompt over 20k tokens', 'accent'),
+      'past a session\u2019s first request, prompt over 20k (80k if a person or an unknown cause)', 'accent'),
   ]));
   if (rec.plan === 'wait_plan' && rec.fixed_k) {
     host.appendChild(el('p', { class: 'note', 'data-testid': 'ka-rec-fixed' },

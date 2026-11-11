@@ -1216,6 +1216,7 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	plan := proxy.CachePolicy{
 		WaitPlan:             c.WaitPlanOn(),
 		ToolWaitMaxPings:     r.KeepAliveToolWaitMaxPings,
+		ToolWaitMinPrefix:    r.KeepAliveToolWaitMinPrefixTokens,
 		BackgroundExtraPings: r.KeepAliveBackgroundExtraPings,
 		HumanExtraPings:      r.KeepAliveHumanExtraPings,
 	}
@@ -1229,6 +1230,7 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	return proxy.CachePolicy{
 		WaitPlan:             plan.WaitPlan,
 		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
+		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
 		BackgroundExtraPings: plan.BackgroundExtraPings,
 		HumanExtraPings:      plan.HumanExtraPings,
 		KeepAlive:            c.KeepAlive,

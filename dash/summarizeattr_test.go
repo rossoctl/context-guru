@@ -106,7 +106,7 @@ func TestSummarizeLedgerCapsCreditAtTheSpanAndRePricesTheFirstRemoval(t *testing
 	}
 
 	// The headline moves by the same amount.
-	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5, TotalReducedUSD: 5}
+	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5}
 	o.ApplySummarizeLedger(l)
 	nearEq(t, "baseline", o.BaselineCostUSD, 10+l.DeltaUSD())
 	nearEq(t, "net saved", o.NetSavedUSD, 4+l.DeltaUSD())
