@@ -8,7 +8,8 @@ Design, in short:
   * Routing is one key per provider in Pi's models.json (`providers.<name>.baseUrl`). Nothing is
     checked per session: Pi reads the file, and the request goes to the proxy.
   * The proxy runs as a user service (launchd on macOS, systemd --user on Linux), so it is up before
-    Pi starts and restarts by itself after a crash or a login. No Pi session starts or checks it.
+    Pi starts and restarts by itself after a crash or a login. At session start the extension checks
+    /healthz once, and if the proxy does not answer it calls `restart` here once.
   * Every file it writes carries an ownership marker or a routing record, and uninstall and the reset
     hatch remove only what they own.
 """
@@ -53,9 +54,16 @@ NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
 PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
 DEFAULT_PRESET = "off"
 DEFAULT_STRATEGY = "auto"
+# From this release the proxy owns the strategy table (#987): `cache: strategy: <name>` in its config
+# fills the cache keys. The config is strict YAML, so an older binary refuses the `strategy` key.
+NAMED_STRATEGY_RELEASE = (0, 7, 1)
 
-# The same strategies, keys and values as the Claude Code plugin (context-guru-plugin/scripts/settings.py),
-# so one name means one behaviour on both clients. `none` writes no cache keys at all.
+# The same strategies, keys and values as the proxy's table (config/strategy.go; pi-package/strategies_test.go
+# checks it), so one name means one behaviour on every client. `none` writes no cache keys at all.
+#
+# For a binary of NAMED_STRATEGY_RELEASE or later, the config names the strategy and the proxy's own
+# table applies. This copy then gives only the names, the consent text and the `desc` lines. The keys
+# here are written only for an older binary.
 #
 # The same keys also drive the proxy's OpenAI keep-alive; no OpenAI-only key is needed. On an OpenAI
 # Responses request the proxy uses `keepalive`, `keepalive_max_pings`, `keepalive_max_usd_per_ping` and
@@ -143,12 +151,32 @@ def facts(**values):
         print(f"{key}=" + " ".join(str(value).split("\n")).replace("\r", " "))
 
 
-def healthy(port):
+# The time limit of the extension's session-start check. `restart` uses the same limit before it
+# restarts, so a proxy that is slow but alive is not killed.
+START_CHECK_SECONDS = 5
+
+# The longest a command waits for another one's restart lock. A restart usually holds it for a few
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has up to
+# 90 s of command time limits, and setup holds it across start_service). A caller that waits 40 s
+# reports `busy` and still finishes inside the extension's 60 s limit.
+LOCK_WAIT_SECONDS = 40
+
+
+def healthy(port, timeout=1):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
             return response.status == 200
     except Exception:
         return False
+
+
+def wait_healthy(port, tries=50):
+    """True once /healthz answers, checking every 0.1 s, about 5 s in all."""
+    for _ in range(tries):
+        if healthy(port):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def first_free_port():
@@ -203,6 +231,15 @@ def owned(path):
         return False
 
 
+def plist_owned(path):
+    """True when the LaunchAgent at `path` carries our ownership key."""
+    try:
+        with open(path, "rb") as handle:
+            return plistlib.load(handle).get("ContextGuruManaged") is True
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+
+
 # --------------------------------------------------------------------------------------------- binary
 
 def find_binary():
@@ -246,6 +283,32 @@ def release_version(tag):
     if len(parts) != 3:
         raise RuntimeError(f"unrecognized context-guru release tag: {tag}")
     return parts
+
+
+def binary_version_text(executable):
+    """The version that `<binary> --version` prints (for example `0.7.1`), or None. `--version` exits
+    before the proxy opens a port, and a binary without the flag exits on an unknown flag, so this
+    never starts a proxy. The time limit is for a binary that hangs."""
+    try:
+        out = subprocess.run([executable, "--version"], text=True, capture_output=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out[1] if len(out) >= 2 and out[0] == "context-guru-proxy" else None
+
+
+def names_strategies(executable):
+    """True when the binary reads `cache: strategy: <name>`. A version we cannot read is False, so
+    the config gets the literal keys, which every binary accepts. A pre-release (`0.7.1-rc1`) counts
+    as older than its release: it may have been cut before #987."""
+    text = binary_version_text(executable) if executable else None
+    if text is None:
+        return False
+    try:
+        version = release_version(text)
+    except RuntimeError:  # a dev build, for example
+        return False
+    prerelease = "-" in text.removeprefix("v")
+    return version > NAMED_STRATEGY_RELEASE or (version == NAMED_STRATEGY_RELEASE and not prerelease)
 
 
 def install_release_binary(version=None):
@@ -293,7 +356,10 @@ def install_release_binary(version=None):
 
 # --------------------------------------------------------------------------------------- proxy config
 
-def render_config(preset, strategy, upstreams=None):
+def render_config(preset, strategy, upstreams=None, by_name=False):
+    """The proxy config. `by_name`: name the strategy and let the proxy fill its keys from its own
+    table (a binary with #987), so a new binary brings new values. Otherwise write Pi's literal keys.
+    `none` writes no cache block either way: it has no keys, and every binary accepts that."""
     lines = [MARKER, f"# strategy={strategy}. Change it with /context-guru preset or /context-guru cache-strategy."]
     # The proxy config has no upstream key (and refuses an unknown one), so a chained upstream is
     # written here as a comment for a person, and passed to the proxy as a flag on the service command.
@@ -301,14 +367,17 @@ def render_config(preset, strategy, upstreams=None):
         lines.append(f"# chained: {provider} -> proxy -> {upstream} ({UPSTREAM_FLAGS[provider]} on the service command)")
     lines.append(f"preset: {preset}")
     cache = STRATEGIES[strategy]["cache"]
-    if cache:
+    if cache and by_name:
+        lines += ["# The proxy fills the cache keys of this strategy from its own table.", "cache:",
+                  f"  strategy: {strategy}"]
+    elif cache:
         lines.append("cache:")
         for key, value in cache.items():
             lines.append(f"  {key}: {str(value).lower() if isinstance(value, bool) else value}")
     return "\n".join(lines) + "\n"
 
 
-def write_proxy_config(preset, strategy, upstreams=None):
+def write_proxy_config(preset, strategy, upstreams=None, by_name=False):
     if preset not in PRESETS:
         raise RuntimeError(f"unknown preset: {preset}")
     if strategy not in STRATEGIES:
@@ -318,10 +387,35 @@ def write_proxy_config(preset, strategy, upstreams=None):
     if path.exists() and not owned(path):
         raise RuntimeError(f"refusing to overwrite a proxy config we did not write: {path}")
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(render_config(preset, strategy, upstreams))
+    temporary.write_text(render_config(preset, strategy, upstreams, by_name))
     temporary.chmod(0o600)
     os.replace(temporary, path)
     return path
+
+
+def rerender_config(record, executable):
+    """Re-render the proxy config from the install record before a start, the same rule as the Claude
+    Code plugin's `strategy sync`. Only a file with our marker is written; a hand-written file stays.
+    Never raises: on a problem the proxy starts with the file as it is. Returns rendered | unchanged |
+    missing | not_owned | invalid_record | failed. A missing file is not created here: setup and
+    configure write it, after a yes."""
+    path = proxy_config()
+    if not path.exists():
+        return "missing"
+    if not owned(path):
+        return "not_owned"
+    preset = record.get("preset", DEFAULT_PRESET)
+    strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
+    if preset not in PRESETS or strategy not in STRATEGIES:
+        return "invalid_record"
+    upstreams, by_name = recorded_upstreams(record), names_strategies(executable)
+    try:
+        if path.read_text() == render_config(preset, strategy, upstreams, by_name):
+            return "unchanged"
+        write_proxy_config(preset, strategy, upstreams, by_name)
+    except Exception:
+        return "failed"
+    return "rendered"
 
 
 def proxy_command(executable, port, upstreams=None):
@@ -420,13 +514,8 @@ def start_service(executable, port, upstreams=None):
     elif kind == "launchd":
         plist = launchd_plist()
         plist.parent.mkdir(parents=True, exist_ok=True)
-        if plist.exists():
-            try:
-                with open(plist, "rb") as handle:
-                    if plistlib.load(handle).get("ContextGuruManaged") is not True:
-                        return False
-            except (OSError, ValueError, plistlib.InvalidFileException):
-                return False
+        if plist.exists() and not plist_owned(plist):
+            return False
         with open(plist, "wb") as handle:
             plistlib.dump({"Label": LAUNCHD_LABEL, "ContextGuruManaged": True, "ProgramArguments": command,
                            "RunAtLoad": True, "KeepAlive": True, "ProcessType": "Background",
@@ -442,11 +531,41 @@ def start_service(executable, port, upstreams=None):
             return False
     else:
         return False
-    for _ in range(50):
-        if healthy(port):
-            return True
-        time.sleep(0.1)
-    return False
+    return wait_healthy(port)
+
+
+def restart_service():
+    """Restart the user service we own, and nothing else. Returns restarted | no_service | not_owned |
+    failed | unsupported. A LaunchAgent that is not loaded is bootstrapped from its plist first."""
+    kind = service_kind()
+    try:
+        if kind == "systemd":
+            unit = systemd_unit()
+            if not unit.exists():
+                return "no_service"
+            if not owned(unit):
+                return "not_owned"
+            subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True,
+                           timeout=30)
+            return "restarted"
+        if kind == "launchd":
+            plist = launchd_plist()
+            if not plist.exists():
+                return "no_service"
+            if not plist_owned(plist):
+                return "not_owned"
+            domain = f"gui/{os.getuid()}"
+            target = f"{domain}/{LAUNCHD_LABEL}"
+            kick = ["launchctl", "kickstart", "-k", target]
+            if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
+                # Not loaded (a bootout, or a failed login start): load the plist, then start it.
+                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
+                               timeout=30)
+                subprocess.run(kick, check=True, capture_output=True, timeout=30)
+            return "restarted"
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return "failed"
+    return "unsupported"
 
 
 def stop_service():
@@ -460,11 +579,7 @@ def stop_service():
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
         return "stopped"
     if plist.exists():
-        try:
-            with open(plist, "rb") as handle:
-                if plistlib.load(handle).get("ContextGuruManaged") is not True:
-                    return "not_owned"
-        except (OSError, ValueError, plistlib.InvalidFileException):
+        if not plist_owned(plist):
             return "not_owned"
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True)
         plist.unlink()
@@ -510,8 +625,9 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
     if STRATEGIES[strategy]["spends"]:
-        spends = ("using quota where each request goes (for a chained provider, at the endpoint it is "
-                  "chained to)" if upstreams else "using your own quota on each provider")
+        chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
+        spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
+                  if upstreams else "using your own quota on each provider")
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
                      f"{spends}: Anthropic after 4 minutes idle (59 "
                      "minutes on a 1-hour cache), OpenAI GPT-5.6 and later after 28 minutes idle. "
@@ -519,7 +635,8 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
         headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
         if headered:
             names = " and ".join(NAMES[p] for p in headered)
-            question += (f" {names} sets headers in models.json. A keep-alive ping carries only the "
+            verb = "sets" if len(headered) == 1 else "set"
+            question += (f" {names} {verb} headers in models.json. A keep-alive ping carries only the "
                          "standard auth headers (Authorization, x-api-key), not those headers, so the "
                          f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
                          "/context-guru cache-strategy none.")
@@ -616,10 +733,10 @@ def setup(args):
     if service_kind() is None:
         facts(result="error", reason="unsupported_platform", detail=platform.system())
         return 2
-    try:
-        write_proxy_config(preset, strategy, upstreams)
-    except Exception as error:
-        facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+    # A hand-written config is refused before anything is downloaded.
+    if proxy_config().exists() and not owned(proxy_config()):
+        facts(result="error", reason="config_conflict", config=proxy_config(),
+              detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
         return 2
     executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
     executable = executable or find_binary()
@@ -630,14 +747,33 @@ def setup(args):
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
-    # Proxy first, routing second: a route written while nothing answers makes every request fail.
-    if not start_service(executable, port, upstreams):
-        facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
-              routing_written="false")
-        return 1
-    record.update(port=port, binary=executable, service=service_kind(), preset=preset, cache_strategy=strategy,
-                  base_urls={p: models_route.base_url(port, p) for p in PROVIDERS}, upstreams=upstreams)
-    write_record(record)
+    by_name = names_strategies(executable)
+    # The config, the start and the record happen under the restart lock: a session-start restart
+    # cannot re-render an older record over the new config between them.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="error", reason="busy", detail=error)
+        return 2
+    with lock:
+        # Read again under the lock, so the fields setup does not set are not an old copy. The preset
+        # and the strategy stay the ones the consent question named.
+        record = read_record()
+        # After the binary is known: the config names the strategy only for a binary that reads the name.
+        try:
+            write_proxy_config(preset, strategy, upstreams, by_name)
+        except Exception as error:
+            facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+            return 2
+        # Proxy first, routing second: a route written while nothing answers makes every request fail.
+        if not start_service(executable, port, upstreams):
+            facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
+                  routing_written="false")
+            return 1
+        record.update(port=port, binary=executable, service=service_kind(), preset=preset,
+                      cache_strategy=strategy, upstreams=upstreams,
+                      base_urls={p: models_route.base_url(port, p) for p in PROVIDERS})
+        write_record(record)
     try:
         models_route.install(models_path(), routing_state(), port, PROVIDERS, earlier)
         hatch = install_escape_hatch()
@@ -690,6 +826,80 @@ def status(args):
     return 0 if values["result"] == "ok" else 1
 
 
+class LockBusy(Exception):
+    """Another command held the restart lock for all of LOCK_WAIT_SECONDS."""
+
+
+def restart_lock(wait=None):
+    """An exclusive lock on a file in the state directory, held until the returned file is closed.
+    A second caller waits here until the first one is done, for at most `wait` seconds
+    (LOCK_WAIT_SECONDS), then raises LockBusy. On a platform without fcntl there is no service to
+    restart, so there is no lock either, and restart_service returns its own `unsupported` fact."""
+    path = state_dir() / "restart.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a")
+    try:
+        import fcntl  # Unix only, like the services this restarts.
+    except ImportError:
+        return handle
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockBusy(f"another context-guru command held {path} for more than "
+                                   f"{wait} seconds") from None
+                time.sleep(0.1)
+    except BaseException:
+        handle.close()
+        raise
+
+
+def restart(args):
+    """Restart the proxy service once, for the extension's session-start check. One restart runs at a
+    time (a lock file). A caller that waited for the lock checks health again first, so when two Pi
+    sessions start together, the second one finds the proxy up and does not restart it again. The
+    health check here has the extension's 5-second limit, so a slow but live proxy is left alone."""
+    record = read_record()
+    port = int(record.get("port") or 0)
+    if not port:
+        facts(result="not_installed")
+        return 2
+    where = {"port": port, "log": state_dir() / "proxy.log"}
+    # Only a hatch that exists is named, as in setup: a failed setup can leave a record without one.
+    if reset_hatch().exists():
+        where["reset_hatch"] = reset_hatch()
+    try:
+        lock = restart_lock()
+    except LockBusy:
+        facts(result="busy", **where)
+        return 1
+    with lock:
+        # Read again under the lock: a `configure` or `setup` that ran while this one waited wrote a
+        # new record, and a setup can move the port.
+        record = read_record()
+        port = int(record.get("port") or 0)
+        if not port:
+            facts(result="not_installed")
+            return 2
+        where["port"] = port
+        # Re-render first, so the next start (this one, or a later one by launchd or systemd) reads the
+        # current strategy. A proxy that answers is not restarted for it: it reads the file at its
+        # next start.
+        where["config"] = rerender_config(record, record.get("binary") or find_binary())
+        if healthy(port, timeout=START_CHECK_SECONDS):
+            facts(result="already_up", **where)
+            return 0
+        service = restart_service()
+        up = service == "restarted" and wait_healthy(port)
+    facts(result="up" if up else "down", service=service, **where)
+    return 0 if up else 1
+
+
 def configure(args):
     record = read_record()
     if not record.get("port"):
@@ -704,16 +914,31 @@ def configure(args):
     if args.show:
         facts(result="ok", preset=preset, cache_strategy=strategy)
         return 0
-    preset = args.preset or preset
-    strategy = args.cache_strategy or strategy
-    upstreams = recorded_upstreams(record)
+    # The config and the record change together under the restart lock, so a session-start restart
+    # cannot re-render the old record over the new file between the two writes.
     try:
-        write_proxy_config(preset, strategy, upstreams)
-    except Exception as error:
-        facts(result="refused", detail=error)
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="refused", reason="busy", detail=error)
         return 2
-    record.update(preset=preset, cache_strategy=strategy)
-    write_record(record)
+    with lock:
+        # Read again under the lock: a `setup` that ran while this one waited wrote a new record.
+        # Only the values given on the command line come from this call.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="not_installed")
+            return 2
+        preset = args.preset or record.get("preset", DEFAULT_PRESET)
+        strategy = args.cache_strategy or record.get("cache_strategy", DEFAULT_STRATEGY)
+        upstreams = recorded_upstreams(record)
+        by_name = names_strategies(record.get("binary"))
+        try:
+            write_proxy_config(preset, strategy, upstreams, by_name)
+        except Exception as error:
+            facts(result="refused", detail=error)
+            return 2
+        record.update(preset=preset, cache_strategy=strategy)
+        write_record(record)
     restarted = start_service(record["binary"], int(record["port"]), upstreams)
     extra = {}
     if restarted and preset == "ultrahigh":
@@ -743,13 +968,7 @@ def update(args):
         return 1
     record = read_record()
     executable = record.get("binary") or find_binary()
-    installed = "unknown"
-    if executable:
-        try:
-            out = subprocess.run([executable, "--version"], text=True, capture_output=True).stdout.split()
-            installed = out[1] if len(out) >= 2 else installed
-        except OSError:
-            pass
+    installed = (binary_version_text(executable) if executable else None) or "unknown"
     available = installed.removeprefix("v") != latest.removeprefix("v")
     if args.check:
         facts(result="checked", installed_version=installed, latest_version=latest,
@@ -766,10 +985,24 @@ def update(args):
     if not record.get("port"):
         facts(result="updated", version=version, restart="skipped")
         return 0
-    record["binary"] = executable
-    write_record(record)
+    # The record and the config change together under the restart lock, as in configure.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="error", reason="busy", version=version, detail=error, restart="skipped")
+        return 1
+    with lock:
+        # Read again under the lock. An uninstall that ran during the wait leaves no port.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="updated", version=version, restart="skipped")
+            return 0
+        record["binary"] = executable
+        write_record(record)
+        # Re-render with the NEW binary: it decides whether the config names the strategy.
+        config = rerender_config(record, executable)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
-    facts(result="updated", version=version, restart="completed" if restarted else "failed")
+    facts(result="updated", version=version, config=config, restart="completed" if restarted else "failed")
     return 0 if restarted else 1
 
 
@@ -816,10 +1049,11 @@ def main():
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--install", action="store_true")
+    commands.add_parser("restart")
     remove = commands.add_parser("uninstall")
     remove.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    return {"setup": setup, "status": status, "configure": configure, "update": update,
+    return {"setup": setup, "status": status, "restart": restart, "configure": configure, "update": update,
             "uninstall": uninstall}[args.command](args)
 
 

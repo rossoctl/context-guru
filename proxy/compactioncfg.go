@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -131,7 +132,8 @@ func short(s string) string {
 }
 
 // compactionPointFor is C for this request: the user's own setting, read at start-up, when it
-// changes C for the request's model; else the bootstrap table. A hosted proxy (Options.Tenants)
+// changes C for the request's model; else the operator's compaction_point in the price table, else the
+// bootstrap table. A hosted proxy (Options.Tenants)
 // never has a user setting. Fail open: any odd value gives the table.
 //
 // WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
@@ -164,7 +166,11 @@ func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) c
 			}
 		}
 	}
-	return compactionpoint.For(model)
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	return h.resolveCompactionPoint(ctx, body, window)
 }
 
 // clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which

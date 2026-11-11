@@ -160,8 +160,8 @@ def levers(st: dict) -> list[tuple[str, float]]:
     Sign convention of `delta_usd` (dash/overview.go, waterfall()): a saving is NEGATIVE (money not
     spent), a cost is POSITIVE. So the saving keys are negated here, and the cost keys are read as
     they are. A key that really is a net loss then shows as negative. `self_removed` is left out on
-    purpose: the waterfall keeps it OUTSIDE total_saved (it is the account's own doing, not ours),
-    so with it the rows could not add up to the headline.
+    purpose: a proxy older than #584 still sends it, OUTSIDE total_saved (it is the account's own
+    doing, not ours), so with it the rows could not add up to the headline.
     """
     w = {x["key"]: x["delta_usd"] for x in (st.get("waterfall") or [])}
     rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
@@ -252,11 +252,38 @@ def name_agents(doc: dict, transcript: str) -> None:
             t["name"] = rows[t["id"]]
 
 
+# The tiers of /api/stats `tokens.saved` / `tokens.caused`, in the order the band shows them, with their labels.
+TOKEN_TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
+
+
+def band_tokens_text(stats: dict | None, human) -> str | None:
+    """`saved 85.0k wr · cost 40.0k rd`: the tokens every feature saved, and what they cost, by tier, from /api/stats
+    `tokens`. The tiers are never added into one number: the provider does not say how a usage limit weights them. A
+    tier at 0 is left out; `cost …` only when a tier was paid. None when the answer has no `tokens` (a proxy before
+    #999) or nothing in any tier."""
+    tokens = stats.get("tokens") if isinstance(stats, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+
+    def tiers(kind: str) -> list[str]:
+        d = tokens.get(kind)
+        out = []
+        for key, tag in TOKEN_TIERS:
+            v = d.get(key) if isinstance(d, dict) else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 1:
+                out.append(f"{human(v)} {tag}")
+        return out
+
+    saved, caused = tiers("saved"), tiers("caused")
+    parts = (["saved " + " · ".join(saved)] if saved else []) + (["cost " + " · ".join(caused)] if caused else [])
+    return " · ".join(parts) or None
+
+
 def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -> None:
     """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
     longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
-    from the status line's own cached /api/stats), and on a subscription the tokens compaction kept out of the current
-    5-hour window by this session. Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
+    from the status line's own cached /api/stats), and on a subscription the tokens this session saved and cost in the
+    current 5-hour window (`band_tokens_text`). Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
     try:
         import statusline as sl  # noqa: PLC0415
         strip = lambda t: re.sub(r"\033\[[0-9;]*m", "", t or "")  # noqa: E731
@@ -270,7 +297,9 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
         if window_start_ms:
             # The 5-hour limit is the account's, but the band speaks for this session: only its own tokens count.
             mine, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}&session={sid}", f"win-{window_start_ms // 1000}-{sid}", sl.WINDOW_TTL_SECONDS)
-            saved = sl._saved_tokens_text(mine)
+            # A proxy before #999 has no `tokens`: it keeps its compaction-only `rd / wr` figure.
+            has_tokens = isinstance(mine, dict) and isinstance(mine.get("tokens"), dict)
+            saved = band_tokens_text(mine, sl._human) if has_tokens else sl._saved_tokens_text(mine)
             if saved:
                 doc["window_saved"] = saved
     except Exception:  # noqa: BLE001  (decoration: never fail the read over it)

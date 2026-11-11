@@ -32,7 +32,8 @@ Setup shows one question and changes nothing until you answer yes. On yes it:
 1. Downloads the latest `context-guru-proxy` release and checks it against the release's SHA-256
    list. A `context-guru-proxy` already on `PATH` is used instead.
 2. Starts the proxy as a user service: a LaunchAgent on macOS, `systemd --user` on Linux. The
-   service starts at login and restarts after a crash. No Pi session starts or checks it.
+   service starts at login and restarts after a crash. Each Pi session start checks it once (see
+   [Proxy check at session start](#proxy-check-at-session-start)).
 3. Sets `providers.anthropic.baseUrl` and `providers.openai.baseUrl` in `~/.pi/agent/models.json`
    to the proxy URLs in the table above. Your models and login stay as they are. On Anthropic, an API
    key and a Claude Pro/Max login both work. On OpenAI, an API key works; for Sign in with ChatGPT
@@ -117,14 +118,36 @@ One cache strategy drives both providers. What each one spends:
 | `1-ping` | At most 1 ping per idle gap | At most 1 ping per idle gap, after 28 minutes |
 | `2-ping` | At most 2 pings per idle gap, on both cache lifetimes | At most 2 pings per idle gap, after 28 minutes |
 
+## The proxy config
+
+The package writes the proxy config to `~/.local/state/context-guru-pi/proxy.yaml`. Its first line is
+the package's marker. The second line names the cache strategy.
+
+- **A proxy of v0.7.1 or later** gets the strategy by name (`cache:` / `strategy: auto`). The proxy
+  fills the cache keys from its own table at each start. So a new proxy release brings new values.
+- **An older proxy** does not accept that key. It gets the cache keys written out, from the package's
+  own table.
+- The package reads the version from `context-guru-proxy --version`. That command never starts a proxy.
+  A version it cannot read counts as old.
+- `none` writes no `cache:` block, on any proxy.
+- **The config is written again before each start:** in `setup`, `preset`, `cache-strategy`,
+  `update` (with the new binary) and the session-start `restart`. It comes from the install record:
+  the preset, the cache strategy and any chained upstream. A proxy that already answers is not
+  restarted for it. It reads the new file at its next start.
+- **A hand edit inside a file with the marker does not stay.** The next `restart`, `update`,
+  `preset` or `cache-strategy` writes the file again. To keep your edits, remove the marker line.
+- **A file without the marker is yours.** The package never writes it. `restart` and `update` report
+  `config=not_owned` and start the proxy with your file. `setup` and `configure` refuse.
+
 A ping goes to the provider with your own credential, so it uses your API quota (or your
-subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more, and
+subscription's limits). The proxy pings only a session with a prefix of 80,000 tokens or more (20,000 while a tool runs, for background work or a teammate, and on a subagent), and
 never a ping that would cost more than $0.50. It does not ping OpenAI models before GPT-5.6: their
 cache has no lifetime the proxy can plan for.
 
 ## What the extension does in a session
 
-The extension makes **no network call** when a session starts or when Pi sends a request.
+The extension makes **no network call** when Pi sends a request. When a session starts, it makes one
+call to the local proxy, described below.
 
 - **Session id.** It adds the header `x-context-guru-session: <Pi session id>` to requests that go to
   the proxy, on both providers. The proxy then keeps one session across a compaction, instead of two.
@@ -138,14 +161,48 @@ The extension makes **no network call** when a session starts or when Pi sends a
   So for a routed `openai` model with a stored ChatGPT login, the extension removes the same four
   fields. An API key request is not changed. A chained `openai` provider is not changed either: Pi
   sent those fields to that endpoint before setup.
+- **Proxy check at session start.** See the next section.
 - **Session signals.** When a session ends or compacts, it tells the proxy. It sends only the session
   id, the event and the reason. The proxy then stops pinging a cache that no later request will read.
   The signal is sent after the fact and never delays Pi.
 
+## Proxy check at session start
+
+When a Pi session starts, the extension checks that the proxy answers. It checks only when context-guru
+is installed and at least one Pi model goes to the proxy (the session's model or any other).
+
+1. It sends `GET http://127.0.0.1:<port>/healthz`, with a 5-second limit. This is a local call. It
+   makes no model call and uses no tokens.
+2. If the proxy does not answer, it restarts the service once: `launchctl kickstart -k` on macOS
+   (it loads the LaunchAgent first if it is not loaded), `systemctl --user restart` on Linux. It
+   restarts only a service that setup wrote. Before it restarts, it checks `/healthz` once more with
+   the same 5-second limit, so a proxy that is slow but alive is not restarted.
+3. It checks `/healthz` again, with the same 5-second limit.
+4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down and
+   why: the restart did not help, the service file is missing, the service file is not ours, or the
+   platform has no user service. It tells you to run `/context-guru status`. It names the reset
+   command only when that file exists.
+
+The check runs in the background. The session does not wait for it. It runs once per session start
+and never loops. When the session ends, Pi stops that session's check, the restart included. So
+`pi -p` exits as soon as it has the answer, and an ended session gets no warning.
+
+One restart runs at a time. If two Pi sessions start together, the second one waits for the first
+restart, checks `/healthz` again, and does not restart a proxy that now answers.
+
+In print mode (`pi -p`) and JSON mode there is no UI, so the warning goes to stderr. stdout carries
+the answer, and a script reads errors on stderr.
+
+You can run the same restart from a shell:
+
+```sh
+python3 /path/to/context-guru/pi-package/scripts/pi_plugin.py restart
+```
+
 ## Data
 
 The package sends the proxy only metadata: the session id, and the session end and compaction
-events. The proxy stores what its preset and storage level say. See
+events. The session-start check sends a bare `GET /healthz` with no body. The proxy stores what its preset and storage level say. See
 [docs/data-dependence.md](../docs/data-dependence.md).
 
 ## If Pi cannot talk

@@ -22,13 +22,16 @@ import (
 //     so the row does not fill it and the library default applies.
 //   - No `strategy` key: nothing here runs, and the config is the same as before.
 //   - An unknown name is a config error. The alias in StrategyAliases is read as its new name.
-//   - `none` has no keys: it sets nothing. (The plugin writes no file for it; the proxy only
-//     accepts the name.)
+//   - `none` has no keys: it sets nothing. (The Claude Code plugin writes no file for it. The
+//     Codex plugin writes `strategy: none`. The proxy accepts the name.)
 //
 // The numbers are written out here, not read from the Default* constants, on purpose: a later
-// change to a default must not silently re-tune a strategy that an install already uses. A drift
-// test pins this table to context-guru-plugin/scripts/settings.py until the plugin reads it from
-// the proxy.
+// change to a default must not silently re-tune a strategy that an install already uses. The
+// Claude Code plugin keeps no copy: it reads this table with `context-guru-proxy strategies`.
+// TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys keeps the files it wrote before that valid.
+// A test also pins the floor in this table to DefaultKeepAliveMinPrefix, so the two are
+// changed together. The table does not write keepalive_tool_wait_min_prefix_tokens: the default
+// (20000) applies, so an old strategy file gets the tool-wait floor without a re-render.
 
 // DefaultStrategy is the name the plugin picks when the user has not chosen one. The proxy does
 // NOT apply it: a file with no `strategy` behaves as before.
@@ -69,7 +72,7 @@ var Strategies = []Strategy{
 	{
 		Name:      "auto",
 		Spends:    true,
-		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. >=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. prefix floor 20k tokens for a tool wait, background work, a teammate or a subagent, 80k for a main thread that waits for a person; <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},

@@ -333,9 +333,66 @@ func TestResponsesPrefixAskerUsesIncomingOpenAIClient(t *testing.T) {
 	if h.prefixAskerForAPI(bschemas.OpenAI, "responses", models) == nil {
 		t.Fatal("Responses did not get a cached-prefix asker")
 	}
-	if h.prefixAskerForAPI(bschemas.OpenAI, "", models) != nil ||
-		h.prefixAskerForAPI(bschemas.OpenAI, "responses", components.ModelSpec{}) != nil {
-		t.Fatal("prefix asker escaped Responses or was built without incoming credentials")
+	if h.prefixAskerForAPI(bschemas.OpenAI, "responses", components.ModelSpec{}) != nil {
+		t.Fatal("prefix asker was built without incoming credentials")
+	}
+	if _, ok := h.prefixAskerForAPI(bschemas.OpenAI, "responses", models).(responsesPrefixAsker); !ok {
+		t.Fatal("a Responses route did not keep the Responses asker")
+	}
+}
+
+func TestChatPrefixAskerRouting(t *testing.T) {
+	h := &Handler{sent: newSentStash()}
+	models := components.ModelSpec{Incoming: cheapmodel.OpenAI{Model: "gpt-5.6"}}
+	if _, ok := h.prefixAskerForAPI(bschemas.OpenAI, "", models).(chatPrefixAsker); !ok {
+		t.Fatal("a Chat Completions route got no chat asker")
+	}
+	if h.prefixAskerForAPI(bschemas.OpenAI, "", components.ModelSpec{}) != nil {
+		t.Fatal("chat asker built without an incoming client")
+	}
+	// Other providers are unchanged: an Anthropic route still gets the Anthropic asker only.
+	am := components.ModelSpec{Incoming: cheapmodel.Anthropic{Model: "claude"}}
+	if _, ok := h.prefixAskerForAPI(bschemas.Anthropic, "", am).(prefixAsker); !ok {
+		t.Fatal("Anthropic route lost its asker")
+	}
+	if h.prefixAskerForAPI(bschemas.Anthropic, "", models) != nil {
+		t.Fatal("Anthropic route accepted an OpenAI client")
+	}
+}
+
+func TestChatPrefixAskerAsksOverStashedSession(t *testing.T) {
+	var mu sync.Mutex
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		captured = b
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"verdict"}}],` +
+			`"usage":{"prompt_tokens":1200,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1100}}}`))
+	}))
+	defer srv.Close()
+	got := func() []byte { mu.Lock(); defer mu.Unlock(); return captured }
+	stash := newSentStash()
+	b := []byte(`{"model":"m","messages":[{"role":"user","content":"ONLY-ONE"}]}`)
+	stash.put("one", bschemas.OpenAI, b, b)
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.BearerAuth("k"))
+	a := chatPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{D: d, Ref: ref, Model: "m"}}
+	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got() != nil {
+		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got())
+	}
+	reply, usage, err := a.Ask(context.Background(), "one", "ASK-ONE")
+	if err != nil || reply != "verdict" || usage.CacheRead != 1100 ||
+		!strings.Contains(string(got()), "ONLY-ONE") || !strings.Contains(string(got()), "ASK-ONE") {
+		t.Fatalf("chat ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got())
+	}
+	// A stale span is refused before any call.
+	mu.Lock()
+	captured = nil
+	mu.Unlock()
+	if _, _, err := a.AskCovered(context.Background(), "one", 5, "nothash", "x"); err != components.ErrStalePrefix || got() != nil {
+		t.Fatalf("stale span was asked: err=%v", err)
 	}
 }
 

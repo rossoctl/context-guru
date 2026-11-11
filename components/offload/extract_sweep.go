@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,38 @@ type ExtractSweep struct {
 	// maxAskBatches is how many batches one sweep asks (max_ask_batches).
 	maxAskBatches int
 
+	// warm turns on the WARM path (#491): the sweep also asks while the cache is live, holds the answer
+	// in memory, and applies it on a later warm request only if the economic gate says it pays. OFF by
+	// default and in no preset. See extract_sweep_warm.go.
+	warm bool
+	// warmEveryN is the fewest warm requests of a thread between two warm questions.
+	warmEveryN int
+	// warmMinAge is how many model turns old an output must be to be a warm candidate.
+	warmMinAge int
+	// warmMaxTurns caps the warm turns the gate may expect.
+	warmMaxTurns int
+	// warmMinMassFrac: ask only when the removable mass is at least this share of the conversation.
+	warmMinMassFrac float64
+	// warmGatePriceModel, when set, prices the warm gate's saving and rewrite with THAT model's rates
+	// instead of the request's. A DIAGNOSTIC setting: see warmGateRates.
+	warmGatePriceModel string
+	// warmExpectedTurns, when > 0, is the session length the warm gate assumes (warm_expected_turns).
+	warmExpectedTurns int
+
+	// v3 is sweep v3 (rules, protection, one big cut at a sweet spot) on the warm path. OFF unless a v3 setting
+	// is written. With it off, the warm path is exactly what it was. See extract_sweep_v3.go.
+	v3                   bool
+	selector             string
+	fillSmall, fillLarge float64
+	minDropFrac          float64
+	protectTools         map[string]bool
+	protectPaths         []*regexp.Regexp
+	protectLastN         int
+	ruleUnref            bool
+	ruleUnrefMinAge      int
+	premiumUSD           float64
+	dryRun               bool
+
 	mode markerMode
 }
 
@@ -138,6 +171,46 @@ type extractSweepConfig struct {
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
 	// MaxAskBatches is how many batches of 12 one sweep asks (0 = 4, at most 8). See extract_sweep_batch.go.
 	MaxAskBatches int `yaml:"max_ask_batches"`
+	// Warm turns on the warm path (#491). OFF by default and in no preset. See ExtractSweep.warm.
+	Warm bool `yaml:"warm"`
+	// WarmEveryN is the fewest warm requests of a thread between two warm questions (0 = 30).
+	WarmEveryN int `yaml:"warm_every_n"`
+	// WarmMinAgeTurns is how many model turns old an output must be to be a warm candidate (0 = 30).
+	WarmMinAgeTurns int `yaml:"warm_min_age_turns"`
+	// WarmMaxTurns caps the warm turns the economic gate may expect a thread to still have (0 = 60).
+	WarmMaxTurns int `yaml:"warm_max_turns"`
+	// WarmMinMassFrac: ask only when the removable candidate mass is at least this share of the conversation (0 = 0.20).
+	WarmMinMassFrac float64 `yaml:"warm_min_mass_frac"`
+	// WarmGatePriceModel is a DIAGNOSTIC: price the warm gate with this model's rates (for a run on a model
+	// the price table prices at $0). Unset by default and in no preset.
+	WarmGatePriceModel string `yaml:"warm_gate_price_model"`
+	// WarmExpectedTurns, when > 0, is how many warm turns the session is expected to run in all: the gate
+	// then expects max(this - turns so far, 0) more. 0 (the default) = unset: the turns left are estimated
+	// from the billed growth per turn up to the cut.
+	WarmExpectedTurns int `yaml:"warm_expected_turns"`
+	// Sweep v3 on the warm path (extract_sweep_v3.go). All off by default. They do nothing without warm: true.
+	//
+	// Selector: judge (the default, as before), rule (rules only, no model call) or hybrid (rules, then the judge).
+	Selector string `yaml:"selector"`
+	// FillSmall and FillLarge: the sweet spot as a share of C, at C = 200k and at C = 1M. 0 = unset.
+	FillSmall float64 `yaml:"fill_small"`
+	FillLarge float64 `yaml:"fill_large"`
+	// MinDropFrac: a cut must remove at least this share of the billed prompt. 0 = unset.
+	MinDropFrac float64 `yaml:"min_drop_frac"`
+	// ProtectTools and ProtectPaths: tool names and path globs whose outputs are never dropped.
+	ProtectTools []string `yaml:"protect_tools"`
+	ProtectPaths []string `yaml:"protect_paths"`
+	// ProtectLastN: the newest tool results that are never dropped. nil = 10 when v3 is on.
+	ProtectLastN *int `yaml:"protect_last_n"`
+	// RuleUnreferenced switches on rule (c): drop a tool output that nothing later references. Off by default.
+	// RuleUnreferencedMinAge: how many tool calls newer the output must have (0 = 30).
+	// CompactionPremiumUSD is an EXPERIMENT knob (sweep v3): a premium added to the saving side of the gate when a
+	// cut postpones the compaction. 0 = the cost gate. See extract_sweep_warm.go.
+	CompactionPremiumUSD float64 `yaml:"compaction_premium_usd"`
+	// DryRun (sweep v3, an experiment): everything runs as a normal v3 run, but no drop is ever applied.
+	DryRun                 bool `yaml:"dry_run"`
+	RuleUnreferenced       bool `yaml:"rule_unreferenced"`
+	RuleUnreferencedMinAge int  `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
 	// keeps the removal recoverable.
 	MarkerMode string `yaml:"marker_mode"`
@@ -181,9 +254,11 @@ const maxAskItems = 12
 var sweepBannedKeys = []struct {
 	key, why string
 }{
+	{"credit_avoided_compaction", "a cut only DELAYS the compaction: it happens anyway, and it removes the dropped outputs anyway. The gate prices the saving on the turns until that compaction (N) and credits nothing for an avoided one. Remove the key"},
 	{"strategy", "an adjudicator selects no compaction strategy — it returns a verdict, not a program"},
 	{"rewrite", "nothing is rewritten, so there is no rewrite to validate; the output is kept verbatim or removed"},
 	{"aggressiveness", "there is no compaction target to teach: the only question asked is whether the output is spent"},
+	{"max_ask_items", "the batch size is fixed at 12 (#747); use max_ask_batches (default 4, at most 8) to ask a longer list in batches"},
 	{"max_chars", "no projection window exists — a dropped output leaves a shape descriptor, not a truncation"},
 	// THE MODEL IS NOT A FREE CHOICE HERE, and this is the one place that asymmetry with extract_llm
 	// is visible, so it is spelled out rather than left to look like an oversight.
@@ -302,14 +377,37 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	if cfg.MaxAskBatches > maxAskBatchesCap {
 		cfg.MaxAskBatches = maxAskBatchesCap
 	}
+	if cfg.WarmEveryN <= 0 {
+		cfg.WarmEveryN = defaultWarmEveryN
+	}
+	if cfg.WarmMinAgeTurns <= 0 {
+		cfg.WarmMinAgeTurns = defaultWarmMinAgeTurns
+	}
+	if cfg.WarmMaxTurns <= 0 {
+		cfg.WarmMaxTurns = defaultWarmMaxTurns
+	}
+	if m := strings.TrimSpace(cfg.WarmGatePriceModel); m != "" && cfg.Warm {
+		noteWarmGatePriceModel(m)
+	}
+	if cfg.WarmMinMassFrac <= 0 || cfg.WarmMinMassFrac > 1 {
+		cfg.WarmMinMassFrac = defaultWarmMinMassFrac
+	}
 	// Evidence is ON unless the operator wrote `evidence: false`.
 	evidence := cfg.Evidence == nil || *cfg.Evidence
+	v3, err := parseSweepV3(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &ExtractSweep{
+		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
+		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, premiumUSD: v3.premiumUSD, dryRun: v3.dryRun,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
 		minLaterTurns: cfg.MinLaterTurns, keepRecheckTurns: cfg.KeepRecheckTurns,
 		maxAskBatches: cfg.MaxAskBatches,
+		warm:          cfg.Warm, warmEveryN: cfg.WarmEveryN, warmMinAge: cfg.WarmMinAgeTurns, warmMaxTurns: cfg.WarmMaxTurns, warmMinMassFrac: cfg.WarmMinMassFrac, warmGatePriceModel: strings.TrimSpace(cfg.WarmGatePriceModel), warmExpectedTurns: cfg.WarmExpectedTurns,
 	}, nil
 }
 
@@ -516,6 +614,11 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// with an unchanged prefix gets only the replays, which are byte-identical to what it sent before.
 	keys, n := e.coldStep(req, rep, c)
 	changed += n
+	// THE WARM PATH (#491), when switched on. It runs after the cold step so the replays are already in.
+	if e.warm {
+		wk, wn := e.warmStep(req, rep, c)
+		keys, changed = append(keys, wk...), changed+wn
+	}
 	return keys, nil
 }
 
@@ -536,6 +639,9 @@ type sweepCand struct {
 	// `toolu_d2`, so the contract told the model to locate content by a key that cannot be found
 	// anywhere. See #123. Empty when the dialect carries no id, in which case nothing is claimed.
 	toolID string
+	// extra is a warm-path evidence clause (#491), added to the candidate's inventory line. Empty for
+	// the ping, so the ping's question is byte-for-byte what it was.
+	extra string
 }
 
 // sweepResult is one adjudication's outcome, carried back to the SERIAL phase.
@@ -558,6 +664,9 @@ type sweepResult struct {
 	// ("keep everything"). It separates a question that was answered from one that failed, which both
 	// return no drops. The ping-time ask holds an answer only when this is set.
 	answered bool
+	// judgedCount is how many verdicts were judged, and fabricatedCount how many of them carried a quote that
+	// is not in the transcript. Per question, so a batched sweep can say which batch the fabrications came from.
+	judgedCount, fabricatedCount int
 }
 
 func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
@@ -645,6 +754,12 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		if e.evidence {
 			it.Evidence = renderEvidence(byIdx[cands[k].i], laterModelTurns(req, cands[k].i))
 		}
+		if cands[k].extra != "" {
+			if it.Evidence != "" {
+				it.Evidence += "; "
+			}
+			it.Evidence += cands[k].extra
+		}
 		items = append(items, it)
 	}
 	if e.evidence {
@@ -696,6 +811,8 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		reply string
 		usage components.PrefixUsage
 		err   error
+		// The text of the body the model read, when the asker reports it (PrefixReadAsker). Empty otherwise.
+		readText string
 		// The ask's own totals. See recordLeg.
 		askMs, askCost float64
 	)
@@ -818,7 +935,16 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 			dump.Trigger = opt.trigger
 		}
 		// The THREAD's stashed body (#423), not whichever thread of the session spoke last.
-		if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
+		//
+		// A PrefixReadAsker also returns the text the model read. The quote check below uses it, because the
+		// model can only quote what it was shown; `flat` is one request newer.
+		if ra, ok := c.PrefixAsk.(components.PrefixReadAsker); ok {
+			cc, ch := -1, ""
+			if haveCover {
+				cc, ch = coverCount, coverHash
+			}
+			reply, usage, readText, err = ra.AskRead(ctx, thread.Key(c.Session, c.Thread), cc, ch, askPrompt)
+		} else if ca, ok := c.PrefixAsk.(components.PrefixCoveredAsker); ok && haveCover {
 			reply, usage, err = ca.AskCovered(ctx, thread.Key(c.Session, c.Thread), coverCount, coverHash, askPrompt)
 		} else {
 			reply, usage, err = c.PrefixAsk.Ask(ctx, thread.Key(c.Session, c.Thread), askPrompt)
@@ -1006,9 +1132,11 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		}
 		seen[v.Label] = true
 		content := cands[v.Label].content
-		a := extract.Judge(v, flat)
+		a := extract.Judge(v, quoteSource(readText, flat))
+		r.judgedCount++
 		if a.QuoteFabricated {
 			r.gate("sweep_quote_fabricated")
+			r.fabricatedCount++
 		}
 		if a.CriterionMissing {
 			r.gate("sweep_criterion_missing")
@@ -1138,6 +1266,15 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	return drop, r
 }
 
+// quoteSource is the text a judge's quote is checked against: what the model read when the asker says so,
+// else the incoming request's transcript. It decides only the fabricated-quote counter.
+func quoteSource(read, flat string) string {
+	if read != "" {
+		return read
+	}
+	return flat
+}
+
 // flattenTranscript renders the agent's own text as one string, for verifying an obligation quote.
 // Every text block of every message, tool results included: an obligation can be created by a user
 // instruction, by the agent's own stated next step, or by something a tool told it.
@@ -1170,6 +1307,44 @@ func init() {
 		},
 		{Key: "max_ask_batches", Type: components.FieldInt, Default: defaultMaxAskBatches, Min: 1,
 			Hint: "How many batches of 12 outputs one sweep asks. Default 4, at most 8 (a larger value reads as 8, below 1 as 4). A list longer than 12 is split into balanced batches (16 gives 8+8, 23 gives 12+11) and asked one after the other over the same cached prefix, each judged on its own; a batch that fails (error, refused cache read, truncated or unparseable reply) keeps its outputs and the other batches still count. All answers are merged into one held answer, so the next cold request does one recheck and one cut. Each batch is one more question, so it costs one more answer. Candidates beyond 12 x max_ask_batches (the smallest) are not asked and are counted as sweep_over_ask_cap. A list of 12 or fewer is one question, as before."},
+		{Key: "warm", Type: components.FieldBool,
+			Hint: "The WARM path (#491). Unset = FALSE, and not in any preset. On a warm request of a thread, at most once every warm_every_n requests, and only when old outputs could pay back a rewrite, the sweep asks its question AFTER the request was forwarded (the agent sees no added delay) and holds the answer in process memory only (never in the Store). On a later warm request the answer is rechecked, then an economic gate decides: apply only if the saving over the expected warm turns is more than the cache rewrite it forces, with every size taken from the provider's billed count. A refused answer is dropped. Applied warm drops use the cold apply's markers, stash and drop records, and are counted apart. A restart loses a waiting answer, which fails open."},
+		{Key: "warm_every_n", Type: components.FieldInt, Default: defaultWarmEveryN, Min: 1,
+			Hint: "Warm path: the fewest warm requests of a thread between two warm questions. Default 30. Counted per thread; a cold request restarts the count."},
+		{Key: "warm_min_age_turns", Type: components.FieldInt, Default: defaultWarmMinAgeTurns, Min: 1,
+			Hint: "Warm path: how many model turns old an output must be to be offered. Default 30. A younger output has not had the time to be superseded, and a removal of it would sit near the end of the prompt, so it would rewrite little but save little."},
+		{Key: "warm_max_turns", Type: components.FieldInt, Default: defaultWarmMaxTurns, Min: 1,
+			Hint: "Warm path: the cap on the warm turns the economic gate may expect a thread to still have. The gate expects as many turns as the thread has already run warm, up to this cap, weighted by why the thread is waiting. Default 60, twice warm_every_n: a run is a poor guide past about two question intervals, and a larger cap would let one long run excuse a very large rewrite."},
+		{Key: "warm_expected_turns", Type: components.FieldInt, Default: 0, Min: 0,
+			Hint: "Warm path: how many warm turns the session is expected to run in all. When set (above 0) the gate expects max(this - warm turns so far, 0) more. Unset (0) by default: the gate then assumes the session runs until its CUT (the cache_aware_summarizer or summarize trigger's fraction of the window when one is in the pipeline, else the full window) and expects (cut - the current billed prompt) / (the average billed growth per turn on this thread) more turns. If the growth is unknown or not positive, or the window is only a family guess, it falls back to the warm turns so far. warm_max_turns caps N in every case, and the wait-cause weight applies on top."},
+		{Key: "warm_min_mass_frac", Type: components.FieldFloat, Default: defaultWarmMinMassFrac, Min: 0,
+			Hint: "Warm path: ask only when the removable candidate mass (outputs old enough and over the floor) is at least this share of the conversation. Default 0.20. On recorded sessions one sweep paid only when (tokens removed) x (turns left) was at least 11.5 x (conversation - tokens removed), and the best single sweep fell near 40% of the session, so a sweep of under a fifth almost never covers the rewrite it forces. A value outside (0, 1] reads as the default."},
+		{Key: "warm_gate_price_model", Type: components.FieldString,
+			Hint: "DIAGNOSTIC, unset by default and in no preset. Price the warm gate's saving and rewrite with THIS model's rates (for example claude-opus-5) instead of the request's model. For a test run on a model the price table prices at $0, where the gate would see saving = rewrite = 0 and refuse everything. It is used only in the gate's decision: the dashboard and /stats keep pricing the real model. Logged once at start and shown in /stats as keepalive.sweep_warm.gate_price_model, so a run with it is never mistaken for a normal run."},
+
+		{Key: "selector", Type: components.FieldEnum, Default: selectorJudge, Options: []string{selectorJudge, selectorRule, selectorHybrid},
+			Hint: "Sweep v3, on the warm path (needs warm: true). Who picks the outputs to drop. judge (default): the model, as before. rule: rules only, no model call: a file read whose path was read or written again later, and a build, test or lint run that a later run of the same command repeats. hybrid: the rules first, then the model on the outputs the rules did not decide. rule and hybrid switch the v3 gates on."},
+		{Key: "fill_small", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 200k or less. The sweep tries a cut when the billed prompt reaches fill x C. 0 = unset. Writing any of selector (rule or hybrid), fill_small, fill_large, min_drop_frac, protect_tools, protect_paths, protect_last_n or rule_unreferenced switches the v3 gates on (with warm: true). When on, an unset or out-of-range value reads as 0.70 (a general rule: 70% of the effective context). fill is linear in C between 200k and 1M."},
+		{Key: "fill_large", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: the sweet spot as a share of C when C is 1M or more. 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.6."},
+		{Key: "min_drop_frac", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3: a cut must remove at least this share of the billed prompt, or it is refused (drop_too_small). 0 = unset. When v3 is on, an unset or out-of-range value reads as 0.15. After an accepted cut the next one waits until the billed prompt has grown by this share of C."},
+		{Key: "protect_tools", Type: components.FieldStrings,
+			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
+		{Key: "protect_paths", Type: components.FieldStrings,
+			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
+		{Key: "dry_run", Type: components.FieldBool,
+			Hint: "Sweep v3, an EXPERIMENT for a paired test: Context Guru in the path but NO cut ever. Off by default. With true everything runs as a normal v3 run (the expand tool injection, keep-alive pings, the judge's questions at pings and at the sweet spot, the rules, the recheck, the gate and its logs), but no drop is applied on any path: warm, cold, changed-prefix. Each cut that would have been made is logged as cg.sweep.dry_run_cut with a real cut's numbers and counted in v3.dry_run_cuts. A would-be cut does not start the growth wait, so the run asks as often as a real one would before its first cut. The forwarded request is byte-identical to one with no sweep drops. It does nothing without v3 (warm: true and a v3 setting). Writing it switches v3 on."},
+		{Key: "compaction_premium_usd", Type: components.FieldFloat, Default: 0,
+			Hint: "Sweep v3, an EXPERIMENT knob to measure quality, not a tuning knob. A premium in USD added to the saving side of the payback gate when a cut postpones the compaction (the turns counted from the prompt after the cut are more than those without it, which is any cut that removes something in the cut turns model). The gate then accepts when the saving to N plus this premium is more than the rewrite. 0 (default) is the cost gate: saving to N, no premium. A high value, for example 10, effectively turns the cost gate off in a $0 test, while the real cost is still logged. Every apply-stage decision logs premium_usd and passed_on_cost. Writing it switches the v3 gates on (with warm: true)."},
+		{Key: "rule_unreferenced", Type: components.FieldBool,
+			Hint: "Sweep v3 rule (c), off by default. Drop a tool output that nothing later in the conversation references: no later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). It is the recheck's referenced_later test, run over the whole later conversation, and it never drops an output that introduced no identifier. It needs selector rule or hybrid, and it obeys every protection. Its drops are counted under unreferenced. Writing it switches the v3 gates on (with warm: true)."},
+		{Key: "rule_unreferenced_min_age", Type: components.FieldInt, Default: defaultRuleUnrefMinAge, Min: 0,
+			Hint: "Sweep v3 rule (c): how many tool calls newer an output must have before it can be dropped as unreferenced. Default 30. An output with fewer has had no chance to be referenced."},
+		{Key: "protect_last_n", Type: components.FieldInt, Default: defaultProtectLastN, Min: 0,
+			Hint: "Sweep v3: the newest N tool results are never dropped. Default 10 when v3 is on; 0 protects none."},
+
 		markerModeField(),
 	})
 }

@@ -41,7 +41,7 @@
  "compaction_resets": 0,
  "corrected_saving_rows": 0,
  "cost_usd": 1.12,
- "decl_credit_priced": false,
+ "decl_credit_priced": true,
  "decl_filter_reads": 0,
  "decl_filter_requests": 0,
  "decl_filter_usd": 0,
@@ -149,10 +149,6 @@
  "saved_gross": 199658,
  "saved_gross_attempted": 199658,
  "saved_unique": 199658,
- "self_removed_items": 4,
- "self_removed_overlap": 0,
- "self_removed_reads": 30140,
- "self_removed_usd": 0.07820999999999999,
  "sessions": 24,
  "since": 1767776400000,
  "split_credited": 0,
@@ -197,7 +193,6 @@
  "tokens_before_billed": 8396242,
  "tokens_unmeasured_requests": 237,
  "total_ms_avg_buffered": 0,
- "total_reduced_usd": 0.17563899999999993,
  "total_saved_usd": 0.09742899999999995,
  "ttfb_ms_avg_streamed": 0,
  "uncompressed": {
@@ -279,7 +274,7 @@
   },
   {
    "delta_usd": -0,
-   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, NET of the names list and the searches that cost. From the per-request ledger, so it is the same figure as the Tools page. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
+   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, net of what that cost. On a request the accountant priced, this line holds the library's whole deferral saving (the definitions left out, less the names list) minus the searches and the definitions they loaded; the saving is not in \"Your preset\". On a request it held, or could not price, it is the ledger's net. The same figure as the Tools page and /api/tool-defer. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
    "key": "defer_net",
    "label": "Tool deferral",
    "total": false
@@ -289,20 +284,6 @@
    "description": "Net compaction savings, plus prefix-cache savings, plus the idle keep-alive's NET — its savings minus what its pings cost — plus the manual pings' net, plus the declarations the removal filter stopped sending, plus tool deferral's net. FIVE disjoint token sets, all ours, so nothing is counted twice: compaction's removals never reached the provider, the split moved a breakpoint over tokens that did, the keep-alive refreshed entries that already existed, and the filter's declarations were dropped before the compaction baseline was even measured — so they are absent from the first line rather than counted in it. The keep-alive enters as a net because the pings' own spend is not in the billed-cost line above — ping rows are excluded from agent traffic — so this is the only place both halves are comparable, and its saving half is a CEILING (see Keep-alive savings). It is not the cost of a fully uncached world: the provider's own cache saved far more than this on the same traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that is credited here.",
    "key": "total_saved",
    "label": "Total cost avoided",
-   "total": true
-  },
-  {
-   "delta_usd": -0.07820999999999999,
-   "description": "Declarations this ACCOUNT stopped carrying on its own — an MCP server you removed, a skill you switched off. The tokens genuinely were not billed, and no component of ours was involved, so this is deliberately OUTSIDE the total above and inside the one below. It is also MODELLED rather than measured: the evidence is that the inventory is a time series and a name is in its early part and not its late part, which cannot tell a removal from a session that ran in a different environment — on the production snapshot the largest candidate is the editor integration, which is simply absent outside the IDE. Every row and its own evidence is on the Inventory tab; rows the filter is already credited for are excluded here rather than counted twice.",
-   "key": "self_removed",
-   "label": "Removed by you, not by us",
-   "total": false
-  },
-  {
-   "delta_usd": 0.17563899999999993,
-   "description": "Everything above, ours and yours: the total cost avoided plus what you removed yourself. It answers 'how much smaller did this bill get', where the total above answers 'how much of that did context-guru do'. Both are worth knowing and they are not the same number, so neither is printed under the other's label.",
-   "key": "total_reduced",
-   "label": "Total the bill came down",
    "total": true
   }
  ]

@@ -773,8 +773,9 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		return declineButReplayStale()
 	}
 	model := s.modelClient // test-injection seam; nil in production
+	usedSource := ""
 	if model == nil {
-		model = c.Model.For(s.modelSource)
+		model, usedSource = c.Model.ForSource(s.modelSource)
 	}
 	var mm components.MessagesModel
 	if model != nil {
@@ -940,7 +941,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// fired (so the registry's own single-flight check in commissionSummary refuses a second
 	// dispatch and the keeper falls back to an ordinary ping) or deferred for cold (same check).
 	// See cache_aware_keepalive.go.
-	s.registerKeepAliveCandidate(c, call, path, span, end-start)
+	// ownCredential: the call goes out with the user's own credential (the PrefixAsk path, or the
+	// incoming client). Only then may its answer's headers reach the user's ping row (#1016). An
+	// answer from the operator's configured model carries the OPERATOR's limit headers.
+	ownCredential := usePrefixAsk || usedSource == "incoming"
+	s.registerKeepAliveCandidate(c, call, path, span, end-start, ownCredential)
 
 	// Don't pay for a summary the store cannot keep: a full marker promises the span is
 	// restorable, so check the room before the call rather than discovering it after.

@@ -1,14 +1,15 @@
 ---
 name: cache-strategy-picker
-description: Show the cache strategy and switch it (`none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`). Use when asked which one runs, to turn keep-alive pings on or off, or to keep the cache warm.
+description: Show the cache strategy and switch it. Use when asked which one runs, to turn keep-alive pings on or off, or to keep the cache warm.
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/settings.py)
 ---
 
 # Pick a cache strategy
 
-Three mechanisms, three names. The point of the names is that switching back is one word:
-"put it back on `5-min-ping`" has to be a sentence, not an archaeology exercise over four
-tuning numbers.
+Each cache mechanism has a name. The point of the names is that switching back is one word:
+"put it back on `auto`" has to be a sentence, not an archaeology exercise over four tuning numbers.
+**The proxy owns the names and what they mean.** `settings.py strategy list` asks the installed
+`context-guru-proxy` for them. This skill keeps no list.
 
 **You do not write the config file, and you do not compose its contents.** `settings.py strategy`
 is the only thing that knows what a name means. It writes atomically, refuses to touch a file it
@@ -78,33 +79,42 @@ actually paid for themselves, not just that they fired.
 
 ## 3. Switch
 
+First read the names the proxy offers for Claude Code:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" strategy list
+```
+
+- `names=` is the full set. Offer only these. Claude Code is routed to Anthropic only, so the list
+  holds no OpenAI-only strategy.
+- `strategy_<name>=` is the proxy's own description. Show it to the user as it is, word for word. It
+  carries the numbers and any gate or measurement caveat. Do not shorten it or add your own.
+- `spends_<name>=true` means the strategy spends the caller's own credential. `false` means it does not.
+- `default=` is the name used when the user chose none. `aliases=` are old names (`old:new`) that still work.
+- `result=error reason=proxy_too_old` means the installed proxy is older than v0.7.1. Say so and tell
+  the user to run `/context-guru:update`. Do not guess a list.
+- `reason=no_proxy_binary` means no proxy is installed: tell the user to run `/context-guru:install`.
+  `reason=proxy_unrunnable` means the binary named by `--bin` or `CONTEXT_GURU_BIN` cannot run: show
+  the `note=`. Do not guess a list in either case.
+
+Then switch:
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" strategy set --name <name> --port <port> --preset <preset>
 ```
 
-| Name | ELI5 | Cost |
-|---|---|---|
-| `none` | no keep-alive pings, nothing extra happens | free |
-| `auto` | pings the cache so it doesn't go cold while you're away. The proxy reads each session's cache lifetime from the traffic: a 5-minute cache gets up to 2 pings (first at 240 s), a 1-hour cache gets 1 ping at 59 minutes | spends a little of your own credential between turns |
-| `1-ping` | at most 1 ping per idle span, on either lifetime | same, fewer pings |
-| `2-ping` | at most 2 pings per idle span, on either lifetime (a 1-hour cache: 59 minutes, then 59 more) | same, more pings |
-| `1-hour-head` | asks the provider for a longer-lived cache instead of pinging, only on prefixes >=50k tokens | free, but on today's models it usually buys nothing — see below |
+The file it writes names the strategy (`cache:` / `strategy: <name>`). The proxy fills in the keys.
+`none` writes no file at all.
 
-**The old name `5-min-ping` still works.** It means `auto`; `strategy set` stores `auto`.
+**Say the cost before switching to any strategy with `spends=true`, once, in one line.** It spends the
+caller's money (or usage-limit budget) while nobody is at the keyboard, and it applies to every session
+routed through this proxy, not just this one. The default is on because holding the cache warm across an
+idle gap is the thing most people install this for, not because it is free.
 
-**Say the cost before switching TO `auto`, `1-ping` or `2-ping`, once, in one line.** It spends the caller's money
-(or usage-limit budget) while nobody is at the keyboard, and it applies to every session routed
-through this proxy, not just this one. It is the default because holding the cache warm across an
-idle gap is the thing most people install this for — not because it is free.
-
-**Be honest about `1-hour-head` rather than selling it.** In practice the 1-hour tier gets granted
-on Haiku but silently downgraded on Sonnet, so on the models most people run, expect $0 benefit
-unless `Usage.CacheWrite1h` says otherwise. Offer it as a measurement, not an upgrade.
-
-**And say the gate out loud when you offer it.** This strategy only does anything on a large prefix
-(tens of thousands of tokens) — below that threshold it's a no-op, so a user watching
-`Usage.CacheWrite1h` stay at zero on a small request shouldn't conclude the tier was refused; the
-request may just be too small to qualify.
+**Do not sell a strategy with `spends=false` and a measurement caveat.** Read its description aloud
+with the caveat, and say any size gate out loud: below the gate the strategy does nothing, so a user
+watching `Usage.CacheWrite1h` stay at zero on a small request should not conclude the tier was refused.
+Offer it as a measurement, not an upgrade.
 
 **Never turn a strategy on from a display path.** The status line renders on every keystroke; if it
 could arm this, a display hook would double as an unbounded traffic generator. Arming is always
@@ -148,4 +158,5 @@ recorded and takes effect at the next session's start.
   back by name.
 - Do not invent a strategy name. `settings.py strategy list` is the authoritative set; anything else
   exits 2 with `reason=unknown_strategy`.
+- Do not copy the names or descriptions into your answer from memory. Read them from `strategy list`.
 - Do not claim a change is in effect because the write succeeded. The restart is the claim.
