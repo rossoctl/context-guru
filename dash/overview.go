@@ -586,7 +586,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		CacheTTL: map[string]int64{},
 	}
 	var cgAvg, upAvg, ttfbAvg, upBufAvg sql.NullFloat64
-	var restoredCopies int64
+	var restoredTok int64
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), COUNT(DISTINCT r.session_id),
 		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
 		COALESCE(SUM(r.attempted_tokens),0), COALESCE(SUM(r.frozen_tokens),0),
@@ -698,7 +698,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
 		&o.SplitCreditedMoved,
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
-		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &restoredCopies, &o.Passthroughs,
+		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &restoredTok, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
 		&o.SSEStreamed, &o.SSEBuffered, &ttfbAvg, &upBufAvg,
 		&o.Breakpoints.System, &o.Breakpoints.Tools, &o.Breakpoints.Messages,
@@ -1143,7 +1143,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
 	// Both are paid for twice: the round that served the expand, and the copy each later turn of a
 	// fixed_restore session sends again (#481).
-	o.SafetyCost.RestoredTokens = o.ExpandTokens + restoredCopies
+	o.SafetyCost.RestoredTokens = o.ExpandTokens + restoredTok
 	o.SafetyCost.RevertedRuns = o.Reverts
 	o.SafetyCost.CGLLMCostUSD = o.CGLLMCostUSD
 	// The freeze's own caveat, on the payload rather than only in a comment: frozen == 0 is

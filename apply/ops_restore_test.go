@@ -30,6 +30,11 @@ func (toolCut) Reformat(req *bschemas.BifrostChatRequest, _ *components.Report, 
 
 func restoreRun(t *testing.T, withAnchor bool) Result {
 	t.Helper()
+	return restoreRunMode(t, withAnchor, "")
+}
+
+func restoreRunMode(t *testing.T, withAnchor bool, mode components.Mode) Result {
+	t.Helper()
 	pipe := components.NewPipeline([]components.Component{toolCut{}}, nil)
 	pipe.SetFixedRestore(true)
 	st := store.NewMemory(store.Options{})
@@ -39,7 +44,7 @@ func restoreRun(t *testing.T, withAnchor bool) Result {
 		expand.RecordAnchor(st, sess, expand.Anchor{ID: "H1", At: 2, Fp: expand.Fingerprint(msgs[1])})
 		st.Put("H1", []byte("ORIGINAL OUTPUT"))
 	}
-	return BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: []byte(restoreBody)})
+	return BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: []byte(restoreBody), Mode: mode})
 }
 
 // Control: with an empty plan the op for the rewritten tool_result (wire message 1) is kept.
@@ -94,7 +99,7 @@ func TestRestoreOpsRankByPosition(t *testing.T) {
 	msg := func(s string) gjson.Result { return gjson.Parse(`{"role":"user","content":"` + s + `"}`) }
 	nb := []gjson.Result{msg("a"), msg("COPY-B"), msg("b"), msg("COPY-A1"), msg("COPY-A2")}
 	plan := restorePlan{{anchor: expand.Anchor{ID: "B"}}, {anchor: expand.Anchor{ID: "A1"}}, {anchor: expand.Anchor{ID: "A2"}}}
-	ops, ok := plan.ops([]int{1, 2, 2}, nb)
+	ops, ok := plan.ops([]int{1, 2, 2}, nb, false)
 	if !ok || len(ops) != 3 {
 		t.Fatalf("ok=%v ops=%+v", ok, ops)
 	}
@@ -106,7 +111,7 @@ func TestRestoreOpsRankByPosition(t *testing.T) {
 			t.Fatalf("op %d = %s at %d, want %s at %d", k, ops[k].ChangeID, ops[k].At.Index, want.id, want.pos)
 		}
 	}
-	if _, ok := plan.ops([]int{1, 2, 9}, nb); ok {
+	if _, ok := plan.ops([]int{1, 2, 9}, nb, false); ok {
 		t.Fatal("a copy that is not in the body must make the report fail, not guess")
 	}
 }
@@ -118,11 +123,42 @@ func TestOpsDroppedWhenRestoreInsertFallsBack(t *testing.T) {
 	res.Trace.Ops = []accountant.Operation{{Kind: accountant.KindRewrite, At: accountant.Position{Section: accountant.SectionMessages, Index: 1}}}
 	res.Trace.OpsDropped = 2
 	plan := restorePlan{{anchor: expand.Anchor{ID: "H1", At: 2}, original: "ORIGINAL OUTPUT"}}
-	got := finishRestore(res, plan, "anthropic", orig, gjson.GetBytes(orig, "messages").Array())
+	got := finishRestore(res, plan, "anthropic", orig, gjson.GetBytes(orig, "messages").Array(), false)
 	if string(got.Body) != restoreBody || got.Restored != 0 {
 		t.Fatalf("want the original body and no restore, got %s restored=%d", got.Body, got.Restored)
 	}
 	if len(got.Trace.Ops) != 0 || got.Trace.OpsDropped != 3 {
 		t.Fatalf("ops=%+v dropped=%d, want none and 3", got.Trace.Ops, got.Trace.OpsDropped)
+	}
+}
+
+// In observe mode the body is never forwarded, so the restore operation is a dry run like the
+// pipeline's own (opsFromRun). A host that books operations would otherwise charge a copy that
+// was never sent.
+func TestRestoreOpIsADryRunInObserveMode(t *testing.T) {
+	res := restoreRunMode(t, true, components.ModeObserve)
+	if res.Restored != 1 || len(res.Trace.Ops) != 2 {
+		t.Fatalf("precondition: observe still plans the copy; restored=%d ops=%+v", res.Restored, res.Trace.Ops)
+	}
+	for _, op := range res.Trace.Ops {
+		if !op.DryRun {
+			t.Fatalf("%s is not a dry run in observe mode", op.Operator)
+		}
+	}
+	if live := restoreRun(t, true); live.Trace.Ops[1].DryRun {
+		t.Fatal("control: the restore op must not be a dry run in an enforced run")
+	}
+}
+
+// A failed insertion forwards the body as the client sent it: nothing was compacted on the wire,
+// so the run must not report a saving.
+func TestRestoreFallbackReportsNoSaving(t *testing.T) {
+	orig := []byte(restoreBody)
+	res := Result{Body: []byte(`{"model":"claude-x"}`)}
+	res.Trace.Run = &components.RunReport{TokensBefore: 500, TokensAfter: 40}
+	// The pipeline body has no messages array, so the copy cannot be inserted.
+	got := finishRestore(res, restorePlan{{anchor: expand.Anchor{ID: "H1", At: 99}, original: "x"}}, "bogus", orig, gjson.GetBytes(orig, "messages").Array(), false)
+	if got.Restored != 0 || got.Trace.Run.TokensAfter != got.Trace.Run.TokensBefore {
+		t.Fatalf("restored=%d after=%d before=%d, want no restore and no saving", got.Restored, got.Trace.Run.TokensAfter, got.Trace.Run.TokensBefore)
 	}
 }

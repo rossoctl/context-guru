@@ -873,7 +873,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
 		if ok {
-			res = finishRestore(res, restore, string(provider), body, msgs)
+			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
 		return res
 	}
@@ -1072,7 +1072,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 	res.Body, res.Changed = out, changed
-	return finishRestore(res, restore, string(provider), body, msgs)
+	return finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 }
 
 // resolveCacheAware decides whether cache-aware compaction is active for this
@@ -2299,17 +2299,21 @@ func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shif
 // pipeline's output cannot be forwarded either: it compacted the originals on the promise of a
 // copy. So it falls back to fallback, the body before the pipeline, which carries every original in
 // full at its own position.
-func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result) Result {
+func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result, dryRun bool) Result {
 	if len(plan) == 0 {
 		return res
 	}
 	pre := gjson.GetBytes(res.Body, expand.MessagesField(wire)).Array()
 	at := plan.positions(pre, client)
-	nb, tokens, ok := plan.insert(wire, res.Body, client)
+	nb, tokens, ok := plan.insertAt(wire, res.Body, at)
 	if !ok {
-		// The fallback forwards the pre-pipeline body, which no operation describes.
+		// The fallback forwards the pre-pipeline body: no operation describes it, and nothing was
+		// compacted on the wire.
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil
+		if res.Trace.Run != nil {
+			res.Trace.Run.TokensAfter = res.Trace.Run.TokensBefore
+		}
 		res.Body, res.Changed = fallback, true
 		return res
 	}
@@ -2322,7 +2326,7 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	}
 	// The pipeline's operations stay valid: the library maps their positions through the copies'
 	// splices, which come last in pipeline order. If a copy cannot be placed, none can be trusted.
-	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array())
+	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array(), dryRun)
 	if !placed {
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil

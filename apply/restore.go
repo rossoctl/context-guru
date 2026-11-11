@@ -96,7 +96,14 @@ func (p restorePlan) insert(wire string, out []byte, client []gjson.Result) ([]b
 		return out, 0, true
 	}
 	outMsgs := gjson.GetBytes(out, expand.MessagesField(wire)).Array()
-	at := p.positions(outMsgs, client)
+	return p.insertAt(wire, out, p.positions(outMsgs, client))
+}
+
+// insertAt is insert with the positions already resolved (positions).
+func (p restorePlan) insertAt(wire string, out []byte, at []int) ([]byte, int, bool) {
+	if len(p) == 0 {
+		return out, 0, true
+	}
 	ins := make([]expand.Insertion, 0, len(p))
 	tokens := 0
 	for i, it := range p {
@@ -133,9 +140,10 @@ func (p restorePlan) positions(outMsgs, client []gjson.Result) []int {
 // ascending order, the copy that ranks k-th lands at its position plus k, which is also where it
 // sits in the final body nb. The sizes are the wire bytes of that message. The ChangeID is the
 // marker id: the same on every request that restores it, so the library keeps the cost applied
-// once (accountant case rewrite/fixed-restore-cost/hot/5m, #481). ok is false when a copy cannot be
-// found in nb.
-func (p restorePlan) ops(at []int, nb []gjson.Result) ([]accountant.Operation, bool) {
+// once (accountant case rewrite/fixed-restore-cost/hot/5m, #481). dryRun is true in observe mode,
+// where the body is never forwarded, as for the pipeline's own operations (opsFromRun). ok is false
+// when a copy cannot be found in nb.
+func (p restorePlan) ops(at []int, nb []gjson.Result, dryRun bool) ([]accountant.Operation, bool) {
 	order := make([]int, len(p))
 	for i := range order {
 		order[i] = i
@@ -150,6 +158,7 @@ func (p restorePlan) ops(at []int, nb []gjson.Result) ([]accountant.Operation, b
 		ops = append(ops, accountant.Operation{
 			Kind:          accountant.KindRewrite,
 			Operator:      "context-guru.expand_restore",
+			DryRun:        dryRun,
 			At:            accountant.Position{Section: accountant.SectionMessages, Index: pos},
 			SizeBefore:    accountant.Size{Bytes: 0},
 			SizeAfter:     accountant.Size{Bytes: len(nb[pos].Raw)},
