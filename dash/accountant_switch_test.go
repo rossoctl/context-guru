@@ -739,3 +739,39 @@ func TestOverviewSumsTheHeldFloor(t *testing.T) {
 		}
 	}
 }
+
+// Review of #1001, point 1: the floor re-prices only the Saved tokens of the counted operations and leaves
+// every other part of the ceiling as the library priced it. That is right for the parts that come from the
+// request's own usage (a break an operation caused: a read that did not happen against a write that did;
+// the tokens an operation ADDED). This pins the arithmetic with such a break and an added declaration, and
+// that the floor then goes below zero when the added tokens cost more than the removed ones save at the
+// read rate: the floor is a number the readers must be able to show, not clamp away.
+func TestPriceMode_HeldFloorKeepsBreaksAndAddedTokensAndCanBeACost(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 4000, SavedUnique: 4000}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+			Saved:  accountant.TierTokens{CacheWrite5m: 4000},
+			Caused: accountant.TierTokens{CacheWrite5m: 1000}}}, // a declaration the operation added
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak, ChangeID: "c",
+			Saved:  accountant.TierTokens{CacheRead: 500},
+			Caused: accountant.TierTokens{CacheWrite5m: 500}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	brk := 500*0.2e-6 - 500*2.5e-6 // the break: a cost, whatever the warm prefix was
+	high := 4000*2.5e-6 - 1000*2.5e-6 + brk
+	low := 4000*0.2e-6 - 1000*2.5e-6 + brk
+	if !accNear(e.EstimatedSavedUSD, high) {
+		t.Errorf("ceiling %v, want %v", e.EstimatedSavedUSD, high)
+	}
+	if !accNear(e.EstimatedSavedLowUSD, low) {
+		t.Errorf("floor %v, want %v", e.EstimatedSavedLowUSD, low)
+	}
+	if e.EstimatedSavedLowUSD >= 0 {
+		t.Errorf("floor %v, want a cost (< 0): the added tokens cost more than the removed ones save at the read rate", e.EstimatedSavedLowUSD)
+	}
+}

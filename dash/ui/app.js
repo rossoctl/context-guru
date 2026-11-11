@@ -105,10 +105,12 @@ function usd(v) {
 // estUsd renders a held-out estimate: a negative figure is a cost, so it reads as one.
 function estUsd(v) { return v < 0 ? 'a cost of ' + usd(-v) : usd(v); }
 // estRange shows the held estimate as the range it is: the true saving lies between the floor
-// (every removed token at the read rate) and the ceiling (every one at the write rate). Without a
-// usable floor it falls back to the ceiling alone.
+// (every removed token at the read rate) and the ceiling (every one at the write rate). A floor below
+// zero is shown: the true saving may be a cost, and the ceiling alone would hide that. A floor of
+// exactly 0 is also what a row from before the column holds, so it is not a floor and falls back to the
+// ceiling alone, as does a floor that is not below the ceiling.
 function estRange(low, high) {
-  return (low > 0 && high > low) ? usd(low) + ' to ' + usd(high) : estUsd(high);
+  return (low !== 0 && high > low) ? usd(low) + ' to ' + usd(high) : estUsd(high);
 }
 function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.toFixed(digits) + '%'; }
 /**
