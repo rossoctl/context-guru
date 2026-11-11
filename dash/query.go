@@ -607,6 +607,79 @@ type SessionRow struct {
 	KeepAlivePingUSD  float64 `json:"keepalive_ping_usd"`
 	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
+	// The same session in tokens, for a Claude subscription (#1023). See sessionTokens.
+	SessionTokens
+}
+
+// SessionTokens is one session's figures in tokens, by tier (#1023). A subscription is limited in
+// tokens, so the Sessions tab shows these there in place of the dollars. The tiers are never added.
+//
+//   - Tokens is the accountant's figure for the session, less the keep-alive rescue: the token form of
+//     saved_usd. It also has the split, the 1-hour head and the ended-change break, which the dollar
+//     row has no column for.
+//   - KeepAliveTokens is the accountant's own keep-alive rescue figure (the tok_ka columns). It is a
+//     different measurement from keepalive_saved_usd, which is the legacy credit gated on read
+//     (kaSavedSince): the two can disagree on a row. Tokens and KeepAliveTokens add up to the
+//     tok_total columns.
+//   - KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens: the token form of
+//     keepalive_ping_usd. It is never added into a cost: the view shows it on its own line.
+//   - UsedTokens is the session's agent requests' billed input tokens: the token form of cost_usd.
+//     context-guru's own model calls (cg_llm_cost_usd) have no token form here.
+//   - TokensUnmeasured counts the agent requests the library did not price (acc_priced = 0).
+type SessionTokens struct {
+	Tokens              TokenFlow  `json:"tokens"`
+	KeepAliveTokens     TokenFlow  `json:"keepalive_tokens"`
+	KeepAlivePingTokens TierTokens `json:"keepalive_ping_tokens"`
+	UsedTokens          TierTokens `json:"used_tokens"`
+	TokensUnmeasured    int64      `json:"tokens_unmeasured_requests"`
+}
+
+// sessionTokensQuery sums the token figures of the given sessions, over the same filter as the
+// session list, with the pings in scope. It does not widen the list's own aggregate: it reads only
+// the rows of the sessions on the page (r.session_id IN, on idx_requests_session or
+// idx_requests_tenant_session), so its cost follows one page of sessions, not the window.
+func sessionTokensQuery(f Filter, ids []string) (string, []any) {
+	f = withKeepAlive(f)
+	f.SessionIn = ids
+	cond, args := f.where()
+	agent := func(expr string) string {
+		return `COALESCE(SUM(CASE WHEN r.keepalive = 0 THEN ` + expr + ` ELSE 0 END),0)`
+	}
+	return `SELECT r.session_id, ` + tokenSumTerms(totalColumns) + `, ` + tokenSumTerms(flowColumns("tok_ka")) + `,
+		` + accTokenTailTerms + `,
+		` + agent("r.fresh_input") + `, ` + agent("r.cache_read") + `,
+		` + agent("MAX(r.cache_write - r.cache_write_1h, 0)") + `, ` + agent("r.cache_write_1h") + `
+		FROM requests r WHERE ` + cond + ` GROUP BY 1`, args
+}
+
+// sessionTokens answers SessionTokens for each of the given sessions, keyed by session id.
+func (d *DB) sessionTokens(f Filter, ids []string) (map[string]SessionTokens, error) {
+	q, args := sessionTokensQuery(f, ids)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]SessionTokens{}
+	for rows.Next() {
+		var id string
+		var agg accTokensAgg
+		var used TierTokens
+		dest := append([]any{&id}, agg.dest(16)...)
+		dest = append(dest, &used.Input, &used.CacheRead, &used.CacheWrite5m, &used.CacheWrite1h)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		total, ka := flowOf(agg.sums[:8]), flowOf(agg.sums[8:])
+		out[id] = SessionTokens{
+			Tokens:              total.less(ka),
+			KeepAliveTokens:     ka,
+			KeepAlivePingTokens: agg.ping,
+			UsedTokens:          used,
+			TokensUnmeasured:    agg.unmeasured,
+		}
+	}
+	return out, rows.Err()
 }
 
 // cacheTTLMs is one provider prompt-cache TTL, the horizon inside which a session's next
@@ -716,6 +789,17 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 				s.KeepAlivePings, s.KeepAlivePingUSD = p.n, p.usd
 			}
 			s.KeepAliveNetUSD = s.KeepAliveSavedUSD - s.KeepAlivePingUSD
+		}
+		ids := make([]string, len(out))
+		for i, s := range out {
+			ids[i] = s.SessionID
+		}
+		toks, err := d.sessionTokens(f, ids)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, s := range out {
+			s.SessionTokens = toks[s.SessionID]
 		}
 	}
 	var total int64

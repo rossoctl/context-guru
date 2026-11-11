@@ -227,6 +227,51 @@ test('the capped note leaves the dollars out on a subscription', () => {
     'Capped: replay credit earned after the client would have compacted is not counted.');
 });
 
+test('a Sessions row in tokens: saved less the keep-alive, the pings on their own line (#1023)', () => {
+  const { sessionTokenCells } = createRequire(import.meta.url)('./ui/savings.js');
+  const s = {
+    turns: 4,
+    used_tokens: { input: 400, cache_read: 20000, cache_write_5m: 1600, cache_write_1h: 0 },
+    tokens: { saved: { cache_write_5m: 3600, input: 900 }, caused: { cache_read: 800 } },
+    keepalive_tokens: { saved: { cache_write_5m: 4000 }, caused: { cache_read: 4000 } },
+    keepalive_ping_tokens: { input: 3, cache_read: 9000, cache_write_5m: 20, cache_write_1h: 10 },
+    tokens_unmeasured_requests: 2,
+  };
+  assert.deepEqual(sessionTokenCells(s, String), {
+    cost: '1600 wr · 20000 rd · 400 in',
+    saved: 'saved 3600 wr · 900 in · cost 800 rd',
+    measured: true,
+    keepalive: 'saved 4000 wr · cost 4000 rd',
+    keepaliveRan: true,
+    // Never added into the keep-alive's cost.
+    pings: 'cost 20 wr · 10 wr1h · 9000 rd · 3 in',
+    unmeasured: 2,
+  });
+  // No keep-alive, no pings: the cell says n/a (the strategy did not run).
+  const quiet = sessionTokenCells({ turns: 1, tokens: { saved: { input: 5 } } }, String);
+  assert.equal(quiet.keepaliveRan, false);
+  assert.equal(quiet.pings, '');
+  // Unpriced rows, and pings that ran: the rescue is "not measured", not "saved 0"; the pings
+  // line still shows, from the ping rows' own usage.
+  const old = sessionTokenCells({ turns: 2, tokens: { saved: {}, caused: {} }, keepalive_tokens: { saved: {}, caused: {} },
+    tokens_unmeasured_requests: 2, keepalive_ping_tokens: { cache_read: 9000 } }, String);
+  assert.equal(old.keepalive, 'not measured');
+  assert.equal(old.pings, 'cost 9000 rd');
+  // Every request priced, pings ran, no rescue: a measured zero.
+  assert.equal(sessionTokenCells({ turns: 2, tokens: { saved: {} }, keepalive_tokens: { saved: {} },
+    keepalive_ping_tokens: { cache_read: 9000 } }, String).keepalive, 'saved 0 tokens');
+  assert.equal(quiet.saved, 'saved 5 in');
+  // The shared rule (tokenFigure), scoped to the session: all zero and every request priced is a
+  // zero; all zero with any unpriced request, or a row with no `tokens` (a server from before
+  // #1023), is "not measured". No NaN.
+  const zero = { saved: { input: 0 }, caused: {} };
+  assert.deepEqual(sessionTokenCells({ turns: 3, tokens: zero }, String).saved, 'saved 0 tokens');
+  assert.equal(sessionTokenCells({ turns: 3, tokens: zero, tokens_unmeasured_requests: 1 }, String).saved, 'not measured');
+  assert.equal(sessionTokenCells({ turns: 3, tokens: zero, tokens_unmeasured_requests: 3 }, String).measured, false);
+  assert.deepEqual(sessionTokenCells({ turns: 3 }, String),
+    { cost: '', saved: 'not measured', measured: false, keepalive: 'not measured', keepaliveRan: false, pings: '', unmeasured: 0 });
+});
+
 // The Cache strategy tab on a subscription (#1022): the measured rescue and the pings, two lines.
 test('the Cache strategy tab shows the rescue and the pings in tokens, never netted', () => {
   const { kaTokenLines } = createRequire(import.meta.url)('./ui/savings.js');
