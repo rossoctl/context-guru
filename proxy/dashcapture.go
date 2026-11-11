@@ -146,6 +146,11 @@ type capture struct {
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
+	// accMeta and accOpen are what accBegin noted for accEnd to hand to the accountant's job.
+	accMeta accountant.RequestMeta
+	accOpen bool
+	// accJob is the accountant's work in flight (nil before accEnd and after accWait).
+	accJob *accJob
 	// accPreDefer is the body tool deferral read, set only on a request it changed (#908). It splits
 	// the envelope diff in two, so deferral's edits to `tools` are reported under its own operator.
 	accPreDefer []byte
@@ -767,6 +772,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// handles (a phase it cannot prove is unknown and falls back too).
 	// Whatever way the request ended, the client hash begin kept for end is not needed past here. end removes it
 	// on the normal path and accDrop on a recovered panic; this covers any path that reached neither.
+	c.accWait()
 	defer c.savings.drop(c.accReq)
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
@@ -916,6 +922,7 @@ func (c *capture) accDrop() {
 	if c != nil {
 		c.savings.drop(c.accReq)
 		c.accReq = nil
+		c.accOpen = false
 	}
 }
 
