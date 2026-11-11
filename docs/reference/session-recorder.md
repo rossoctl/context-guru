@@ -41,15 +41,19 @@ the session (`CLAUDE_CODE_SESSION_ID`), which is also the name of the session's 
   `<session>.wire.jsonl`. It writes no later call of that session.
 - The marker keeps the session off after a proxy restart. An operator can see it.
 - The caller is authenticated like the Ping button, for its own account only. A `?tenant=`
-  override is refused.
-- The answer is `200 {"recording": <bool>, "deleted": <bool>}`. `recording` is false when the
-  proxy has no recorder.
+  override other than `me` is refused. Calls are rate-limited per account.
+- The answer is `200 {"recording": <bool>, "deleted": <bool>}`. `recording` tells whether the
+  account is recorded: false when the proxy has no recorder, and false for an account that did
+  not opt in.
+- For an account that is not recorded, the proxy writes no marker. It still deletes a file that
+  exists, for example one recorded before the account opted out of recording.
 - Spans already sent to a collector (`--record-otlp`) cannot be called back. With no
   `--record` directory, the opt-out holds only until the proxy restarts.
 
 **`x-context-guru-record: off` on a request** (`false`, `no` and `0` work too, in any case).
-The proxy does not record that request. Any other value, including a typo, is ignored, so a
-mistake never stops a recording that was wanted. Like every `x-context-guru-*` header, it is
+The proxy does not record that request. Earlier requests of the session that did not carry the
+header stay recorded; to delete them, use the `POST` above. Any other value, including a typo,
+is ignored, so a mistake never stops a recording that was wanted. Like every `x-context-guru-*` header, it is
 not forwarded upstream.
 
 Both can only narrow consent. Neither turns recording on for an account that did not opt in,

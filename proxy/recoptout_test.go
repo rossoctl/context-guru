@@ -46,7 +46,7 @@ func TestDeclineDeletesTheSessionAndKeepsItOff(t *testing.T) {
 	}
 
 	r := newRec(t, dir)
-	deleted, err := r.Decline("", testSessionUUID)
+	_, deleted, err := r.Decline("", testSessionUUID)
 	if err != nil || !deleted {
 		t.Fatalf("Decline = %v, %v; want the file deleted", deleted, err)
 	}
@@ -79,7 +79,7 @@ func TestDeclineDeletesTheSessionAndKeepsItOff(t *testing.T) {
 func TestDeclineBeforeTheFirstTurn(t *testing.T) {
 	dir := t.TempDir()
 	r := newRec(t, dir)
-	if deleted, err := r.Decline("", testSessionUUID); err != nil || deleted {
+	if _, deleted, err := r.Decline("", testSessionUUID); err != nil || deleted {
 		t.Fatalf("Decline = %v, %v; want nothing deleted and no error", deleted, err)
 	}
 	recordAndClose(t, r, baseEvent(testSessionUUID, []byte(testSSE), true))
@@ -97,7 +97,7 @@ func TestDeclineIsPerTenant(t *testing.T) {
 	recordAndClose(t, newRec(t, dir), evA, evB)
 
 	r := newRec(t, dir)
-	if deleted, err := r.Decline("tA", testSessionUUID); err != nil || !deleted {
+	if _, deleted, err := r.Decline("tA", testSessionUUID); err != nil || !deleted {
 		t.Fatalf("Decline = %v, %v", deleted, err)
 	}
 	r.Close()
