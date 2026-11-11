@@ -94,11 +94,12 @@ def save(fig, name):
 def fleet():
     fig = canvas("Fleet overview", h=10.6)
     # Row 1: money first
-    stat(fig, [0.015, 0.785, 0.30, 0.14], "NET SAVED", "$ 288.40", GREEN, "last 7 days",
+    stat(fig, [0.015, 0.785, 0.24, 0.14], "NET SAVED", "$ 288.40", GREEN, "last 7 days",
          DIM, big=True)
-    stat(fig, [0.325, 0.785, 0.20, 0.14], "Gross saved", "$ 412.30", TXT, "saved_usd")
-    stat(fig, [0.535, 0.785, 0.20, 0.14], "Added cost", "$ 123.90", ORG, "added_usd (cost of our changes)")
-    stat(fig, [0.745, 0.785, 0.24, 0.14], "Spend", "$ 1,486.80", TXT, "what the providers billed")
+    stat(fig, [0.265, 0.785, 0.13, 0.14], "SAVING RATE", "16.2%", GREEN, "of the cost without", DIM)
+    stat(fig, [0.405, 0.785, 0.17, 0.14], "Gross saved", "$ 412.30", TXT, "saved_usd")
+    stat(fig, [0.585, 0.785, 0.17, 0.14], "Added cost", "$ 123.90", ORG, "added_usd (cost of our changes)")
+    stat(fig, [0.765, 0.785, 0.22, 0.14], "Spend", "$ 1,486.80", TXT, "what the providers billed")
     # Row 2: net saved per day
     ax = panel(fig, [0.04, 0.555, 0.945, 0.19], "Net saved per day", "last 30 days")
     d = np.clip(np.linspace(8, 40, 30) + rng.normal(0, 5, 30), 2, None)

@@ -413,7 +413,7 @@ Question: do we save money, and is the fleet healthy?
 
 ![Fleet overview (fictive data)](img/dash-fleet.png)
 
-Order, top to bottom: the four money tiles, the daily net saved, the hourly trend with the best machines, then a health strip. The tiles use the colors of rule 3.
+Order, top to bottom: the money tiles (net saved and saving rate first), the daily net saved, the hourly trend with the best machines, then a health strip. The tiles use the colors of rule 3.
 
 | Panel | Type | Query idea |
 |---|---|---|
@@ -429,7 +429,7 @@ Order, top to bottom: the four money tiles, the daily net saved, the hourly tren
 | 5xx error rate | stat | 5xx requests / requests |
 | Requests per minute | stat | `sum(rate(llm_inference_requests_total[...])) * 60` |
 | Alerts firing | stat | `count(ALERTS{alertstate="firing"})` |
-| Saving rate | stat | net / baseline. **Not built:** it needs the baseline counter. |
+| **Saving rate** | stat | net saved / (spend + net saved): the share of what the traffic would have cost without the proxy. Next to the Net saved tile. The exact baseline counter (`llm_savings_baseline_usd_total`) is not built, so spend plus net stands in for it. |
 
 ### 6.2 Savings
 
