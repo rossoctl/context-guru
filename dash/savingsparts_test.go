@@ -134,6 +134,8 @@ func TestKeepAliveTablesSubscriptionTokensAreWired(t *testing.T) {
 	app := stripComments(readUI(t, "ui/app.js"))
 	for _, want := range []string{
 		"subLabels($('#ka-downside-panel'), sub);",
+		"subLabels(panel, kaState.sub);",                           // the downside headers follow the units before the sessions land
+		"So far in this window${tk.measured ? ' (measured)' : ''}", // "(measured)" only on a measured rescue
 		"subLabels($('#ka-live-panel'), sub);",
 		"subLabels($('#ka-behaviour-panel'), sub);",
 		"const c = sub ? kaSessionTokenCells(s, compact) : null;",

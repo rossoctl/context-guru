@@ -9262,6 +9262,8 @@ function renderKADownside(o) {
   const worst = clear($('#ka-worst'));
   const panel = $('#ka-downside-panel');
   panel.classList.remove('bad');
+  // The headers follow the units now: the sessions fetch can land later, or fail (#1065 review).
+  subLabels(panel, kaState.sub);
   if (!o.sessions_touched) {
     emptyState(host, 'This mechanism has not touched any of your sessions yet',
       'The service-wide split above is what to expect if you switch it on.');
@@ -9582,7 +9584,7 @@ function renderKALive() {
   if (sub) {
     const tk = kaTokenLines(led, compact);
     $('#ka-live-hint').textContent =
-      `So far in this window (measured): ${tk.rescuesText} ${PING_LABEL}: ${tk.pings}. `
+      `So far in this window${tk.measured ? ' (measured)' : ''}: ${tk.rescuesText} ${PING_LABEL}: ${tk.pings}. `
       + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of rewrite `
       + 'cost a lapse would charge, at API-price weights. That is a CEILING, not a measurement: it is only earned by a '
       + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
