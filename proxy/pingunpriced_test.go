@@ -10,6 +10,7 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
@@ -17,8 +18,8 @@ import (
 
 // returnAfterPings prices one warm return that followed one keep-alive ping, the way a host does. The
 // host decides how it wires the ping side: pingStore is what the capture reads (nil = Options.Pings
-// unset), and callPingSavings says whether the host priced the ping at all.
-func returnAfterPings(t *testing.T, pingStore *PingStore, callPingSavings bool) (*savingsTracker, *PingStore) {
+// unset), and ping is the report the host prices (nil = it never calls PingSavings).
+func returnAfterPings(t *testing.T, pingStore *PingStore, ping *components.KeepAliveReport) (*savingsTracker, *PingStore) {
 	t.Helper()
 	body := []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":[{"role":"user","content":"hi"}]}`)
 	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
@@ -26,10 +27,8 @@ func returnAfterPings(t *testing.T, pingStore *PingStore, callPingSavings bool) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	if callPingSavings {
-		if _, ok := PingSavings(okReport(), pingStore); !ok {
-			t.Fatal("the ping was not priced")
-		}
+	if ping != nil {
+		PingSavings(*ping, pingStore)
 	}
 	sv := newSavingsTracker()
 	c := &capture{rec: rec, savings: sv, pings: pingStore, tenant: "t1", provider: "anthropic",
@@ -44,7 +43,7 @@ func returnAfterPings(t *testing.T, pingStore *PingStore, callPingSavings bool) 
 // A host wired like cmd/context-guru-proxy prices the ping and shares the store: the return finds the
 // facts, so nothing is missing and the ping counts as priced.
 func TestWiredHostMissesNoPingFacts(t *testing.T) {
-	sv, st := returnAfterPings(t, NewPingStore(), true)
+	sv, st := returnAfterPings(t, NewPingStore(), ptr(okReport()))
 	if got := sv.RescueFactsMissing(); got != 0 {
 		t.Errorf("facts missing = %d, want 0", got)
 	}
@@ -53,23 +52,42 @@ func TestWiredHostMissesNoPingFacts(t *testing.T) {
 	}
 }
 
-// The three ways a host fails to wire the ping side all show as one missing-facts count.
+// Two ways a host fails to wire the ping side, and a key mismatch, all show as one missing-facts count.
 func TestUnwiredHostCountsMissingPingFacts(t *testing.T) {
+	other := okReport()
+	other.Thread = "sub-1"
 	for name, tc := range map[string]struct {
 		store *PingStore
-		call  bool
+		ping  *components.KeepAliveReport
 	}{
-		"no store (Options.Pings nil)": {nil, true},
-		"PingSavings never called":     {NewPingStore(), false},
+		"no store (Options.Pings nil)": {nil, ptr(okReport())},
+		"PingSavings never called":     {NewPingStore(), nil},
+		"key mismatch":                 {NewPingStore(), &other},
 	} {
 		t.Run(name, func(t *testing.T) {
-			sv, _ := returnAfterPings(t, tc.store, tc.call)
+			sv, _ := returnAfterPings(t, tc.store, tc.ping)
 			if got := sv.RescueFactsMissing(); got != 1 {
 				t.Errorf("facts missing = %d, want 1", got)
 			}
 		})
 	}
 }
+
+// A wired host still counts a return after a ping the provider rejected: the ping is not priced, so it
+// stores no facts and the credit is lost. The documentation says this case counts.
+func TestWiredHostCountsAReturnAfterARejectedPing(t *testing.T) {
+	bad := okReport()
+	bad.Status = 429
+	sv, st := returnAfterPings(t, NewPingStore(), &bad)
+	if got := sv.RescueFactsMissing(); got != 1 {
+		t.Errorf("facts missing = %d, want 1", got)
+	}
+	if st.Priced() != 0 {
+		t.Errorf("a rejected ping counted as priced: %d", st.Priced())
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
 
 // A return with no pings in its gap has nothing to find, so it is not counted.
 func TestNoPingsInTheGapIsNotMissing(t *testing.T) {

@@ -1101,10 +1101,11 @@ type Snapshot struct {
 	ToolDefer any `json:"tool_defer,omitempty"`
 
 	// KeepAlivePingsPriced and KeepAliveRescueFactsMissing say whether the host wires keep-alive credit
-	// (filled by the host). Priced: pings whose saving was priced and stored for the thread's next request.
-	// Missing: priced real requests that followed keep-alive pings but found no ping facts, so their
-	// credit is lost. Missing above 0 means the ping side is not wired (no ping store on the proxy, no
-	// PingSavings call, or a key mismatch). Counts only.
+	// (filled by the host). Priced: pings the host priced (each PingSavings call that returned ok).
+	// Missing: real requests that followed keep-alive pings but found no ping facts, so credit was lost
+	// on that return. It also counts a return after an unpriced ping (non-2xx, no usage), after an
+	// eviction, and a request whose pricing panicked. If it keeps rising while Priced stays 0, the ping
+	// side is not wired. Counts only; Missing moves only with the dashboard on.
 	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
 	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
 
