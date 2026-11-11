@@ -217,7 +217,7 @@ func TestTheRemovedStrategyNameIsRefused(t *testing.T) {
 		t.Errorf("reason=%q, want unknown_strategy: %v", facts["reason"], facts)
 	}
 	// The refusal has to carry the alternatives, or a caller who typed the old name is told only
-	// that they are wrong. `known=` is that list, and it comes from STRATEGIES rather than prose.
+	// that they are wrong. `known=` is that list, and it comes from the proxy's table rather than prose.
 	if !strings.Contains(facts["known"], "none") {
 		t.Errorf("known=%q does not offer `none`, so the refusal does not say what to type instead",
 			facts["known"])

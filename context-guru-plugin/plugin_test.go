@@ -9072,7 +9072,7 @@ func TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList(t *testin
 			warns := questionWarnsAboutSpend(q)
 			if warns != (spends == "true") {
 				t.Errorf("strategy list says spends=%s for %q, and the consent question %s warn about "+
-					"spending. The sentence a user agrees to has to agree with STRATEGIES:\n  %s",
+					"spending. The sentence a user agrees to has to agree with the proxy's strategy table:\n  %s",
 					spends, name, map[bool]string{true: "does", false: "does not"}[warns], q)
 			}
 		})
