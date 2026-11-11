@@ -162,7 +162,7 @@ func TestManualHoldRespectsTheBodyEntryAndByteCaps(t *testing.T) {
 	}
 
 	k, _, clock := testKeeper(t)
-	recordHold(k, sess1, clock.now(), pad(MaxBodyBytes), offPolicy, true) // over 8 MiB with the JSON around it
+	recordHold(k, sess1, clock.now(), pad(MaxBodyBytes), offPolicy, true) // over the per-body limit with the JSON around it
 	if _, ok := k.Entry(sess1); ok {
 		t.Error("a body over the per-body cap was held")
 	}
@@ -178,7 +178,9 @@ func TestManualHoldRespectsTheBodyEntryAndByteCaps(t *testing.T) {
 		t.Errorf("%d entries held, cap %d", n, MaxSessions)
 	}
 
-	k, _, clock = testKeeper(t) // bytes
+	k, fd, clock := testKeeper(t) // bytes
+	// A price, or the unpriced 8 MiB limit would refuse these bodies at the door and the tenant byte cap would never act.
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-6, Output: 1e-6, CacheRead: 1e-6, CacheWrite: 1e-6}}})
 	big := pad(MaxBodyBytes - 4096)
 	for i := 0; i < 20; i++ {
 		recordHold(k, Key{Tenant: "t1", Session: "big" + string(rune('a'+i))}, clock.now(), big, offPolicy, true)
@@ -186,8 +188,11 @@ func TestManualHoldRespectsTheBodyEntryAndByteCaps(t *testing.T) {
 	k.mu.Lock()
 	bytes := k.bytes
 	k.mu.Unlock()
-	if bytes > MaxBytes {
-		t.Errorf("%d bytes held, cap %d", bytes, MaxBytes)
+	if bytes == 0 {
+		t.Error("held nothing: the bodies must pass the door so the byte cap is what acts")
+	}
+	if bytes > ManualHoldMaxBytesPerTenant {
+		t.Errorf("%d manual bytes held, per-tenant cap %d", bytes, ManualHoldMaxBytesPerTenant)
 	}
 }
 
