@@ -31,12 +31,12 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
   - `UserPromptSubmit`: `check` adds one line to the model context when the proxy is down. Else it
     prints nothing.
 - **State** in `~/.local/state/context-guru-bob/`: `install.json`, the proxy config
-  `bob-PORT.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
+  `bob-PORT.yaml`, with `bob-ultrahigh` also Bob's prices `bob-PORT-prices.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
   before the first change (`backup/`), and the reset script `context-guru-reset`.
 
-The proxy runs only lossless components: `format`, `toon` and `cachesplit`, and with the
-`lossless-defer` preset also `toolfilter` (tool deferral). The lossy ones need the expand step,
-which does not yet work on Bob's streams.
+By default the proxy runs only lossless components: `format`, `toon` and `cachesplit`. The opt-in
+`bob-ultrahigh` preset also cuts content. The model gets cut content back through the expand repair
+(test T4 passed on the real Bob IDE, 2026-11-11).
 
 ## Install
 
@@ -128,13 +128,14 @@ the variable. `result=no_bob_traffic` tells you this. The fix is to quit Bob and
 Dock.
 
 The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Dollar figures
-for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet.
+for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet. With `bob-ultrahigh`
+the proxy prices them with estimated dollar rates (see below).
 
 ## Presets
 
 ```sh
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --show
-python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --preset off       # or lossless, lossless-defer
+python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --preset off       # or lossless, bob-ultrahigh
 ```
 
 Or ask Bob "which context-guru preset runs". Bob has three presets:
@@ -142,12 +143,33 @@ Or ask Bob "which context-guru preset runs". Bob has three presets:
 | Preset | Does |
 |---|---|
 | `lossless` (default) | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. |
-| `lossless-defer` | `lossless`, plus tool deferral (see below). Nothing is cut. |
+| `bob-ultrahigh` (opt-in) | context-guru's `ultrahigh`, set up for Bob (see below). It cuts content, and the model can get it back. |
 | `off` | Sends requests through as they are. |
 
-### Tool deferral (`lossless-defer`)
+### `bob-ultrahigh`
 
-Bob's tool definitions are about 55% of every model call. `lossless-defer` holds back the tools you
+It is `ultrahigh` with 4 Bob changes:
+
+1. **Summaries use Bob's own model.** No model is named. A summary call goes only to Bob's server,
+   under your Bob login, and Bob bills it like any request. **These calls do not work on Bob yet:**
+   they fail, and the request goes to Bob unchanged. A later release fixes this.
+2. **`extract_llm` runs on Bob,** though Bob caches. Bob bills a cache rewrite at the input rate,
+   so a rewrite costs little.
+3. **The sweep may apply on a warm cache** (`warm: true`), behind its cost gate.
+4. **Tool deferral keeps Bob's core tools** (see below).
+
+It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`): every input token at one
+flat rate, a cache read and a cache write too. The sweep's cost gate needs that. Without it, the
+gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. The dollar rates are
+estimates; only the flat ratio is measured. So with this preset the dashboard's Bob dollar figures
+change. Leaving the preset removes the prices.
+
+The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut
+content back) and `context_guru_adjudicate` (the sweep's question).
+
+#### Tool deferral
+
+Bob's tool definitions are about 55% of every model call. `bob-ultrahigh` holds back the tools you
 do not use:
 
 - **What it holds back:** a tool that your last 3 Bob sessions declared and did not use, and that
@@ -171,9 +193,8 @@ do not use:
 `tool_defer_deferred_tokens`, `tool_defer_add_backs`, `tool_defer_wrong_guesses`,
 `tool_defer_turned_off`, `tool_defer_break`.
 
-The other context-guru presets (`conservative` to `xhigh`) can drop content. context-guru must be
-able to give it back to the model (the expand step), and that is not proven for Bob yet. So the
-plugin refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts
+The other context-guru presets (`conservative` to `ultrahigh`) are not tested on Bob, so the plugin
+refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts
 back the old config and the old service, and says if that failed (`rolled_back=false`). A config
 you edit by hand is kept: setup and `--cache-strategy` leave it, `configure --show` reports
 `preset=custom`, and only `--preset NAME` replaces it. Setup, configure, update and uninstall take
@@ -216,7 +237,7 @@ status. Each check prints `ok`, `warn` or `fail`, and a `fix=` line for each tha
   shell startup files, so it is opt-in. Setup always runs it.
 - `service`: also checks that the agent's `--config` is the managed config file.
 - `preset`: `warn` when the config was edited by hand. It may hold a lossy component.
-- `tool_defer`: only with `lossless-defer`, when the proxy reports it. `warn` when the proxy turned
+- `tool_defer`: only with `bob-ultrahigh`, when the proxy reports it. `warn` when the proxy turned
   tool deferral off at least once since it started (`/stats` `tool_defer.turned_off` or
   `client_search_disabled.break` above 0). On Bob, only a refused request turns it off.
 - `hooks`, `binary`: our hooks are there; the binary has `--bob-upstream`.
