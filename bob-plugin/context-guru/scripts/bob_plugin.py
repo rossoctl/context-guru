@@ -319,8 +319,9 @@ def find_binary(reasons=None):
 
 
 def update_hint():
-    return (f"update the proxy to {STRATEGIES_RELEASE} or later "
-            "(run the context-guru-update skill)")
+    return (f"update the proxy to {STRATEGIES_RELEASE} or later (run the context-guru-update skill; "
+            "for a proxy the plugin did not install, for example with brew, update it the way it "
+            "was installed, or remove it so setup downloads the latest release)")
 
 
 def load_strategy_table(binary):
@@ -355,6 +356,8 @@ def load_strategy_table(binary):
                      and isinstance(r.get("desc"), str) for r in rows))
     if not valid:
         raise RuntimeError(f"{binary} cannot list cache strategies; {hint}")
+    # No check of table["presets"], unlike the Codex plugin: Bob writes its own pipeline body
+    # (BOB_PRESETS), and lossless is not a registered preset.
     return table
 
 
@@ -362,6 +365,12 @@ def offered_strategies(table):
     """The names of the strategies that fit Bob's route, in table order."""
     return [row["name"] for row in table["strategies"]
             if any(p in PROVIDERS for p in row["providers"])]
+
+
+def plugin_applies(name):
+    # The plugin writes no cache strategy into its config, so it can apply only none. A strategy
+    # that needs one must teach write_proxy_config first.
+    return name == "none"
 
 
 def release_platform():
@@ -948,27 +957,39 @@ def configure(args):
     except RuntimeError as error:
         facts(result="refused", reason="unmanaged_config", detail=error)
         return 2
-    allowed = []
-    if args.show or args.cache_strategy:
-        try:
-            allowed = offered_strategies(load_strategy_table(record.get("binary")))
-        except RuntimeError as error:
-            facts(result="error", reason="strategy_table_unreadable", detail=error)
-            return 1
     if args.show:
+        # The preset is always reported. A table error replaces only the strategy list.
+        try:
+            fits = offered_strategies(load_strategy_table(record.get("binary")))
+            strategies = {"allowed_cache_strategies": ",".join(filter(plugin_applies, fits))}
+        except RuntimeError as error:
+            strategies = {"cache_strategy_error": "strategy_table_unreadable",
+                          "cache_strategy_detail": error}
         facts(result="ok", preset=current, cache_strategy="none",
-              allowed_presets=",".join(BOB_PRESETS),
-              allowed_cache_strategies=",".join(allowed),
+              allowed_presets=",".join(BOB_PRESETS), **strategies,
               cache_note=NO_KEEPALIVE_REASON)
         return 0
     if args.preset and args.preset not in BOB_PRESETS:
         facts(result="refused", reason="preset_not_allowed_for_bob", preset=args.preset,
               detail=preset_refusal(args.preset))
         return 2
-    if args.cache_strategy and args.cache_strategy not in allowed:
-        facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
-              cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
-        return 2
+    # none is always valid on Bob, so it needs no table: it works on an older proxy too.
+    if args.cache_strategy and args.cache_strategy != "none":
+        try:
+            fits = offered_strategies(load_strategy_table(record.get("binary")))
+        except RuntimeError as error:
+            facts(result="error", reason="strategy_table_unreadable", detail=error)
+            return 1
+        if args.cache_strategy not in fits:
+            facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
+                  cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
+            return 2
+        if not plugin_applies(args.cache_strategy):
+            facts(result="refused", reason="cache_strategy_not_supported_by_plugin",
+                  cache_strategy=args.cache_strategy,
+                  detail="The Bob plugin writes no cache strategy into its config, so it can "
+                         "apply only none.")
+            return 2
     if not args.preset and current == "custom":
         facts(result="unchanged", preset=current, cache_strategy="none",
               preset_note=f"{proxy_config(port)} was edited by hand. It is kept as it is. "

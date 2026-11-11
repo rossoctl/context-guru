@@ -149,27 +149,58 @@ class ConfigureTest(Installed):
         self.assertEqual(PLUGIN.BOB_PRESETS, {"off": "preset: off\n",
                                               "lossless": "pipeline: [format, toon, cachesplit]\n"})
 
-    def test_show_takes_the_allowed_strategies_from_the_proxy_table(self):
+    def test_show_lists_only_strategies_that_fit_the_route_and_the_plugin_applies(self):
         self.record_table_binary(with_row("chat-ping", ["openai-chat"]))
         code, out, _ = self.run_main("configure", "--show")
         self.assertEqual(code, 0, out)
-        self.assertIn("allowed_cache_strategies=none,chat-ping\n", out)
+        self.assertIn("allowed_cache_strategies=none\n", out)
 
-    def test_an_unreadable_table_is_a_clean_error_and_changes_nothing(self):
+    def test_a_strategy_the_plugin_cannot_apply_is_refused_and_nothing_changes(self):
+        self.record_table_binary(with_row("chat-ping", ["openai-chat"]))
+        before, calls = self.tree(), len(self.launchctl_calls())
+        code, out, _ = self.run_main("configure", "--cache-strategy", "chat-ping")
+        self.assertEqual(code, 2)
+        self.assertIn("result=refused\nreason=cache_strategy_not_supported_by_plugin\n", out)
+        self.assertIn("cache_strategy=chat-ping\n", out)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.launchctl_calls()), calls)
+
+    def old_binary(self):
         folder = self.root / "oldbin"
         folder.mkdir()
         self.record_binary(write_script(folder / "old",
                                         "echo 'flag provided but not defined' >&2\nexit 2\n"))
-        for argv in (("--show",), ("--cache-strategy", "none")):
-            with self.subTest(argv=argv):
-                before = self.tree()
-                code, out, err = self.run_main("configure", *argv)
-                self.assertEqual(code, 1)
-                self.assertIn("result=error\nreason=strategy_table_unreadable\n", out)
-                self.assertIn("update the proxy to v0.7.1 or later", out)
-                self.assertNotIn("allowed_cache_strategies", out)
-                self.assertEqual(err, "")
-                self.assertEqual(self.tree(), before)
+
+    def test_show_on_an_unreadable_table_still_reports_the_preset(self):
+        self.old_binary()
+        before = self.tree()
+        code, out, err = self.run_main("configure", "--show")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=ok\npreset=lossless\ncache_strategy=none\n"
+                      "allowed_presets=off,lossless\n", out)
+        self.assertIn("cache_strategy_error=strategy_table_unreadable\n", out)
+        self.assertIn("cache_strategy_detail=", out)
+        self.assertIn("update the proxy to v0.7.1 or later", out)
+        self.assertNotIn("allowed_cache_strategies", out)
+        self.assertEqual(err, "")
+        self.assertEqual(self.tree(), before)
+
+    def test_an_unreadable_table_is_a_clean_error_and_changes_nothing(self):
+        self.old_binary()
+        before = self.tree()
+        code, out, err = self.run_main("configure", "--cache-strategy", "30-min-ping")
+        self.assertEqual(code, 1)
+        self.assertIn("result=error\nreason=strategy_table_unreadable\n", out)
+        self.assertIn("update the proxy to v0.7.1 or later", out)
+        self.assertEqual(err, "")
+        self.assertEqual(self.tree(), before)
+
+    def test_cache_strategy_none_does_not_read_the_table(self):
+        self.old_binary()
+        code, out, _ = self.run_main("configure", "--preset", "off", "--cache-strategy", "none")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=configured\npreset=off\n", out)
+        self.assertEqual(self.config.read_text(), PLUGIN.CONFIG_MARKER + "\npreset: off\n")
 
     def test_a_preset_change_does_not_read_the_table(self):
         self.record_binary("/nonexistent/context-guru-proxy")
@@ -234,6 +265,14 @@ class StrategyTableTest(unittest.TestCase):
     def test_a_strategy_tagged_openai_chat_is_offered(self):
         table = with_row("chat-ping", ["openai", "openai-chat"])
         self.assertEqual(PLUGIN.offered_strategies(table), ["none", "chat-ping"])
+
+    def test_the_update_hint_covers_a_proxy_the_plugin_did_not_install(self):
+        with self.assertRaises(RuntimeError) as caught:
+            PLUGIN.load_strategy_table(None)
+        hint = str(caught.exception)
+        self.assertIn("run the context-guru-update skill", hint)
+        self.assertIn("for a proxy the plugin did not install", hint)
+        self.assertIn("remove it so setup downloads the latest release", hint)
 
     def test_old_binary_that_serves_gets_the_update_error_within_the_timeout(self):
         # v0.7.0 given `strategies` starts serving and prints no JSON.

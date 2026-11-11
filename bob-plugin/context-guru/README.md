@@ -158,6 +158,9 @@ pings only Anthropic and OpenAI Responses caches, and Bob's model call is OpenAI
 so a ping strategy would do nothing for Bob. Also, Bob has no SessionEnd event, so a ping could not
 stop when a Bob task ends.
 
+The plugin reads the offer from the proxy's own table (`context-guru-proxy strategies`, proxy v0.7.1
+or later). Today that offer is only `none`.
+
 ## Update
 
 ```sh
