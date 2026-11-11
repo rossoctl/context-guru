@@ -166,13 +166,15 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	}
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		// A ping that read the entry refreshed it; one that wrote re-created it and started a fresh
-		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. Only a
-		// 2xx reaches here: the switch above returned on every other status.
+		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. The
+		// switch above returns on 429, 5xx, 4xx and on no usage, so in practice only a 2xx reaches here.
 		job.touch(job.provider, start.UnixMilli())
 		k.mu.Lock()
 		e.refreshedAt = start
 		// An automatic entry's schedule restarts from a ping that read the cache. A write does not
-		// restart it, as in record1. A manual-only hold does NOT restart either: its life is measured
+		// restart it here, although a scheduled writing ping does (Sweep moves startedAt before it
+		// dispatches): the next slot is at most one Idle away, inside the re-created entry's lifetime.
+		// A manual-only hold does NOT restart either: its life is measured
 		// from the last real request, so a press can never extend how long a credential is held
 		// (manualhold.go).
 		if u.CacheRead > 0 && !e.manualOnly {
