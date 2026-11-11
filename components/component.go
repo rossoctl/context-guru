@@ -162,8 +162,9 @@ type PrefixUsage struct {
 // superseded and would be kept anyway — and it has the side benefit of keeping a large model call off
 // the agent's critical path.
 //
-// nil when the host cannot support it: no stashed body for this session yet, the first turn, a
-// non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
+// nil when the host cannot support it: no asker exists for the route's wire (Anthropic, Responses and
+// Chat Completions have one), no incoming client, or the feature switched off. A first turn with no
+// stashed body yet is not nil: Ask returns ErrNoPrefix. A caller must decide for itself what nil means;
 // see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
 // mechanism exists to avoid.
 //
@@ -683,7 +684,7 @@ type Ctx struct {
 	// 199,184 — the same event in a different ruler. See internal/compactionpoint.
 	CompactionPoint int
 	// CompactionPointSource says where CompactionPoint came from: observed on real traffic, assumed
-	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), or fallen back to the window. Carried so a decision made on a guess
+	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), stated by the operator per model ("operator"), or fallen back to the window. Carried so a decision made on a guess
 	// is distinguishable from one made on a measurement — the discipline CtxWindowExact keeps.
 	CompactionPointSource string
 	// MaxCachedIdx is the highest req.Input index considered already committed to the
@@ -1246,10 +1247,11 @@ type KeepAliveReport struct {
 	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
 	// as belonging to a window.
 	Window time.Time
-	// Header is the ping response's headers. It is nil when no response came back, and on a
-	// substitute call, whose summary result does not carry the headers (a host can also send
-	// none). A sink reads only the metadata it needs from
-	// it, such as the subscription limit headers (#995), and must not change it.
+	// Header is the ping response's headers. On a substitute call (a summary or sweep question
+	// in the ping's place) it is that call's response headers (#1016), but only when the call
+	// used the user's own credential. It is nil when no response came back (a host can also send
+	// none). A sink reads only the metadata it needs from it,
+	// such as the subscription limit headers (#995), and must not change it.
 	Header http.Header
 }
 

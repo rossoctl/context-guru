@@ -33,6 +33,11 @@ func (t *TierTokens) add(o TierTokens) {
 	t.CacheWrite1h += o.CacheWrite1h
 }
 
+func (t TierTokens) less(o TierTokens) TierTokens {
+	return TierTokens{Input: t.Input - o.Input, CacheRead: t.CacheRead - o.CacheRead,
+		CacheWrite5m: t.CacheWrite5m - o.CacheWrite5m, CacheWrite1h: t.CacheWrite1h - o.CacheWrite1h}
+}
+
 func tiersOf(t accountant.TierTokens) TierTokens {
 	return TierTokens{Input: int64(t.Input), CacheRead: int64(t.CacheRead),
 		CacheWrite5m: int64(t.CacheWrite5m), CacheWrite1h: int64(t.CacheWrite1h)}
@@ -48,6 +53,11 @@ type TokenFlow struct {
 func (f *TokenFlow) add(o TokenFlow) {
 	f.Saved.add(o.Saved)
 	f.Caused.add(o.Caused)
+}
+
+// less is f without o, tier by tier: o must be a part of f.
+func (f TokenFlow) less(o TokenFlow) TokenFlow {
+	return TokenFlow{Saved: f.Saved.less(o.Saved), Caused: f.Caused.less(o.Caused)}
 }
 
 func (f *TokenFlow) addTiers(saved, caused accountant.TierTokens) {

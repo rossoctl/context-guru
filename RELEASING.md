@@ -222,7 +222,7 @@ Notes:
 - Keep the session small. Report the spend.
 - Record the evidence for each check: request rows, API output, status-line output.
 - **Traps that make a check look broken:**
-  - Keep-alive is off unless the config turns it on. Its keys go under `cache:`. The default floor is `keepalive_min_prefix_tokens: 20000` (it was 80000 before #858), so a small session needs a lower value in its own config. Without it, a manual ping answers `409 not held`.
+  - Keep-alive is off unless the config turns it on. Its keys go under `cache:`. The general floor `keepalive_min_prefix_tokens` is 80000. Tool waits, waits for background work or a teammate, and subagent threads use `keepalive_tool_wait_min_prefix_tokens`, 20000. A small session (a main thread that waits for a person) needs a lower general floor in its own config. Without it, a manual ping answers `409 not held`.
   - The keep-alive skips the first request of each session after every proxy restart. Restart, then send 2 turns before you test a ping.
   - The model gateway can replay a byte-identical request from its own cache. Put a new nonce in every prompt.
   - For the shape of a turn's last message, read `wake_cause`, not `stop_reason`. `ping_n` is in `request_lifecycle`.
