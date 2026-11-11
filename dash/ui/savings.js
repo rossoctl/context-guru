@@ -218,6 +218,26 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered) {
   return { main, pings, estimate };
 }
 
+// The Cache strategy tab in tokens (#1022), from the keep-alive ledger's `tokens` (the rescue) and
+// `keepalive_ping_tokens` (what the pings paid, read by pingLine). Two lines, never netted: the pings
+// are not added into the rescue's cost, and the tiers have no common unit. `fmt` formats a count.
+// The rescue follows the one rule for zero against "not measured" (tokenFigure): `measured` is
+// false for an absence. The sentences that carry the rescue branch on it, so an absence never
+// reads as a figure ("up to not measured"):
+//   measuredText  the line under the forecast
+//   avoidedText   the "Cache rewrites avoided" fact: "up to 85.0k wr · cost 40.0k rd"
+//   rescuesText   the "costs more than it saves" banner
+function kaTokenLines(o, fmt) {
+  const { text: rescue, measured } = tokenFigure(o && o.tokens, o, fmt);
+  return {
+    measured, rescue, pings: pingLine(o, fmt) || 'cost 0 tokens',
+    measuredText: measured ? 'Measured on the sessions where it ran: ' + rescue
+      : 'Not measured in tokens on the sessions where it ran',
+    avoidedText: measured ? 'up to ' + rescue.replace(/^saved /, '') : 'not measured',
+    rescuesText: measured ? 'The rescues: ' + rescue + '.' : 'The rescues are not measured in tokens.',
+  };
+}
+
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL };
+  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, kaTokenLines };

@@ -297,6 +297,14 @@ type KeepAliveLedger struct {
 	// requests — see KeepAliveLatencyDiagnostic. Known is false (and every figure zero) on
 	// a window too small to measure it, never a fabricated number.
 	Latency kvcache.Latency `json:"latency"`
+	// The same two halves in tokens, by tier, for a Claude subscription (#1022). Tokens is the
+	// rescue: the sum of the accountant's keep-alive figure (tok_ka_*), as /api/stats
+	// tokens.by_feature.keepalive. PingTokens is what the pings paid, as /api/stats
+	// keepalive_ping_tokens. The two are never netted: the tiers have no common unit.
+	// TokensUnmeasured counts the agent requests with no token figure (acc_priced = 0).
+	Tokens           TokenFlow  `json:"tokens"`
+	PingTokens       TierTokens `json:"keepalive_ping_tokens"`
+	TokensUnmeasured int64      `json:"tokens_unmeasured_requests"`
 	KeepAliveCoverage
 }
 
@@ -314,8 +322,8 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	aCond, aArgs := addressable(f)
-	// Six independent reads, three of them a pass over every request (the saving, the per-session
-	// saving, the addressable CTE). They ran back to back; each goroutine fills its own fields.
+	// Seven independent reads, four of them a pass over every request (the saving, the per-session
+	// saving, the addressable CTE, the tokens). They ran back to back; each goroutine fills its own fields.
 	var (
 		saved, spent map[string]float64
 		from         sql.NullInt64
@@ -370,6 +378,17 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		return d.sql.QueryRowContext(d.readCtx(), aCond+`
 		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
 			&o.Addressable, &o.AddressableUSD)
+	})
+	// The tokens: the rescue over agent rows and the pings' billed tiers, in one pass. A ping row
+	// stores no token figure, so the plain sum over kaCond is the agent rows' sum (tokenSumTerms).
+	g.Go(func() error {
+		var agg accTokensAgg
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT `+tokenSumTerms(flowColumns("tok_ka"))+`,
+		`+accTokenTailTerms+` FROM requests r WHERE `+kaCond, kaArgs...).Scan(agg.dest(8)...); err != nil {
+			return err
+		}
+		o.Tokens, o.PingTokens, o.TokensUnmeasured = flowOf(agg.sums), agg.ping, agg.unmeasured
+		return nil
 	})
 	g.Go(func() error {
 		days = d.windowDays(kaCond, kaArgs)
