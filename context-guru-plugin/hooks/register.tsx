@@ -1,7 +1,7 @@
 // Context Guru mod: a calm band above the prompt and a pane (/context-guru).
 //
 // The mod is the whole display: the status line is no longer installed, so what it drew lives here, the same way:
-//   band row 1  next-message price (warm vs cold), Ping or why it is off, hide, the dashboard link
+//   band row 1  next-message price (dollars: warm vs cold; subscription: one token figure for now), Ping or why it is off, hide, the dashboard link
 //   band row 2  the status line's row: `▲ update`, `saved $x of $y session · saved $z of $q subagents ↻ $p pings`
 //               (on a subscription `5h 34% · this session saved 85.0k wr · cost 40.0k rd` instead of money),
 //               the cache clock (`cache ● ████░░ 4:12`, dim `cache ○ cold 1:07:04` once cold), `ctx ████░░░░ 41%`
@@ -323,8 +323,12 @@ export const register: Register = on => {
     const chips = v.subs.slice(0, AGENT_CHIPS)
     const figures = await read($, context)
     const status = statusRow(v, figures, cols)
-    // On a subscription the next message is priced in tokens, the unit of the saving; with an API key in dollars.
-    const { warm, cold } = nextPrice(m, figures?.fiveHour !== undefined)
+    // On a subscription the next message is priced in tokens, the unit of the saving, as ONE figure for the cache's
+    // state now (`next message 90.0k rd` warm, `○ cache cold · next message 90.0k wr` cold). With an API key it is
+    // priced in dollars, warm and cold.
+    const price = nextPrice(m, figures?.fiveHour !== undefined)
+    const warm = price.kind === 'usd' ? price.warm : m.isWarm ? price.now : undefined
+    const cold = price.kind === 'usd' ? price.cold : m.isWarm ? undefined : price.now
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -506,15 +510,26 @@ export const register: Register = on => {
 
         <Box flexDirection="column" paddingTop={1}>
           {head('NEXT MESSAGE')}
-          <Text>
-            <Text dimColor>if the cache is warm </Text>
-            {next.warm !== undefined ? <Text color="success">{next.warm}</Text> : <Text dimColor>unknown</Text>}
-          </Text>
-          <Text>
-            <Text dimColor>if it is cold      </Text>
-            {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
-            {m.tokens !== undefined && <Text dimColor>  ({Math.round(m.tokens / 1000)}k tokens in the cached prefix)</Text>}
-          </Text>
+          {next.kind === 'usd' && (
+            <Text>
+              <Text dimColor>if the cache is warm </Text>
+              {next.warm !== undefined ? <Text color="success">{next.warm}</Text> : <Text dimColor>unknown</Text>}
+            </Text>
+          )}
+          {next.kind === 'usd' && (
+            <Text>
+              <Text dimColor>if it is cold      </Text>
+              {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
+              {m.tokens !== undefined && <Text dimColor>  ({Math.round(m.tokens / 1000)}k tokens in the cached prefix)</Text>}
+            </Text>
+          )}
+          {next.kind === 'tokens' && (
+            // On a subscription: one figure, for the cache's state now (see nextPrice).
+            <Text>
+              <Text dimColor>next message </Text>
+              {next.now !== undefined ? <Text color={next.color}>{next.now}</Text> : <Text dimColor>unknown</Text>}
+            </Text>
+          )}
           {m.isWarm ? (
             <Text color={state(m).color}>
               {state(m).glyph} cache warm, about {m.left} left{state(m).mark ? ' · kept warm by pings ↻' : ''}
