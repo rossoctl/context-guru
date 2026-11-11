@@ -1,3 +1,7 @@
+<!-- GENERATED FILE. Do not edit it. Edit the row files in docs/data-dependence/ and run:
+     go run ./cmd/gen-datadep
+     See "Keep this page right" below. -->
+
 # Data dependence
 
 This page says, for each component and feature, whether it needs **stored customer data**. It also
@@ -174,10 +178,11 @@ These presets are for the standalone proxy and for benchmarks.
 
 ## Pipeline components
 
-One row for each registered component. The test `components/all/datadep_test.go` fails when:
+One row for each registered component. Each row is its own file,
+`docs/data-dependence/components/<name>.md`. The test `components/all/datadep_test.go` fails when:
 
-- a registered component has no row;
-- a row names a component that does not exist;
+- a registered component has no row file;
+- a row file names a component that does not exist;
 - a cell is empty, or the reason is shorter than 8 words or is only a pointer into the code.
 
 | Component | Kind | Where | Off | Metadata only | Everything | Reason | Decided by |
@@ -213,6 +218,8 @@ One row for each registered component. The test `components/all/datadep_test.go`
   files. `cmdfilter` and `linecap` use it, and those two keep the originals.
 
 ## Features outside the pipeline
+
+One file for each row: `docs/data-dependence/features/<slug>.md`.
 
 | Feature | Kind | Off | Metadata only | Everything | Reason |
 |---|---|---|---|---|---|
@@ -331,11 +338,34 @@ This PR fixes 3 code comments that said the wrong default:
 "Hard boundaries". The PR template asks for it.
 
 - Every PR that adds or changes a component or feature states its data dependence at each level.
-  It also updates this page.
+  It also adds or edits the row file, and then runs `go run ./cmd/gen-datadep` (see
+  [How to add or change a row](#how-to-add-or-change-a-row)).
 - A PR that changes a row's **Kind** or a level column, in either direction, says so at the top.
   The person in "Decided by" confirms it before merge.
 - Write the reason in plain words: **why** the component needs the data. A file name or line
   number is not a reason, and the test rejects it.
+
+## How to add or change a row
+
+This page is **generated**. Do not edit `docs/data-dependence.md` by hand.
+
+1. Add or edit one file: `docs/data-dependence/components/<name>.md` for a pipeline component
+   (the file name is the component name), or `docs/data-dependence/features/<slug>.md` for a
+   feature. Copy a file that is next to it.
+2. A row file has a front matter and a body. The front matter is `key: value`, one line for each
+   key. It is not YAML. The body is the **Reason**, in plain words.
+   - Component keys: `name`, `kind`, `where`, `off`, `metadata_only`, `everything`, `decided_by`.
+   - Feature keys: `name`, `kind`, `off`, `metadata_only`, `everything`.
+   - `order` (optional) is a number. Rows sort by `order`, then by file name. Without it, a row
+     goes to the end, in file name order.
+3. Run `go run ./cmd/gen-datadep` from the repo root. Commit the row file **and** this page.
+4. `internal/datadep` has a test that fails when this page is not what the generator makes.
+5. **A conflict in this page** after a merge or a rebase: take either side, and run
+   `go run ./cmd/gen-datadep` again. Do not resolve it by hand. The row files do not conflict
+   when two PRs touch different rows.
+
+The text of this page outside the two tables is in `docs/data-dependence/page.md.tmpl`. Edit that
+file for it, and run the generator.
 
 ## Technical notes: what each switch turns off
 

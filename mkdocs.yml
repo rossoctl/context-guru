@@ -85,11 +85,14 @@ validation:
 # refuted it — useful in review, actively confusing on a page a user reaches looking for how to
 # configure something. Excluded rather than added to the nav so `mkdocs build --strict` stays
 # green without publishing internal argument, and so a proposal can be added without a nav edit.
+# docs/data-dependence/ holds the row files and the template that cmd/gen-datadep turns into
+# docs/data-dependence.md (the page the site shows).
 exclude_docs: |
   superpowers/
   img/readme/savings-figure.html
   proposals/
   plans/
+  data-dependence/
 
 # Nav mirrors how people arrive: install it the easy way and see what it saves
 # (Get started) → run it yourself instead of the plugin (Advanced /
