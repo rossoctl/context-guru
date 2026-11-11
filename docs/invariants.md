@@ -97,6 +97,8 @@ and `ultrahigh` after that. W3 has 1,339 real requests and 257 pings.
 | K6 | contract | The extra slot after the last planned ping sends at most one request per idle span. | rows with `max_tokens = 0` and `ping_n` = planned count + 1 for that `waiting_for` | more than 1 per span | — | 5 of 5 spans with 1 request | 4 spans (`teammate` 3, `human` 1), 1 request each |
 | K7 | contract | No sweep question while the thread waits for its own tool (#867). | spans where the held turn's `waiting_for = 'own_tool'` and a ping has `max_tokens = 0` | any | — | — | **1 of 45 (B6)** |
 | K8 | contract | A thread that is done gets no ping (#859, #867). | spans where the held turn's `waiting_for = 'done'` and a ping follows | any | — | — | 0 |
+| K9 | intent | A release does not cut the pings per long wait. | per day, by thread type (main or subagent) and `waiting_for`: pings per real-turn gap longer than 300 s | a drop of more than 30% against the week before, at the same request volume | see [the #1040 case](#case-a-default-change-hidden-by-a-config-layer-1040) |  |  |
+| K10 | side effect | A long wait that the plan covers does not miss for lack of a ping. | per day, by thread type and prefix band (under 20k, 20k to 80k, 80k or more): gaps longer than 300 s with no ping between and `cache_write > cache_read` on the turn after | a rise of more than 2× against the week before, in any band | see the #1040 case |  |  |
 
 - **A miss after the warm time ends is not a breach.** The strategy accepts that cost. The monitor
   reports it but does not alert on it.
@@ -292,6 +294,53 @@ pays one cache rewrite. 2 reasons (since #934):
 - **No laptop baseline:** the laptop runs `xhigh`, not `ultrahigh`.
 - **Owner:** David Amid (proposed).
 
+## Case A: a default change hidden by a config layer (#1040)
+
+**Why it is here:** this is the kind of defect the monitor must catch. No test failed and nothing
+errored. Only the metrics showed it. Source: the fix-subagents session, on the owner's laptop
+proxy, 2026-11-01 to 11-10. It is not fleet data.
+
+- **What happened:**
+  - #867 lowered the default `keepalive_min_prefix_tokens` from 80k to 20k, so small subagents
+    get pings.
+  - The cache-strategy table (`config/strategy.go`, and the plugin's `settings.py`) still wrote
+    80000 into the user's config. An explicit value wins over the default. So no plugin user on a
+    strategy got the 20k floor.
+  - #867 also stopped the sweep question during a tool wait, because pings were to keep the cache
+    warm there. With the 80k floor, those pings never went out. Subagents lost both the sweep cut
+    and the pings.
+- **What the metrics showed** (fix-subagents):
+  - Subagent savings fell from 9.3% to 4.0% of baseline cost, from one week to the next.
+  - Subagent keep-alive credit fell from about $65 a day to $2–4 a day.
+  - Subagent pings fell from about 140 to 17 a day, at the same request volume.
+  - On 11-08 to 11-10, 109 subagent tool waits longer than 5 min got no ping. All 109 missed,
+    and all had a prefix of 20k to 80k tokens.
+- **The fix:** #1040 (merged 2026-11-10, after v0.7.1). The floor follows the wait cause: 20k
+  (`keepalive_tool_wait_min_prefix_tokens`) for a tool wait, background work, a teammate and every
+  subagent wait; 80k for a main thread that waits for a person or for an unknown cause. #1061 adds
+  a test. #1044 makes Pi render its config again.
+- **Baseline for K9, K10 and X6** (laptop, measured 2026-11-11 with
+  [Q3](#q3-long-waits-by-thread-type)). The laptop runs v0.7.1, which does not have #1040, and its
+  config holds `keepalive_min_prefix_tokens: 80000`. So 11-08 onward is the broken state, and the
+  next release must move these numbers:
+
+| Day | Subagent long waits | Subagent pings per wait | Subagent no-ping misses (all 20k–80k) | Subagent saved | Main pings per wait |
+|---|---|---|---|---|---|
+| 11-03 | 19 | 1.37 | 3 | 8.8% | 2.00 |
+| 11-04 | 70 | 1.64 | 7 | 6.0% | 2.23 |
+| 11-08 | 46 | 0.87 | 22 | 2.6% | 2.03 |
+| 11-09 | 66 | 0.39 | 48 | 2.1% | 2.53 |
+| 11-10 | 182 | 0.48 | 133 | 4.1% | 2.16 |
+| 11-11 (part) | 48 | 0.46 | 36 | 7.5% | 2.17 |
+
+- **Main threads did not move** (2.0 to 2.5 pings per wait). The drop is in subagents only. So the
+  monitor must split by thread type, or the main threads hide the drop.
+- **After the release with #1040:** subagent pings per wait should rise to about 1.4 or more, and
+  the 20k–80k no-ping misses should fall to near 0.
+- **The lesson for the monitor:** compare each metric with the week before, and split it by thread
+  type and wait cause. A sharp drop on the day a release goes in, at the same request volume, is
+  the alert.
+
 ## Cross-component invariants
 
 | # | Statement | Signal | Threshold (proposed) | Baseline |
@@ -301,6 +350,7 @@ pays one cache rewrite. 2 reasons (since #934):
 | X3 | The share of requests that miss does not rise after a release. | non-ping rows with `cache_write > cache_read`, per version window | over +3 points against the last release | to measure |
 | X4 | A request labelled `hit` read its cache. | `cache_miss_reason = 'hit'` and `cache_write > cache_read + 10000` | 0, except a first request of a thread | **34 later requests; 3 in W2** (B2) |
 | X5 | A component's own action is not followed by another component's cost. | Q2 generalized: for each request kind, the miss rate of the next request in the thread | to define | to measure |
+| X6 | The savings share of each thread type does not fall after a release. | per week, by thread type (main or subagent): `1 − sum(cost_usd) / sum(baseline_cost_usd)` on real requests | a drop of more than 3 points against the week before the release | see the #1040 case |
 
 ## Suspected breaches
 
@@ -327,13 +377,14 @@ pays one cache rewrite. 2 reasons (since #934):
 | G5 | The 12 components with no laptop baseline. | Real traffic on other presets. | No |
 | G7 | A `cg_*` metric for tool deferral. Only `/stats` and the database show it today. | Export the `/stats` `tool_defer` counters as `cg_tooldefer_*`. | No |
 | G9 | The expand rate of `extract_llm` alone (E2). The database counts expands per request, not per component that made the marker. Only the sweep has its own column. | Record the component that made each restored marker, as a count per component (for example `expands_by_component` in `request_components`). | No |
+| G10 | The keep-alive settings in effect for each request. A config layer can hide a new default (the #1040 case), and no counter shows it. | Record the effective prefix floor (and the plan's ping count) on the ping row, or show the effective keep-alive config in `/stats`, with where each value came from (default, strategy table, user). | No |
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, S2, S4, X2, X3, D1, D3, D7, E1, E3, E4, and the per-component activity table.
+- **Daily:** K1, K3, K4, K7, K8, K9, K10, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Weekly:** K2, K5, S2, S4, X2, X3, X6, D1, D3, D7, E1, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
@@ -418,4 +469,16 @@ select count(*) from requests
 where cache_miss_reason = 'hit' and keepalive = 0
   and cache_write > cache_read and cache_write > 10000
   and ts >= :lo and ts < :hi;
+```
+
+### Q3: long waits by thread type
+
+```python
+# rows: requests in (session_id, thread_id, ts) order.
+# thread type: 'sub' when thread_id starts with 'a:', else 'main'.
+# A long wait: two real requests on one thread more than 300 s apart.
+# For each long wait: the pings between them; the turn after missed when cache_write > cache_read;
+# the prefix band from the held turn's cache_read + cache_write + fresh_input.
+# Per day and thread type: long waits, pings per wait, no-ping misses by band,
+# and saved = 1 - sum(cost_usd) / sum(baseline_cost_usd) on real requests.
 ```
