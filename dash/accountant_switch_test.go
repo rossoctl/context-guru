@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -645,5 +646,132 @@ func TestPriceMode_AnUnpricedRequestKeepsTheLedgersNet(t *testing.T) {
 	}
 	if e.DeferNetUSD != 0.0007 {
 		t.Errorf("lever %v, want the ledger's net 0.0007", e.DeferNetUSD)
+	}
+}
+
+// Issue #915 with the issue's numbers. The first request on an unseen warm cache: the client's body
+// would have billed 8010 tokens read, 7966 written and 5 as input. The proxy removed 15976 tokens and
+// the forwarded request billed only 5 as input. The library prices every removed token as a write (the
+// ceiling). The warm size is not in the usage, so the true saving cannot be priced. It can be bounded:
+// a client token never costs less than a read, so the floor is every removed token at the read price.
+func TestPriceMode_HeldEstimateIsBoundedByReadAndWrite(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 15976, SavedUnique: 15976}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+			Saved: accountant.TierTokens{CacheWrite5m: 15976}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("the held request booked a delta of %v, want 0 (booking is the owner's decision)", e.BaselineCostUSD-e.CostUSD)
+	}
+	high, low := 15976*2.5e-6, 15976*0.2e-6
+	if !accNear(e.EstimatedSavedUSD, high) {
+		t.Errorf("ceiling %v, want %v", e.EstimatedSavedUSD, high)
+	}
+	if !accNear(e.EstimatedSavedLowUSD, low) {
+		t.Errorf("floor %v, want %v", e.EstimatedSavedLowUSD, low)
+	}
+	hand := 8010*0.2e-6 + 7966*2.5e-6 + 5*10e-6 + 1*2e-6 // the issue's hand baseline: 0.021569
+	if !accNear(hand, 0.021569) {
+		t.Fatalf("hand figure %v is not the issue's 0.021569", hand)
+	}
+	truth := hand - e.CostUSD
+	if truth < e.EstimatedSavedLowUSD || truth > e.EstimatedSavedUSD {
+		t.Errorf("true saving %v is outside the bounds [%v, %v]", truth, e.EstimatedSavedLowUSD, e.EstimatedSavedUSD)
+	}
+	e.Price(p, true)
+	if e.EstimatedSavedLowUSD != 0 {
+		t.Error("Price left the floor set")
+	}
+}
+
+// The deferral's figure is out of the held ceiling, so its tokens are out of the floor: a held request that
+// also deferred tools keeps a floor of the other removed tokens at the read rate, never a negative one.
+func TestPriceMode_HeldFloorLeavesTheDeferralOut(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 4000, SavedUnique: 4000}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{
+			{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheWrite5m: 4000}},
+			{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheWrite5m: 12000}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	if want := 4000 * 2.5e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("ceiling %v, want %v without the deferral", e.EstimatedSavedUSD, want)
+	}
+	if want := 4000 * 0.2e-6; !accNear(e.EstimatedSavedLowUSD, want) {
+		t.Errorf("floor %v, want %v without the deferral", e.EstimatedSavedLowUSD, want)
+	}
+}
+
+// The floor and the ceiling are stored with the request and summed on both Overview paths.
+func TestOverviewSumsTheHeldFloor(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 2; i++ {
+		e := &Event{TS: now - int64(i)*1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 5000, TokensAfter: 4000, FreshInput: 5, OutputTokens: 1,
+			TokenAccounting: AccountingComplete, PriceEstimated: true, EstimateHeld: true,
+			EstimatedSavedUSD: 0.04, EstimatedSavedLowUSD: 0.003}
+		insertReq(t, db, e)
+	}
+	f := Filter{TenantAll: true, Since: now - 60_000}
+	full, err := db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean, err := db.OverviewLean(f, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, o := range map[string]*Overview{"full": full, "lean": lean} {
+		if !accNear(o.EstimatedSavedLowUSD, 0.006) || !accNear(o.EstimatedSavedUSD, 0.08) {
+			t.Errorf("%s: floor %v ceiling %v, want 0.006 and 0.08", name, o.EstimatedSavedLowUSD, o.EstimatedSavedUSD)
+		}
+	}
+}
+
+// Review of #1001, point 1: the floor re-prices only the Saved tokens of the counted operations and leaves
+// every other part of the ceiling as the library priced it. That is right for the parts that come from the
+// request's own usage (a break an operation caused: a read that did not happen against a write that did;
+// the tokens an operation ADDED). This pins the arithmetic with such a break and an added declaration, and
+// that the floor then goes below zero when the added tokens cost more than the removed ones save at the
+// read rate: the floor is a number the readers must be able to show, not clamp away.
+func TestPriceMode_HeldFloorKeepsBreaksAndAddedTokensAndCanBeACost(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 4000, SavedUnique: 4000}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c",
+			Saved:  accountant.TierTokens{CacheWrite5m: 4000},
+			Caused: accountant.TierTokens{CacheWrite5m: 1000}}}, // a declaration the operation added
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak, ChangeID: "c",
+			Saved:  accountant.TierTokens{CacheRead: 500},
+			Caused: accountant.TierTokens{CacheWrite5m: 500}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	brk := 500*0.2e-6 - 500*2.5e-6 // the break: a cost, whatever the warm prefix was
+	high := 4000*2.5e-6 - 1000*2.5e-6 + brk
+	low := 4000*0.2e-6 - 1000*2.5e-6 + brk
+	if !accNear(e.EstimatedSavedUSD, high) {
+		t.Errorf("ceiling %v, want %v", e.EstimatedSavedUSD, high)
+	}
+	if !accNear(e.EstimatedSavedLowUSD, low) {
+		t.Errorf("floor %v, want %v", e.EstimatedSavedLowUSD, low)
+	}
+	if e.EstimatedSavedLowUSD >= 0 {
+		t.Errorf("floor %v, want a cost (< 0): the added tokens cost more than the removed ones save at the read rate", e.EstimatedSavedLowUSD)
 	}
 }

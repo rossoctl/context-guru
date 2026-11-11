@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
 )
@@ -19,6 +20,23 @@ type savingsTracker struct {
 	onEnd func(*accountant.Request)
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
+	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
+	rescueFactsMissing atomic.Int64
+}
+
+// noteRescueFactsMissing counts one priced request that followed pings and found no ping facts. Nil-safe.
+func (s *savingsTracker) noteRescueFactsMissing() {
+	if s != nil {
+		s.rescueFactsMissing.Add(1)
+	}
+}
+
+// RescueFactsMissing is the count noteRescueFactsMissing keeps. Nil-safe.
+func (s *savingsTracker) RescueFactsMissing() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.rescueFactsMissing.Load()
 }
 
 // clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does

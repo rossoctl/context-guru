@@ -3098,6 +3098,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.Savings = s
 	}
 	snap.ToolDefer = h.deferStats()
+	snap.KeepAlivePingsPriced = h.opts.Pings.Priced()
+	snap.KeepAliveRescueFactsMissing = h.savings.RescueFactsMissing()
 	json.NewEncoder(w).Encode(snap)
 }
 
