@@ -43,17 +43,20 @@ type accJob struct {
 
 // accEnd hands the thread, the forwarded body and the operations to the accountant and returns at once. The
 // parsing, hashing and bookkeeping run on another goroutine; finish waits for them (accWait) before it prices the
-// request, so a request's record is complete before the request is priced, and a thread's next request arrives
-// after the previous one was priced. Nil-safe; a no-op when accBegin did not note a request.
+// request, so a request's record is complete before the request is priced. The order of two requests of one thread
+// is usual, not guaranteed: finish runs after the response is flushed, so a client can send the next turn first.
+// The library recomputes a figure when another request of the thread intervened (Result.Recomputed). Nil-safe; a no-op when accBegin did not note a request.
 func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
 	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
 		return
 	}
 	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer}
 	job := &accJob{done: make(chan struct{}), w: w}
-	c.accJob = job
 	meta, client := c.accMeta, c.accClient
 	ops = append([]accountant.Operation(nil), ops...)
+	// Publish the job last: finish waits for a published job, so nothing that can fail may sit between this line
+	// and the go statement.
+	c.accJob = job
 	go func() {
 		defer close(job.done)
 		w.accRun(meta, client, th, forwarded, ops)

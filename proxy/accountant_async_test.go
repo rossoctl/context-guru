@@ -54,7 +54,8 @@ func TestAccEndDoesNotWaitForTheAccountantWork(t *testing.T) {
 	}
 }
 
-// The guard issue #1059 asked for: on a large body, without -race, what the request goroutine pays must be a
+// The guard issue #1059 asked for: on a large body, without -race, what the request goroutine pays before the
+// first byte goes upstream (accBegin and accEnd; finish waits for the job later, after the response) must be a
 // small part of the accountant's work. The ratio keeps the test honest on a slow or loaded runner, where an
 // absolute limit would flake. A synchronous accountant pays the whole of it and fails.
 func TestRequestPathCostDoesNotGrowWithBodySize(t *testing.T) {
@@ -159,7 +160,13 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 	if wait := time.Duration(reached.Load() - sent.UnixNano()); wait > accountantDelay/2 {
 		t.Errorf("the upstream saw the request %v after it was sent: it waited for the accountant (%v)", wait, accountantDelay)
 	}
-	waitForRows(t, rec, 1)
+	// waitForRows polls for about 2 s, the same as the accountant's delay, so poll longer here.
+	for i := 0; i < 2000 && rec.Stats().Written < 1; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rec.Stats().Written < 1 {
+		t.Fatal("the row was never written")
+	}
 	if _, ok := tap.all()[0].AccountantResult(); !ok {
 		t.Error("the row carries no accountant result: finish priced the request before the background work ended")
 	}
