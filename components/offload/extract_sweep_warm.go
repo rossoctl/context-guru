@@ -112,6 +112,11 @@ type warmThread struct {
 	// set is not retried on every warm request (it would be refused again on nearly the same numbers); the
 	// trigger runs instead, asks a new question, and the new answer is merged in (warmHold clears this).
 	heldTried bool
+	// Sweep v3 (extract_sweep_v3.go): numbers only. v3Await: a cut was accepted and the next request sets the
+	// base. v3Baseline: the billed prompt after the last accepted cut. v3Asked: a hybrid question is out.
+	v3Await, v3Asked bool
+	v3Reqs           int
+	v3Baseline       int
 }
 
 var (
@@ -199,6 +204,8 @@ type SweepWarmStats struct {
 	// numbers they were made on.
 	RecentDecisions []WarmDecision
 	Panics          int64
+	// V3 is the sweep v3 ledger (extract_sweep_v3.go).
+	V3 V3Stats
 	// Gates counts the question's own gate and event names (sweep_kept, sweep_unparseable, ...) for warm
 	// questions, apart from the ping's.
 	Gates map[string]int64
@@ -206,7 +213,7 @@ type SweepWarmStats struct {
 
 // Any reports whether the warm path did or counted anything, so /stats shows nothing when it never ran.
 func (w SweepWarmStats) Any() bool {
-	if len(w.TriggerReasons) > 0 || len(w.Recent) > 0 || len(w.RecentDecisions) > 0 || w.GatePriceModel != "" || w.PriceModelUnknown > 0 {
+	if w.V3.Any() || len(w.TriggerReasons) > 0 || len(w.Recent) > 0 || len(w.RecentDecisions) > 0 || w.GatePriceModel != "" || w.PriceModelUnknown > 0 {
 		return true
 	}
 	return w.Fired+w.Asked+w.Held+w.Failed+w.NotWorth+w.NoBilled+w.ThreadBusy+w.ModelDeclined+
@@ -261,7 +268,7 @@ func SweepWarmCounters() SweepWarmStats {
 		AlreadyAsked: sweepWarmAlreadyAsked.Load(), NoInventory: sweepWarmNoInventory.Load(), Gates: copyWarmGates(),
 		PriceModelUnknown: sweepWarmPriceModelUnknown.Load(), GatePriceModel: gatePriceModel(),
 		GateAccept: sweepWarmGateAccept.Load(), GateRefuse: sweepWarmGateRefuse.Load(), Reasons: rs,
-		Panics: sweepWarmPanics.Load()}
+		Panics: sweepWarmPanics.Load(), V3: v3Counters()}
 }
 
 func noteWarmGate(accept bool, reason string) {
@@ -418,6 +425,7 @@ func (m memHeld) put(h heldAnswer) {
 
 // resetWarmForTest clears every thread's warm state, as a new process would have it.
 func resetWarmForTest() {
+	resetV3ForTest()
 	resetSweepBatchForTest() // the batching ledger the warm ask feeds (#747)
 	warmMu.Lock()
 	warmThreads = map[string]*warmThread{}
@@ -533,10 +541,13 @@ const (
 
 // turnsEstimate is the expected number of warm turns N and how it was produced.
 type turnsEstimate struct {
-	N, Raw        float64
-	Model, Why    string
-	Cut           int
-	GrowthPerTurn float64
+	N, Raw float64
+	// NAfter and RawAfter are the turns left counted from the prompt AFTER a removal (sweep v3 passes D), so a log
+	// can show both. They are 0 when no removal was passed. The gate prices the saving on N, not on NAfter.
+	NAfter, RawAfter float64
+	Model, Why       string
+	Cut              int
+	GrowthPerTurn    float64
 }
 
 // noteBilledGrowth folds the billed prompt size the host recorded for the previous turn into the growth
@@ -565,7 +576,20 @@ func (t *warmThread) noteBilledGrowth(billed int) {
 //	    own trigger refuses to act on (Trigger.FracResolvable).
 //
 // warm_max_turns caps N in every case. The wait-cause weight is applied by the caller, at the apply.
+//
+// N is always the turns to the cut from the prompt as it is, (cut - P) / growth: the compaction comes then without
+// the cut, and it removes the dropped outputs anyway. The gate prices the saving on N and on nothing longer. A cut
+// only DELAYS the compaction, so a saving counted past N would be paid for by a compaction that happens anyway.
+//
+// warmTurnsLeftAfter also takes removedBilled, the billed tokens a cut would remove. With it, NAfter is the turns
+// from the prompt after the cut, N' = (cut - (P - D)) / growth (turnsUntilCut, the one definition). It is for the
+// log. Nothing prices on it.
 func (e *ExtractSweep) warmTurnsLeft(c *components.Ctx, run, growthFrom, growthTurns int) turnsEstimate {
+	return e.warmTurnsLeftAfter(c, run, growthFrom, growthTurns, 0)
+}
+
+// warmTurnsLeftAfter is warmTurnsLeft with the billed tokens a cut would remove. With 0 it is warmTurnsLeft.
+func (e *ExtractSweep) warmTurnsLeftAfter(c *components.Ctx, run, growthFrom, growthTurns, removedBilled int) turnsEstimate {
 	capN := func(raw float64) float64 {
 		if raw > float64(e.warmMaxTurns) {
 			return float64(e.warmMaxTurns)
@@ -606,7 +630,12 @@ func (e *ExtractSweep) warmTurnsLeft(c *components.Ctx, run, growthFrom, growthT
 		return est
 	}
 	raw := float64(cut-c.PrevBilledInput) / growth
-	return turnsEstimate{N: capN(raw), Raw: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
+	est := turnsEstimate{N: capN(raw), Raw: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
+	if removedBilled > 0 {
+		est.RawAfter = turnsUntilCut(float64(cut), float64(c.PrevBilledInput-removedBilled), growth)
+		est.NAfter = capN(est.RawAfter)
+	}
+	return est
 }
 
 func localTokens(msgs []bschemas.ChatMessage) int {
@@ -688,6 +717,10 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		// EVERY exit records its decision, accepted or refused, with the numbers it had by then.
 		defer func() {
 			d.Accept, d.Reason = ok, reason
+			d.DShareP, d.PShareC = wa.dShareP, wa.pShareC
+			d.CutPoint, d.CSource = wa.cutPoint, wa.cSource
+			// D by rule (sweep v3), on EVERY exit: accepted, does_not_pay or any other refusal.
+			d.RuleD = wa.ruleD
 			noteWarmDecision(tkey, d)
 		}()
 		// The recheck's own account, recorded whatever the gate decides below.
@@ -733,7 +766,12 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		}
 		read, write := e.warmGateRates(c)
 		rewritten, deep := warmRewrite(req, first, cachedEnd(c, req), rm)
-		te := e.warmTurnsLeft(c, run, growthFrom, growthTurns)
+		// Sweep v3 also reports the turns from the prompt AFTER the cut, for the log. The price uses N.
+		removedBilled := 0
+		if e.v3 {
+			removedBilled = int(float64(removed) * content)
+		}
+		te := e.warmTurnsLeftAfter(c, run, growthFrom, growthTurns, removedBilled)
 		turns := te.N * d.Weight
 		in := warmEconIn{Removed: removed, Rewritten: rewritten,
 			RatioContent: content, RatioFull: full, Read: read, Write: write, Turns: turns}
@@ -742,7 +780,18 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		d.RemovedLocal, d.RemovedBilled = removed, int(float64(removed)*content)
 		d.RewrittenLocal, d.RewrittenBilled = rewritten, int(float64(rewritten)*full)
 		d.Turns, d.Deep, d.Saving, d.Rewrite = in.Turns, deep, saving, rewrite
-		if !(saving > rewrite) {
+		if e.v3 {
+			d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
+		}
+		// EXPERIMENT (sweep v3, compaction_premium_usd): the premium joins the saving side when the cut postpones the
+		// compaction. passed_on_cost says the cost gate alone would have accepted. With a premium of 0 nothing changes.
+		premium := e.postponementPremium(te)
+		passedOnCost := saving > rewrite
+		if e.v3 {
+			d.PremiumUSD, d.PassedOnCost = premium, &passedOnCost
+			wa.premium, wa.passedOnCost = premium, passedOnCost
+		}
+		if !(saving+premium > rewrite) {
 			if deep {
 				return false, "does_not_pay_deep"
 			}
@@ -838,6 +887,11 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			}
 			hasHeld = false
 		}
+	}
+	// SWEEP V3 (extract_sweep_v3.go) replaces everything below when it is on.
+	if e.v3 {
+		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, run: run, count: count, growthFrom: growthFrom,
+			growthTurns: growthTurns, prevLocal: prevLocal, busy: busy, hasHeld: hasHeld, heldTried: heldTried})
 	}
 	// A CARRIED set the gate already refused is not retried on every warm request: the trigger runs instead and
 	// asks a new question, whose drops are merged in, and THEN the gate decides on the merged set. A FRESH
@@ -951,7 +1005,12 @@ func (e *ExtractSweep) warmWorthAsking(c *components.Ctx, req *bschemas.BifrostC
 	// (warmTurnsLeft), so a thread is not asked about while the gate would refuse it for want of turns.
 	// No wait-cause weight is applied here: the weight (warmWeight) is read off the request at the apply,
 	// where the gate uses it.
-	te := e.warmTurnsLeft(c, run, growthFrom, growthTurns)
+	// Sweep v3 counts from the prompt after the cut here too, with this trigger's own D (every candidate dropped).
+	removedBilled := 0
+	if e.v3 {
+		removedBilled = int(float64(removed) * content)
+	}
+	te := e.warmTurnsLeftAfter(c, run, growthFrom, growthTurns, removedBilled)
 	rewritten, deep := warmRewrite(req, first, cachedEnd(c, req), rm)
 	d.RewrittenLocal, d.RewrittenBilled, d.Turns, d.Deep = rewritten, int(float64(rewritten)*full), te.N, deep
 	d.TurnsModel, d.TurnsRaw, d.Cut, d.GrowthPerTurn, d.TurnsWhy = te.Model, te.Raw, te.Cut, te.GrowthPerTurn, te.Why
@@ -959,7 +1018,15 @@ func (e *ExtractSweep) warmWorthAsking(c *components.Ctx, req *bschemas.BifrostC
 		RatioContent: content, RatioFull: full, Read: read, Write: write, Turns: te.N}
 	saving, rewrite := warmEcon(in)
 	d.Saving, d.Rewrite = saving, rewrite
-	if !(saving > rewrite) {
+	if e.v3 {
+		d.TurnsNoCut, d.TurnsAfterCut = te.N, te.NAfter
+	}
+	premium := e.postponementPremium(te)
+	if e.v3 {
+		passed := saving > rewrite
+		d.PremiumUSD, d.PassedOnCost = premium, &passed
+	}
+	if !(saving+premium > rewrite) {
 		sweepWarmNotWorth.Add(1)
 		noteWarmTrigger("does_not_pay")
 		d.Reason = "does_not_pay"
@@ -1353,6 +1420,23 @@ type WarmDecision struct {
 	// Saving and Rewrite are the gate's two sides in USD, so the refusal reads as numbers.
 	Saving  float64 `json:"saving_usd"`
 	Rewrite float64 `json:"rewrite_usd"`
+	// Sweep v3 only: D as a share of P (the billed prompt), and P as a share of C (the cut point).
+	DShareP float64 `json:"d_share_of_p,omitempty"`
+	PShareC float64 `json:"p_share_of_c,omitempty"`
+	// CutPoint is C in billed tokens, and CSource where it came from (cutfrac, compaction, window). v3 only.
+	CutPoint int    `json:"cut_point,omitempty"`
+	CSource  string `json:"c_source,omitempty"`
+	// RuleD is D by what chose it: a rule name, or judge (v3 only), in billed tokens.
+	RuleD map[string]int `json:"rule_d,omitempty"`
+	// Sweep v3: the turns left if nothing were cut (N, the one the saving is priced on) and counted from the prompt
+	// after the cut (N', for reading only), both capped by warm_max_turns and before the wait-cause weight.
+	TurnsNoCut    float64 `json:"turns_no_cut,omitempty"`
+	TurnsAfterCut float64 `json:"turns_after_cut,omitempty"`
+	// PremiumUSD is the experiment premium the gate added to the saving (0 unless compaction_premium_usd is set and
+	// the cut postpones the compaction). PassedOnCost says the saving to N alone beat the rewrite, so a run shows
+	// which cuts needed the premium. Sweep v3 only.
+	PremiumUSD   float64 `json:"premium_usd,omitempty"`
+	PassedOnCost *bool   `json:"passed_on_cost,omitempty"`
 }
 
 var warmDecisions []WarmDecision
@@ -1371,7 +1455,9 @@ func noteWarmDecision(tkey string, d WarmDecision) {
 		"removed_local", d.RemovedLocal, "removed_billed", d.RemovedBilled,
 		"rewritten_local", d.RewrittenLocal, "rewritten_billed", d.RewrittenBilled,
 		"turns", d.Turns, "weight", d.Weight, "ratio_full", d.RatioFull, "ratio_content", d.RatioContent,
-		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite)
+		"deep", d.Deep, "saving_usd", d.Saving, "rewrite_usd", d.Rewrite,
+		"d_share_of_p", d.DShareP, "p_share_of_c", d.PShareC, "cut_point", d.CutPoint, "c_source", d.CSource, "rule_d", ruleDString(d.RuleD),
+		"turns_no_cut", d.TurnsNoCut, "turns_after_cut", d.TurnsAfterCut, "premium_usd", d.PremiumUSD, "passed_on_cost", passedOnCostString(d.PassedOnCost))
 }
 
 func warmDecisionsCopy() []WarmDecision {
@@ -1423,6 +1509,20 @@ func lastWarmDecision() (WarmDecision, bool) {
 // thread cannot keep a verdict alive for ever by being refused (warmHeldMaxAge counts from the oldest
 // question that still contributes). Returns how many drops were carried.
 func carryRefused(src heldSource, tkey string, claimed heldAnswer, res recheckResult) int {
+	// Sweep v3: only the judge's verdicts are carried. A rule is decided again on every request.
+	if vh, isV3 := src.(*v3Held); isV3 {
+		if !vh.useMem {
+			return 0
+		}
+		src = vh.mem
+		var judged []heldOutput
+		for _, o := range res.Valid {
+			if _, isRule := vh.ruleOf[o.ToolUseID]; !isRule {
+				judged = append(judged, o)
+			}
+		}
+		res.Valid = judged
+	}
 	m, ok := src.(memHeld)
 	if !ok || len(res.Valid) == 0 {
 		return 0
@@ -1468,4 +1568,26 @@ func SeedCarriedCountersForTest() (reset func()) {
 	sweepWarmCarriedExpired.Store(4)
 	sweepWarmCarriedCapped.Store(5)
 	return resetWarmForTest
+}
+
+// postponementPremium is the experiment premium (compaction_premium_usd) when this cut postpones the compaction:
+// the turns counted from the prompt after the cut are more than those without it. That holds for any cut that
+// removes something in the cut turns model. It is 0 off v3, with the setting at 0, and in the other turns models.
+// The default of 0 leaves the gate as the cost gate: saving to N, no credit.
+func (e *ExtractSweep) postponementPremium(te turnsEstimate) float64 {
+	if !e.v3 || e.premiumUSD <= 0 || te.Model != turnsModelCut || !(te.RawAfter > te.Raw) {
+		return 0
+	}
+	return e.premiumUSD
+}
+
+// passedOnCostString renders PassedOnCost for the log line: "" when the decision is not a v3 one.
+func passedOnCostString(p *bool) string {
+	switch {
+	case p == nil:
+		return ""
+	case *p:
+		return "true"
+	}
+	return "false"
 }

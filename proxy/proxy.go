@@ -2618,6 +2618,22 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	}
 }
 
+// resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
+// table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
+// and /compact) go through it, as they do for the window.
+func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
+	model := gjson.GetBytes(body, "model").String()
+	stated := 0
+	if cp, ok := h.opts.Windows.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	}); ok {
+		if n, found := cp.CompactionPoint(ctx, model); found {
+			stated = n
+		}
+	}
+	return compactionpoint.Resolve(model, stated, window)
+}
+
 // resolveWindow resolves this request's model context window and whether that figure is
 // published for the model rather than guessed at from its family.
 //
