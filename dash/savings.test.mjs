@@ -359,6 +359,72 @@ test('the headline uses the same rule, and a page filter hides the account-wide 
   assert.equal(subscriptionHeadline(lim, {}, null, now, String).main, 'not measured'); // a server from before #999
 });
 
+// The learned 5-hour weights (#1047): GET /api/me/fivehour-weights, mocked as data.
+const fit = { ok: true, requests: 1234, windows: 5,
+  weights: { input: 3e-7, cache_read: 1e-8, cache_write_5m: 4e-7, cache_write_1h: 6e-7, output: 1.5e-6 },
+  window_ping: { input: 0, cache_read: 200000, cache_write_5m: 0, cache_write_1h: 0, output: 1000 } };
+
+test('with learned weights, the 5-hour estimate is the weighted tokens, and the label names them', () => {
+  const { subscriptionHeadline, fiveHourLearnedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.4, reset_s: 2000 } };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  // saved 100k wr (0.04) less 500k rd caused (0.005), less the pings: 200k rd (0.002) and 1,000 out (0.0015).
+  const win = { cost_usd: 9, total_saved_usd: 1, tokens: { saved: { cache_write_5m: 100000 }, caused: { cache_read: 500000 } } };
+  const p = fiveHourLearnedPct(lim.five_hour, win, fit);
+  assert.ok(Math.abs(p.pct - 3.15) < 1e-9, String(p.pct)); assert.equal(p.hit, false);
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, false, fit).estimate,
+    '≈ 3% of the 5-hour limit (estimate at learned 5-hour weights (from 1,234 requests))');
+  // The cap holds the same: used 99%, so 1% is the most that can be saved.
+  assert.equal(subscriptionHeadline({ five_hour: { utilization: 0.99, reset_s: 2000 } }, o, win, now, String, false, fit).estimate,
+    '≈ without context-guru you would have hit the 5-hour limit (estimate at learned 5-hour weights (from 1,234 requests))');
+});
+
+test('without a fit that passed the gate, the estimate and its label stay at API prices', () => {
+  const { subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.54, reset_s: 2000 } };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  const win = { cost_usd: 90, total_saved_usd: 5, tokens: { saved: { cache_write_5m: 100000 } } };
+  const api = '≈ 3% of the 5-hour limit (estimate at API-price weights)';
+  for (const f of [undefined, null, {}, { ok: false, reason: 'too few 5-hour windows', requests: 80 },
+    Object.assign({}, fit, { window_ping: undefined }), // the pings could not be read
+    Object.assign({}, fit, { weights: Object.assign({}, fit.weights, { cache_read: null }) })]) {
+    assert.equal(subscriptionHeadline(lim, o, win, now, String, false, f).estimate, api, JSON.stringify(f));
+  }
+  // A server from before #999 has no window tokens: API prices.
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 90, total_saved_usd: 5 }, now, String, false, fit).estimate, api);
+  // A filter hides the estimate either way.
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true, fit).estimate, '');
+  // A learned figure at or below zero shows nothing, as the dollar one does.
+  const loss = { cost_usd: 90, total_saved_usd: 5, tokens: { saved: {}, caused: { cache_write_5m: 100000 } } };
+  assert.equal(subscriptionHeadline(lim, o, loss, now, String, false, fit).estimate, api);
+});
+
+test('the Cache strategy forecast uses the learned range and label on a subscription only', () => {
+  const { forecastView } = createRequire(import.meta.url)('./ui/savings.js');
+  const rec = { refused: 'your own history cannot tell this apart from zero', n: 40, sessions: 9,
+    plan: 'wait_plan', fixed_k: { lo_usd: -1, hi_usd: 2 }, alt_max_pings: 3,
+    learned: { idle_seconds: 240, max_pings: 2, lo_usd: 1.5, hi_usd: 4, requests: 1234, windows: 5 } };
+  // A manager or an API key: the payload as it is, no label.
+  assert.deepEqual(forecastView(rec, false), { rec, label: null });
+  // A subscription with learned weights: the learned yes and range, and the dollar refusal is gone.
+  const v = forecastView(rec, true);
+  assert.equal(v.rec.refused, undefined);
+  assert.equal(v.rec.lo_usd, 1.5); assert.equal(v.rec.hi_usd, 4); assert.equal(v.rec.max_pings, 2);
+  assert.equal(v.rec.n, 40);
+  // The API-price comparisons do not show beside a learned range.
+  assert.equal(v.rec.fixed_k, undefined); assert.equal(v.rec.alt_max_pings, undefined);
+  assert.equal(v.label, 'Forecast at learned 5-hour weights (from 1,234 requests), in API dollars. A subscription does not bill per token.');
+  // A learned refusal wins over a dollar yes.
+  const r2 = forecastView({ lo_usd: 1, hi_usd: 2, idle_seconds: 240, max_pings: 2,
+    learned: { refused: 'your own history says this would COST you money', requests: 300 } }, true).rec;
+  assert.equal(r2.refused, 'your own history says this would COST you money');
+  // No learned forecast: today's label exactly, and today's payload.
+  const plain = { lo_usd: 1, hi_usd: 2 };
+  assert.deepEqual(forecastView(plain, true), { rec: plain, label: 'Forecast at API-price weights. A subscription does not bill per token.' });
+});
+
 // The Cache strategy tab's tables on a subscription (#1048): one session row in tokens.
 test('a Cache strategy table row in tokens: the rescue, the pings apart, the expiries by tier', () => {
   const { kaSessionTokenCells } = createRequire(import.meta.url)('./ui/savings.js');
