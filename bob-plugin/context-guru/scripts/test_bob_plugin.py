@@ -1027,6 +1027,17 @@ class UninstallTest(TempHome):
         self.assertFalse(PLUGIN.record_path().exists())
         self.assertFalse((PLUGIN.state_dir() / f"bob-{proxy.port}.yaml").exists())
 
+    def test_uninstall_removes_the_price_copy_of_bob_ultrahigh(self):
+        with FakeProxy() as proxy:
+            self.install(proxy)
+            self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+            prices = PLUGIN.proxy_prices(proxy.port)
+            self.assertTrue(prices.exists())
+            code, out, _ = self.run_main("uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=removed", out)
+        self.assertFalse(prices.exists())
+
     def test_uninstall_purge_removes_the_state_folder(self):
         with FakeProxy() as proxy:
             self.install(proxy)
@@ -1100,6 +1111,16 @@ class ResetScriptTest(TempHome):
             done = self.reset("--yes")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(config.exists())
+
+    def test_reset_removes_the_price_copy_of_bob_ultrahigh(self):
+        with FakeProxy() as proxy:
+            self.install(proxy, b"x\n", b"{}\n")
+            self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+            prices = PLUGIN.proxy_prices(proxy.port)
+            self.assertTrue(prices.exists())
+            done = self.reset("--yes")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(prices.exists())
 
     def test_reset_removes_a_legacy_block(self):
         with FakeProxy() as proxy:

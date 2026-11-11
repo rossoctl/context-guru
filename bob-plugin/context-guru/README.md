@@ -162,7 +162,10 @@ It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`): every i
 flat rate, a cache read and a cache write too. The sweep's cost gate needs that. Without it, the
 gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. The dollar rates are
 estimates; only the flat ratio is measured. So with this preset the dashboard's Bob dollar figures
-change. Leaving the preset removes the prices.
+change. Leaving the preset, `uninstall` and the reset script remove the prices.
+
+It needs context-guru-proxy v0.7.2 or newer. On an older release, `configure` refuses it and says
+to update first.
 
 The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut
 content back) and `context_guru_adjudicate` (the sweep's question).

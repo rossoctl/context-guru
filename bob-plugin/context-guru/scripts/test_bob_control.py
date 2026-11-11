@@ -175,6 +175,26 @@ class ConfigureTest(Installed):
         self.assertEqual(PLUGIN.launchd_plist().read_bytes(), plist)
         self.assertFalse(PLUGIN.proxy_prices(self.port).exists())
 
+    def test_bob_ultrahigh_is_refused_on_a_proxy_older_than_its_settings(self):
+        before, calls = self.tree(), len(self.launchctl_calls())
+        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.1"):
+            code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+        self.assertEqual(code, 2, out)
+        self.assertIn("result=refused\nreason=proxy_too_old\npreset=bob-ultrahigh\n", out)
+        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.2 or newer; this one is "
+                      "v0.7.1. Run the update skill first.", out)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.launchctl_calls()), calls)
+
+    def test_bob_ultrahigh_runs_on_a_new_or_unnumbered_proxy(self):
+        for version in ("v0.7.2", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
+            with self.subTest(version=version):
+                self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+                with mock.patch.object(PLUGIN, "binary_version", return_value=version):
+                    code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+                self.assertEqual(code, 0, out)
+                self.assertIn("result=configured\npreset=bob-ultrahigh\n", out)
+
     def test_setup_again_keeps_the_prices_of_bob_ultrahigh(self):
         self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
         with mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"):

@@ -92,6 +92,10 @@ DEFAULT_PRESET = "lossless"
 # The presets that get Bob's flat prices (prices.yaml) as the proxy's MODEL_PRICES. The sweep's warm
 # cost gate needs them: without them it prices a cache rewrite at Claude rates and cuts nothing warm.
 PRICED_PRESETS = ("bob-ultrahigh",)
+# The oldest proxy release that accepts a preset's settings. An older proxy refuses unknown keys and
+# does not start (bob-ultrahigh's `warm: true` came in v0.7.2). A dev build has no release number;
+# for it, the restart check in change_and_restart is the guard.
+PRESET_MINIMUM_RELEASE = {"bob-ultrahigh": (0, 7, 2)}
 PRICES_SOURCE = Path(__file__).resolve().parent.parent / "prices.yaml"
 # The cache strategies Bob may use. Only none: see NO_KEEPALIVE_REASON.
 BOB_CACHE_STRATEGIES = ("none",)
@@ -977,6 +981,17 @@ def configure(args):
         facts(result="refused", reason="preset_not_allowed_for_bob", preset=args.preset,
               detail=preset_refusal(args.preset))
         return 2
+    if need := PRESET_MINIMUM_RELEASE.get(args.preset):
+        version = binary_version(record.get("binary") or "")
+        try:
+            too_old = release_version(version) < need
+        except RuntimeError:
+            too_old = False
+        if too_old:
+            facts(result="refused", reason="proxy_too_old", preset=args.preset,
+                  detail=f"{args.preset} needs context-guru-proxy v{'.'.join(map(str, need))} or "
+                         f"newer; this one is {version}. Run the update skill first.")
+            return 2
     if args.cache_strategy and args.cache_strategy not in BOB_CACHE_STRATEGIES:
         facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
               cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
@@ -1485,6 +1500,7 @@ def uninstall(args):
         try:
             if config.exists() and config.read_text().startswith(CONFIG_MARKER):
                 config.unlink()
+            proxy_prices(port).unlink(missing_ok=True)
         except OSError:
             pass
     if clean:
