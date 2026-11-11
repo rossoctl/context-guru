@@ -1093,15 +1093,17 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
 		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
-		if key == "" {
+		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
+		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
+		target := agentModelTarget(r.Context(), h.agentFor(up.path))
+		// The operator's OpenAI key belongs to the OpenAI upstream. A route whose agent names its own
+		// target is another provider's server, so it gets the caller's key or no model call.
+		if key == "" && target == (agent.ModelTarget{}) {
 			key = h.serverKey(h.opts.OpenAIKey)
 		}
 		if key == "" {
 			return nil
 		}
-		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
-		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
-		target := agentModelTarget(r.Context(), h.agentFor(up.path))
 		auth := AuthHeader(bschemas.OpenAI, key, "")
 		if target.AuthScheme != "" {
 			auth = http.Header{"Authorization": {target.AuthScheme + " " + key}}

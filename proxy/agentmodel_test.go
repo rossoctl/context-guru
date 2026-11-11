@@ -89,7 +89,9 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(summarizableOpenAIRequest(model)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", auth)
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +191,7 @@ func TestPanickingAgentModelTargetFailsOpenToTheHostDefault(t *testing.T) {
 	got := summaryCallWith(t, targeted{panics: true})
 
 	if got.path != "/v1/chat/completions" || got.auth != "Bearer openai-caller-key" {
-		t.Errorf("summary call = %s with %q auth scheme, want the host default", got.path, strings.Fields(got.auth)[0])
+		t.Errorf("summary call = %s with auth scheme %q, want the host default", got.path, authScheme(got.auth))
 	}
 	out := logs.String()
 	if !strings.Contains(out, "recovered from panic in the agent's model target") {
@@ -206,14 +208,68 @@ func TestMalformedAgentModelTargetKeepsTheHostDefault(t *testing.T) {
 	for name, target := range map[string]agent.ModelTarget{
 		"relative path":         {Path: "inference/v1/chat/completions"},
 		"absolute URL":          {Path: "//evil.example/v1/chat/completions"},
+		"path with a query":     {Path: "/v1/chat/completions?x=1"},
+		"path with a fragment":  {Path: "/v1/chat/completions#x"},
+		"path with a space":     {Path: "/v1/chat completions"},
 		"scheme with a space":   {AuthScheme: "Api key"},
 		"scheme with a newline": {AuthScheme: "Apikey\r\nX-Evil: 1"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLog(t)
+
 			got := summaryCallWith(t, targeted{target: target})
+
+			field := "path"
+			if target.AuthScheme != "" {
+				field = "auth_scheme"
+			}
+			if out := logs.String(); !strings.Contains(out, "agent's model target has a field the host cannot use") ||
+				!strings.Contains(out, "field="+field) {
+				t.Errorf("the dropped %s was not logged:\n%s", field, out)
+			}
 			if got.path != "/v1/chat/completions" || got.auth != "Bearer openai-caller-key" {
-				t.Errorf("summary call = %s with %q auth scheme, want the host default", got.path, strings.Fields(got.auth)[0])
+				t.Errorf("summary call = %s with auth scheme %q, want the host default", got.path, authScheme(got.auth))
 			}
 		})
+	}
+}
+
+// authScheme is the first word of an Authorization value, for a failure message: never the key.
+func authScheme(v string) string {
+	if f := strings.Fields(v); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
+// The operator's OpenAI key must never go to another provider's server. On Bob's route the agent
+// names its own target, so a request with no key of its own makes no model call, and the
+// operator's key is in no request the upstream gets.
+func TestBobRouteNeverSendsTheOperatorsOpenAIKey(t *testing.T) {
+	const operatorKey = "sk-operator-openai-CANARY"
+	up, calls := summaryUpstream(t)
+	h := summaryHandler(t, "incoming", Options{BobUpstream: up.URL, OpenAIKey: operatorKey})
+
+	got := postSummarizable(t, h, bobModelPath, "premium-ide", "", calls)
+
+	if len(got) != 0 {
+		t.Errorf("Bob's upstream got %d summary calls without a caller key, want 0", len(got))
+	}
+	for _, c := range calls() {
+		if strings.Contains(c.auth, operatorKey) || strings.Contains(string(c.body), operatorKey) {
+			t.Fatalf("a request to Bob's upstream (%s) carries the operator's OpenAI key", c.path)
+		}
+	}
+}
+
+// The OpenAI route keeps its fallback to the operator's key: that key belongs to that upstream.
+func TestOpenAIRouteStillFallsBackToTheOperatorsKey(t *testing.T) {
+	up, calls := summaryUpstream(t)
+	h := summaryHandler(t, "incoming", Options{OpenAIUpstream: up.URL, OpenAIKey: "sk-operator-openai"})
+
+	got := postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "", calls)
+
+	if len(got) != 1 || got[0].auth != "Bearer sk-operator-openai" {
+		t.Fatalf("summary calls = %d, want 1 with the operator's key as Bearer", len(got))
 	}
 }
