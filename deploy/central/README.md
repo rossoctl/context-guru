@@ -40,6 +40,24 @@ install ID. Anyone with Grafana access can read it. To stop the storage, remove 
 (`install.sh remove`) and delete `/var/lib/central-metrics`. To stop one install from sending, revoke
 its token or turn its push off.
 
+## Deploy from your laptop
+
+`deploy.sh` does the steps below over ssh, so you need not log in to the server. It targets a RHEL 9 server
+with sudo for the ssh user.
+
+```
+./deploy.sh --dry-run alice@metrics-host deploy      # show what it will do
+./deploy.sh alice@metrics-host deploy                # check, copy, install, status
+CENTRAL_HOST=metrics.example.com TLS_CERT=/etc/ssl/central/fullchain.pem TLS_KEY=/etc/ssl/central/privkey.pem \
+  ./deploy.sh alice@metrics-host nginx               # TLS front end with your company certificate
+CENTRAL_HOST=metrics.example.com ./deploy.sh alice@metrics-host check
+./deploy.sh alice@metrics-host token add context-guru alice-laptop
+```
+
+The certificate and key paths are paths on the server. `nginx` checks that the certificate is valid, matches the
+key, includes its chain and names the host. It puts the new nginx files live only if `nginx -t` passes, and it puts
+the old ones back if not. The Claude Code skill `central` (`.claude/skills/central/`) drives the same script.
+
 ## Install on a server
 
 1. Copy this repository to the server. Install `podman` or `docker`.
