@@ -121,7 +121,12 @@ func TestTheRecommendationRendersARangeAndRefusesThinHistory(t *testing.T) {
 	if i < 0 {
 		t.Fatal("loadKARecommend is gone; this check needs rewriting")
 	}
-	body := src[i : i+min(len(src)-i, 4000)]
+	// The whole function, to its closing brace at the top level: a fixed length cut off the end of
+	// the panel once it grew (#1047).
+	body := src[i:]
+	if j := strings.Index(body, "\n}\n"); j >= 0 {
+		body = body[:j]
+	}
 	// The SEPARATOR is pinned, not merely the two field names. Asserting only that both names
 	// appear leaves `usd((rec.lo_usd + rec.hi_usd) / 2)` — a single hero midpoint — passing, which
 	// is precisely what this check exists to forbid, and it did pass: the whole dash package

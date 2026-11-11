@@ -98,6 +98,8 @@ type API struct {
 	promptCache jsonCache
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
 	spendCache jsonCache
+	// fiveHour holds the learned 5-hour weights per account (#1047), for fhCacheTTL.
+	fiveHour fhCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// The flight key holds the cache pointer AND the entry key, so two caches never share a flight.
 	// The entry key is the same principal-scoped cacheKey as the caches, so two tenants never share a
@@ -813,6 +815,7 @@ func (a *API) routes() []route {
 	rs = append(rs, a.insightsRoutes()...)
 	// The subscription limit values (#984), declared beside their handler in limits.go.
 	rs = append(rs, a.limitsRoutes()...)
+	rs = append(rs, a.fiveHourRoutes()...)
 	return rs
 }
 
