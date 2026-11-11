@@ -175,6 +175,11 @@ Limits:
   Such a row has `estimate_held = 0` (the column defaults to 0), keeps the figure it was booked with, and is not in
   `estimated_requests`. The hold-out covers the whole figure: every component, the head-TTL premium and rescue legs
   (so the 1h premium of a thread's first request shows as $0 there), the ended-change break and the filter's part.
+  The held figure is a ceiling. The usage does not give the size of the unseen warm prefix, so the proxy also stores
+  a floor (`requests.estimated_saved_low_usd`, sent as `estimated_saved_low_usd`, summed in the Overview): the same
+  removed tokens priced at the read rate. The true saving lies between the floor and the ceiling. Neither is booked.
+  The issue's request (8010 read, 7966 written): the bounds bracket the hand figure of $0.021569. Booking one of them
+  is a behavior change that needs the owner's decision (#915).
   The figure can be negative when the request's net effect is a cost (a tool-names list, an injected expand or
   adjudicate declaration). The UI then shows "a cost of $x". The keep-alive rescue (`keepalive_saved_usd`) and the
   split saving do not depend on a break and stay booked, each in its own column.
