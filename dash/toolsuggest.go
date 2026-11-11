@@ -541,8 +541,8 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 // config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind skill,
 // or `mcp__plan__make_plan` with server `plan`. So `filtered[row.Name]` never matched a skill and
 // `filtered[row.Server]` never matched a whole MCP server — the overlap exclusion could not fire
-// for either, which made three user-facing statements false: the field's own doc, the
-// `self_removed` waterfall description, and the tile's overlap count.
+// for either, which made user-facing statements false: the field's own doc and the overlap
+// count of the savings-since-removal estimate.
 //
 // Built from excludedFrom rather than with a second mapping, because that function already knows
 // how a config name becomes a report row and a second copy is how the two drift apart. Taking the

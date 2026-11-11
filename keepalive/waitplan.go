@@ -18,6 +18,10 @@ import (
 //	subagent, its main agent                  base
 //	done, or no tool call yet on the thread   0
 //
+// The prefix floor follows the same cause (WaitMinPrefix): a tool wait and any subagent wait use the
+// lower tool-wait floor (20k); so do a main thread's waits for background work and for a teammate. A main
+// thread that waits for a person, or for an unknown cause, uses MinPrefixTokens (80k).
+//
 // The plan applies to the 5-minute tier only. A 1-hour thread keeps its own schedule
 // (Policy.ForOneHour), whose credential hold is already bounded at (K+1) x 59 min.
 const (
@@ -29,6 +33,9 @@ const (
 	// config.DefaultKeepAliveBackgroundExtraPings and DefaultKeepAliveHumanExtraPings.
 	DefaultBackgroundExtraPings = 3
 	DefaultHumanExtraPings      = 1
+	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. Mirrored by
+	// config.DefaultKeepAliveToolWaitMinPrefix.
+	DefaultToolWaitMinPrefix = 20000
 	// MaxWaitPings bounds any plan result unless the base itself is higher. It equals the highest
 	// strategy ping count, so the credential hold stays at (11+1) x 299 s = 60 min or less.
 	MaxWaitPings = 11
@@ -71,6 +78,40 @@ func (p Policy) WaitPings(cause string, subagent bool) int {
 		}
 	}
 	return min(n, max(base, MaxWaitPings))
+}
+
+// WaitMinPrefix is the billed-prefix floor for a thread that waits for cause. With WaitPlan off, or
+// when the cause is unknown ("": the plan did not apply), it is MinPrefixTokens. A tool wait, a wait for
+// background work or a teammate, and any wait of a subagent thread, use the tool-wait floor, which never
+// raises MinPrefixTokens. A main thread that waits for a person, or for an unknown cause, keeps
+// MinPrefixTokens.
+func (p Policy) WaitMinPrefix(cause string, subagent bool) int {
+	if !p.WaitPlan || cause == "" {
+		return p.MinPrefixTokens
+	}
+	switch {
+	case subagent, cause == waitcause.WaitingOwnTool, cause == waitcause.WaitingBackground,
+		cause == waitcause.WaitingTeammate:
+		return min(p.MinPrefixTokens, orDefault(p.ToolWaitMinPrefix, DefaultToolWaitMinPrefix))
+	}
+	return p.MinPrefixTokens
+}
+
+// LowestMinPrefix is the lowest floor any wait can have. A replay gates on it in SQL and then applies
+// SpanPrefixOK to each span.
+func (p Policy) LowestMinPrefix() int {
+	return min(p.MinPrefixTokens, p.WaitMinPrefix(waitcause.WaitingOwnTool, true))
+}
+
+// SpanPrefixOK reports whether a stored span of the given prefix clears the floor of its wait. It is
+// the replay's form of the keeper's gate, with the cause read as storedWait reads it. A row with no
+// stored cause and no stop reason (an old row) gets the general floor, also on a subagent thread: the
+// replay then under-counts those rows, the safe direction.
+func (p Policy) SpanPrefixOK(s SpanFacts, prefix int64) bool {
+	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
+		return prefix >= int64(p.MinPrefixTokens)
+	}
+	return prefix >= int64(p.WaitMinPrefix(storedWait(s.Cause, s.StopReason), s.Subagent))
 }
 
 func orDefault(v, def int) int {

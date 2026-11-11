@@ -3611,29 +3611,157 @@ def cmd_config(args: argparse.Namespace) -> int:
 STRATEGY_MARKER_PREFIX = "# context-guru:"
 STRATEGY_MARKER_TAIL = "written by"
 
+# THE TABLE LIVES IN THE PROXY. `context-guru-proxy strategies` prints it as JSON: each strategy's
+# name, the providers it fits, whether it spends, its description, and the `cache:` keys it sets,
+# plus the alias map, the default name and every preset the proxy registers (config/strategy.go).
+# This plugin keeps no copy. A copy is what drifted: the plugin and the proxy ship separately.
+#
 # Strategies are named by PING COUNT, never by minutes: the proxy reads each session's cache lifetime
 # (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
 # sessions it governs. The proxy picks the timing; the strategy picks how many pings.
 #
-#   strategy   5-minute cache                   1-hour cache
-#   auto       2 pings, first at 240 s          1 ping at 59 min
-#   1-ping     1 ping, at 240 s                 1 ping at 59 min
-#   2-ping     2 pings, first at 240 s          2 pings, 59 min apart
-#
-# `auto` is the default and is the per-TTL table: a 5-minute session behaves exactly as `5-min-ping`
-# always did. The 1-hour numbers are config.DefaultKeepAliveIdle1h / DefaultKeepAliveMaxPings1h in
-# the proxy; they are written out below so the file says what it does.
-DEFAULT_STRATEGY = "auto"
-
-# Names that existed before the rename. They keep working everywhere a name is read: `strategy set`
-# and `--cache-strategy` store the new name, and `strategy sync` rewrites an old marker under the
-# new one, so an existing install or settings file does not break. `5-min-ping` was the default.
-STRATEGY_ALIASES = {"5-min-ping": "auto"}
+# NO FALLBACK for a proxy older than v0.7.1 (owner decision). A binary without the `strategies`
+# subcommand is told so, clearly, and the command stops. Do not add a table "just in case".
+STRATEGY_MIN_PROXY = "v0.7.1"
+STRATEGIES_TIMEOUT_ENV = "CONTEXT_GURU_STRATEGIES_TIMEOUT"
+STRATEGIES_TIMEOUT = 5.0
+# The picker offers only what the Claude Code plugin can route: it routes Anthropic only.
+PLUGIN_PROVIDERS = ("anthropic", "any")
 
 
-def canonical_strategy(name: str) -> str:
-    """The current name for `name`: itself, or what an alias maps to."""
-    return STRATEGY_ALIASES.get(name, name)
+class StrategyTableError(Exception):
+    """The proxy binary could not give its strategy table. `reason` is a short code:
+    no_proxy_binary (none found), proxy_too_old (no valid JSON), proxy_unrunnable."""
+
+    def __init__(self, message: str, reason: str = "proxy_too_old"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def find_proxy_binary(explicit: str = "") -> str:
+    """The proxy binary, found the way the plugin finds it everywhere else: an explicit path, then
+    CONTEXT_GURU_BIN (what the install writes into the settings env block), then the bare name on
+    PATH, then install.sh's own destination. "" when none exists."""
+    for cand in (explicit, os.environ.get(BIN_KEY, "")):
+        if cand:
+            path = shutil.which(cand) or ""
+            if path:
+                return path
+            if os.path.exists(cand):
+                # Named on purpose, so another binary on PATH must not answer in its place.
+                raise StrategyTableError(f"{cand} exists but is not an executable file",
+                                         "proxy_unrunnable")
+    path = shutil.which("context-guru-proxy") or ""
+    if path:
+        return path
+    dest = os.environ.get("CONTEXT_GURU_DEST") or os.path.join(os.path.expanduser("~"), ".local", "bin")
+    cand = os.path.join(dest, "context-guru-proxy")
+    return cand if os.access(cand, os.X_OK) else ""
+
+
+def _update_hint() -> str:
+    return (f"update the proxy to {STRATEGY_MIN_PROXY} or later (/context-guru:update); "
+            f"nothing was changed")
+
+
+_TABLE_CACHE: dict[tuple[str, int], dict | Exception] = {}
+
+# Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
+_PROBE_DROP = re.compile(r"^(DASHBOARD.*|SESSION_STATE.*|CONTROL_DB|UPSTREAMS|CG_RECORD.*|ARCHIVE_.*|STORE|IDLE_EXIT)$")
+
+# The one alias the plugin names itself, for display only (`strategy show`, marker rename) when no
+# proxy can be asked. The proxy's own `aliases` stay the authority everywhere else.
+LEGACY_NAME_ALIASES = {"5-min-ping": "auto"}
+
+
+def load_strategy_table(explicit_bin: str = "") -> dict:
+    """The strategy table the proxy binary prints. Raises StrategyTableError with a plain reason.
+
+    The trap this guards (#483): a binary older than v0.7.1 does NOT fail on `strategies`. It ignores
+    the word and starts serving. So the command runs with a short time limit, on a loopback port that
+    cannot collide (LISTEN_ADDR 127.0.0.1:0), and "no valid JSON" means an old binary. The result is
+    kept for the life of this process, keyed by binary path and mtime."""
+    binary = find_proxy_binary(explicit_bin)
+    if not binary:
+        raise StrategyTableError(
+            "no context-guru-proxy binary was found, so the cache strategies cannot be read; "
+            "run /context-guru:install", "no_proxy_binary")
+    try:
+        key = (binary, os.stat(binary).st_mtime_ns)
+    except OSError as exc:
+        raise StrategyTableError(f"cannot read {binary}: {exc}", "proxy_unrunnable") from exc
+    if key in _TABLE_CACHE:
+        hit = _TABLE_CACHE[key]
+        if isinstance(hit, Exception):
+            raise hit
+        return hit
+    try:
+        limit = float(os.environ.get(STRATEGIES_TIMEOUT_ENV, "") or STRATEGIES_TIMEOUT)
+    except ValueError:
+        limit = STRATEGIES_TIMEOUT
+    # An old binary ignores `strategies` and serves until the limit. It must write nothing: the
+    # probe env drops every setting that turns on a database, a record dir or hosted mode, and the
+    # probe runs in a fresh empty directory so a relative default path cannot land in a project.
+    env = {k: v for k, v in os.environ.items() if not _PROBE_DROP.match(k)}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as cwd:
+            run = subprocess.run([binary, "strategies"], capture_output=True, timeout=limit,
+                                 env=env, stdin=subprocess.DEVNULL, cwd=cwd)
+        out, code = run.stdout.decode("utf-8", errors="replace"), run.returncode
+    except subprocess.TimeoutExpired:
+        out, code = "", -1     # run() has already killed it: an old binary that started serving
+    except OSError as exc:
+        raise StrategyTableError(f"cannot run {binary}: {exc}", "proxy_unrunnable") from exc
+    try:
+        table = json.loads(out)
+    except ValueError:
+        table = None
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    ok = (code == 0 and isinstance(table, dict) and isinstance(table.get("default"), str)
+          and isinstance(rows, list) and rows
+          and isinstance(table.get("aliases", {}), dict)
+          and all(isinstance(k, str) and isinstance(v, str) for k, v in table.get("aliases", {}).items())
+          and isinstance(table.get("presets", []), list)
+          and all(isinstance(x, str) for x in table.get("presets", []))
+          and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                  and isinstance(r.get("providers"), list) and isinstance(r.get("spends"), bool)
+                  and isinstance(r.get("desc"), str) for r in rows))
+    if not ok:
+        err = StrategyTableError(f"{binary} cannot list cache strategies; {_update_hint()}")
+        _TABLE_CACHE[key] = err    # an old binary costs its time limit once per process, not per call
+        raise err
+    table.setdefault("aliases", {})
+    table.setdefault("presets", [])
+    _TABLE_CACHE[key] = table
+    return table
+
+
+def offered_strategies(table: dict) -> list[dict]:
+    """The rows the Claude Code plugin may offer: those whose providers include anthropic or any."""
+    return [r for r in table["strategies"] if any(p in PLUGIN_PROVIDERS for p in r["providers"])]
+
+
+def canonical_strategy(name: str, table: dict | None = None) -> str:
+    """The current name for `name`: itself, or what an alias maps to. With no table to read (no
+    binary, or an old one) the name comes back as it was written."""
+    if table is None:
+        try:
+            table = load_strategy_table()
+        except StrategyTableError:
+            return LEGACY_NAME_ALIASES.get(name, name)
+    return table["aliases"].get(name, name)
+
+
+def default_strategy(table: dict | None = None) -> str:
+    """The proxy's default strategy name. Display only: `auto` when no table can be read, which is
+    the default plugin.json declares for the option."""
+    if table is None:
+        try:
+            table = load_strategy_table()
+        except StrategyTableError:
+            return "auto"
+    return table["default"]
 
 
 # The default PRESET, in the one place that decides it. It is `off` - the passthrough pipeline, no
@@ -3661,97 +3789,9 @@ def canonical_strategy(name: str) -> str:
 # check-proxy.sh, and the empty-preset note below). A drift test now fails if they disagree.
 DEFAULT_PRESET = "off"
 
-# `split` was the old name for `none`. It was named after `cachesplit`, which stopped being the
-# default, so the name referred to a component that is not running - the defect shape #263 is about.
-# Renamed outright rather than aliased: the plugin is unreleased, so there is no install in the wild
-# to keep working, and an alias would be a second name for one thing living in the code forever to
-# serve nobody. A file can never carry `strategy=split` either, because `split` WAS the absence of a
-# file - so there is no stored state to migrate.
-# Each entry: the `cache:` keys it sets, and one line of honest description.
-#
 # `none` writes NO FILE AT ALL, deliberately. --config REPLACES --preset rather than layering over
 # it, so the way to express "just the preset, nothing else" is the absence of a config, not a
-# config that says keepalive: false. That also means switching to `none` is a removal, which is
-# why it cannot be expressed as a dict here.
-STRATEGIES: dict[str, dict] = {
-    "none": {
-        "cache": {},
-        "spends": False,
-        "desc": "no cache strategy: the preset runs and nothing else. No pings, no model calls, "
-                "no spend. Written as the ABSENCE of a config file.",
-    },
-    DEFAULT_STRATEGY: {
-        # Explicit rather than relying on the library defaults, for two reasons: the file becomes
-        # self-documenting for anyone who opens it, and a later change to a default in config.go
-        # cannot silently re-tune an already-armed install.
-        "cache": {
-            "keepalive": True,
-            "keepalive_idle_seconds": 240,
-            "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 80000,
-            "keepalive_idle_seconds_1h": 3540,
-            "keepalive_max_pings_1h": 1,
-        },
-        "spends": True,
-        "desc": "idle pings that follow the cache lifetime each session was billed at. 5-minute "
-                "cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. "
-                ">=80k-token prefix, <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody "
-                "is at the keyboard.",
-    },
-    "1-ping": {
-        "cache": {
-            "keepalive": True,
-            "keepalive_idle_seconds": 240,
-            "keepalive_max_pings": 1,
-            "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 80000,
-            "keepalive_idle_seconds_1h": 3540,
-            "keepalive_max_pings_1h": 1,
-        },
-        "spends": True,
-        "desc": "at most 1 idle ping per idle span, whichever cache lifetime the session was "
-                "billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS "
-                "THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
-    },
-    "2-ping": {
-        "cache": {
-            "keepalive": True,
-            "keepalive_idle_seconds": 240,
-            "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 80000,
-            "keepalive_idle_seconds_1h": 3540,
-            "keepalive_max_pings_1h": 2,
-        },
-        "spends": True,
-        "desc": "at most 2 idle pings per idle span, whichever cache lifetime the session was "
-                "billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). "
-                "SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
-    },
-    "1-hour-head": {
-        # Keep the deprecated token key on purpose. The plugin updates through the marketplace and the
-        # proxy binary is released on its own, so this file can run against an OLDER proxy, and that
-        # proxy rejects an unknown key (strict YAML). Every proxy accepts head_ttl_min_tokens; a new
-        # proxy reads 50000 as the 200000-byte gate. Write head_ttl_min_bytes from the plugin only in
-        # a later release, once the oldest proxy in use knows it (#798).
-        "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
-        "spends": False,
-        # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
-        # the difference between this strategy doing something and doing nothing - and because both
-        # measurements quoted as its evidence are BELOW it (36,574 on Haiku, 48,212 on Sonnet). A
-        # strategy that advertises a measurement has to state the threshold that measurement would
-        # not have passed, or "verify with Usage.CacheWrite1h" reads zero for an undisclosed second
-        # reason and the user concludes the tier was refused.
-        "desc": "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on "
-                "requests with a >=50k-token prefix (below that it does nothing at all; the "
-                "size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No "
-                "pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero "
-                "1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection "
-                "is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both "
-                "of those measurements were on prefixes UNDER the 50k gate this ships with.",
-    },
-}
+# config that says keepalive: false. That also means switching to `none` is a removal.
 
 
 def strategy_path(port: str) -> str:
@@ -3775,21 +3815,14 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
-# What the proxy does for a 1-hour cache when the `_1h` keys are absent (config.DefaultKeepAliveIdle1h
-# and DefaultKeepAliveMaxPings1h). A key equal to its default is NOT written, and that is load-bearing:
-# the plugin and the proxy binary ship separately, and an OLD binary's strict loader rejects an
-# unknown key and exits. Omitting the defaults keeps `auto` and `1-ping` loadable by every binary;
-# only a non-default value (`2-ping`) writes a `_1h` key.
-ONE_HOUR_DEFAULTS = {"keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1}
-
-# A file re-rendered for a binary that rejected the `_1h` keys carries this line. `strategy sync` sees
-# it and keeps omitting them, so a later session start does not fail and recover again. A deliberate
-# `strategy set` renders afresh without it, and so does the next one after a proxy update.
-#
-# The marker records the proxy version it was written for. `strategy sync` keeps the keys out only
-# while the installed version is still that one: after a proxy update the keys go back in, and an old
-# binary that is still installed simply rejects them once more and takes the recovery path again.
+# FILES WRITTEN BEFORE THE PROXY OWNED THE TABLE carry the `cache:` keys themselves, and `2-ping`
+# carries `keepalive_max_pings_1h`. A proxy binary older than the 1-hour keys rejects that key (strict
+# YAML) and exits. start-proxy.sh then asks `strategy sync --legacy-binary`, which drops the `_1h`
+# lines from such a file and marks it, so the next start does not fail and recover again. The marker
+# records the proxy version it was written for; after a proxy update the keys are not put back by
+# sync, because sync no longer owns the numbers: `strategy set` writes the new form.
 LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+_ONE_HOUR_KEY = re.compile(r"^  keepalive_(idle_seconds|max_pings)_1h:.*\n?", re.M)
 
 
 def _installed_proxy_version() -> str:
@@ -3801,12 +3834,36 @@ def _installed_proxy_version() -> str:
         return ""
 
 
+def _version_tuple(v: str) -> tuple[int, ...] | None:
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", v.strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _proxy_version_at_least(minimum: str) -> bool:
+    """Does the version install.sh recorded meet `minimum`? False when none is recorded."""
+    have, need = _version_tuple(_installed_proxy_version()), _version_tuple(minimum)
+    return bool(have and need and have >= need)
+
+
 def _legacy_marker() -> str:
     return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
 
 
-def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
-    spec = STRATEGIES[name]
+def _without_one_hour_keys(text: str) -> str:
+    """An old-form file with its `_1h` keys removed and the legacy marker on line 2."""
+    body = _ONE_HOUR_KEY.sub("", "\n".join(l for l in text.split("\n")
+                                           if not l.startswith(LEGACY_BINARY_MARKER_PREFIX)))
+    lines = body.split("\n")
+    lines.insert(1, _legacy_marker())
+    return "\n".join(lines)
+
+
+def _render_strategy(name: str, preset: str) -> str:
+    """The per-port config file. The proxy owns the keys: the file names the strategy and the proxy
+    fills `cache:` from its table (a key the file sets itself would win, and this file sets none).
+
+    Files written before v0.7.1 carry the keys themselves. They keep working: the proxy reads
+    them as they are, and `strategy sync` leaves their keys alone (see cmd_strategy)."""
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
         f"/context-guru:cache-strategy-picker",
@@ -3822,16 +3879,16 @@ def _render_strategy(name: str, preset: str, legacy: bool = False) -> str:
         "# changed the option saw it stick in the config UI and kept running the preset that was",
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
+        "# The proxy fills the cache keys of this strategy (`context-guru-proxy strategies`).",
+        "cache:",
+        f"  strategy: {name}",
     ]
-    cache = {k: v for k, v in spec["cache"].items()
-             if not k.endswith("_1h") or (not legacy and ONE_HOUR_DEFAULTS.get(k) != v)}
-    if legacy:
-        lines.insert(1, _legacy_marker())
-    if cache:
-        lines.append("cache:")
-        for k, v in cache.items():
-            lines.append(f"  {k}: {json.dumps(v)}")
     return "\n".join(lines) + "\n"
+
+
+def _set_preset_line(text: str, preset: str) -> str:
+    """`text` with its top-level `preset:` line set to `preset`; unchanged when it has none."""
+    return re.sub(r"(?m)^preset:.*$", lambda _m: f"preset: {preset}", text, count=1)
 
 
 def valid_base_url(url: str) -> str:
@@ -3923,16 +3980,40 @@ def cmd_check_url(args: argparse.Namespace) -> int:
     return 0
 
 
+def _table_for(args):
+    """(table, 0) or (None, exit code) after printing why the proxy gave no table."""
+    try:
+        return load_strategy_table(getattr(args, "bin", "")), 0
+    except StrategyTableError as exc:
+        emit(result="error", reason=exc.reason, note=str(exc))
+        return None, 3
+
+
+def _names(rows) -> str:
+    return ",".join(r["name"] for r in rows)
+
+
+def _is_new_form(text: str, name: str) -> bool:
+    """Is `text` the file this version renders for `name`, apart from its preset line?"""
+    return _set_preset_line(text, "x") == _render_strategy(name, "x")
+
+
 def cmd_strategy(args) -> int:
     if args.op == "list":
+        table, rc = _table_for(args)
+        if table is None:
+            return rc
+        rows = offered_strategies(table)
         # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
-        # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
-        # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
-        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES),
-             aliases=",".join(f"{old}:{new}" for old, new in STRATEGY_ALIASES.items()))
-        for name, spec in STRATEGIES.items():
-            emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
-                    f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
+        # valid fact keys, so they cannot be parsed back into names - install.sh needs to validate a
+        # `--cache-strategy` value, and this is what it reads. Only strategies the Claude Code plugin
+        # can route are listed: it routes Anthropic only, so `30-min-ping` is not offered.
+        emit(result="ok", default=table["default"], names=_names(rows),
+             aliases=",".join(f"{old}:{new}" for old, new in table["aliases"].items()),
+             presets=",".join(table["presets"]))
+        for r in rows:
+            emit(**{f"strategy_{r['name'].replace('-', '_')}": r["desc"],
+                    f"spends_{r['name'].replace('-', '_')}": "true" if r["spends"] else "false"})
         return 0
 
     port = args.port
@@ -3953,18 +4034,24 @@ def cmd_strategy(args) -> int:
             emit(result="ok", strategy="(foreign)", file=path, port=port,
                  note="a config exists at our path that we did not write; left alone")
             return 0
-        name = canonical_strategy(_strategy_name_in(text))
+        # Read-only, so it asks the proxy when it can and reports the name as recorded when it cannot.
+        try:
+            table = load_strategy_table(getattr(args, "bin", ""))
+        except StrategyTableError:
+            table = None
+        name = canonical_strategy(_strategy_name_in(text), table)
         # A name we do not recognise is reported AS RECORDED, with a note saying so. Two wrong
         # answers were available here and both were worse: mapping it to a current name would claim
         # the file does something it does not, and reporting "(unnamed)" would hide that the file
         # names a strategy at all. `split` is the realistic case - it was removed rather than
         # aliased, so a hand-written file can still carry it - and the file EXISTS and arms pings,
         # which is exactly what the reader needs to know.
-        if name and name not in STRATEGIES:
+        if table is not None and name and name not in [r["name"] for r in table["strategies"]]:
             emit(result="ok", strategy=name, file=path, port=port,
-                 note=f"this config names `{name}`, which is not a strategy this version knows "
-                      f"({','.join(STRATEGIES)}). The file is still what the proxy loads; re-set it "
-                      f"with `strategy set --name <known>` to bring it back under a name")
+                 note=f"this config names `{name}`, which is not a strategy this proxy knows "
+                      f"({_names(offered_strategies(table))}). The file is still "
+                      f"what the proxy loads; re-set it with `strategy set --name <known>` to bring "
+                      f"it back under a name")
             return 0
         emit(result="ok", strategy=name or "(unnamed)", file=path, port=port,
              note="" if name else "written before strategies had names; re-set it to name it")
@@ -3984,6 +4071,15 @@ def cmd_strategy(args) -> int:
         # the preset line in place: the name is the durable choice, the preset is the option, and
         # rendering the pair through the one function that writes these files keeps a synced file
         # byte-identical to a freshly-set one. Anything else is a second encoding of the same rule.
+        #
+        # MIGRATION: none, on purpose. A file armed before the proxy owned the table carries the
+        # `cache:` keys itself. The proxy loads those exactly as they are, and the effective config
+        # is the same as `strategy: <name>` (TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys).
+        # Sync leaves the keys alone and brings only the `preset:` line in line. Re-rendering would
+        # need the proxy's table on every session start, and a proxy older than v0.7.1 answers
+        # `strategies` by starting to serve, so each start would wait for the time limit. A file with
+        # explicit keys also cannot drift when the proxy changes a default. A deliberate
+        # `strategy set` writes the new form.
         if not args.preset.strip():
             emit(result="error", reason="empty_preset",
                  note="sync needs the preset to write; nothing was changed")
@@ -4006,26 +4102,36 @@ def cmd_strategy(args) -> int:
             emit(result="skipped", reason="not_ours", file=path,
                  note="a config we did not write is at this path; its preset is its owner's business")
             return 0
-        name = canonical_strategy(_strategy_name_in(text))
-        if not name:
+        recorded = _strategy_name_in(text)
+        if not recorded:
             emit(result="skipped", reason="unnamed", file=path,
                  note="written before strategies had names, so there is no name to re-render from; "
                       "`strategy set --name <name>` names it")
             return 0
-        if name not in STRATEGIES:
-            # A file naming a strategy this version does not know. Re-rendering it would silently
-            # change what it does; reporting it is the honest move.
-            emit(result="skipped", reason="unknown_strategy", file=path, requested=name,
-                 known=",".join(STRATEGIES))
-            return 0
-        if name == "none":
+        if recorded == "none":
             # A file that names the absence of a file. Contradictory, so do not act on it.
             emit(result="skipped", reason="none_has_no_file", file=path,
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset,
-                                legacy=args.legacy_binary or _legacy_marker() in text.splitlines())
+        # The new form is re-rendered whole (byte-identical to a fresh `set`); the old form keeps its
+        # keys and gets only the preset line.
+        name = LEGACY_NAME_ALIASES.get(recorded, recorded)
+        lines = text.splitlines()
+        stale_marker = (any(l.startswith(LEGACY_BINARY_MARKER_PREFIX) for l in lines)
+                        and _legacy_marker() not in lines)
+        if _is_new_form(text, recorded):
+            want = _render_strategy(name, args.preset)
+        elif stale_marker and _proxy_version_at_least(STRATEGY_MIN_PROXY):
+            # The proxy was updated since the `_1h` keys were dropped, and the recorded version knows
+            # the `strategy` key. Move the file to the new form: the proxy owns the keys again.
+            want = _render_strategy(name, args.preset)
+        else:
+            want = _set_preset_line(text, args.preset)
+            if args.legacy_binary or _legacy_marker() in lines:
+                want = _without_one_hour_keys(want)
+            if name != recorded:     # the marker name only, so the status line shows the current name
+                want = want.replace(f"strategy={recorded} ", f"strategy={name} ", 1)
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -4073,18 +4179,30 @@ def cmd_strategy(args) -> int:
         return 0
 
     # op == "set"
-    name = canonical_strategy(args.name)
-    if name not in STRATEGIES:
-        emit(result="error", reason="unknown_strategy", requested=args.name,
-             known=",".join(STRATEGIES))
-        return 2
+    table = None
+    if args.name == "none":
+        name = "none"       # needs no table: switching pings OFF must work with any proxy binary
+    else:
+        table, rc = _table_for(args)
+        if table is None:
+            return rc
+        name = canonical_strategy(args.name, table)
+        offered = offered_strategies(table)
+        if name not in [r["name"] for r in offered]:
+            if name in [r["name"] for r in table["strategies"]]:
+                emit(result="error", reason="not_offered", requested=args.name, known=_names(offered),
+                     note=f"`{name}` is not for this plugin: Claude Code is routed to Anthropic only")
+            else:
+                emit(result="error", reason="unknown_strategy", requested=args.name,
+                     known=_names(offered))
+            return 2
     # `none` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
     # first refused `strategy set --name split` (with no --preset, which the parser does not require)
     # as `empty_preset`, whose note about silently disabling compaction describes a file that would
     # never be written. It also regressed the old keep-alive-off path, which was `rm -f "$CFG"` and
     # required no preset at all. Ordered before the guard for that reason.
     if name == "none":
-        # Expressed as a removal, per the STRATEGIES comment - but reported as a `set`, because that is
+        # Expressed as a removal, see the note above strategy_path - but reported as a `set`, because that is
         # the operation the caller asked for. See the clear branch.
         return cmd_strategy(argparse.Namespace(op="clear", port=port, as_set=True))
 
@@ -4112,7 +4230,8 @@ def cmd_strategy(args) -> int:
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     _write_atomic(path, _render_strategy(name, args.preset).encode("utf-8"), mode=0o600)
     emit(result="set", strategy=name, file=path, port=port, preset=args.preset,
-         spends="true" if STRATEGIES[name]["spends"] else "false",
+         spends="true" if table and next(r for r in table["strategies"] if r["name"] == name)["spends"]
+         else "false",
          note="takes effect the next time the proxy starts; a proxy already running keeps its "
               "current config until it is stopped and started again")
     return 0
@@ -4186,8 +4305,33 @@ def _gap_facts(saved: str) -> dict:
     return facts
 
 
+def _presets_known_to_proxy(args) -> int:
+    """0 when the proxy registers every preset of the picker list (PRESETS), or when no proxy can be
+    asked. Then it prints a warning and the choice is saved unchecked, as before this check existed.
+    A proxy that answers and lacks a preset is an error. The short list stays here."""
+    try:
+        table = load_strategy_table(getattr(args, "bin", ""))
+    except StrategyTableError as exc:
+        why = str(exc)
+        if why.endswith("; nothing was changed"):
+            why = why[: -len("; nothing was changed")]
+        emit(warning="preset_unchecked",
+             warning_note=f"the preset name is not checked against the proxy: {why}")
+        return 0
+    missing = [n for n in PRESETS if n not in table["presets"]]
+    if missing:
+        emit(result="error", reason="preset_unknown_to_proxy", missing=",".join(missing),
+             note=f"this proxy does not register the preset(s) {', '.join(missing)}; "
+                  f"{_update_hint()}")
+        return 3
+    return 0
+
+
 def cmd_preset(args: argparse.Namespace) -> int:
     if args.op == "list":
+        rc = _presets_known_to_proxy(args)
+        if rc:
+            return rc
         emit(result="ok", default=DEFAULT_PRESET, names=",".join(PRESETS))
         for name, desc in PRESETS.items():
             emit(**{f"preset_{name}": desc})
@@ -4211,6 +4355,9 @@ def cmd_preset(args: argparse.Namespace) -> int:
         emit(result="error", reason="unknown_preset", requested=name,
              known=",".join(PRESETS))
         return 2
+    rc = _presets_known_to_proxy(args)
+    if rc:
+        return rc
 
     target = None
     for path in _option_file_candidates(args.plugin):
@@ -4288,6 +4435,9 @@ def _preset_restart(args: argparse.Namespace) -> int:
     if name not in PRESETS:
         emit(result="error", reason="unknown_preset", requested=name, known=",".join(PRESETS))
         return 2
+    rc = _presets_known_to_proxy(args)
+    if rc:
+        return rc
     port, why = resolve_routed_port(plugin=args.plugin)
     if not port:
         emit(result="error", reason="not_routed", why=why)
@@ -4634,7 +4784,7 @@ def main() -> int:
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
     st.add_argument("--name", default="",
-                    help="strategy name for `set`; one of " + ", ".join(STRATEGIES))
+                    help="strategy name for `set`; `strategy list` prints the names the proxy offers")
     st.add_argument("--port", default="",
                     help="the CONFIGURED port. Required for show/set/clear: the config file is "
                          "named after it, so a defaulted port writes a file nothing reads.")
@@ -4643,11 +4793,16 @@ def main() -> int:
                          "--config REPLACES --preset rather than layering over it.")
 
     st.add_argument("--legacy-binary", action="store_true",
-                    help="`sync` only: omit the `_1h` keys, for a proxy binary that rejected them")
+                    help="`sync` only: drop the `_1h` keys from a file that carries its own keys, "
+                         "for a proxy binary that rejected them")
+    st.add_argument("--bin", default="",
+                    help="the proxy binary that prints the strategy table; default: CONTEXT_GURU_BIN, "
+                         "then context-guru-proxy on PATH, then ~/.local/bin")
 
     pr = sub.add_parser("preset")
     pr.add_argument("op", choices=("list", "show", "set", "restart"))
     pr.add_argument("--plugin", default="context-guru@context-guru")
+    pr.add_argument("--bin", default="", help="the proxy binary that prints its preset list")
     pr.add_argument("--name", default="",
                     help="preset name for `set` and `restart`; one of " + ", ".join(PRESETS))
     pr.add_argument("--user-scope", action="store_true",
@@ -4723,7 +4878,7 @@ def main() -> int:
             ap.error("strategy " + args.op + " needs --port: the config file is named after the "
                      "port, so a defaulted one writes a file nothing ever reads")
         if args.op == "set" and not args.name:
-            ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
+            ap.error("strategy set needs --name; `strategy list` prints the names")
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,

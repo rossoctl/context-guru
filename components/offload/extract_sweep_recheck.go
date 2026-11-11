@@ -53,6 +53,9 @@ type recheckDropped struct {
 type recheckResult struct {
 	Valid   []heldOutput
 	Dropped []recheckDropped
+	// proposed is how many drops the held answer carried INTO the recheck (the verdicts that said drop). The
+	// warm gate reads it to tell "the judge proposed nothing" from "the recheck threw everything out".
+	proposed int
 	// novel holds, per tool id, the identifiers each valid output introduced. The cold apply keeps
 	// their hashes to see a later reference (the referenced_later quality signal).
 	novel map[string][]string
@@ -100,6 +103,7 @@ func recheckHeld(c *components.Ctx, req *bschemas.BifrostChatRequest, h heldAnsw
 			drops = append(drops, o)
 		}
 	}
+	res.proposed = len(drops)
 	if len(drops) == 0 {
 		return res
 	}

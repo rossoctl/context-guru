@@ -80,7 +80,7 @@ func TestASubstituteCallTouchesTheAliasTheHostHandedIn(t *testing.T) {
 	k.mu.Unlock()
 	j := pingJob{e: e, tenant: e.tenant, session: e.session, key: e.key, st: st, touchAlias: "arriving-alias",
 		raw: []byte(`{"messages":[{"role":"user","content":"x"}]}`)}
-	k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, clock.now(), 0)
+	k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, clock.now(), 0, nil)
 	if got := seenAt(t, st, "arriving-alias"); got != clock.now().UnixMilli() {
 		t.Fatalf("clock = %d, want %d", got, clock.now().UnixMilli())
 	}

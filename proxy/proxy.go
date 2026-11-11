@@ -379,6 +379,8 @@ type Handler struct {
 	// never on the keep-alive ping path, so a ping can never make itself "current".
 	// Empty until the first real request arrives.
 	lastSession string
+	// capCache holds the cap's correction per /stats scope for capCacheTTL (savings.go).
+	capCache capCorrectionCache
 
 	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
 	defer_ deferHost
@@ -1607,8 +1609,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			//
 			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
 			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
-			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
+			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
 			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
 			//   - Any dialect: if the model calls expand on every round, the client gets the raw
 			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
@@ -1658,11 +1660,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// control arm of every published comparison in this repo — and including presets
 				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
 				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Responses has one; Chat Completions does not.
+				// matching wire adapter. Anthropic, Responses and Chat Completions have one
+				// (chatPrefixAsker, #1030); every other wire does not.
 				//
 				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
 				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
+				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
 				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
@@ -1673,6 +1676,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// Deferral adds its names list to the messages after the pipeline reported its
 				// operations. Report it as an operation of its own, after theirs (#908).
 				if di != nil && !bytes.Equal(preDefer, body) {
+					if cp != nil {
+						cp.accPreDefer = preDefer
+					}
 					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], messageOps("tooldefer", preDefer, body)...)
 				}
 			}
@@ -2027,6 +2033,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
 		// majority of sessions that never deferred anything.
 		offload.ResolveDeferredCacheAwareSummary(session, threadID)
+		// The warm sweep's question (#491), if the trigger registered one: it runs now, after this
+		// request was forwarded and answered, on its own goroutine. A failed forward drops it.
+		offload.ResolveWarmQuestion(session, threadID, status/100 == 2, int(usage.CacheRead))
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which
@@ -2627,6 +2636,22 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
+// table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
+// and /compact) go through it, as they do for the window.
+func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
+	model := gjson.GetBytes(body, "model").String()
+	stated := 0
+	if cp, ok := h.opts.Windows.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	}); ok {
+		if n, found := cp.CompactionPoint(ctx, model); found {
+			stated = n
+		}
+	}
+	return compactionpoint.Resolve(model, stated, window)
 }
 
 // resolveWindow resolves this request's model context window and whether that figure is

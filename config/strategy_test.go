@@ -3,77 +3,45 @@ package config
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// pyDump reads STRATEGIES, DEFAULT_STRATEGY and STRATEGY_ALIASES from the plugin's settings.py and
-// prints them as JSON. It evaluates only those assignments, with ast, so the file's other code
-// never runs. The test fails when python3 is missing: a skip would prove nothing.
-const pyDump = `
-import ast, json, sys
-src = open(sys.argv[1]).read()
-ns = {}
-for n in ast.parse(src).body:
-    t = n.targets[0] if isinstance(n, ast.Assign) else getattr(n, "target", None)
-    if getattr(t, "id", "") in ("DEFAULT_STRATEGY", "STRATEGY_ALIASES", "STRATEGIES"):
-        exec(compile(ast.Module([n], []), "x", "exec"), ns)
-print(json.dumps({"default": ns["DEFAULT_STRATEGY"], "aliases": ns["STRATEGY_ALIASES"],
-                  "strategies": [dict(name=k, **v) for k, v in ns["STRATEGIES"].items()]}))
-`
-
-// TestStrategyTableMatchesPlugin pins the Go table to settings.py, name by name and key by key.
-// It stays until the Claude Code plugin reads the table from the proxy.
-func TestStrategyTableMatchesPlugin(t *testing.T) {
-	out, err := exec.Command("python3", "-I", "-c", pyDump, "../context-guru-plugin/scripts/settings.py").Output()
-	if err != nil {
-		t.Fatalf("python3 could not read settings.py: %v", err)
-	}
-	var py struct {
-		Default    string            `json:"default"`
-		Aliases    map[string]string `json:"aliases"`
-		Strategies []struct {
-			Name   string         `json:"name"`
-			Spends bool           `json:"spends"`
-			Desc   string         `json:"desc"`
-			Cache  map[string]any `json:"cache"`
-		} `json:"strategies"`
-	}
-	if err := json.Unmarshal(out, &py); err != nil {
-		t.Fatal(err)
-	}
-	if py.Default != DefaultStrategy {
-		t.Errorf("default: py %q, go %q", py.Default, DefaultStrategy)
-	}
-	if !reflect.DeepEqual(py.Aliases, StrategyAliases) {
-		t.Errorf("aliases: py %v, go %v", py.Aliases, StrategyAliases)
-	}
-	// The Python table has the Anthropic and "any" rows. The Go table adds the Codex rows after
-	// them, checked in TestStrategyTableMatchesCodexPlugin.
-	if len(py.Strategies)+1 != len(Strategies) {
-		t.Fatalf("py has %d strategies, go has %d (expect py + the Codex row)", len(py.Strategies), len(Strategies))
-	}
-	for i, p := range py.Strategies {
-		g := Strategies[i]
-		if g.Name != p.Name || g.Spends != p.Spends || g.Desc != p.Desc {
-			t.Errorf("row %d (%s): name/spends/desc differ from py", i, p.Name)
-		}
-		got := map[string]any{}
-		for _, k := range g.Cache {
-			got[k.Key] = k.Value
-		}
-		if len(got) != len(p.Cache) {
-			t.Errorf("%s: py has %d keys, go has %d", p.Name, len(p.Cache), len(got))
-		}
-		for k, pv := range p.Cache {
-			gb, _ := json.Marshal(got[k])
-			pb, _ := json.Marshal(pv)
-			if string(gb) != string(pb) {
-				t.Errorf("%s.%s: py %s, go %s", p.Name, k, pb, gb)
+// TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys. The Claude Code plugin used to write the
+// `cache:` keys of a strategy into the per-port file. It now writes `cache.strategy: <name>`. The
+// files in testdata/cc-old-strategy-files are what the old plugin wrote (rendered by the plugin at
+// the commit before the change, with preset off). For each one, the Resolved() cache block that the
+// proxy runs must be the same for the old file and for the new form. Old files stay valid for users
+// who armed a strategy before this change.
+func TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys(t *testing.T) {
+	for _, name := range []string{"auto", "1-ping", "2-ping", "1-hour-head"} {
+		t.Run(name, func(t *testing.T) {
+			old, err := os.ReadFile("testdata/cc-old-strategy-files/" + name + ".yaml")
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			if !strings.Contains(string(old), "strategy="+name) || strings.Contains(string(old), "strategy:") {
+				t.Fatalf("%s: the fixture is not an old-form file", name)
+			}
+			co, err := LoadBytes(old)
+			if err != nil {
+				t.Fatalf("old file: %v", err)
+			}
+			cn, err := LoadBytes([]byte("preset: off\ncache:\n  strategy: " + name + "\n"))
+			if err != nil {
+				t.Fatalf("new form: %v", err)
+			}
+			// Resolved() is what the proxy runs on. Strategy is only the name it was filled from.
+			ro, rn := co.Cache.Resolved(), cn.Cache.Resolved()
+			rn.Strategy = ""
+			if !reflect.DeepEqual(ro, rn) {
+				t.Errorf("%s: effective config differs\n old: %+v\n new: %+v", name, ro, rn)
+			}
+			if co.Preset != cn.Preset {
+				t.Errorf("%s: preset old %q, new %q", name, co.Preset, cn.Preset)
+			}
+		})
 	}
 }
 
@@ -161,56 +129,6 @@ func TestStrategiesJSON(t *testing.T) {
 	}
 }
 
-// The Codex plugin keeps its names in Python code, not in a dict. This test reads the source text:
-// the names, the config it writes for 30-min-ping, the preset list, and the picker wording.
-func TestStrategyTableMatchesCodexPlugin(t *testing.T) {
-	read := func(p string) string {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
-	}
-	dir := "../codex-marketplace/plugins/context-guru/"
-	py := read(dir + "scripts/codex_plugin.py")
-	skill := strings.Join(strings.Fields(read(dir+"skills/cache-strategy-picker/SKILL.md")), " ")
-
-	if !strings.Contains(py, `choices=("none", "30-min-ping")`) {
-		t.Error("codex_plugin.py strategy choices changed")
-	}
-	// 30-min-ping writes "cache:\n  keepalive: true\n" and nothing else under cache.
-	if !strings.Contains(py, `"cache:\n"`+"\n"+`        "  keepalive: true\n"`) {
-		t.Error("codex_plugin.py no longer writes exactly `cache: keepalive: true` for 30-min-ping")
-	}
-	s, ok := LookupStrategy("30-min-ping")
-	if !ok || len(s.Cache) != 1 || s.Cache[0].Key != "keepalive" || s.Cache[0].Value != true ||
-		!reflect.DeepEqual(s.Providers, []string{"openai"}) {
-		t.Fatalf("30-min-ping row wrong: %+v", s)
-	}
-	// The desc starts with the picker wording and adds one sentence about Anthropic. Only the
-	// picker part is compared with SKILL.md.
-	picker, extra, _ := strings.Cut(s.Desc, ". ")
-	if !strings.Contains(skill, picker) {
-		t.Errorf("picker SKILL.md does not contain the desc start %q", picker)
-	}
-	if !strings.Contains(extra, "Anthropic keep-alive") {
-		t.Errorf("30-min-ping desc must say that keepalive: true also turns on the Anthropic keep-alive: %q", extra)
-	}
-	// The preset list the Codex plugin hard-codes must be known to the proxy.
-	known := map[string]bool{}
-	for _, n := range PresetNames() {
-		known[n] = true
-	}
-	for _, n := range []string{"off", "conservative", "medium", "high", "xhigh", "ultrahigh"} {
-		if !known[n] {
-			t.Errorf("preset %q is in the plugins but not registered in the proxy", n)
-		}
-		if !strings.Contains(py, `"`+n+`"`) {
-			t.Errorf("codex_plugin.py no longer lists preset %q", n)
-		}
-	}
-}
-
 func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	b, _ := StrategiesJSON()
 	var v struct {
@@ -230,5 +148,45 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 		if len(s.Providers) != 1 {
 			t.Errorf("%s: providers %v", s.Name, s.Providers)
 		}
+	}
+}
+
+// TestStrategiesPinTheGeneralFloorToTheDefault: the table writes literals on purpose, but its prefix
+// floor is the general one. A change of DefaultKeepAliveMinPrefix has to change the table with it, or
+// strategy users keep the old floor (an explicit value beats the default). The table does not write the
+// tool-wait floor, so that default reaches every strategy file, old or new.
+func TestStrategiesPinTheGeneralFloorToTheDefault(t *testing.T) {
+	seen := 0
+	for _, s := range Strategies {
+		for _, k := range s.Cache {
+			switch k.Key {
+			case "keepalive_min_prefix_tokens":
+				seen++
+				if k.Value != DefaultKeepAliveMinPrefix {
+					t.Errorf("%s: keepalive_min_prefix_tokens = %v, want the default %d", s.Name, k.Value, DefaultKeepAliveMinPrefix)
+				}
+			case "keepalive_tool_wait_min_prefix_tokens":
+				t.Errorf("%s writes keepalive_tool_wait_min_prefix_tokens: a strategy file would pin the tool-wait floor", s.Name)
+			}
+		}
+	}
+	if seen < 3 {
+		t.Errorf("found the prefix floor in %d strategies, want at least 3 (auto, 1-ping, 2-ping)", seen)
+	}
+}
+
+func TestToolWaitMinPrefixDefaultAndOverride(t *testing.T) {
+	if got := (CacheConfig{}).Resolved().KeepAliveToolWaitMinPrefixTokens; got != 20000 {
+		t.Errorf("default tool-wait floor = %d, want 20000", got)
+	}
+	c, err := LoadBytes([]byte("cache:\n  strategy: auto\n  keepalive_tool_wait_min_prefix_tokens: 30000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens != 30000 || c.Cache.KeepAliveMinPrefixTokens != 80000 {
+		t.Errorf("floors = %d / %d", c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens, c.Cache.KeepAliveMinPrefixTokens)
+	}
+	if _, err := LoadBytes([]byte("cache:\n  keepalive_tool_wait_min_prefix_tokens: -1\n")); err == nil {
+		t.Error("a negative tool-wait floor was accepted")
 	}
 }

@@ -17,9 +17,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -32,10 +52,31 @@
    "session_id": "t2:sess-59",
    "start": 1768242620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 398777,
    "tokens_before": 409013,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 444
+   "upstream_ms_avg": 444,
+   "used_tokens": {
+    "cache_read": 210498,
+    "cache_write_1h": 0,
+    "cache_write_5m": 198515,
+    "input": 440
+   }
   },
   {
    "agents": "claude-code",
@@ -54,9 +95,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -69,10 +130,31 @@
    "session_id": "t1:sess-58",
    "start": 1768231220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 348786,
    "tokens_before": 356460,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 434.5
+   "upstream_ms_avg": 434.5,
+   "used_tokens": {
+    "cache_read": 195276,
+    "cache_write_1h": 0,
+    "cache_write_5m": 161184,
+    "input": 400
+   }
   },
   {
    "agents": "bob",
@@ -91,9 +173,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -106,10 +208,31 @@
    "session_id": "t2:sess-57",
    "start": 1768219820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 299310,
    "tokens_before": 306981,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 425
+   "upstream_ms_avg": 425,
+   "used_tokens": {
+    "cache_read": 231563,
+    "cache_write_1h": 0,
+    "cache_write_5m": 75418,
+    "input": 360
+   }
   },
   {
    "agents": "claude-code",
@@ -128,9 +251,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 43072,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -143,10 +286,31 @@
    "session_id": "t1:sess-56",
    "start": 1768208420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 252908,
    "tokens_before": 260576,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 415.5
+   "upstream_ms_avg": 415.5,
+   "used_tokens": {
+    "cache_read": 222304,
+    "cache_write_1h": 0,
+    "cache_write_5m": 38272,
+    "input": 320
+   }
   },
   {
    "agents": "bob",
@@ -165,9 +329,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -180,10 +364,31 @@
    "session_id": "t2:sess-55",
    "start": 1768201220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 212135,
    "tokens_before": 217245,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 406
+   "upstream_ms_avg": 406,
+   "used_tokens": {
+    "cache_read": 179610,
+    "cache_write_1h": 0,
+    "cache_write_5m": 37635,
+    "input": 280
+   }
   },
   {
    "agents": "claude-code",
@@ -202,9 +407,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -217,10 +442,31 @@
    "session_id": "t1:sess-54",
    "start": 1768189820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 171880,
    "tokens_before": 176988,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 396.5
+   "upstream_ms_avg": 396.5,
+   "used_tokens": {
+    "cache_read": 57796,
+    "cache_write_1h": 0,
+    "cache_write_5m": 119192,
+    "input": 240
+   }
   },
   {
    "agents": "bob",
@@ -239,9 +485,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -254,10 +520,31 @@
    "session_id": "t2:sess-53",
    "start": 1768178420000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 567689,
    "tokens_before": 580454,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 463.5
+   "upstream_ms_avg": 463.5,
+   "used_tokens": {
+    "cache_read": 326888,
+    "cache_write_1h": 0,
+    "cache_write_5m": 253566,
+    "input": 560
+   }
   },
   {
    "agents": "claude-code",
@@ -276,9 +563,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 57924,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -291,10 +598,31 @@
    "session_id": "t1:sess-52",
    "start": 1768167020000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 508804,
    "tokens_before": 519012,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 454
+   "upstream_ms_avg": 454,
+   "used_tokens": {
+    "cache_read": 302592,
+    "cache_write_1h": 0,
+    "cache_write_5m": 216420,
+    "input": 520
+   }
   },
   {
    "agents": "bob",
@@ -313,9 +641,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -328,10 +676,31 @@
    "session_id": "t2:sess-51",
    "start": 1768155620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 450440,
    "tokens_before": 460644,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 444.5
+   "upstream_ms_avg": 444.5,
+   "used_tokens": {
+    "cache_read": 302296,
+    "cache_write_1h": 0,
+    "cache_write_5m": 158348,
+    "input": 480
+   }
   },
   {
    "agents": "claude-code",
@@ -350,9 +719,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -365,10 +754,31 @@
    "session_id": "t1:sess-50",
    "start": 1768144220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 395150,
    "tokens_before": 405350,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 435
+   "upstream_ms_avg": 435,
+   "used_tokens": {
+    "cache_read": 238750,
+    "cache_write_1h": 0,
+    "cache_write_5m": 166600,
+    "input": 440
+   }
   },
   {
    "agents": "bob",
@@ -387,9 +797,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -402,10 +832,31 @@
    "session_id": "t2:sess-49",
    "start": 1768132820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 345483,
    "tokens_before": 353130,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 425.5
+   "upstream_ms_avg": 425.5,
+   "used_tokens": {
+    "cache_read": 199278,
+    "cache_write_1h": 0,
+    "cache_write_5m": 153852,
+    "input": 400
+   }
   },
   {
    "agents": "claude-code",
@@ -424,9 +875,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 45776,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -439,10 +910,31 @@
    "session_id": "t1:sess-48",
    "start": 1768125620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 296340,
    "tokens_before": 303984,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 416
+   "upstream_ms_avg": 416,
+   "used_tokens": {
+    "cache_read": 156880,
+    "cache_write_1h": 0,
+    "cache_write_5m": 147104,
+    "input": 360
+   }
   },
   {
    "agents": "bob",
@@ -461,9 +953,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -476,10 +988,31 @@
    "session_id": "t2:sess-47",
    "start": 1768114220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 250271,
    "tokens_before": 257912,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 406.5
+   "upstream_ms_avg": 406.5,
+   "used_tokens": {
+    "cache_read": 147695,
+    "cache_write_1h": 0,
+    "cache_write_5m": 110217,
+    "input": 320
+   }
   },
   {
    "agents": "claude-code",
@@ -498,9 +1031,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -513,10 +1066,31 @@
    "session_id": "t1:sess-46",
    "start": 1768102820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 209822,
    "tokens_before": 214914,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 397
+   "upstream_ms_avg": 397,
+   "used_tokens": {
+    "cache_read": 141510,
+    "cache_write_1h": 0,
+    "cache_write_5m": 73404,
+    "input": 280
+   }
   },
   {
    "agents": "bob",
@@ -535,9 +1109,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -550,10 +1144,31 @@
    "session_id": "t2:sess-45",
    "start": 1768091420000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 169900,
    "tokens_before": 174990,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 387.5
+   "upstream_ms_avg": 387.5,
+   "used_tokens": {
+    "cache_read": 138325,
+    "cache_write_1h": 0,
+    "cache_write_5m": 36665,
+    "input": 240
+   }
   },
   {
    "agents": "claude-code",
@@ -572,9 +1187,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 60628,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -587,10 +1222,31 @@
    "session_id": "t1:sess-44",
    "start": 1768080020000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 563072,
    "tokens_before": 575792,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 454.5
+   "upstream_ms_avg": 454.5,
+   "used_tokens": {
+    "cache_read": 486336,
+    "cache_write_1h": 0,
+    "cache_write_5m": 89456,
+    "input": 560
+   }
   },
   {
    "agents": "bob",
@@ -609,9 +1265,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -624,10 +1300,31 @@
    "session_id": "t2:sess-43",
    "start": 1768068620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 504511,
    "tokens_before": 514683,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 445
+   "upstream_ms_avg": 445,
+   "used_tokens": {
+    "cache_read": 287937,
+    "cache_write_1h": 0,
+    "cache_write_5m": 226746,
+    "input": 520
+   }
   },
   {
    "agents": "claude-code",
@@ -646,9 +1343,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -661,10 +1378,31 @@
    "session_id": "t1:sess-42",
    "start": 1768057220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 446480,
    "tokens_before": 456648,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 435.5
+   "upstream_ms_avg": 435.5,
+   "used_tokens": {
+    "cache_read": 263678,
+    "cache_write_1h": 0,
+    "cache_write_5m": 192970,
+    "input": 480
+   }
   },
   {
    "agents": "bob",
@@ -683,9 +1421,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -698,10 +1456,31 @@
    "session_id": "t2:sess-41",
    "start": 1768050020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 391523,
    "tokens_before": 401687,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 426
+   "upstream_ms_avg": 426,
+   "used_tokens": {
+    "cache_read": 245419,
+    "cache_write_1h": 0,
+    "cache_write_5m": 156268,
+    "input": 440
+   }
   },
   {
    "agents": "claude-code",
@@ -720,9 +1499,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 48480,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -735,10 +1534,31 @@
    "session_id": "t1:sess-40",
    "start": 1768038620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 342180,
    "tokens_before": 349800,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 416.5
+   "upstream_ms_avg": 416.5,
+   "used_tokens": {
+    "cache_read": 194280,
+    "cache_write_1h": 0,
+    "cache_write_5m": 155520,
+    "input": 400
+   }
   },
   {
    "agents": "bob",
@@ -757,9 +1577,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -772,10 +1612,31 @@
    "session_id": "t2:sess-39",
    "start": 1768027220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 293370,
    "tokens_before": 300987,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 407
+   "upstream_ms_avg": 407,
+   "used_tokens": {
+    "cache_read": 185058,
+    "cache_write_1h": 0,
+    "cache_write_5m": 115929,
+    "input": 360
+   }
   },
   {
    "agents": "claude-code",
@@ -794,9 +1655,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -809,10 +1690,31 @@
    "session_id": "t1:sess-38",
    "start": 1768015820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 247634,
    "tokens_before": 255248,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 397.5
+   "upstream_ms_avg": 397.5,
+   "used_tokens": {
+    "cache_read": 152030,
+    "cache_write_1h": 0,
+    "cache_write_5m": 103218,
+    "input": 320
+   }
   },
   {
    "agents": "bob",
@@ -831,9 +1733,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -846,10 +1768,31 @@
    "session_id": "t2:sess-37",
    "start": 1768004420000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 207509,
    "tokens_before": 212583,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 388
+   "upstream_ms_avg": 388,
+   "used_tokens": {
+    "cache_read": 113076,
+    "cache_write_1h": 0,
+    "cache_write_5m": 99507,
+    "input": 280
+   }
   },
   {
    "agents": "claude-code",
@@ -868,9 +1811,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 36332,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -883,10 +1846,31 @@
    "session_id": "t1:sess-36",
    "start": 1767993020000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 167920,
    "tokens_before": 172992,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 378.5
+   "upstream_ms_avg": 378.5,
+   "used_tokens": {
+    "cache_read": 106928,
+    "cache_write_1h": 0,
+    "cache_write_5m": 66064,
+    "input": 240
+   }
   },
   {
    "agents": "bob",
@@ -905,9 +1889,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -920,10 +1924,31 @@
    "session_id": "t2:sess-35",
    "start": 1767981620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 558455,
    "tokens_before": 571130,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 445.5
+   "upstream_ms_avg": 445.5,
+   "used_tokens": {
+    "cache_read": 395950,
+    "cache_write_1h": 0,
+    "cache_write_5m": 175180,
+    "input": 560
+   }
   },
   {
    "agents": "claude-code",
@@ -942,9 +1967,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -957,10 +2002,31 @@
    "session_id": "t1:sess-34",
    "start": 1767974420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 500218,
    "tokens_before": 510354,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 436
+   "upstream_ms_avg": 436,
+   "used_tokens": {
+    "cache_read": 326922,
+    "cache_write_1h": 0,
+    "cache_write_5m": 183432,
+    "input": 520
+   }
   },
   {
    "agents": "bob",
@@ -979,9 +2045,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -994,10 +2080,31 @@
    "session_id": "t2:sess-33",
    "start": 1767963020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 442520,
    "tokens_before": 452652,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 426.5
+   "upstream_ms_avg": 426.5,
+   "used_tokens": {
+    "cache_read": 365210,
+    "cache_write_1h": 0,
+    "cache_write_5m": 87442,
+    "input": 480
+   }
   },
   {
    "agents": "claude-code",
@@ -1016,9 +2123,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 51184,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -1031,10 +2158,31 @@
    "session_id": "t1:sess-32",
    "start": 1767951620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 387896,
    "tokens_before": 398024,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 417
+   "upstream_ms_avg": 417,
+   "used_tokens": {
+    "cache_read": 231504,
+    "cache_write_1h": 0,
+    "cache_write_5m": 166520,
+    "input": 440
+   }
   },
   {
    "agents": "bob",
@@ -1053,9 +2201,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -1068,10 +2236,31 @@
    "session_id": "t2:sess-31",
    "start": 1767940220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 338877,
    "tokens_before": 346470,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 407.5
+   "upstream_ms_avg": 407.5,
+   "used_tokens": {
+    "cache_read": 156735,
+    "cache_write_1h": 0,
+    "cache_write_5m": 189735,
+    "input": 400
+   }
   },
   {
    "agents": "claude-code",
@@ -1090,9 +2279,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -1105,10 +2314,31 @@
    "session_id": "t1:sess-30",
    "start": 1767928820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 290400,
    "tokens_before": 297990,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 398
+   "upstream_ms_avg": 398,
+   "used_tokens": {
+    "cache_read": 192060,
+    "cache_write_1h": 0,
+    "cache_write_5m": 105930,
+    "input": 360
+   }
   },
   {
    "agents": "bob",
@@ -1127,9 +2357,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -1142,10 +2392,31 @@
    "session_id": "t2:sess-29",
    "start": 1767917420000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 244997,
    "tokens_before": 252584,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 388.5
+   "upstream_ms_avg": 388.5,
+   "used_tokens": {
+    "cache_read": 147365,
+    "cache_write_1h": 0,
+    "cache_write_5m": 105219,
+    "input": 320
+   }
   },
   {
    "agents": "claude-code",
@@ -1164,9 +2435,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 39036,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -1179,10 +2470,31 @@
    "session_id": "t1:sess-28",
    "start": 1767906020000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 205196,
    "tokens_before": 210252,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 379
+   "upstream_ms_avg": 379,
+   "used_tokens": {
+    "cache_read": 138180,
+    "cache_write_1h": 0,
+    "cache_write_5m": 72072,
+    "input": 280
+   }
   },
   {
    "agents": "bob",
@@ -1201,9 +2513,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -1216,10 +2548,31 @@
    "session_id": "t2:sess-27",
    "start": 1767898820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 165940,
    "tokens_before": 170994,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 369.5
+   "upstream_ms_avg": 369.5,
+   "used_tokens": {
+    "cache_read": 108596,
+    "cache_write_1h": 0,
+    "cache_write_5m": 62398,
+    "input": 240
+   }
   },
   {
    "agents": "claude-code",
@@ -1238,9 +2591,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -1253,10 +2626,31 @@
    "session_id": "t1:sess-26",
    "start": 1767887420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 553838,
    "tokens_before": 566468,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 436.5
+   "upstream_ms_avg": 436.5,
+   "used_tokens": {
+    "cache_read": 312896,
+    "cache_write_1h": 0,
+    "cache_write_5m": 253572,
+    "input": 560
+   }
   },
   {
    "agents": "bob",
@@ -1275,9 +2669,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -1290,10 +2704,31 @@
    "session_id": "t2:sess-25",
    "start": 1767876020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 495925,
    "tokens_before": 506025,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 427
+   "upstream_ms_avg": 427,
+   "used_tokens": {
+    "cache_read": 297600,
+    "cache_write_1h": 0,
+    "cache_write_5m": 208425,
+    "input": 520
+   }
   },
   {
    "agents": "claude-code",
@@ -1312,9 +2747,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 53888,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -1327,10 +2782,31 @@
    "session_id": "t1:sess-24",
    "start": 1767864620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 438560,
    "tokens_before": 448656,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 417.5
+   "upstream_ms_avg": 417.5,
+   "used_tokens": {
+    "cache_read": 276304,
+    "cache_write_1h": 0,
+    "cache_write_5m": 172352,
+    "input": 480
+   }
   },
   {
    "agents": "bob",
@@ -1349,9 +2825,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -1364,10 +2860,31 @@
    "session_id": "t2:sess-23",
    "start": 1767853220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 384269,
    "tokens_before": 394361,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 408
+   "upstream_ms_avg": 408,
+   "used_tokens": {
+    "cache_read": 213757,
+    "cache_write_1h": 0,
+    "cache_write_5m": 180604,
+    "input": 440
+   }
   },
   {
    "agents": "claude-code",
@@ -1386,9 +2903,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -1401,10 +2938,31 @@
    "session_id": "t1:sess-22",
    "start": 1767841820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 335574,
    "tokens_before": 343140,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 398.5
+   "upstream_ms_avg": 398.5,
+   "used_tokens": {
+    "cache_read": 257712,
+    "cache_write_1h": 0,
+    "cache_write_5m": 85428,
+    "input": 400
+   }
   },
   {
    "agents": "bob",
@@ -1423,9 +2981,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -1438,10 +3016,31 @@
    "session_id": "t2:sess-21",
    "start": 1767830420000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 287430,
    "tokens_before": 294993,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 389
+   "upstream_ms_avg": 389,
+   "used_tokens": {
+    "cache_read": 178885,
+    "cache_write_1h": 0,
+    "cache_write_5m": 116108,
+    "input": 360
+   }
   },
   {
    "agents": "claude-code",
@@ -1460,9 +3059,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 41740,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -1475,10 +3094,31 @@
    "session_id": "t1:sess-20",
    "start": 1767823220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 242360,
    "tokens_before": 249920,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 379.5
+   "upstream_ms_avg": 379.5,
+   "used_tokens": {
+    "cache_read": 110560,
+    "cache_write_1h": 0,
+    "cache_write_5m": 139360,
+    "input": 320
+   }
   },
   {
    "agents": "bob",
@@ -1497,9 +3137,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -1512,10 +3172,31 @@
    "session_id": "t2:sess-19",
    "start": 1767811820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 202883,
    "tokens_before": 207921,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 370
+   "upstream_ms_avg": 370,
+   "used_tokens": {
+    "cache_read": 148515,
+    "cache_write_1h": 0,
+    "cache_write_5m": 59406,
+    "input": 280
+   }
   },
   {
    "agents": "claude-code",
@@ -1534,9 +3215,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -1549,10 +3250,31 @@
    "session_id": "t1:sess-18",
    "start": 1767800420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 163960,
    "tokens_before": 168996,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 360.5
+   "upstream_ms_avg": 360.5,
+   "used_tokens": {
+    "cache_read": 104264,
+    "cache_write_1h": 0,
+    "cache_write_5m": 64732,
+    "input": 240
+   }
   },
   {
    "agents": "bob",
@@ -1571,9 +3293,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -1586,10 +3328,31 @@
    "session_id": "t2:sess-17",
    "start": 1767789020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 549221,
    "tokens_before": 561806,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 427.5
+   "upstream_ms_avg": 427.5,
+   "used_tokens": {
+    "cache_read": 398290,
+    "cache_write_1h": 0,
+    "cache_write_5m": 163516,
+    "input": 560
+   }
   },
   {
    "agents": "claude-code",
@@ -1608,9 +3371,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 56592,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -1623,10 +3406,31 @@
    "session_id": "t1:sess-16",
    "start": 1767777620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 491632,
    "tokens_before": 501696,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 418
+   "upstream_ms_avg": 418,
+   "used_tokens": {
+    "cache_read": 350928,
+    "cache_write_1h": 0,
+    "cache_write_5m": 150768,
+    "input": 520
+   }
   },
   {
    "agents": "bob",
@@ -1645,9 +3449,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -1660,10 +3484,31 @@
    "session_id": "t2:sess-15",
    "start": 1767766220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 434600,
    "tokens_before": 444660,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 408.5
+   "upstream_ms_avg": 408.5,
+   "used_tokens": {
+    "cache_read": 253685,
+    "cache_write_1h": 0,
+    "cache_write_5m": 190975,
+    "input": 480
+   }
   },
   {
    "agents": "claude-code",
@@ -1682,9 +3527,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -1697,10 +3562,31 @@
    "session_id": "t1:sess-14",
    "start": 1767754820000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 380642,
    "tokens_before": 390698,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 399
+   "upstream_ms_avg": 399,
+   "used_tokens": {
+    "cache_read": 185508,
+    "cache_write_1h": 0,
+    "cache_write_5m": 205190,
+    "input": 440
+   }
   },
   {
    "agents": "bob",
@@ -1719,9 +3605,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -1734,10 +3640,31 @@
    "session_id": "t2:sess-13",
    "start": 1767747620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 332271,
    "tokens_before": 339810,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 389.5
+   "upstream_ms_avg": 389.5,
+   "used_tokens": {
+    "cache_read": 220167,
+    "cache_write_1h": 0,
+    "cache_write_5m": 119643,
+    "input": 400
+   }
   },
   {
    "agents": "claude-code",
@@ -1756,9 +3683,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 44444,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -1771,10 +3718,31 @@
    "session_id": "t1:sess-12",
    "start": 1767736220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 284460,
    "tokens_before": 291996,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 380
+   "upstream_ms_avg": 380,
+   "used_tokens": {
+    "cache_read": 210908,
+    "cache_write_1h": 0,
+    "cache_write_5m": 81088,
+    "input": 360
+   }
   },
   {
    "agents": "bob",
@@ -1793,9 +3761,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -1808,10 +3796,31 @@
    "session_id": "t2:sess-11",
    "start": 1767724820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 239723,
    "tokens_before": 247256,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 370.5
+   "upstream_ms_avg": 370.5,
+   "used_tokens": {
+    "cache_read": 210649,
+    "cache_write_1h": 0,
+    "cache_write_5m": 36607,
+    "input": 320
+   }
   },
   {
    "agents": "claude-code",
@@ -1830,9 +3839,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -1845,10 +3874,31 @@
    "session_id": "t1:sess-10",
    "start": 1767713420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 200570,
    "tokens_before": 205590,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 361
+   "upstream_ms_avg": 361,
+   "used_tokens": {
+    "cache_read": 92310,
+    "cache_write_1h": 0,
+    "cache_write_5m": 113280,
+    "input": 280
+   }
   },
   {
    "agents": "bob",
@@ -1867,9 +3917,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -1882,10 +3952,31 @@
    "session_id": "t2:sess-09",
    "start": 1767702020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 161980,
    "tokens_before": 166998,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 351.5
+   "upstream_ms_avg": 351.5,
+   "used_tokens": {
+    "cache_read": 108932,
+    "cache_write_1h": 0,
+    "cache_write_5m": 58066,
+    "input": 240
+   }
   },
   {
    "agents": "claude-code",
@@ -1904,9 +3995,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 59296,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 700,
    "presets": "codesmart",
@@ -1919,10 +4030,31 @@
    "session_id": "t1:sess-08",
    "start": 1767690620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 544604,
    "tokens_before": 557144,
+   "tokens_unmeasured_requests": 14,
    "turns": 14,
-   "upstream_ms_avg": 418.5
+   "upstream_ms_avg": 418.5,
+   "used_tokens": {
+    "cache_read": 348264,
+    "cache_write_1h": 0,
+    "cache_write_5m": 208880,
+    "input": 560
+   }
   },
   {
    "agents": "bob",
@@ -1941,9 +4073,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 650,
    "presets": "codesmart",
@@ -1956,10 +4108,31 @@
    "session_id": "t2:sess-07",
    "start": 1767679220000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 487339,
    "tokens_before": 497367,
+   "tokens_unmeasured_requests": 13,
    "turns": 13,
-   "upstream_ms_avg": 409
+   "upstream_ms_avg": 409,
+   "used_tokens": {
+    "cache_read": 344931,
+    "cache_write_1h": 0,
+    "cache_write_5m": 152436,
+    "input": 520
+   }
   },
   {
    "agents": "claude-code",
@@ -1978,9 +4151,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 600,
    "presets": "codesmart",
@@ -1993,10 +4186,31 @@
    "session_id": "t1:sess-06",
    "start": 1767672020000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 430640,
    "tokens_before": 440664,
+   "tokens_unmeasured_requests": 12,
    "turns": 12,
-   "upstream_ms_avg": 399.5
+   "upstream_ms_avg": 399.5,
+   "used_tokens": {
+    "cache_read": 279976,
+    "cache_write_1h": 0,
+    "cache_write_5m": 160688,
+    "input": 480
+   }
   },
   {
    "agents": "bob",
@@ -2015,9 +4229,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 550,
    "presets": "codesmart",
@@ -2030,10 +4264,31 @@
    "session_id": "t2:sess-05",
    "start": 1767660620000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 377015,
    "tokens_before": 387035,
+   "tokens_unmeasured_requests": 11,
    "turns": 11,
-   "upstream_ms_avg": 390
+   "upstream_ms_avg": 390,
+   "used_tokens": {
+    "cache_read": 239095,
+    "cache_write_1h": 0,
+    "cache_write_5m": 147940,
+    "input": 440
+   }
   },
   {
    "agents": "claude-code",
@@ -2052,9 +4307,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 47148,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 500,
    "presets": "codesmart",
@@ -2067,10 +4342,31 @@
    "session_id": "t1:sess-04",
    "start": 1767649220000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 328968,
    "tokens_before": 336480,
+   "tokens_unmeasured_requests": 10,
    "turns": 10,
-   "upstream_ms_avg": 380.5
+   "upstream_ms_avg": 380.5,
+   "used_tokens": {
+    "cache_read": 148740,
+    "cache_write_1h": 0,
+    "cache_write_5m": 187740,
+    "input": 400
+   }
   },
   {
    "agents": "bob",
@@ -2089,9 +4385,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 450,
    "presets": "codesmart",
@@ -2104,10 +4420,31 @@
    "session_id": "t2:sess-03",
    "start": 1767637820000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 281490,
    "tokens_before": 288999,
+   "tokens_unmeasured_requests": 9,
    "turns": 9,
-   "upstream_ms_avg": 371
+   "upstream_ms_avg": 371,
+   "used_tokens": {
+    "cache_read": 183066,
+    "cache_write_1h": 0,
+    "cache_write_5m": 105933,
+    "input": 360
+   }
   },
   {
    "agents": "claude-code",
@@ -2126,9 +4463,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-unpriced",
    "output_tokens": 400,
    "presets": "codesmart",
@@ -2141,10 +4498,31 @@
    "session_id": "t1:sess-02",
    "start": 1767626420000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 237086,
    "tokens_before": 244592,
+   "tokens_unmeasured_requests": 8,
    "turns": 8,
-   "upstream_ms_avg": 361.5
+   "upstream_ms_avg": 361.5,
+   "used_tokens": {
+    "cache_read": 173844,
+    "cache_write_1h": 0,
+    "cache_write_5m": 70748,
+    "input": 320
+   }
   },
   {
    "agents": "bob",
@@ -2163,9 +4541,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": 0,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
    "keepalive_ping_usd": 0,
    "keepalive_pings": 0,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-opus",
    "output_tokens": 350,
    "presets": "codesmart",
@@ -2178,10 +4576,31 @@
    "session_id": "t2:sess-01",
    "start": 1767615020000,
    "tenant_id": "t2",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 198257,
    "tokens_before": 203259,
+   "tokens_unmeasured_requests": 7,
    "turns": 7,
-   "upstream_ms_avg": 352
+   "upstream_ms_avg": 352,
+   "used_tokens": {
+    "cache_read": 167622,
+    "cache_write_1h": 0,
+    "cache_write_5m": 35637,
+    "input": 280
+   }
   },
   {
    "agents": "claude-code",
@@ -2200,9 +4619,29 @@
    "in_flight": false,
    "incomplete_rows": 0,
    "keepalive_net_usd": -0.0004,
+   "keepalive_ping_tokens": {
+    "cache_read": 35000,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
    "keepalive_ping_usd": 0.0004,
    "keepalive_pings": 1,
    "keepalive_saved_usd": 0,
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "models": "m-sonnet",
    "output_tokens": 300,
    "presets": "codesmart",
@@ -2215,10 +4654,31 @@
    "session_id": "t1:sess-00",
    "start": 1767603620000,
    "tenant_id": "t1",
+   "tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "tokens_after": 160000,
    "tokens_before": 165000,
+   "tokens_unmeasured_requests": 6,
    "turns": 6,
-   "upstream_ms_avg": 342.5
+   "upstream_ms_avg": 342.5,
+   "used_tokens": {
+    "cache_read": 130000,
+    "cache_write_1h": 0,
+    "cache_write_5m": 35000,
+    "input": 240
+   }
   }
  ],
  "total": 60

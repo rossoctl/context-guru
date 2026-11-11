@@ -1175,8 +1175,10 @@ function renderRealized(host) {
 /**
  * renderDeferNet is tool deferral's net saving (#485, #869): per account and per UTC day, what the
  * deferred definitions did not cost, the searches that loaded them back, the wrong guesses (a
- * deferred tool the model then needed), and the net after every search cost. The figures are the
- * proxy's own ledger, stored per request, so they match the tool_defer block of /stats. Nothing is
+ * deferred tool the model then needed), and the net saving. The net is the deferral lever the Overview
+ * card shows: on a request the accountant priced it is the library's figure less the search cost, and
+ * otherwise the ledger's net. Gross and cost are the proxy's own ledger, stored per request, so on a
+ * priced request net is NOT gross less cost, and the tile does not say it is. Nothing is
  * drawn when deferral never changed a request in the window: it is off unless the ultrahigh preset
  * is on, and an empty panel would read as "deferral saved nothing".
  */
@@ -1187,11 +1189,11 @@ function renderDeferNet(host) {
   const priced = t.requests > t.unpriced_requests;
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-defer-net' },
     el('div', { class: 'section' }, el('h2', {}, 'What did tool deferral save?'),
-      el('span', { class: 'section-note' }, 'net of the names list and every search, measured on real requests')));
+      el('span', { class: 'section-note' }, 'the same figure as the Overview card; gross and cost are the proxy ledger')));
   host.appendChild(panel);
   panel.appendChild(el('div', { class: 'tiles' },
     tile('inv-defer-net-usd', 'Net saving', priced ? usd(t.net_usd) : compact(t.tokens_deferred) + ' tok',
-      priced ? 'gross ' + usd(t.gross_usd) + ' less ' + usd(t.cost_usd) + ' of searches and list' : 'unpriced model; tokens only',
+      priced ? 'ledger: ' + usd(t.gross_usd) + ' of definitions kept out; ' + usd(t.cost_usd) + ' for the names list and searches' : 'unpriced model; tokens only',
       t.net_usd > 0 ? 'good' : ''),
     tile('inv-defer-tokens', 'Tokens not carried', compact(t.tokens_deferred),
       num(t.requests) + ' requests with deferred tools'),
@@ -2276,75 +2278,6 @@ function promptParts(r) {
   return wrap;
 }
 
-/**
- * renderSelfRemoved credits the reductions the USER made themselves.
- *
- * Every other measurement here is about content context-guru removed. When somebody reads this
- * page, removes an MCP server and stops carrying 4,000 tokens a request, no component ran and
- * no filter fired — so the saving registered nowhere at all, and the product got no credit for
- * the one outcome it most wants to cause. This finds it by treating the inventory as the time
- * series it is: present in the early sessions, absent from the later ones.
- *
- * It is never added into the filter's realized savings, because an account that removed a
- * server locally AND has it on the server-side filter list would be credited twice for one
- * reduction. Overlapping rows are marked and left for the reader.
- */
-function renderSelfRemoved(host, rep) {
-  const rows = rep.self_removed || [];
-  if (!rows.length) return;
-  const panel = foldPanel('inv-self-removed', 'What did you already remove?',
-    num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's')
-    + ' stopped appearing partway through this window — modelled, not measured');
-  panel.appendChild(el('p', { class: 'note' }, num(rows.length) + ' declaration'
-      + (rows.length === 1 ? '' : 's') + ' stopped being sent partway through this window. The saving is yours, not context-guru\'s '
-      + '("Removed by you, not by us" on Overview).'));
-  host.appendChild(panel.closest('details'));
-  // The honest limit of the method, up front rather than as a footnote under the weakest row.
-  // This is the finding that decided where the figure is allowed to appear: the inference is
-  // right about the facts and can be wrong about the cause, and no threshold fixes that.
-  panel.appendChild(el('details', { class: 'why', 'data-testid': 'inv-self-removed-basis' },
-    el('summary', {}, 'How this is worked out, and when it is wrong'),
-    el('p', {}, 'The inventory is a time series. A name that appears in the early sessions of '
-      + 'this window and in none of the later ones stopped being declared, and the strength of '
-      + 'the claim is the number of COMPARABLE sessions that ran afterwards without it — a '
-      + 'session that declared no MCP tool at all cannot testify about a missing MCP tool, so '
-      + 'those are not counted. Every row shows its own count and anything under a dozen is '
-      + 'marked weak.'),
-    el('p', {}, 'What it cannot tell you is WHY the name went. On this deployment\'s own history '
-      + 'the largest candidate was the editor integration, which is declared only when a session '
-      + 'runs inside the IDE — so "you removed it" and "you worked in a terminal that day" look '
-      + 'identical here, and no threshold separates them. The reduction is real either way; the '
-      + 'attribution is a guess, which is why this figure is labelled as modelled everywhere it '
-      + 'appears and is kept out of the total that claims our credit.'),
-    el('p', {}, 'A row the server-side filter is already credited for is marked, and excluded '
-      + 'from the Overview figure rather than counted twice.')));
-  const table = el('table', { class: 'tbl' },
-    el('thead', {}, el('tr', {},
-      el('th', {}, 'Item'), el('th', { class: 'num' }, 'Was costing'),
-      el('th', { class: 'num' }, 'Sessions since'), el('th', { class: 'num' }, 'Avoided since'),
-      el('th', {}, 'Evidence'))));
-  const body = el('tbody');
-  for (const r of rows) {
-    body.appendChild(el('tr', {},
-      el('td', {}, el('code', { text: r.name })),
-      el('td', { class: 'num', text: num(r.tokens) + ' tok/req' }),
-      numTd(r.sessions_after),
-      el('td', { class: 'num' }, money(r.avoided_usd, r.priced)),
-      // 12, not 3: the server already drops everything below 3, so a 3-threshold here never
-      // rendered. A dozen comparable sessions is what the copy has always claimed.
-      el('td', {}, r.sessions_after < 12
-        ? el('span', { class: 'pill missing', title: 'Only ' + num(r.sessions_after)
-          + ' comparable sessions have run since it was last seen, so this may simply be a run '
-          + 'of sessions that did not need it rather than a removal.' }, 'weak — few sessions')
-        : el('span', { title: 'Declared in ' + num(r.sessions_before) + ' sessions, then absent '
-          + 'from the ' + num(r.sessions_after) + ' that followed.' },
-        num(r.sessions_before) + ' → 0')),
-      r.overlap ? el('td', {}, el('span', { class: 'pill warn' }, 'also server-side filtered')) : null));
-  }
-  table.appendChild(body);
-  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
-}
-
 // ── load + render ──────────────────────────────────────────────────────────
 
 function renderTools() {
@@ -2380,7 +2313,6 @@ function renderTools() {
       renderRealized(d);
       renderPromptPanel(d, rep);
       renderRemovalValue(d, rep);
-      renderSelfRemoved(d, rep);
       renderCoverage(d, rep);
       renderBuiltins(d, rep);
     });
