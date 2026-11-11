@@ -640,6 +640,11 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	// already published so two requests never hold different stores for one tenant.
 	if c, ok := s.cache.get(t.ID); ok {
 		if c.config == cfgDoc {
+			// A concurrent request built the same config first, after this one removed the old
+			// entry, so its build had no prev and holds no marks. Carry into the published one.
+			// Put of the same keys is idempotent, and the marks are session state that the expand
+			// path already writes into a published store.
+			carryKeepMarks(prev, c.t)
 			return c.t, nil
 		}
 		s.cache.remove(t.ID)
@@ -653,6 +658,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 // expanded an output, so the new pipeline must keep sending it in full: if it compacts it again,
 // the early prefix changes and the provider rewrites a warm cache. With a different component set
 // the old marks are not carried: that is a new pipeline, and it behaves as it did before #1097.
+// The names alone decide: a change to a setting that is not a component (for example
+// expand.fixed_restore) also carries the marks. That is the safe direction, because content stays in full.
 // Only the marks move. The frozen decisions and the stashed originals stay behind, which is the
 // honest cost the rebuild always had.
 // It cannot fail a request: a store that cannot carry leaves the new store empty.

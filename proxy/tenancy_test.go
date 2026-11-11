@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -1200,5 +1201,61 @@ func TestKeepMarksDoNotSurviveARebuildWithDifferentComponents(t *testing.T) {
 	}
 	if offload.KeptVerbatim(second.Store, "sess", "the expanded output") {
 		t.Fatal("a different component set must start clean, as before #1097")
+	}
+}
+
+// #1097, review round 1: two requests race a config change. A removes the old entry and builds
+// slowly. B arrives after the remove, so it has no prev, and it publishes first. A must still
+// return a tenancy that holds the marks.
+func TestKeepMarksSurviveTwoConcurrentRebuilds(t *testing.T) {
+	f := newHostedFixture(t, "up", "openai")
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		cfg, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		pipe, err := cfg.Build(e)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		// Call 1 is the first build. Call 2 is request A, which blocks. Call 3 is request B.
+		if calls.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Preset: "test"}, nil
+	}, 0)
+	a, _ := f.register(t, "a@ibm.com")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 5\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 9\n")
+
+	type res struct {
+		tn  *Tenancy
+		err error
+	}
+	done := make(chan res)
+	go func() { tn, err := f.h.opts.Tenants.ForTenant(a); done <- res{tn, err} }()
+	<-entered
+	b, err := f.h.opts.Tenants.ForTenant(a) // publishes while A still builds
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.tn != b {
+		t.Fatal("A did not return the tenancy B published; the test no longer forces the interleaving")
+	}
+	if !offload.KeptVerbatim(r.tn.Store, "sess", "the expanded output") {
+		t.Fatal("the keep mark was lost when a second request published the rebuild first")
 	}
 }

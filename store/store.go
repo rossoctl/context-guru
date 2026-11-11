@@ -1323,8 +1323,8 @@ func CarryPrefix(from, to Store, prefix string) (n int) {
 		}
 	}()
 	pc, ok := from.(PrefixCopier)
-	if !ok {
-		return 0
+	if !ok || !to.Persists() {
+		return 0 // a destination that keeps nothing (store.Nop) keeps no marks either
 	}
 	for k, v := range pc.EntriesWithPrefix(prefix) {
 		to.Put(k, v)

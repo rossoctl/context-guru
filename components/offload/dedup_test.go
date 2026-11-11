@@ -272,6 +272,7 @@ func TestDedupKeepsAnExpandedOutputAfterARestart(t *testing.T) {
 	m1, d1 := open()
 	MarkKeptVerbatim(m1, "s", dump)
 	d1.Flush()
+	defer d1.Close()
 	// The restart: a new memory store over the same database.
 	m2, d2 := open()
 	defer d2.Close()
