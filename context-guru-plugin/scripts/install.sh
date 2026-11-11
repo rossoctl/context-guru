@@ -750,9 +750,11 @@ or written." ;;
   fi
   if [ "$R_STRATLIST_DEFERRED" = 0 ]; then
     route_check_strategy "$slist"
-  elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ]; then
+  elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ]; then
     # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
     # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
+    # Two names pass unchecked (owner decision): `none` needs no table, and `auto` is the plugin's own
+    # default, which the remote proxy checks when it loads the setting.
     route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
 context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
 Install the proxy v0.7.1 or later, or pass --cache-strategy none. Nothing was installed, started \
@@ -940,7 +942,7 @@ handling auth), replace (theirs is recorded and uninstall puts it back), or abor
 
   if [ "$R_PLAN" = 1 ]; then
     emit "result=planned"
-    [ "$R_STRATLIST_DEFERRED" = 1 ] && [ "$R_STRATEGY" != none ] && emit "strategy_unchecked=true" \
+    [ "$R_STRATLIST_DEFERRED" = 1 ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ] && emit "strategy_unchecked=true" \
       && emit "strategy_unchecked_note=no proxy binary yet, so cache strategy $R_STRATEGY is checked after the binary is installed; an unknown name is then refused before any routing is written"
     if [ "$R_MODE" = attach ]; then emit "binary=(not needed in attach mode)"
     else emit "binary=would_check"; fi

@@ -47,12 +47,46 @@ func TestAttachModeRefusesAnUncheckedStrategyName(t *testing.T) {
 	}
 }
 
-// A local --plan with no binary yet cannot check the name. It must say so.
+// A local --plan with no binary yet cannot check the name. It says so, except for `auto` (the
+// plugin's own default) and `none`.
 func TestPlanWithNoBinarySaysTheStrategyIsUnchecked(t *testing.T) {
 	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	plan, code := runRoute(t, proj, noBinaryEnv(t, home, state), "--plan", "--scope", "project")
+	env := noBinaryEnv(t, home, state)
+	plan, code := runRoute(t, proj, env, "--plan", "--scope", "project", "--cache-strategy", "2-ping")
 	if code != 0 || plan["result"] != "planned" || plan["strategy_unchecked"] != "true" {
 		t.Errorf("exit %d %v; want planned with strategy_unchecked=true", code, plan)
+	}
+	for _, name := range []string{"auto", "none"} {
+		plan, code = runRoute(t, proj, env, "--plan", "--scope", "project", "--cache-strategy", name)
+		if code != 0 || plan["result"] != "planned" || plan["strategy_unchecked"] != "" {
+			t.Errorf("%s: exit %d %v; want planned and not reported as unchecked", name, code, plan)
+		}
+	}
+}
+
+// Attach mode with no local binary: `auto` (the default) and `none` install; any other name is
+// refused, since nothing can check it.
+func TestAttachModeWithNoBinaryAllowsAutoAndRefusesOtherNames(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	env := noBinaryEnv(t, home, state)
+	args := func(name string) []string {
+		return []string{"--mode", "attach", "--base-url", "http://127.0.0.1:9/anthropic", "--no-health-check",
+			"--scope", "project", "--i-consent-to-traffic-interception", "--cache-strategy", name}
+	}
+	for _, name := range []string{"auto", "none"} {
+		proj := t.TempDir()
+		facts, code := runRoute(t, proj, env, args(name)...)
+		if code != 0 || facts["result"] != "routed" {
+			t.Errorf("%s: exit %d %v; want routed", name, code, facts)
+		}
+	}
+	proj := t.TempDir()
+	facts, code := runRoute(t, proj, env, args("2-ping")...)
+	if code != 2 || facts["reason"] != "strategy_unchecked" || facts["result"] == "routed" {
+		t.Errorf("2-ping: exit %d %v; want refused/strategy_unchecked", code, facts)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err == nil {
+		t.Error("routing was written for an unchecked strategy")
 	}
 }
 
