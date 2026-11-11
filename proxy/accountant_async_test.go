@@ -142,7 +142,11 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 	}))
 	defer up.Close()
 	h, rec, tap := accHandlerYAML(t, up.URL, "pipeline: [extract]\n")
-	h.savings.onEnd = func(*accountant.Request) { time.Sleep(accountantDelay) }
+	var accountantDone atomic.Int64 // unix nanos at which the accountant's work ended
+	h.savings.onEnd = func(*accountant.Request) {
+		time.Sleep(accountantDelay)
+		accountantDone.Store(time.Now().UnixNano())
+	}
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -150,15 +154,17 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 		strings.NewReader(string(manyToolResultsRequest("claude-sonnet-5", 4))))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-context-guru-session", "sess-async-handler")
-	sent := time.Now()
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
-	if wait := time.Duration(reached.Load() - sent.UnixNano()); wait > accountantDelay/2 {
-		t.Errorf("the upstream saw the request %v after it was sent: it waited for the accountant (%v)", wait, accountantDelay)
+	// Compare with the moment the accountant ended, not with a fixed limit: a slow runner delays the
+	// request by an unknown time, but the upstream must still be reached before the accountant is done.
+	if done := accountantDone.Load(); done != 0 && reached.Load() >= done {
+		t.Errorf("the upstream saw the request %v after the accountant ended: it waited for the accountant (%v)",
+			time.Duration(reached.Load()-done), accountantDelay)
 	}
 	// waitForRows polls for about 2 s, the same as the accountant's delay, so poll longer here.
 	for i := 0; i < 2000 && rec.Stats().Written < 1; i++ {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 
@@ -56,6 +57,10 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	sent, _ := fwd.Load().([]byte)
 	if !expand.HasTool("anthropic", sent) || !adjudicate.HasTool("anthropic", sent) {
 		t.Fatalf("precondition: both tools must be injected: %s", gjson.GetBytes(sent, "tools"))
+	}
+	// The record ends in the background job, after the response is back.
+	for i := 0; i < 1000 && got.Load() == nil; i++ {
+		time.Sleep(5 * time.Millisecond)
 	}
 	r := got.Load()
 	if r == nil {
