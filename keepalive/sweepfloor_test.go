@@ -9,6 +9,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -16,7 +17,7 @@ import (
 type floorRun struct {
 	last    resp
 	prefix  int64 // billed prefix of every response, in tokens
-	noUsage bool  // the last response reports no usage, so its wait cause is unknown
+	noUsage bool  // the last response reports no usage (with no stop reason, its wait cause is unknown)
 }
 
 // recordFloorSeq records two responses of one thread. The first calls a tool, because a thread with no
@@ -40,10 +41,11 @@ func recordFloorSeq(k *Keeper, key Key, at time.Time, run floorRun) {
 //
 // At a 40k prefix a subagent that waits for its main agent, and a main thread that waits for background
 // work or a teammate, get a ping, and the question replaces it. A thread that waits for its own tool
-// gets a plain ping. A main thread that waits for a person, or for an unknown cause, gets nothing; at
+// gets a plain ping. A main thread that waits for a person, or for an unknown cause (a last response
+// with no usage AND no stop reason), gets nothing; at
 // 100k the person wait gets a ping and the question. The question has no size gate of its own here:
 // min_tokens (2000) only decides which tool outputs are candidates.
-func TestSweepQuestionAtThePingFollowsTheWaitFloorAt40kPrefix(t *testing.T) {
+func TestSweepQuestionAtThePingFollowsTheWaitFloor(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		thread     string
@@ -52,15 +54,16 @@ func TestSweepQuestionAtThePingFollowsTheWaitFloorAt40kPrefix(t *testing.T) {
 		wantPing   bool // the keeper fires a ping
 		wantAsk    bool // the sweep question replaces it
 		wantPlains int  // ordinary pings sent
+		wantWait   string
 	}{
-		{"subagent waits for its main agent", "a:x", floorRun{last: endTurn, prefix: 40000}, 0, 0, true, true, 0},
-		{"subagent waits for its own tool", "a:x", floorRun{last: toolCall, prefix: 40000}, 0, 0, true, false, 1},
-		{"main waits for its own tool", "", floorRun{last: toolCall, prefix: 40000}, 0, 0, true, false, 1},
-		{"main waits for a person", "", floorRun{last: endTurn, prefix: 40000}, 0, 0, false, false, 0},
-		{"main waits for a person at 100k", "", floorRun{last: endTurn, prefix: 100000}, 0, 0, true, true, 0},
-		{"main waits for an unknown cause", "", floorRun{last: endTurn, prefix: 40000, noUsage: true}, 0, 0, false, false, 0},
-		{"main waits for background work", "", floorRun{last: endTurn, prefix: 40000}, 1, 0, true, true, 0},
-		{"main waits for a teammate", "", floorRun{last: endTurn, prefix: 40000}, 0, 1, true, true, 0},
+		{"subagent waits for its main agent", "a:x", floorRun{last: endTurn, prefix: 40000}, 0, 0, true, true, 0, waitcause.WaitingHuman},
+		{"subagent waits for its own tool", "a:x", floorRun{last: toolCall, prefix: 40000}, 0, 0, true, false, 1, waitcause.WaitingOwnTool},
+		{"main waits for its own tool", "", floorRun{last: toolCall, prefix: 40000}, 0, 0, true, false, 1, waitcause.WaitingOwnTool},
+		{"main waits for a person", "", floorRun{last: endTurn, prefix: 40000}, 0, 0, false, false, 0, waitcause.WaitingHuman},
+		{"main waits for a person at 100k", "", floorRun{last: endTurn, prefix: 100000}, 0, 0, true, true, 0, waitcause.WaitingHuman},
+		{"main waits for an unknown cause", "", floorRun{last: resp{}, prefix: 40000, noUsage: true}, 0, 0, false, false, 0, waitcause.WaitingUnknown},
+		{"main waits for background work", "", floorRun{last: endTurn, prefix: 40000}, 1, 0, true, true, 0, waitcause.WaitingBackground},
+		{"main waits for a teammate", "", floorRun{last: endTurn, prefix: 40000}, 0, 1, true, true, 0, waitcause.WaitingTeammate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k, fs, clock := testKeeperWith(t, func(o *Options) {
@@ -71,6 +74,11 @@ func TestSweepQuestionAtThePingFollowsTheWaitFloorAt40kPrefix(t *testing.T) {
 			registerSweepThread(t, tc.thread, st, asker, sweepConversation(3))
 			key := Key{Tenant: "t1", Session: "sess-1", Thread: tc.thread}
 			recordFloorSeq(k, key, clock.now(), tc.run)
+			// The wait the keeper stores comes from WaitingFor with these inputs (keeper.go, Record).
+			// Check the row really has the cause it names: the unknown row once held "human".
+			if got := k.WaitingFor(key, tc.run.last.names, false, tc.run.last.stop, !tc.run.noUsage); got != tc.wantWait {
+				t.Fatalf("wait cause = %q, want %q", got, tc.wantWait)
+			}
 
 			n := k.Sweep(clock.advance(281 * time.Second))
 			if (n == 1) != tc.wantPing {
