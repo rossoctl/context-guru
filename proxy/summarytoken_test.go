@@ -8,36 +8,49 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
-// Context Guru's own token never reaches an upstream, in any header or body of any request, the
-// summary call included. A token of the wrong length is the hard case: the forwarded request
-// removes it (by its prefix), but CallerKey skips only a token of the exact shape, so a damaged
-// token could become the summary call's key.
+// Context Guru's own token never reaches an upstream, in the URL, a header or the body of any
+// request, the summary call included. A token of the wrong length is the hard case: CallerKey skips
+// only a token of the exact shape, so a damaged token can become the summary call's key. The
+// dispatcher's scrub (setUpstreamAuth in Dispatcher.Do) must remove it.
+//
+// The summary call runs in a detached goroutine, so the test waits for it and fails when it does
+// not come. Each case has its own session, so one case's summary in flight cannot block the next.
 func TestSummaryCallNeverSendsContextGurusToken(t *testing.T) {
 	valid := tenant.TokenPrefix + strings.Repeat("A", 26)
 	if !tenant.LooksLikeToken(valid) {
 		t.Fatalf("test token %q is not token-shaped; fix the test", valid)
 	}
 	damaged := valid[:len(valid)-1] // the prefix and one character short: removed, but not valid
-	routes := map[string]string{"openai": "/openai/v1/chat/completions", "bob": bobModelPath}
-	for rname, route := range routes {
-		for name, hdr := range map[string]http.Header{
-			"a damaged token is the only key":        {"Authorization": {"Bearer " + damaged}},
-			"a token beside the caller's key":        {"Authorization": {"Bearer " + valid}, "X-Api-Key": {"caller-key"}},
-			"two Authorization values, token second": {"Authorization": {"Bearer caller-key", "Bearer " + valid}},
-		} {
-			t.Run(rname+"/"+name, func(t *testing.T) {
+	routes := []struct{ name, path string }{{"openai", "/openai/v1/chat/completions"}, {"bob", bobModelPath}}
+	cases := []struct {
+		name string
+		hdr  http.Header
+	}{
+		{"a damaged token is the only key", http.Header{"Authorization": {"Bearer " + damaged}}},
+		{"a token beside the caller's key", http.Header{"Authorization": {"Bearer " + valid}, "X-Api-Key": {"caller-key"}}},
+		{"two Authorization values, token second", http.Header{"Authorization": {"Bearer caller-key", "Bearer " + valid}}},
+	}
+	for _, route := range routes {
+		for _, tc := range cases {
+			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
 				var mu sync.Mutex
 				var seen []string
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					b, _ := io.ReadAll(r.Body)
+					b, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("reading a request body: %v", err)
+					}
 					var all strings.Builder
+					all.WriteString(r.URL.String() + "\n")
 					for k, vs := range r.Header {
 						all.WriteString(k + ": " + strings.Join(vs, ",") + "\n")
 					}
@@ -53,20 +66,31 @@ func TestSummaryCallNeverSendsContextGurusToken(t *testing.T) {
 				h := tokenCanaryHandler(t, Options{OpenAIUpstream: up.URL, BobUpstream: up.URL})
 				srv := httptest.NewServer(h.Mux())
 				defer srv.Close()
-				req, _ := http.NewRequest(http.MethodPost, srv.URL+route, strings.NewReader(tokenCanaryRequest()))
-				req.Header = hdr.Clone()
+				req, _ := http.NewRequest(http.MethodPost, srv.URL+route.path, strings.NewReader(tokenCanaryRequest()))
+				req.Header = tc.hdr.Clone()
 				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("x-context-guru-session", "token-canary-"+route.name+"-"+tc.name)
 
 				resp, err := srv.Client().Do(req)
-
 				if err != nil {
 					t.Fatal(err)
 				}
 				resp.Body.Close()
+				if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+					t.Fatal("the summary call never finished")
+				}
+
 				mu.Lock()
 				defer mu.Unlock()
-				if len(seen) == 0 {
-					t.Fatal("the upstream got no request; the test proves nothing")
+				summaries := 0
+				for _, s := range seen {
+					// The summary call carries max_tokens; the client's own chat does not.
+					if strings.Contains(s, `"max_tokens"`) {
+						summaries++
+					}
+				}
+				if summaries == 0 {
+					t.Fatalf("the upstream got %d requests and no summary call; the test proves nothing", len(seen))
 				}
 				for i, s := range seen {
 					for _, tok := range []string{valid, damaged} {
