@@ -11,7 +11,7 @@
   "editable": false,
   "refresh": "1m",
   "time": {
-    "from": "now-24h",
+    "from": "now-7d",
     "to": "now"
   },
   "timezone": "browser",
@@ -83,7 +83,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=\"cache_read\"}[$__rate_interval])) / clamp_min(sum by (model) (rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=~\"cache_read|cache_write_5m|cache_write_1h|input\"}[$__rate_interval])), 1e-9)",
+          "expr": "sum by (model)(rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=\"cache_read\"}[$__rate_interval])) / clamp_min(sum by (model)(rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=~\"cache_read|cache_write_5m|cache_write_1h|input\"}[$__rate_interval])), 1e-9)",
           "legendFormat": "{{model}}",
           "refId": "A",
           "datasource": {
@@ -113,8 +113,8 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Misses by cause",
-      "description": "Cache misses per minute, by why.",
+      "title": "Misses by cause (per hour)",
+      "description": "Cache misses per hour, by why.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -127,7 +127,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (cause) (rate(llm_cache_misses_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 60",
+          "expr": "sum by (cause)(rate(llm_cache_misses_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
           "legendFormat": "{{cause}}",
           "refId": "A",
           "datasource": {
@@ -142,7 +142,10 @@
           "custom": {
             "stacking": {
               "mode": "normal"
-            }
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
           }
         },
         "overrides": []
@@ -166,18 +169,19 @@
       "gridPos": {
         "x": 0,
         "y": 8,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "targets": [
         {
-          "expr": "sum by (cause) (increase(llm_cache_miss_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
+          "expr": "sum by (cause)(increase(llm_cache_miss_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
           "legendFormat": "{{cause}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
-          }
+          },
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -187,35 +191,55 @@
             "stacking": {
               "mode": "none"
             }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
         }
       }
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Ping outcomes",
-      "description": "Pings per minute. Only ok and failed are visible: a timed-out or skipped ping leaves no row.",
+      "title": "Ping outcomes (per hour)",
+      "description": "Pings per hour. Only ok and failed are visible: a timed-out or skipped ping leaves no row.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
       },
       "gridPos": {
-        "x": 12,
+        "x": 8,
         "y": 8,
-        "w": 12,
+        "w": 10,
         "h": 8
       },
       "targets": [
         {
-          "expr": "sum by (outcome) (rate(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 60",
+          "expr": "sum by (outcome)(rate(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
           "legendFormat": "{{outcome}}",
           "refId": "A",
           "datasource": {
@@ -230,10 +254,74 @@
           "custom": {
             "stacking": {
               "mode": "normal"
-            }
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ok"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F2495C"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -244,6 +332,58 @@
     },
     {
       "id": 5,
+      "type": "stat",
+      "title": "Pings that paid",
+      "description": "Rescue value divided by ping cost over the selected range. Above 1, the pings paid.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "(sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"saved\"}[$__range])) - sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"added\"}[$__range]))) / clamp_min(sum(increase(llm_keepalive_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1e-9)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: x",
+          "noValue": "no data",
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#73BF69"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "text": {
+          "valueSize": 56
+        }
+      }
+    },
+    {
+      "id": 6,
       "type": "timeseries",
       "title": "Keep-alive: cost, rescue and net (USD per hour)",
       "description": "Do the pings pay? The rescue is a write that became a read, so its value is the write saved minus the read paid.",
@@ -254,7 +394,7 @@
       "gridPos": {
         "x": 0,
         "y": 16,
-        "w": 24,
+        "w": 16,
         "h": 8
       },
       "targets": [
@@ -295,13 +435,74 @@
             }
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ping cost"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rescue (net of reads)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "net"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "displayMode": "table",
           "placement": "bottom"
         }
+      }
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "title": "Shared-warm tokens",
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**No data yet.**\n\nThe counter `llm_keepalive_shared_warm_tokens_total` needs #853."
       }
     }
   ]
