@@ -55,3 +55,11 @@ func TestInitRegistersBobInTheDefaultRegistry(t *testing.T) {
 		t.Fatalf("agent.ForPath(%q) = %#v, want Bob{}", ModelPath, got)
 	}
 }
+
+// Bob serves chat only on its own model path, and takes `Authorization: Apikey <key>`.
+func TestModelTargetIsBobsModelPathWithApikey(t *testing.T) {
+	want := agent.ModelTarget{Path: "/inference/v1/chat/completions", AuthScheme: "Apikey"}
+	if got := (Bob{}).ModelTarget(); got != want {
+		t.Fatalf("ModelTarget() = %+v, want %+v", got, want)
+	}
+}

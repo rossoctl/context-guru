@@ -1062,6 +1062,9 @@ func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRat
 // Reading up.setKey rather than re-deriving the credential is the fix and the invariant:
 // there is one decision, and both exits read it.
 //
+// A route whose agent owns its auth (agent.ModelTarget) never gets the server-held OpenAI key:
+// that key belongs to the OpenAI upstream, not to the agent's server.
+//
 // FAIL OPEN: no credential, no upstream or no model name returns nil, and the
 // component degrades to its deterministic path. It never errors the request.
 func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, body []byte, r *http.Request) components.Model {
@@ -1093,14 +1096,23 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
 		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
-		if key == "" {
+		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
+		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
+		target, owned := agentModelTarget(r.Context(), h.agentFor(up.path))
+		// The operator's OpenAI key belongs to the OpenAI upstream. A route whose agent owns its auth
+		// is another provider's server, so it gets the caller's key or no model call.
+		if key == "" && !owned {
 			key = h.serverKey(h.opts.OpenAIKey)
 		}
 		if key == "" {
 			return nil
 		}
-		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
-		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
+		auth := AuthHeader(bschemas.OpenAI, key, "")
+		if target.AuthScheme != "" {
+			auth = http.Header{"Authorization": {target.AuthScheme + " " + key}}
+		}
+		ref := h.dispatch.incoming(up, auth)
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model, Path: target.Path}
 	}
 	return nil
 }
