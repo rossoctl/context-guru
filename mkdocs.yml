@@ -102,6 +102,7 @@ nav:
   - Get started:
       - Install the Claude Code plugin: how-to/install-plugin.md
       - Install the OpenCode plugin: how-to/install-opencode-plugin.md
+      - Install the Pi package: how-to/install-pi-package.md
       - The plugin's recovery files: how-to/plugin-recovery-files.md
       - Use with Claude Code: how-to/use-with-claude-code.md
       - Claude Code plugin:
