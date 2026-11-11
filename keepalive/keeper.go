@@ -326,7 +326,7 @@ func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.term
 // ~$8.8 of avoided misses, and 45 never came back, ~$5.8 of pings. A blanket gate would lose more
 // than it saves there.
 func (e *kaEntry) pingable() bool {
-	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
+	if e.turn < 1 || e.prefix < int64(e.pol.WaitMinPrefix(e.wait, IsSubagentThread(e.thread))) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
 	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
@@ -1934,6 +1934,8 @@ type SweepWarmStats struct {
 	GateRefuse      int64                  `json:"gate_refuse"`
 	GateReasons     map[string]int64       `json:"gate_refuse_reasons,omitempty"`
 	Panics          int64                  `json:"panics"`
+	// V3 is sweep v3: why cut attempts were refused, the rule and judge drops, and each cut's D/P and P/C.
+	V3 *offload.V3Stats `json:"v3,omitempty"`
 }
 
 func sweepWarmStats() *SweepWarmStats {
@@ -1945,7 +1947,14 @@ func sweepWarmStats() *SweepWarmStats {
 		NoBilledSize: w.NoBilled, ThreadBusy: w.ThreadBusy, ModelDeclined: w.ModelDeclined,
 		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, CarriedMerged: w.CarriedMerged, CarriedOverridden: w.CarriedOverridden, CarriedRefused: w.CarriedRefused, CarriedExpired: w.CarriedExpired, CarriedCapped: w.CarriedCapped, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
 		NoInventory: w.NoInventory, GatePriceModel: w.GatePriceModel, PriceModelUnknown: w.PriceModelUnknown, Gates: w.Gates, TriggerRefusals: w.TriggerReasons, Recent: w.Recent, RecentDecisions: w.RecentDecisions, GateAccept: w.GateAccept,
-		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics}
+		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics, V3: v3StatsOrNil(w.V3)}
+}
+
+func v3StatsOrNil(v offload.V3Stats) *offload.V3Stats {
+	if !v.Any() {
+		return nil
+	}
+	return &v
 }
 
 // SweepDropStats is offload.SweepDropStats in /stats shape.

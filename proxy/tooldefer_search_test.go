@@ -159,13 +159,13 @@ func TestClientSearchInBand(t *testing.T) {
 		t.Fatalf("upstream rounds = %d, want 2", len(b))
 	}
 	first, follow := b[0], b[1]
-	if got := csTools(first); got != "Bash,Read,context_guru_expand,"+tooldefer.ClientSearchName {
+	if got := csTools(first); got != "Bash,Read,context_guru_expand,context_guru_adjudicate,"+tooldefer.ClientSearchName {
 		t.Fatalf("first tools = %s", got)
 	}
 	if !strings.HasPrefix(gjson.GetBytes(first, "messages.1.content").String(), "Context Guru deferred these tools") {
 		t.Fatalf("names list missing: %s", gjson.GetBytes(first, "messages").Raw)
 	}
-	if got := csTools(follow); got != "Bash,Read,context_guru_expand,"+tooldefer.ClientSearchName+",Workflow" {
+	if got := csTools(follow); got != "Bash,Read,context_guru_expand,context_guru_adjudicate,"+tooldefer.ClientSearchName+",Workflow" {
 		t.Fatalf("follow-up tools = %s", got)
 	}
 	if !strings.Contains(gjson.GetBytes(follow, "messages.@reverse.0.content").String(), "Loaded: Workflow") {
@@ -250,7 +250,7 @@ func TestClientSearchRetriesOriginalOn400(t *testing.T) {
 		t.Fatalf("client saw %d: %s", st, out)
 	}
 	b := up.all()
-	if len(b) != 2 || csTools(b[1]) != "Bash,Read,Workflow,Monitor,context_guru_expand" {
+	if len(b) != 2 || csTools(b[1]) != "Bash,Read,Workflow,Monitor,context_guru_expand,context_guru_adjudicate" {
 		t.Fatalf("retry was not the original: %d rounds, %s", len(b), csTools(b[len(b)-1]))
 	}
 	if !h.deferGate().Broken("", "gpt-5.5") {

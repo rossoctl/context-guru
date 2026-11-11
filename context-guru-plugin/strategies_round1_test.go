@@ -93,7 +93,6 @@ func TestTheProbeRunsInAScrubbedEnvAndAFreshDirectory(t *testing.T) {
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	here := t.TempDir()
 	extra := []string{"DASHBOARD=1", "DASHBOARD_DB=/x", "DASHBOARD_CONTENT=1", "SESSION_STATE_DIR=/y", "CONTROL_DB=/z",
 		"UPSTREAMS=a=b", "ARCHIVE_REMOTE=s3://x", "ARCHIVE_INTERVAL=1s", "CG_RECORD_DIR=/r", "CG_RECORD_OTLP=1", "STORE=/s", "IDLE_EXIT=1h", "KEEP_ME=yes"}
 	facts, code, _ := settingsWithBin(t, bin, extra, "strategy", "list")
@@ -102,7 +101,7 @@ func TestTheProbeRunsInAScrubbedEnvAndAFreshDirectory(t *testing.T) {
 	}
 	got := readFileString(t, rec)
 	lines := strings.Split(got, "\n")
-	if lines[0] == here || !strings.Contains(lines[0], "cg-strategies-") {
+	if !strings.Contains(lines[0], "cg-strategies-") {
 		t.Errorf("the probe did not run in a fresh temp dir: %q", lines[0])
 	}
 	for _, bad := range []string{"DASHBOARD_DB=", "DASHBOARD_CONTENT=", "SESSION_STATE_DIR=", "CONTROL_DB=", "UPSTREAMS=", "ARCHIVE_REMOTE=", "ARCHIVE_INTERVAL=",

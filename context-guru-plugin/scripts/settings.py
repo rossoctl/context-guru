@@ -4313,7 +4313,7 @@ def _presets_known_to_proxy(args) -> int:
         table = load_strategy_table(getattr(args, "bin", ""))
     except StrategyTableError as exc:
         emit(warning="preset_unchecked",
-             warning_note=f"the preset name is not checked against the proxy: {exc}")
+             warning_note=f"the preset name is not checked against the proxy: {str(exc).removesuffix("; nothing was changed")}")
         return 0
     missing = [n for n in PRESETS if n not in table["presets"]]
     if missing:
