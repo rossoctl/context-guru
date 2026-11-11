@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +41,7 @@ func TestSummaryCallNeverSendsContextGurusToken(t *testing.T) {
 		{"two Authorization values, token second", http.Header{"Authorization": {"Bearer caller-key", "Bearer " + valid}}},
 	}
 	for _, route := range routes {
-		for _, tc := range cases {
+		for i, tc := range cases {
 			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
 				var mu sync.Mutex
 				var seen []string
@@ -69,7 +70,7 @@ func TestSummaryCallNeverSendsContextGurusToken(t *testing.T) {
 				req, _ := http.NewRequest(http.MethodPost, srv.URL+route.path, strings.NewReader(tokenCanaryRequest()))
 				req.Header = tc.hdr.Clone()
 				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("x-context-guru-session", "token-canary-"+route.name+"-"+tc.name)
+				req.Header.Set("x-context-guru-session", fmt.Sprintf("token-canary-%s-%d", route.name, i))
 
 				resp, err := srv.Client().Do(req)
 				if err != nil {
