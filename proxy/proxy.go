@@ -1529,9 +1529,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
-			// The savings tracker begins HERE, after applyMode, and not before it: the session
-			// (tr.Session) is known only once the pipeline has run, and BeginRequest only records
-			// the client body, so opening the record late loses nothing. `orig` is what the agent
+			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
+			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
+			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
 			//

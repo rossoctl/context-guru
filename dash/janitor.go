@@ -379,7 +379,7 @@ func (r *Recorder) evictSessions(cands []coldCandidate) (int64, error) {
 			slog.Warn("dash: could not read the aliases of a session being evicted",
 				"session", c.SessionID, "err", aerr)
 		}
-		res, derr := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
+		res, derr := r.db.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = ?`, c.TenantID, c.SessionID)
 		if derr != nil {
 			return freed, derr
 		}

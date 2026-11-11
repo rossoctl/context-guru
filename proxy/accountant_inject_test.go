@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 
@@ -57,6 +58,10 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	if !expand.HasTool("anthropic", sent) || !adjudicate.HasTool("anthropic", sent) {
 		t.Fatalf("precondition: both tools must be injected: %s", gjson.GetBytes(sent, "tools"))
 	}
+	// The record ends in the background job, after the response is back.
+	for i := 0; i < 1000 && got.Load() == nil; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
 	r := got.Load()
 	if r == nil {
 		t.Fatal("the savings record never ended")
@@ -74,6 +79,10 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	// diff and reports each as an added declaration. The sum check passes, the override applies, and
 	// each injection is a cost on a row of its own.
 	waitForRows(t, rec, 1)
+	// The recorder counts a row just before it calls the tap, so wait for the tap too.
+	for i := 0; i < 400 && len(tap.all()) < 1; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
 	e := tap.all()[0]
 	res, _ := e.AccountantResult()
 	for _, c := range res.Checks {
