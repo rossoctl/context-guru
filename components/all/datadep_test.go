@@ -1,16 +1,16 @@
 package all_test
 
 import (
-	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/datadep"
 )
 
-// docs/data-dependence.md says, for every registered component, whether it depends on stored
+// docs/data-dependence/components/<name>.md says, for every registered component, whether it depends on stored
 // customer data and what it does at each storage level (off, metadata only, everything). Many users do turn it off, and a
 // component that quietly starts to need data stops working for them with nothing reported (#428).
 //
@@ -18,15 +18,17 @@ import (
 // component that does not exist fails, and a row without a plain-words reason fails. It is the same
 // set-in-both-directions check as config/docdrift_test.go, for the same reason — iterating only the
 // rows that happen to exist cannot notice the row nobody wrote.
-const dataDepDoc = "../../docs/data-dependence.md"
+//
+// There is one file per component, so two PRs never edit the same file (#1088). The generator
+// builds docs/data-dependence.md from them; internal/datadep tests that the page is current.
+const dataDepDir = "docs/data-dependence/components"
 
-// dataDepSection is the heading the component table lives under. Only rows in this section are
-// read, so the feature and switch tables further down the page cannot satisfy the check by accident.
-const dataDepSection = "## Pipeline components"
+// dataDepRoot is the repo root, seen from this package.
+const dataDepRoot = "../.."
 
-// dataDepRow matches a table row whose first cell is a backticked component name. The name class
-// is wider than the names that exist today, so a misspelt row is REPORTED, not skipped.
-var dataDepRow = regexp.MustCompile("^\\|\\s*`([a-z0-9_-]+)`\\s*\\|(.*)\\|\\s*$")
+// dataDepName is the allowed shape of a component name. It is wider than the names that exist
+// today, so a misspelt row file is REPORTED, not skipped.
+var dataDepName = regexp.MustCompile("^[a-z0-9_-]+$")
 
 // dataDepKinds are the only allowed values of the "Kind" cell.
 var dataDepKinds = map[string]bool{"none": true, "metadata": true, "content": true}
@@ -41,60 +43,36 @@ var codeRef = regexp.MustCompile(`\.go(:\d+)?\b|:\d+\b`)
 // same way as every other component.
 var buildTagged = map[string]string{"skeleton": "cg_skeleton"}
 
-// The column order of the component table. Cells are addressed by these indexes below. The three
-// level columns say what the component does with storage off, with metadata only, and with
-// everything stored.
-const (
-	colKind       = 0 // after the name cell
-	colWhere      = 1
-	colOff        = 2
-	colMetaOnly   = 3
-	colEverything = 4
-	colReason     = 5
-	colDecidedBy  = 6
-	numCols       = 7
-)
-
 func TestDataDependenceDocCoversEveryComponent(t *testing.T) {
-	raw, err := os.ReadFile(dataDepDoc)
+	loaded, err := datadep.Load(dataDepRoot, datadep.Components)
 	if err != nil {
-		t.Fatalf("read %s: %v", dataDepDoc, err)
+		t.Fatalf("read %s: %v", dataDepDir, err)
 	}
-	rows := map[string][]string{}
-	in := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(line, "## ") {
-			in = strings.TrimSpace(line) == dataDepSection
-			continue
+	if len(loaded) == 0 {
+		t.Fatalf("%s: no component rows", dataDepDir)
+	}
+	rows := map[string]datadep.Row{}
+	for _, r := range loaded {
+		name := r.Fields["name"]
+		if !dataDepName.MatchString(name) {
+			t.Errorf("%s: component name %q is not a-z, 0-9, _ or -", r.File, name)
 		}
-		if !in {
-			continue
+		if name != r.Stem {
+			t.Errorf("%s: name %q must equal the file name %q", r.File, name, r.Stem)
 		}
-		m := dataDepRow.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		name := m[1]
 		if _, dup := rows[name]; dup {
-			t.Errorf("%s: component %q has two rows; keep one", dataDepDoc, name)
+			t.Errorf("%s: component %q has two rows; keep one", dataDepDir, name)
 		}
-		cells := strings.Split(m[2], "|")
-		for i := range cells {
-			cells[i] = strings.TrimSpace(cells[i])
-		}
-		rows[name] = cells
-	}
-	if len(rows) == 0 {
-		t.Fatalf("%s: no component rows under %q — the table or its heading moved", dataDepDoc, dataDepSection)
+		rows[name] = r
 	}
 
 	registered := map[string]bool{}
 	for _, n := range components.Names() {
 		registered[n] = true
 		if _, ok := rows[n]; !ok {
-			t.Errorf("component %q is registered but has no row in %s under %q. "+
-				"Add one: say whether it depends on stored data, what it does with storage off, and why.",
-				n, dataDepDoc, dataDepSection)
+			t.Errorf("component %q is registered but has no row file %s/%s.md. "+
+				"Add one: say whether it depends on stored data, what it does with storage off, and why. "+
+				"Then run: %s", n, dataDepDir, n, datadep.RegenCommand)
 		}
 	}
 
@@ -104,37 +82,30 @@ func TestDataDependenceDocCoversEveryComponent(t *testing.T) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		cells := rows[n]
+		r := rows[n]
 		if !registered[n] && buildTagged[n] == "" {
-			t.Errorf("%s documents component %q, which is not registered", dataDepDoc, n)
+			t.Errorf("%s documents component %q, which is not registered", r.File, n)
 			continue
 		}
-		if len(cells) != numCols {
-			t.Errorf("%s: row %q has %d cells after the name, want %d", dataDepDoc, n, len(cells), numCols)
-			continue
-		}
-		kind := strings.Trim(cells[colKind], "*` ")
+		kind := strings.Trim(r.Fields["kind"], "*` ")
 		if !dataDepKinds[kind] {
-			t.Errorf("%s: row %q has Kind %q, want one of none, metadata, content", dataDepDoc, n, cells[colKind])
+			t.Errorf("%s: Kind %q, want one of none, metadata, content", r.File, r.Fields["kind"])
 		}
-		for _, c := range []struct {
-			col  int
-			what string
-		}{
-			{colWhere, "Where"}, {colOff, "Off"}, {colMetaOnly, "Metadata only"}, {colEverything, "Everything"},
-			{colReason, "Reason"}, {colDecidedBy, "Decided by"},
+		for _, c := range []struct{ key, what string }{
+			{"where", "Where"}, {"off", "Off"}, {"metadata_only", "Metadata only"}, {"everything", "Everything"},
+			{"reason", "Reason (the text after the front matter)"}, {"decided_by", "Decided by"},
 		} {
-			if cells[c.col] == "" {
-				t.Errorf("%s: row %q has an empty %q cell", dataDepDoc, n, c.what)
+			if r.Fields[c.key] == "" {
+				t.Errorf("%s: empty %q cell", r.File, c.what)
 			}
 		}
-		reason := cells[colReason]
+		reason := r.Fields["reason"]
 		if codeRef.MatchString(reason) {
-			t.Errorf("%s: row %q gives a code reference as its reason (%q). "+
-				"Say in plain words why the component needs (or does not need) the data.", dataDepDoc, n, reason)
+			t.Errorf("%s: the reason is a code reference (%q). "+
+				"Say in plain words why the component needs (or does not need) the data.", r.File, reason)
 		}
 		if len(strings.Fields(reason)) < 8 {
-			t.Errorf("%s: row %q has a reason of under 8 words (%q); explain why, in a sentence", dataDepDoc, n, reason)
+			t.Errorf("%s: the reason has under 8 words (%q); explain why, in a sentence", r.File, reason)
 		}
 	}
 }
