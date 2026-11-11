@@ -224,8 +224,8 @@ Status:
 
 | Step | State |
 |---|---|
-| 1 | Built: accountant#59. Not merged. context-guru pins a commit of it. Needs a tag before release. |
-| 2 | Built: accountant#59. |
+| 1 | Built and merged: accountant#59 (merge commit 541e0fe). context-guru pins 6085d46, a commit on accountant `main` with no tag. It needs a tag (the nested module `metrics/` needs its own, for example `metrics/v0.1.0`) before a release. |
+| 2 | Built and merged: accountant#59. |
 | 3, 4 | Built for context-guru: #974. Cortex is not wired. |
 | 5 | Not started. |
 | 6 | Built: #1086. Depends on #974 for its end-to-end tests. |
