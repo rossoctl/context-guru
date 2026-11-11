@@ -46,7 +46,8 @@ var Models = []string{
 }
 
 // Check compares got with the fixture. RATEFILL_UPDATE=1 rewrites the fixture; that is
-// how the "before" values were made, on origin/main c2a06dd5, before any code changed.
+// how the "before" values were made, on origin/main c2a06dd5, before any code changed. The four
+// table/*/claude-sonnet-5 rows were re-made by #334 (a bare id takes its qualified entry).
 func Check(t *testing.T, got map[string]string) {
 	t.Helper()
 	const path = "testdata/ratefill_before.json"
