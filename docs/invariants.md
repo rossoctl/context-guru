@@ -99,11 +99,13 @@ and `ultrahigh` after that. W3 has 1,339 real requests and 257 pings.
 | K8 | contract | A thread that is done gets no ping (#859, #867). | spans where the held turn's `waiting_for = 'done'` and a ping follows | any | — | — | 0 |
 | K9 | intent | A release does not cut the pings per long wait. | per day, by thread type (main or subagent) and `waiting_for`: pings per real-turn gap longer than 300 s | a drop of more than 30% against the week before, at the same request volume | see [the #1040 case](#case-a-default-change-hidden-by-a-config-layer-1040) |  |  |
 | K10 | side effect | A long wait that the plan covers does not miss for lack of a ping. | per day, by thread type and prefix band (under 20k, 20k to 80k, 80k or more): gaps longer than 300 s with no ping between and `cache_write > cache_read` on the turn after | a rise of more than 2× against the week before, in any band | see the #1040 case |  |  |
+| K11 | contract | A real turn that comes back warm after a ping gets keep-alive credit. | A real request (`keepalive = 0`) with a `keepalive = 1` row before it on the same `session_id` and `thread_id`, in the same idle gap. The gap since the thread's previous real request is 300 s or more (5-min tier). The turn read its cache (`cache_read > cache_write`). The check is `keepalive_saved_usd > 0`. Report the share with credit, per day and per host ([Q4](#q4-credit-for-warm-turns-after-a-ping)). | a share below 80% on a day with 10 or more such turns, or any day at 0% with 10 or more | — | — | Laptop (v0.7.1): **about 100 of 100** in the last 3 days. Hosted deployment, before its v0.7.2 deploy: 31 of 33. Hosted deployment, after the deploy: **0 of 48 (B10)**. Measured 2026-11-11. |
 
 - **A miss after the warm time ends is not a breach.** The strategy accepts that cost. The monitor
   reports it but does not alert on it.
 - **Do not compare K5 across releases.** #855 lowered the cache-read prices. #768 (on main, not
   released) changes how `keepalive_saved_usd` is computed.
+- **Breach meaning, K11:** the host does not book the ping saving. The pings still work. On a correct host, the share is about 100%. First check: does the host call `proxy.PingSavings` and set `proxy.Options.Pings` (see `cmd/context-guru-proxy/main.go`, around `:725` and `:1033-1043` on v0.7.2)? Then check whether `acc_priced` changed on the day the share dropped.
 - **Breach meaning, K1:** a ping or a substitute did not renew the cache entry. First check: what
   the ping before it was (Q2), and the model.
 - **Owner:** David Amid (proposed).
@@ -374,6 +376,7 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | B6 | **A sweep question during a tool wait, 3 s after the turn.** One span: `waiting_for = 'own_tool'`, `wake_cause = 'teammate'`. The question went out 3 s after the turn, not after about 240 s. Both K3 and K7 count it. | K3, K7 | Check how the keeper starts a question when the wait cause is a tool and the turn woke from a teammate. |
 | B7 | **Ping failures rose to 1.2%** (3 of 257) in W3, from 0 of 84 in W2. | K4 | Check the 3 rows: status, or slow. |
 | B4 | **`cachesplit` never acted** on 12,265 requests. `split_requests` and `cachesplit_saved_usd` are 0. | the activity table | Check if Claude Code requests have anything to split, or if the component is broken. |
+| B10 | **Keep-alive credit is $0 on a host that embeds the library with its own `main`.** That host does not wire `PingSavings`. Since #930 (v0.7.0), a host must do it, or the accountant books no rescue. It showed on the day the host first ran an accountant build: credit went from about $5/h to $0 on every preset. Hosted deployment, after its v0.7.2 deploy: 0 of 48 warm turns had credit (31 of 33 before). Reported to that host's owners. Fix pending. | K11 | Wire `proxy.PingSavings` and set `proxy.Options.Pings` in the host's `main`. After the fix, K11 must be near 100%. |
 
 ## Gaps
 
@@ -389,10 +392,11 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | G10 | The keep-alive settings in effect for each request. A config layer can hide a new default (the #1040 case), and no counter shows it. | Record the effective prefix floor (and the plan's ping count) on the ping row, or show the effective keep-alive config in `/stats`, with where each value came from (default, strategy table, user). | No |
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
+| G11 | The proxy has no counter of pings that went out but were never priced. | An upstream counter, in a separate PR. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, K9, K10, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
@@ -490,4 +494,17 @@ where cache_miss_reason = 'hit' and keepalive = 0
 # the prefix band from the held turn's cache_read + cache_write + fresh_input.
 # Per day and thread type: long waits, pings per wait, no-ping misses by band,
 # and saved = 1 - sum(cost_usd) / sum(baseline_cost_usd) on real requests.
+```
+
+### Q4: credit for warm turns after a ping
+
+```python
+# rows: requests in (session_id, thread_id, ts) order.
+# For each real request R (keepalive = 0) with a previous real request P on the same thread:
+#   gap    = R.ts - P.ts
+#   pinged = any keepalive = 1 row on the thread with P.ts < ts < R.ts
+#   warm   = R.cache_read > R.cache_write
+# Count R when gap >= 300 s and pinged and warm.
+# Per day and host: counted turns, turns with keepalive_saved_usd > 0, and the share.
+# K11 breach: share < 80% with 10 or more turns, or share = 0% with 10 or more turns.
 ```
