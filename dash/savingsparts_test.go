@@ -180,3 +180,15 @@ func TestKeepAliveTablesSubscriptionTokensAreWired(t *testing.T) {
 		}
 	}
 }
+
+// TestEstRangeShowsANegativeFloor runs estrange.test.mjs: a held estimate whose floor is a cost must show it,
+// not fall back to the ceiling alone (#1001). Without this wrapper the node test never runs in CI.
+func TestEstRangeShowsANegativeFloor(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH, so estrange.test.mjs did not run; run `node --test dash/estrange.test.mjs`")
+	}
+	if out, err := exec.Command(node, "--test", "estrange.test.mjs").CombinedOutput(); err != nil {
+		t.Fatalf("node --test estrange.test.mjs failed: %v\n%s", err, out)
+	}
+}
