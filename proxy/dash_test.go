@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -496,40 +496,42 @@ func manyToolResultsRequest(model string, results int) []byte {
 // with the dashboard off. It fails if the dashboard adds a perceptible cost.
 //
 // HOW IT MEASURES (#1013, #1031). It times the dashboard's OWN calls on the request goroutine
-// (newCapture, the note* methods, finish) through spendHook, a test-only hook that is nil in
-// production. It does not time the whole request. The old test compared the median of paired
-// whole-request differences against min(45 ms, max(5 ms, 20% of the baseline)). That failed on a slow
-// CI runner: the baseline was 500-730 ms and the added time was 49-77 ms in EVERY round (#1013 reopen
-// comment), so best-of-3 rounds (#1014) did not help. A fastest-request comparison failed too, on a
-// box loaded to 16 busy loops on 4 cores: 7 of 20 runs. The old test also missed a 50 ms sleep in
-// capture.finish under load (#1031), because that cost runs in the handler's defer and hid behind
-// the next "off" request.
+// (newCapture, the note* methods, the accountant's accBegin and accEnd, finish) through spendHook, a
+// test-only hook that is nil in production. It does not time the whole request. The old test compared
+// the median of paired whole-request differences against min(45 ms, max(5 ms, 20% of the baseline)).
+// That failed on a slow CI runner: the baseline was 500-730 ms and the added time was 49-77 ms in
+// EVERY round (#1013 reopen comment), so best-of-3 rounds (#1014) did not help. A fastest-request
+// comparison failed too, on a box loaded to 16 busy loops on 4 cores: 7 of 20 runs. The old test also
+// missed a 50 ms sleep in capture.finish under load (#1031), because that cost runs in the handler's
+// defer and hid behind the next "off" request.
 //
-// Why this works. The dashboard's calls are field copies and one channel send: well under 1 ms. A
-// cost on the request path, before the response or in the defer, adds its full size to EVERY request.
-// Upstream time, pipeline time and the runner's speed are not in the figure. The test sends requests
-// one after the other, waits until every finish has run, and
-// averages the dashboard's time per request. The savings accountant (accBegin, accEnd) is not timed: it
-// is a separate feature, and it costs about 24 ms per request under -race on this body.
-const (
-	// maxDashboardSpend is the most the dashboard may spend on the request goroutine per request.
-	// The guarded regression is 50-53 ms and never shrinks under load.
-	maxDashboardSpend = 20 * time.Millisecond
-	spendRequests     = 10
-)
+// Why this works. A cost on the request path, before the response or in the defer, adds its full size
+// to EVERY request. Upstream time, pipeline time and the runner's speed are not in the figure. The
+// test sends requests one after the other, waits until each finish has run, and takes the MEDIAN of
+// the dashboard's time per request. The median ignores the few requests that the scheduler stalls.
+// The guarded regression is 50-53 ms and never shrinks under load.
+//
+// Two checks, because the accountant's cost grows with the body (#1059):
+//   - TestDashboardAddsNoRequestLatencyWithContentCapture counts ALL the dashboard's work, the
+//     accountant (accBegin, accEnd) included, on a small body (2 tool results). The growth of the
+//     accountant's cost with body size is tracked in #1059 and is NOT covered by this test.
+//   - TestDashboardCaptureAddsNoRequestLatencyAtMaxContent runs content capture at its maximum
+//     (24 tool results) and leaves the accountant out, because on that body the accountant costs
+//     about 24 ms per request under -race and 150 ms under load (#1059). It covers the capture work.
 
-func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+// dashboardSpends sends n requests with a body of the given number of tool results through a
+// dashboard with content capture on. It returns, sorted, the time each request's dashboard calls
+// took on the request goroutine, leaving out the calls named in skip.
+func dashboardSpends(t *testing.T, n, results int, skip ...string) []time.Duration {
+	t.Helper()
 	up := fakeUpstream(t)
 	defer up.Close()
-
 	// Content capture ON: the configuration with the most work to do per request is
 	// the one worth guarding.
 	onH, _ := dashHandler(t, up.URL, dash.Options{
 		CaptureContent: true, ContentCap: 16 << 10, ContentMaxPerRequest: 24,
 	})
-	// 24 tool results = ContentMaxPerRequest, so the capture path does the full amount
-	// of work it is ever allowed to do on one request.
-	body := string(manyToolResultsRequest("m", 24))
+	body := string(manyToolResultsRequest("m", results))
 
 	srv := httptest.NewServer(onH.Mux())
 	defer srv.Close()
@@ -551,35 +553,75 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 	for i := 0; i < 3; i++ { // warm up, before the hook is set
 		one()
 	}
-	var spent atomic.Int64
-	var finished atomic.Int64
+	var mu sync.Mutex
+	var spent time.Duration
+	done := make(chan struct{}, n+1)
 	hook := func(call string, d time.Duration) {
-		spent.Add(int64(d))
+		if slices.Contains(skip, call) {
+			return
+		}
+		mu.Lock()
+		spent += d
+		mu.Unlock()
 		if call == "finish" {
-			finished.Add(1)
+			done <- struct{}{}
 		}
 	}
 	spendHook.Store(&hook)
 	defer spendHook.Store(nil)
-	for i := 0; i < spendRequests; i++ {
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		mu.Lock()
+		spent = 0
+		mu.Unlock()
 		one()
-	}
-	// finish runs in the handler's defer, so it may still run when the client has the response.
-	for deadline := time.Now().Add(30 * time.Second); finished.Load() < spendRequests; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d finish calls ran", finished.Load(), spendRequests)
+		// finish runs in the handler's defer, so it may still run when the client has the response.
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("finish did not run for request %d", i)
 		}
+		mu.Lock()
+		out = append(out, spent)
+		mu.Unlock()
 	}
 	spendHook.Store(nil)
+	slices.Sort(out)
+	return out
+}
 
-	per := time.Duration(spent.Load() / spendRequests)
-	t.Logf("the dashboard spent %v per request on the request goroutine (%d requests, content ON, budget %v)",
-		per, spendRequests, maxDashboardSpend)
-	if per > maxDashboardSpend {
-		t.Errorf("the dashboard spent %v per request on the request goroutine (budget %v): something "+
-			"expensive is on the request path, before the response or in the handler's defer",
-			per, maxDashboardSpend)
+func checkSpend(t *testing.T, spends []time.Duration, budget time.Duration) {
+	t.Helper()
+	med := spends[len(spends)/2]
+	t.Logf("dashboard time per request on the request goroutine, %d requests: median %v, min %v, max %v (budget %v on the median)",
+		len(spends), med, spends[0], spends[len(spends)-1], budget)
+	if med > budget {
+		t.Errorf("the dashboard spent a median of %v per request on the request goroutine (budget %v): something "+
+			"expensive is on the request path, before the response or in the handler's defer", med, budget)
 	}
+}
+
+// maxSmallBodySpend is the budget on the median, 2 tool results, accountant counted. Measured under
+// -race on 4 cores, 5 runs of 50 requests each (median of the per-request times, p95 in brackets):
+//   - idle: 2.5-2.6 ms (4.4-4.5 ms)
+//   - under load, 16 busy loops pinned to 4 cores: 9.1-14.7 ms (30.5-35.8 ms; worst request 58.5 ms)
+//
+// The budget is 2x the worst median (14.7 ms), rounded up to 30 ms. That leaves grace for noise and
+// stays clearly under the 50 ms a regression adds to EVERY request, so the median reaches 50 ms or more.
+// The mean of the same runs reached 30 ms under load, which is why the check uses the median.
+const maxSmallBodySpend = 30 * time.Millisecond
+
+func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+	checkSpend(t, dashboardSpends(t, 50, 2), maxSmallBodySpend)
+}
+
+// maxMaxContentSpend is the budget on the median, 24 tool results, accountant left out. Measured
+// under -race on 4 cores with 16 busy loops: worst run mean 10.5 ms. The budget is 2x that, plus
+// grace, and well under the 50 ms the guarded regression adds.
+const maxMaxContentSpend = 25 * time.Millisecond
+
+func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
+	checkSpend(t, dashboardSpends(t, 10, 24, "accBegin", "accEnd", "accBilledTTL"), maxMaxContentSpend)
 }
 
 // TestDashboardUnderConcurrentTraffic drives the whole path (pipeline, capture,
