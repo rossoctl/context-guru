@@ -1100,6 +1100,14 @@ type Snapshot struct {
 	// the host. Omitted when deferral never ran in this process.
 	ToolDefer any `json:"tool_defer,omitempty"`
 
+	// KeepAlivePingsPriced and KeepAliveRescueFactsMissing say whether the host wires keep-alive credit
+	// (filled by the host). Priced: pings whose saving was priced and stored for the thread's next request.
+	// Missing: priced real requests that followed keep-alive pings but found no ping facts, so their
+	// credit is lost. Missing above 0 means the ping side is not wired (no ping store on the proxy, no
+	// PingSavings call, or a key mismatch). Counts only.
+	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
+	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
+
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,
 	// never renamed or removed (see the golden shape test).

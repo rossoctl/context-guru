@@ -196,6 +196,8 @@ thing and is counted separately. See [when the tiers read zero](#when-the-tiers-
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |
 | `savings_pct_attempted` | `saved ÷ attempted`. The ratio to quote: `savings_pct`'s whole-request denominator recounts the transcript every turn and trends to ~0% on a long session. `0` when nothing was attempted. |
 | `savings_pct_new_input` | `saved ÷ (fresh + cache_write + saved)` — savings as a fraction of what would newly have entered the provider. Reported as `0`, **never 100**, when the provider reported no usage: savings must not be divided by themselves. |
+| `keepalive_pings_priced` | Keep-alive pings whose saving the host priced and stored for the thread's next request (each `PingSavings` call that returned ok). The denominator for the next field. `0` on a host with no ping store. |
+| `keepalive_rescue_facts_missing` | Priced real requests that followed keep-alive pings but found **no ping facts** for their thread, so the ping credit was lost. Non-zero means the host does not wire the ping side: no `Options.Pings`, no `PingSavings` call, or a key mismatch. `0` on a healthy host. Also exported as `cg_keepalive_rescue_facts_missing_total`. |
 
 ##### When the tiers read zero
 
