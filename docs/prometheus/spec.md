@@ -391,11 +391,29 @@ Target: **under 2,000 active series per machine.** For 50 machines this is 100,0
 
 All dashboards use the central Prometheus. They are Grafana JSON files in `deploy/grafana/dashboards/`. Each panel states its query. Use `$__rate_interval`.
 
-Filters on every dashboard: `proxy`, `machine`, `model`, time range.
+Filters on every dashboard: `proxy`, `machine`, `model`, time range. The default range is the last 7 days.
+
+The pictures below are **fictive screenshots**. Every number in them is invented. They show layout and wording, not results. `docs/prometheus/mockups/gen_mockups.py` draws them, so they can change with the design.
+
+### 6.0 Design rules
+
+1. **Money first.** The first screen answers "do we save money?" in 5 seconds. The largest tile, at the top left, is **Net saved today**. Health comes below it.
+2. **One question for each dashboard.** The question is the first line of its section. A panel that does not help answer it moves to another dashboard.
+3. **The same colors everywhere.** Green is saved. Orange is added cost. Red is a loss or a failure. Yellow needs a look. Blue and purple only separate series.
+4. **Counters are never shown raw.** A total uses `increase()` over the selected range. A trend uses `rate()` with `$__rate_interval`.
+5. **Every panel states its unit and range** in the small text at the top right.
+6. **Estimates stay visible.** The Savings dashboard shows the estimated share (`llm_savings_estimated_total`, section 5.2). No panel hides an estimated figure.
+7. **Losses are read first.** Components with a negative net have their own table on the Savings dashboard.
+8. **A panel for a metric that is not built shows "No data yet"** and the issue number. It does not show 0.
+9. **A machine is shown by its random install ID** (R43). The operator keeps the map from ID to person or team outside the metrics system. A dashboard never shows a host name.
 
 ### 6.1 Fleet overview
 
-Question: is the fleet healthy, and do we save money?
+Question: do we save money, and is the fleet healthy?
+
+![Fleet overview (fictive data)](img/dash-fleet.png)
+
+Order, top to bottom: the four money tiles, the daily net saved, the hourly trend with the best machines, then a health strip. The tiles use the colors of rule 3.
 
 | Panel | Type | Query idea |
 |---|---|---|
@@ -413,6 +431,10 @@ Question: is the fleet healthy, and do we save money?
 
 Question: where does the saving come from, and where does it leak?
 
+![Savings (fictive data)](img/dash-savings.png)
+
+The left column ranks components. The table at the bottom right is the one to read first: it lists the components that cost more than they save.
+
 | Panel | Type | Query idea |
 |---|---|---|
 | Saved vs added | time series | both counters, stacked |
@@ -428,6 +450,10 @@ Question: where does the saving come from, and where does it leak?
 ### 6.3 Cache and keep-alive
 
 Question: does the cache pay, and do pings pay?
+
+![Cache and keep-alive (fictive data)](img/dash-cache.png)
+
+The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 
 | Panel | Type | Query idea |
 |---|---|---|
@@ -471,6 +497,10 @@ Question: is context-guru itself working?
 ### 6.6 Machine comparison
 
 Question: which machines or configs save the most?
+
+![Machine comparison (fictive data)](img/dash-machines.png)
+
+The **saving rate** column needs the baseline counter (`llm_savings_baseline_usd_total`), which is not built yet. Until then, "Net saved per 1,000 requests" gives a fair comparison between a busy machine and a quiet one.
 
 | Panel | Type | Query idea |
 |---|---|---|
