@@ -178,12 +178,16 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 - **Mechanical** (both sides add a line to the same list): resolve it, and say how in the merge body.
 - **Semantic** (the code was restructured under the PR): stop and hand the rebase to the author. Then review the author's conflict resolution before you merge.
 
-**A PR that another PR is stacked on** (GitHub's stack feature) cannot merge with `gh pr merge` or `PUT /pulls/<n>/merge`. Use `PUT /repos/<owner>/<repo>/pulls/<n>/merge-async` with `merge_method: squash`, `merge_action: direct_merge`, `bypass_rules: true`, `sha`, `commit_title` and `commit_message`. It merges that PR only, not the PRs stacked on top.
+**A PR that another PR is stacked on** (GitHub's stack feature) cannot merge with `gh pr merge` or `PUT /pulls/<n>/merge`. Use `PUT /repos/<owner>/<repo>/pulls/<n>/merge-async` with `merge_method: squash`, `merge_action: direct_merge`, `sha`, `commit_title` and `commit_message`. It merges that PR only, not the PRs stacked on top.
+- **Use it on the bottom PR of the stack only.** On a child, it also merges every open PR below it.
+- **Add `bypass_rules: true` only if a rule blocks the merge.** It is the same bypass as `--admin`. The rules in [Merge](#3-merge) apply: the owner's yes for any failed rule other than the review rule, `check-ready.sh` first, and the rule suite read after the merge.
+- **A `202` is not a merge.** Read the PR state back from GitHub.
 
 **To bring a stacked child onto `main` after its parent squash-merged,** you may use a merge instead of a rebase:
-1. Merge `origin/main` into the child. There is no rebase, so there is no force-push.
+1. Merge `origin/main` into the child. There is no rebase, so there is no force-push. Do not push yet.
 2. PATCH the child's base to `main`.
-3. The child's own change is unchanged when the added and removed lines of `git diff origin/main...<head>` match the approved change.
+3. Push the merge commit.
+4. The child's own change is unchanged when the added and removed lines of `git diff origin/main...<head>` match the approved change.
 
 This section is about a stacked PR rebase. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
@@ -221,7 +225,7 @@ Notes:
 - **Do not copy new code into that directory while a run is in progress.**
 - The script runs a failed step once more. "flaky" in the summary means the second run passed. If a step failed twice, run it on the same commit in a clean directory. That separates a flaky test from a defect.
 - Known flakes on a loaded machine: `SQLITE_BUSY` in `./dash/...`, and `TestDashEmitterKeepAlivePingCarriesNoWaitCause`.
-- **Known flake: `TestFailedLoadAllowsRetry`** (`store/disk_test.go:415`). It fails with `OpenDisk: context deadline exceeded` when the machine is under load. In v0.7.2 it passed on a re-run, and 3 times when run alone. Issue #1075 covers it. Check it with `gh issue view 1075`.
+- **Known flake: `TestFailedLoadAllowsRetry`** (`store/disk_test.go:413`). It fails with `OpenDisk: context deadline exceeded` when the machine is under load. In v0.7.2 it passed on a re-run, and 3 times when run alone. Issue #1075 covers it. Check it with `gh issue view 1075`.
 - If a test fails, run it on an unmodified `origin/main` on the same machine before you call it a defect of the release. Some tests fail because of the machine itself.
 
 **Part B: one live session through a proxy built from `main`.**
