@@ -234,8 +234,8 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 			names = append(names, tail)
 		}
 		sort.Strings(names)
-		slog.Warn("model price list: bare id is ambiguous between two qualified entries at "+
-			"different rates; not indexing it — a request for it falls through to the family/"+
+		slog.Warn("model price list: bare id is ambiguous between two qualified entries that "+
+			"differ in rate, window or compaction point; not indexing it — a request for it falls through to the family/"+
 			"public rate instead of guessing which provider's rate applies",
 			"tails", names)
 	}

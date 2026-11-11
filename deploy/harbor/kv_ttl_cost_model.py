@@ -531,10 +531,15 @@ class PriceBook:
             raise ValueError(f"{path}: cache_write_frac must not be negative")
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
+        # Each entry's window and compaction point. Nothing here prices with them; the
+        # bare-tail ambiguity rule compares them, as table.go's does.
+        meta: dict[str, tuple[int, int]] = {}
         for i, m in enumerate(raw.get("models") or ()):
             match = str(m.get("match", "")).strip().lower()
             if not match:
                 raise ValueError(f"{path}: entry {i} has no match")
+            if match in meta:
+                raise ValueError(f"{path}: {match!r} appears more than once")
             prefix = match.endswith("*")
             match = match.rstrip("*")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
@@ -559,11 +564,12 @@ class PriceBook:
             price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
+            meta[match] = (int(m.get("window") or 0), int(m.get("compaction_point") or 0))
         # Longest match first: specificity is a property of the match, not of the file's
         # ordering or of the KIND of match.
         entries.sort(key=lambda e: len(e[0]), reverse=True)
         book._entries = entries
-        book._bare_tails = _derive_bare_tails(entries)
+        book._bare_tails = _derive_bare_tails(entries, meta)
         return book
 
     def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
@@ -617,6 +623,9 @@ class PriceBook:
 
     def _lookup(self, model: str) -> ModelPricing:
         full = (model or "").strip().lower()
+        # modelinfo.stripVariant: one trailing "[...]", unless the id is only that group.
+        if full.endswith("]") and full.rfind("[") > 0:
+            full = full[:full.rfind("[")]
         tail = full.rsplit("/", 1)[-1]
         def hit(price: ModelPricing) -> ModelPricing:
             if price.read_derived:
@@ -641,15 +650,18 @@ class PriceBook:
                             ping_output_tokens=self.ping_output_tokens)
 
 
-def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]]) -> dict[str, ModelPricing]:
+def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]],
+                       meta: Mapping[str, tuple[int, int]]) -> dict[str, ModelPricing]:
     """Index each qualified, non-family entry by its bare tail — table.go's deriveBareTails.
 
     An entry the operator wrote bare wins on its own, and a tail two providers price
     differently is dropped with a warning rather than guessed.
     """
-    def rates(p: ModelPricing) -> ModelPricing:
+    def rates(match: str, p: ModelPricing) -> tuple[ModelPricing, tuple[int, int]]:
         # The entry's own id and a read rate derived from that id are not part of its rate.
-        return replace(p, model="", cache_read=0.0 if p.read_derived else p.cache_read)
+        # The window and compaction point are: the entry serves them too.
+        return (replace(p, model="", cache_read=0.0 if p.read_derived else p.cache_read),
+                meta.get(match, (0, 0)))
 
     literal = {e[0] for e in entries}
     tails: dict[str, tuple[str, ModelPricing]] = {}
@@ -662,15 +674,16 @@ def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]]) -> d
             continue
         prev = tails.get(tail)
         if prev is not None and prev[0] != match:
-            if rates(prev[1]) != rates(price):
+            if rates(prev[0], prev[1]) != rates(match, price):
                 ambiguous.add(tail)
             continue
         tails[tail] = (match, price)
     if ambiguous:
         for tail in ambiguous:
             del tails[tail]
-        warnings.warn(f"model price list: bare id is ambiguous between two qualified entries at "
-                      f"different rates; not indexing it: {sorted(ambiguous)}")
+        warnings.warn(f"model price list: bare id is ambiguous between two qualified entries that "
+                      f"differ in rate, window or compaction point; not indexing it: "
+                      f"{sorted(ambiguous)}")
     return {tail: price for tail, (_m, price) in tails.items()}
 
 
