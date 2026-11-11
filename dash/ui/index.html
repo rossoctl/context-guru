@@ -608,13 +608,13 @@
         <thead><tr>
           <th>Session</th><th data-scope-col hidden class="narrow-hide">Account</th><th class="narrow-hide">Started</th>
           <th class="num" title="Number of requests the agent sent in this session">Turns</th>
-          <th class="num" title="What this session cost: the provider's bill plus our own model calls">Cost</th>
-          <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th>
+          <th class="num" title="What this session cost: the provider's bill plus our own model calls" data-sub-label="Tokens used" data-sub-title="Input tokens this session was billed, by kind (wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input)">Cost</th>
+          <th class="num" title="Dollars saved after subtracting what context-guru itself cost" data-sub-label="Tokens saved" data-sub-title="Tokens saved by kind, and the tokens the savings cost. The keep-alive has its own column.">Net saved $</th>
           <th class="more">Model</th><th class="more">Agent</th><th class="more" title="The preset this session used">Preset</th>
           <th class="num more" title="Tokens sent to context-guru, before any removal">Before</th>
           <th class="num more" title="Gross counts a removed span once per request it was missing from; unique counts it once.">Tokens removed<br><span class="hint">total / distinct</span></th>
           <th class="num more" title="Tokens read from / written to the provider prompt cache">Cache read / write</th>
-          <th class="num more" title="Dollars gained or lost by keeping the cache warm with pings">Keep-alive net</th><th class="num more" title="Times the agent asked for removed text to be restored">Restores</th>
+          <th class="num more" title="Dollars gained or lost by keeping the cache warm with pings" data-sub-label="Keep-alive" data-sub-title="Cache rewrites the pings avoided, and on its own line what the pings paid">Keep-alive net</th><th class="num more" title="Times the agent asked for removed text to be restored">Restores</th>
           <th class="num more" title="Milliseconds context-guru added to the request">Added delay</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>

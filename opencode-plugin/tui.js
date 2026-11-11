@@ -1,0 +1,149 @@
+// Native pickers for the OpenCode TUI. OpenCode loads a TUI plugin from tui.json, as a module
+// with a "tui" export; that module cannot also export "server", so this is a second file.
+// It only draws dialogs. Every switch runs the same "set NAME [--restart]" script as the chat
+// commands, through runCommandScript, so the native path and the chat path cannot differ.
+import { parsePickerOutput, runCommandScript, stateDirectory } from "./index.js"
+
+const KINDS = {
+  preset: {
+    script: "context-guru-preset",
+    title: "Context Guru: preset",
+    what: "preset",
+  },
+  strategy: {
+    script: "context-guru-strategy",
+    title: "Context Guru: cache strategy",
+    what: "cache strategy",
+  },
+}
+
+const RESTART_WARNING = "A restart applies it now. It costs one cache rewrite in every open session of this project."
+
+function toast(api, variant, message) {
+  try { api.ui.toast({ variant, title: "Context Guru", message }) } catch {}
+}
+
+// Select list, then a confirm to switch (saves the choice), then a confirm to restart.
+export async function pickAndSwitch(api, directory, kind) {
+  const spec = KINDS[kind]
+  const state = stateDirectory(directory)
+  const shown = await runCommandScript(state, spec.script)
+  const { facts, choices } = parsePickerOutput(shown.output)
+  if (shown.status !== 0 || !choices.length) {
+    // Two different causes: the script is missing, or it exists and says the strategy table is missing.
+    const noTable = /reason=no-strategy-table/.test(shown.output)
+    toast(api, "error", noTable
+      ? "The strategy table is missing. Restart OpenCode with a routed Anthropic or OpenAI provider, so the plugin reads it from the proxy."
+      : `No ${spec.what} script found. Start OpenCode once with the Context Guru plugin enabled.`)
+    return
+  }
+  const current = facts.saved
+  // The proxy table says which strategies spend the caller's credential. The script prints them.
+  const spending = new Set((facts.spends ?? "").split(",").filter(Boolean))
+  const options = choices.map((choice) => ({
+    title: choice.name === current ? `${choice.name} (current)` : choice.name,
+    value: choice.name,
+    description: choice.help,
+  }))
+  const gap = facts.gap ? ` ${facts.gap}.` : ""
+  api.ui.dialog.replace(() => api.ui.DialogSelect({
+    title: `${spec.title} (saved: ${current}).${gap}`.trim(),
+    current,
+    options,
+    onSelect: (option) => {
+      if (option.value === current) {
+        api.ui.dialog.clear()
+        toast(api, "info", `${option.value} is already saved.`)
+        return
+      }
+      confirmSwitch(api, state, kind, option.value, spending.has(option.value))
+    },
+  }))
+}
+
+function confirmSwitch(api, state, kind, name, spends) {
+  const spec = KINDS[kind]
+  const message = `Save ${spec.what} "${name}" for this project?` + (spends ? " This strategy spends your own credential while nobody is at the keyboard, on every session routed through this proxy." : "")
+  api.ui.dialog.replace(() => api.ui.DialogConfirm({
+    title: `Switch ${spec.what}?`,
+    message,
+    onCancel: () => api.ui.dialog.clear(),
+    onConfirm: async () => {
+      const saved = await runCommandScript(state, spec.script, ["set", name])
+      if (saved.status !== 0) {
+        api.ui.dialog.clear()
+        toast(api, "error", `Could not save ${name}: ${saved.output.trim().split("\n").slice(-2).join(" ")}`)
+        return
+      }
+      confirmRestart(api, state, kind, name)
+    },
+  }))
+}
+
+function confirmRestart(api, state, kind, name) {
+  const spec = KINDS[kind]
+  api.ui.dialog.replace(() => api.ui.DialogConfirm({
+    title: "Restart the proxy now?",
+    message: `Saved ${spec.what} "${name}". ${RESTART_WARNING} If you say no, it applies at the next OpenCode start.`,
+    onCancel: () => {
+      api.ui.dialog.clear()
+      toast(api, "info", `Saved. ${name} applies at the next OpenCode start.`)
+    },
+    onConfirm: async () => {
+      api.ui.dialog.clear()
+      const restarted = await runCommandScript(state, spec.script, ["set", name, "--restart"])
+      const ok = restarted.status === 0 && /result=restarted/.test(restarted.output)
+      toast(api, ok ? "success" : "error", ok ? `Proxy restarted with ${spec.what} "${name}".` : `Restart not applied. See proxy.log in ${state}`)
+    },
+  }))
+}
+
+// keymap.registerLayer is the current API. api.command.register is deprecated and is the
+// fallback for a host that has no keymap. With neither, the chat commands from the server
+// plugin stay the only path.
+//
+// The field names below are what OpenCode 1.19.5 reads. The published types do not list them.
+// They come from the host: its api.command shim turns a legacy item into a keymap command with
+// { namespace: "palette", name, title, desc, category, slashName, run }. A command without
+// namespace "palette" registers without an error and never shows in the palette.
+//
+// The native pickers have NO slash name (owner decision, option A). /context-guru-preset and
+// /context-guru-strategy open only the chat commands of the server plugin, so each slash name
+// shows once. The native dialogs are reached from the ctrl+p palette, under "Context Guru".
+export function registerPickerCommands(api, directory) {
+  const entries = Object.entries(KINDS)
+  if (typeof api.keymap?.registerLayer === "function") {
+    api.keymap.registerLayer({
+      commands: entries.map(([kind, spec]) => ({
+        namespace: "palette",
+        name: `context-guru.${kind}`,
+        title: spec.title,
+        desc: spec.what,
+        category: "Context Guru",
+        run: () => { pickAndSwitch(api, directory, kind).catch(() => toast(api, "error", "Picker failed.")) },
+      })),
+    })
+    return "keymap"
+  }
+  if (typeof api.command?.register === "function") {
+    api.command.register(() => entries.map(([kind, spec]) => ({
+      title: spec.title,
+      value: `context-guru.${kind}`,
+      category: "Context Guru",
+      onSelect: () => { pickAndSwitch(api, directory, kind).catch(() => toast(api, "error", "Picker failed.")) },
+    })))
+    return "legacy"
+  }
+  return "none"
+}
+
+async function tui(api) {
+  const directory = api.state?.path?.directory
+  if (!directory) return
+  registerPickerCommands(api, directory)
+}
+
+export default {
+  id: "opencode-context-guru-tui",
+  tui,
+}

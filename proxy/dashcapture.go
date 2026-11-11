@@ -57,6 +57,8 @@ type capture struct {
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
+	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
+	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
 	sseTTFBMs   float64
 	sseBuffered bool
@@ -144,6 +146,9 @@ type capture struct {
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
+	// accPreDefer is the body tool deferral read, set only on a request it changed (#908). It splits
+	// the envelope diff in two, so deferral's edits to `tools` are reported under its own operator.
+	accPreDefer []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
 	accThread string
 	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
@@ -487,13 +492,16 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	c.sweepExpandTok += tokens
 	if note.First && !note.Overlap {
 		c.sweepFalseExp++
+		if note.Warm {
+			c.sweepFalseExpWarm++
+		}
 	}
 }
 
 // deferFacts is what tool deferral did on one request, for the dashboard row (#869).
 type deferFacts struct {
 	tokens, list, searches, dropped, loaded, wrong int
-	gross, net                                     float64
+	gross, net, search                             float64
 }
 
 // noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
@@ -504,7 +512,7 @@ func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) 
 		return
 	}
 	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
-		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net}
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net, search: m.SearchCost}
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -625,8 +633,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
-		e.DeferGrossUSD, e.DeferNetUSD = d.gross, d.net
+		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = d.gross, d.net, d.search
+		// The ledger's own cost, taken here, before PriceMode can move the net onto the library's figure.
+		e.DeferCostUSD = d.gross - d.net
 	}
+	e.SweepFalseExpandsWarm = c.sweepFalseExpWarm
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
@@ -767,6 +778,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
 		if c.rejected() {
 			c.accNoResult = "rejected_status"
+		} else if c.accNoResult == accDeferralUnplaced {
+			// accEnd found a deferral it could not describe to the library (billedBody). Computing on the bodies
+			// as they are would fail the sum check, so no figure is computed and the log line names the reason.
 		} else if c.rounds <= 1 {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
@@ -795,6 +809,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 		if cgPriced {
 			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
+		} else {
+			e.CGCostUnpriced = true
 		}
 	}
 

@@ -10,8 +10,10 @@ import (
 // The figures are the proxy's own deferral ledger, stored per request on the request row
 // (Event.DeferTokens and the rest): tokens deferred, the server-side searches the responses ran,
 // the tools those searches loaded, the wrong guesses (a deferred tool that was then loaded), and
-// the ledger's gross and net dollars. Net is gross minus the names list and every search cost
-// (tooldefer.Price), so this page and /stats show the same net figure. The wrong guesses and the
+// the ledger's gross dollars and its cost. Net is the deferral lever the Overview card shows: on a request the
+// accountant priced it is the library's deferral figure less the search cost, and on any other it is the ledger's
+// gross less its cost (tooldefer.Price). So net is NOT always gross less cost; the cost column is read from the
+// ledger, not derived from the other two. The wrong guesses and the
 // dropped searches are the ledger's own numbers (tooldefer.WrongGuesses, SearchRead.Dropped).
 //
 // Metadata only: counts and prices from the request rows. Days are UTC days, like every other
@@ -43,7 +45,9 @@ type ToolDeferDay struct {
 	WrongGuesses int64   `json:"wrong_guesses"`
 	GrossUSD     float64 `json:"gross_usd"`
 	NetUSD       float64 `json:"net_usd"`
-	// CostUSD is gross minus net: the names list and the searches.
+	// CostUSD is the ledger's own cost of the deferral: the names list and the searches. It is read from the
+	// request row, not derived as gross minus net, because on a request the accountant priced net is the library's
+	// figure less the search cost.
 	CostUSD float64 `json:"cost_usd"`
 	// Unpriced is the changed requests whose model has no price: their dollars read 0, not free.
 	Unpriced int64 `json:"unpriced_requests"`
@@ -61,7 +65,7 @@ func (d *DB) ToolDeferReportFor(f Filter) (*ToolDeferReport, error) {
 	cond, args := f.where()
 	q := `SELECT (r.ts / ?) * ?, r.tenant_id, COUNT(*), SUM(r.defer_tokens), SUM(r.defer_list_tokens),
 		SUM(r.defer_searches), SUM(r.defer_dropped_searches), SUM(r.defer_loaded), SUM(r.defer_wrong_guesses),
-		SUM(r.defer_gross_usd), ` + deferNetSum + `,
+		SUM(r.defer_gross_usd), ` + deferNetSum + `, SUM(r.defer_cost_usd),
 		SUM(CASE WHEN r.defer_gross_usd = 0 AND r.defer_net_usd = 0 THEN 1 ELSE 0 END)
 		FROM requests r WHERE ` + cond + ` AND r.defer_tokens > 0 GROUP BY 1, 2`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append([]any{DayMs, DayMs}, args...)...)
@@ -73,10 +77,9 @@ func (d *DB) ToolDeferReportFor(f Filter) (*ToolDeferReport, error) {
 	for rows.Next() {
 		var x ToolDeferDay
 		if err := rows.Scan(&x.Day, &x.Tenant, &x.Requests, &x.TokensDeferred, &x.ListTokens,
-			&x.Searches, &x.DroppedSearches, &x.Loaded, &x.WrongGuesses, &x.GrossUSD, &x.NetUSD, &x.Unpriced); err != nil {
+			&x.Searches, &x.DroppedSearches, &x.Loaded, &x.WrongGuesses, &x.GrossUSD, &x.NetUSD, &x.CostUSD, &x.Unpriced); err != nil {
 			return nil, err
 		}
-		x.CostUSD = x.GrossUSD - x.NetUSD
 		out.Days = append(out.Days, x)
 		t := &out.Total
 		t.Requests += x.Requests

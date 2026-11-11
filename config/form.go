@@ -126,8 +126,10 @@ type CacheForm struct {
 	KeepAliveMaxPings          int     `json:"keepalive_max_pings,omitempty"`
 	KeepAliveMaxUSDPerPing     float64 `json:"keepalive_max_usd_per_ping,omitempty"`
 	KeepAliveMinPrefixTokens   int     `json:"keepalive_min_prefix_tokens,omitempty"`
-	HeadTTL1h                  bool    `json:"head_ttl_1h"`
-	HeadTTLMinBytes            int     `json:"head_ttl_min_bytes,omitempty"`
+	// KeepAliveToolWaitMinPrefixTokens is the floor for a tool wait, background work, a teammate and a subagent wait.
+	KeepAliveToolWaitMinPrefixTokens int  `json:"keepalive_tool_wait_min_prefix_tokens,omitempty"`
+	HeadTTL1h                        bool `json:"head_ttl_1h"`
+	HeadTTLMinBytes                  int  `json:"head_ttl_min_bytes,omitempty"`
 	// HeadTTLMinTokens is DEPRECATED, see CacheConfig. The form still reads it from an old
 	// document and keeps it, so a re-save does not drop a value the user set.
 	HeadTTLMinTokens int `json:"head_ttl_min_tokens,omitempty"`
@@ -137,13 +139,14 @@ type CacheForm struct {
 // for each (0 = not stated). ApplyForm's write loop and CacheReset's validation both read it.
 func (c *CacheForm) tuningValues() map[string]float64 {
 	return map[string]float64{
-		"keepalive_idle_seconds":        float64(c.KeepAliveIdleSeconds),
-		"keepalive_openai_idle_seconds": float64(c.KeepAliveOpenAIIdleSeconds),
-		"keepalive_max_pings":           float64(c.KeepAliveMaxPings),
-		"keepalive_min_prefix_tokens":   float64(c.KeepAliveMinPrefixTokens),
-		"keepalive_max_usd_per_ping":    c.KeepAliveMaxUSDPerPing,
-		"head_ttl_min_bytes":            float64(c.HeadTTLMinBytes),
-		"head_ttl_min_tokens":           float64(c.HeadTTLMinTokens),
+		"keepalive_idle_seconds":                float64(c.KeepAliveIdleSeconds),
+		"keepalive_openai_idle_seconds":         float64(c.KeepAliveOpenAIIdleSeconds),
+		"keepalive_max_pings":                   float64(c.KeepAliveMaxPings),
+		"keepalive_min_prefix_tokens":           float64(c.KeepAliveMinPrefixTokens),
+		"keepalive_tool_wait_min_prefix_tokens": float64(c.KeepAliveToolWaitMinPrefixTokens),
+		"keepalive_max_usd_per_ping":            c.KeepAliveMaxUSDPerPing,
+		"head_ttl_min_bytes":                    float64(c.HeadTTLMinBytes),
+		"head_ttl_min_tokens":                   float64(c.HeadTTLMinTokens),
 	}
 }
 
@@ -346,11 +349,12 @@ func ParseForm(doc string) (Form, error) {
 func cacheForm(c CacheConfig) *CacheForm {
 	return &CacheForm{
 		KeepAlive: c.KeepAlive, KeepAliveIdleSeconds: c.KeepAliveIdleSeconds,
-		KeepAliveOpenAIIdleSeconds: c.KeepAliveOpenAIIdleSeconds,
-		KeepAliveMaxPings:          c.KeepAliveMaxPings,
-		KeepAliveMaxUSDPerPing:     c.KeepAliveMaxUSDPerPing,
-		KeepAliveMinPrefixTokens:   c.KeepAliveMinPrefixTokens,
-		HeadTTL1h:                  c.HeadTTL1h, HeadTTLMinBytes: c.HeadTTLMinBytes, HeadTTLMinTokens: c.HeadTTLMinTokens,
+		KeepAliveOpenAIIdleSeconds:       c.KeepAliveOpenAIIdleSeconds,
+		KeepAliveMaxPings:                c.KeepAliveMaxPings,
+		KeepAliveMaxUSDPerPing:           c.KeepAliveMaxUSDPerPing,
+		KeepAliveMinPrefixTokens:         c.KeepAliveMinPrefixTokens,
+		KeepAliveToolWaitMinPrefixTokens: c.KeepAliveToolWaitMinPrefixTokens,
+		HeadTTL1h:                        c.HeadTTL1h, HeadTTLMinBytes: c.HeadTTLMinBytes, HeadTTLMinTokens: c.HeadTTLMinTokens,
 	}
 }
 
@@ -612,11 +616,12 @@ func (f Form) validate() error {
 	if f.Cache != nil {
 		if err := (CacheConfig{
 			KeepAlive: f.Cache.KeepAlive, KeepAliveIdleSeconds: f.Cache.KeepAliveIdleSeconds,
-			KeepAliveOpenAIIdleSeconds: f.Cache.KeepAliveOpenAIIdleSeconds,
-			KeepAliveMaxPings:          f.Cache.KeepAliveMaxPings,
-			KeepAliveMaxUSDPerPing:     f.Cache.KeepAliveMaxUSDPerPing,
-			KeepAliveMinPrefixTokens:   f.Cache.KeepAliveMinPrefixTokens,
-			HeadTTL1h:                  f.Cache.HeadTTL1h, HeadTTLMinBytes: f.Cache.HeadTTLMinBytes, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
+			KeepAliveOpenAIIdleSeconds:       f.Cache.KeepAliveOpenAIIdleSeconds,
+			KeepAliveMaxPings:                f.Cache.KeepAliveMaxPings,
+			KeepAliveMaxUSDPerPing:           f.Cache.KeepAliveMaxUSDPerPing,
+			KeepAliveMinPrefixTokens:         f.Cache.KeepAliveMinPrefixTokens,
+			KeepAliveToolWaitMinPrefixTokens: f.Cache.KeepAliveToolWaitMinPrefixTokens,
+			HeadTTL1h:                        f.Cache.HeadTTL1h, HeadTTLMinBytes: f.Cache.HeadTTLMinBytes, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
 		}).validate(); err != nil {
 			return err
 		}

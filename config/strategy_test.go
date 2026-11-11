@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -51,7 +50,8 @@ func TestStrategyTableMatchesPlugin(t *testing.T) {
 		t.Errorf("aliases: py %v, go %v", py.Aliases, StrategyAliases)
 	}
 	// The Python table has the Anthropic and "any" rows. The Go table adds the Codex rows after
-	// them, checked in TestStrategyTableMatchesCodexPlugin.
+	// them. strategy_codex_test.go checks the offered set and that the Codex forms
+	// (`strategy: <name>` and `keepalive: true|false`) give the same effective config.
 	if len(py.Strategies)+1 != len(Strategies) {
 		t.Fatalf("py has %d strategies, go has %d (expect py + the Codex row)", len(py.Strategies), len(Strategies))
 	}
@@ -161,56 +161,6 @@ func TestStrategiesJSON(t *testing.T) {
 	}
 }
 
-// The Codex plugin keeps its names in Python code, not in a dict. This test reads the source text:
-// the names, the config it writes for 30-min-ping, the preset list, and the picker wording.
-func TestStrategyTableMatchesCodexPlugin(t *testing.T) {
-	read := func(p string) string {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
-	}
-	dir := "../codex-marketplace/plugins/context-guru/"
-	py := read(dir + "scripts/codex_plugin.py")
-	skill := strings.Join(strings.Fields(read(dir+"skills/cache-strategy-picker/SKILL.md")), " ")
-
-	if !strings.Contains(py, `choices=("none", "30-min-ping")`) {
-		t.Error("codex_plugin.py strategy choices changed")
-	}
-	// 30-min-ping writes "cache:\n  keepalive: true\n" and nothing else under cache.
-	if !strings.Contains(py, `"cache:\n"`+"\n"+`        "  keepalive: true\n"`) {
-		t.Error("codex_plugin.py no longer writes exactly `cache: keepalive: true` for 30-min-ping")
-	}
-	s, ok := LookupStrategy("30-min-ping")
-	if !ok || len(s.Cache) != 1 || s.Cache[0].Key != "keepalive" || s.Cache[0].Value != true ||
-		!reflect.DeepEqual(s.Providers, []string{"openai"}) {
-		t.Fatalf("30-min-ping row wrong: %+v", s)
-	}
-	// The desc starts with the picker wording and adds one sentence about Anthropic. Only the
-	// picker part is compared with SKILL.md.
-	picker, extra, _ := strings.Cut(s.Desc, ". ")
-	if !strings.Contains(skill, picker) {
-		t.Errorf("picker SKILL.md does not contain the desc start %q", picker)
-	}
-	if !strings.Contains(extra, "Anthropic keep-alive") {
-		t.Errorf("30-min-ping desc must say that keepalive: true also turns on the Anthropic keep-alive: %q", extra)
-	}
-	// The preset list the Codex plugin hard-codes must be known to the proxy.
-	known := map[string]bool{}
-	for _, n := range PresetNames() {
-		known[n] = true
-	}
-	for _, n := range []string{"off", "conservative", "medium", "high", "xhigh", "ultrahigh"} {
-		if !known[n] {
-			t.Errorf("preset %q is in the plugins but not registered in the proxy", n)
-		}
-		if !strings.Contains(py, `"`+n+`"`) {
-			t.Errorf("codex_plugin.py no longer lists preset %q", n)
-		}
-	}
-}
-
 func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	b, _ := StrategiesJSON()
 	var v struct {
@@ -230,5 +180,45 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 		if len(s.Providers) != 1 {
 			t.Errorf("%s: providers %v", s.Name, s.Providers)
 		}
+	}
+}
+
+// TestStrategiesPinTheGeneralFloorToTheDefault: the table writes literals on purpose, but its prefix
+// floor is the general one. A change of DefaultKeepAliveMinPrefix has to change the table with it, or
+// strategy users keep the old floor (an explicit value beats the default). The table does not write the
+// tool-wait floor, so that default reaches every strategy file, old or new.
+func TestStrategiesPinTheGeneralFloorToTheDefault(t *testing.T) {
+	seen := 0
+	for _, s := range Strategies {
+		for _, k := range s.Cache {
+			switch k.Key {
+			case "keepalive_min_prefix_tokens":
+				seen++
+				if k.Value != DefaultKeepAliveMinPrefix {
+					t.Errorf("%s: keepalive_min_prefix_tokens = %v, want the default %d", s.Name, k.Value, DefaultKeepAliveMinPrefix)
+				}
+			case "keepalive_tool_wait_min_prefix_tokens":
+				t.Errorf("%s writes keepalive_tool_wait_min_prefix_tokens: a strategy file would pin the tool-wait floor", s.Name)
+			}
+		}
+	}
+	if seen < 3 {
+		t.Errorf("found the prefix floor in %d strategies, want at least 3 (auto, 1-ping, 2-ping)", seen)
+	}
+}
+
+func TestToolWaitMinPrefixDefaultAndOverride(t *testing.T) {
+	if got := (CacheConfig{}).Resolved().KeepAliveToolWaitMinPrefixTokens; got != 20000 {
+		t.Errorf("default tool-wait floor = %d, want 20000", got)
+	}
+	c, err := LoadBytes([]byte("cache:\n  strategy: auto\n  keepalive_tool_wait_min_prefix_tokens: 30000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens != 30000 || c.Cache.KeepAliveMinPrefixTokens != 80000 {
+		t.Errorf("floors = %d / %d", c.Cache.Resolved().KeepAliveToolWaitMinPrefixTokens, c.Cache.KeepAliveMinPrefixTokens)
+	}
+	if _, err := LoadBytes([]byte("cache:\n  keepalive_tool_wait_min_prefix_tokens: -1\n")); err == nil {
+		t.Error("a negative tool-wait floor was accepted")
 	}
 }

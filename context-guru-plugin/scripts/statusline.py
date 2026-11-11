@@ -447,11 +447,10 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     proxy — see _default_segment for why mixing the two would be dishonest.
 
     `lean=1` asks the proxy to answer from its cheap path (dash/api.go's statsLean): every field
-    this script reads, at full precision, without running the one call among /api/stats' four
-    (DeclCreditFor's SelfRemovals, dash/toolapi.go) that does a full scan over tool_declarations
-    for the WHOLE tenant regardless of the session filter — the rest are comparably cheap and are
-    skipped only because this script does not read what they add. SelfRemovals was NOT the actual
-    cause of the 38-45s timeouts this function recovers from, though: on a copy of the affected
+    this script reads, at full precision, without running the calls among /api/stats' four that
+    this script does not read. One of them used to be a full scan over tool_declarations for the
+    WHOLE tenant regardless of the session filter (the self-removal credit, removed in #584). That
+    scan was NOT the actual cause of the 38-45s timeouts this function recovers from, though: on a copy of the affected
     deployment's dashboard DB, every one of those four calls measured well under a second run in
     isolation. The real cause was dash/api.go's jsonCache spawning a brand-new goroutine running
     the FULL /api/stats compute on every single stale-cache read with no deduplication, so under
