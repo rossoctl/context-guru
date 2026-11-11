@@ -69,3 +69,18 @@ func Parse(u gjson.Result) (t Tiers, ok bool) {
 	}
 	return t, true
 }
+
+// Present reports whether a usage block is there: an object with at least one field. A JSON null
+// or `{}` is absent, not a block in an unknown dialect. The proxy and agent/bob both use this
+// rule, so the two always pick the same stream chunk.
+func Present(v gjson.Result) bool {
+	if !v.IsObject() {
+		return false
+	}
+	empty := true
+	v.ForEach(func(gjson.Result, gjson.Result) bool {
+		empty = false
+		return false // one field is enough
+	})
+	return !empty
+}

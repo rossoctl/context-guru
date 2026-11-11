@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 // TestThePresetDefaultIsEncodedOnce.
@@ -215,7 +217,7 @@ func TestTheRemovedStrategyNameIsRefused(t *testing.T) {
 		t.Errorf("reason=%q, want unknown_strategy: %v", facts["reason"], facts)
 	}
 	// The refusal has to carry the alternatives, or a caller who typed the old name is told only
-	// that they are wrong. `known=` is that list, and it comes from STRATEGIES rather than prose.
+	// that they are wrong. `known=` is that list, and it comes from the proxy's table rather than prose.
 	if !strings.Contains(facts["known"], "none") {
 		t.Errorf("known=%q does not offer `none`, so the refusal does not say what to type instead",
 			facts["known"])
@@ -809,8 +811,9 @@ func TestStartProxyDoesNotRecordWhenAnotherProcessOwnsThePort(t *testing.T) {
 	}
 }
 
-// TestStrategyFileHasNoToolWaitFloor: the table writes the general floor (80000) and no
-// tool-wait floor, so an old strategy file stays correct, and a sync leaves it unchanged.
+// TestStrategyFileHasNoToolWaitFloor: the plugin writes the strategy NAME, so the proxy owns both
+// floors. The general floor is 80000 and the tool-wait floor is its default (20000); the file pins
+// neither, so a later change in the proxy table reaches an armed install.
 func TestStrategyFileHasNoToolWaitFloor(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	port := "8787"
@@ -819,7 +822,16 @@ func TestStrategyFileHasNoToolWaitFloor(t *testing.T) {
 		t.Fatalf("arming failed: %v", facts)
 	}
 	got := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
-	if !strings.Contains(got, "keepalive_min_prefix_tokens: 80000") || strings.Contains(got, "tool_wait_min_prefix") {
-		t.Errorf("the file must state the general floor 80000 and leave the tool-wait floor to the default:\n%s", got)
+	if strings.Contains(got, "tool_wait_min_prefix") || strings.Contains(got, "keepalive_min_prefix_tokens") ||
+		!strings.HasSuffix(got, "cache:\n  strategy: auto\n") {
+		t.Errorf("the file must name the strategy and pin no floor:\n%s", got)
+	}
+	cfg, err := config.LoadBytes([]byte(got))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Cache.Resolved()
+	if r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 {
+		t.Errorf("floors = %d / %d, want 80000 / 20000", r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens)
 	}
 }
