@@ -145,7 +145,7 @@ Three needs drive these requirements.
 - R15. The proxy pushes metrics to an OpenTelemetry Collector over HTTPS. It makes outgoing connections only.
 - R16. The push is **asynchronous**. The proxy records a metric in memory and returns at once. A separate background task sends the data to the collector in batches. The push never runs on the path of a request. It adds no time to a request or to the answer, and it never waits for the collector.
 - R17. The collector adds the labels `machine` and `proxy`. It sends the data to Prometheus with remote write.
-- R19. The product ships a default collector URL, so the push works from the first run. The URL is a setting. The user or the operator can change it in the config file, with a flag, or with an environment variable. The access token is a setting too (R44). A setting turns the push off. If the URL is empty, the proxy makes no connection and writes one log line at start. The PR chooses the names of the settings. Data leaves every machine from the first run, so the PR names this at the top: who it affects, what is sent, and how to turn it off (`RELEASING.md`).
+- R19. There is no default collector URL. The operator sets the URL in the config file, with a flag, or with an environment variable. The access token is a setting too (R44). A setting turns the push off. If the URL is empty, the proxy logs one warning at start, makes no outgoing connection and reports no metrics. The PR chooses the names of the settings. Data leaves a machine only after the operator names a collector, so the PR names this at the top: what is sent, and how to turn it off (`RELEASING.md`).
 - R20. If the collector is down or slow, the proxy keeps working. A failed push never delays or changes a request, and it never blocks a request. Fail open.
 - R46. Metrics reporting must not affect the response time of a request. This covers every step: pricing the result into numbers, recording them, and the push.
   1. The extra time on the path of a request is a fixed small amount that does not depend on the collector, the number of series or the size of the request. **Open:** choose the budget, for example under 50 microseconds at p99 per request.
@@ -190,7 +190,7 @@ Three needs drive these requirements.
 ### 3.7 Privacy and access
 
 - R43. `machine` is a pseudonymous install ID: a random value made at first start. It is not the host name, because a host name often holds a person's name. The operator keeps the map from install ID to person or team outside the metrics system.
-- R44. The collector accepts a push only over HTTPS and only with a valid access token. Each install has its own token, so one token can be revoked. Read access to the central Prometheus and Grafana is limited to named managers and operators. **Open:** who issues the tokens, and who is on the access list.
+- R44. The collector accepts a push only over HTTPS and only with a valid access token. Each install has its own token, so one token can be revoked. Read access to the central Prometheus and Grafana is limited to named managers and operators. A token binds to a proxy, not to a machine: the `machine` label is the sender's claim (design 8.8). **Open:** who issues the tokens, and who is on the access list.
 
 ## 4. Proposed architecture
 
@@ -208,9 +208,9 @@ The next picture shows how the Cortex proxy fits in next to the context-guru pro
 |---|---|---|
 | proxy | exists | Forwards requests and calls the `accountant`. |
 | `accountant` | exists | Returns `Result`. Imports no OTel (R23). |
-| `Sink`, `Result` helpers | new | One place that turns `Result` into numbers (R25, R26, section 4.1). |
-| `accountant/metrics` | new | Defines the common metrics once (R27). |
-| OTel SDK in the proxy | new | Aggregates in memory and pushes in the background (R16). |
+| `PricedOp.Kind` | new | One field in the `accountant`, copied from the input operation (section 4.1). |
+| `accountant/metrics` | new | Holds the `Observer` hook and defines the common metrics once (R25, R26, R27). |
+| OTel SDK and push setup in each proxy | new | Aggregates in memory and pushes in the background (R16). Each proxy owns this code (section 4.1). |
 | dash store and `dash/ui` | exists | Per-session and per-request views. Do not use Prometheus. |
 | OTel Collector | new | Receives pushes. Adds `machine` and `proxy`. |
 | central Prometheus | new | Stores the pushed series. |
@@ -223,12 +223,13 @@ These notes say how the requirements can be met. They are proposals. The PR may 
 | Requirement | Proposed way |
 |---|---|
 | R23, R24 | The `accountant` keeps its pure `Compute`. The proxy reports after the response returns. |
-| R25, R26 | A small hook in the `accountant` (`Sink`, called as `Observe(Meta, Usage, Result)`), a `Kind` field on `PricedOp` (below) and helper methods on `Result` (`Totals()`, `ByKind()`, `Failed()`). A `Multi(...)` helper passes the same data to several consumers: the shared metrics, the local ledger and any proxy-only metrics. |
-| R27, R47 | A separate Go module `accountant/metrics`. It uses the OpenTelemetry API only. The proxy gives it a `Meter` and a `Pricer`, an interface with one method, `Price(model, at, tier) (usdPerToken, estimated)`. The rates stay in the proxy. |
+| R25, R26 | The hook is `metrics.Observer` (`Observe(Observation)`, where `Observation` holds the meta, the usage and the `Result`). It lives in the `accountant/metrics` module, not in the `accountant`, so the `accountant` gets one change only: `PricedOp.Kind` (below). `metrics.Multi(...)` passes the same data to several consumers: the shared metrics, the local ledger and any proxy-only metrics. It recovers a panic in one consumer. No `Result` helper methods were needed; the sink reads the fields of the `Result`. |
+| R27, R47 | A separate Go module `accountant/metrics`. It uses the OpenTelemetry API only. The proxy gives it a `Meter` and a `Pricer`, an interface with one method, `Price(model, at, tier) (usdPerToken, estimated)`. The rates stay in the proxy. Money is booked only when `Billing.Mode` is `api`. For `subscription`, `unknown` or an unset mode, the token counters move, no `usd` counter moves, and the request counts as estimated. |
+| R15, R16, R19, R44 | The SDK, the exporter and the push settings belong to each proxy, in a small package of its own (`internal/metricspush` in context-guru). `accountant/metrics` stays API-only, and the `accountant` repo has no network code. The cost is about 150 lines that each proxy holds. The exporter is a hand-written OTLP/JSON exporter on the standard library. The standard OTLP exporter adds about 12 MB of gRPC and protobuf to the binary, and a test (`depguard_test.go`) keeps those packages out of the default build. The settings have no default URL (R19). The exporter refuses `http` to a remote host, except to a loopback address (R44). |
 | R28 | The proxy adds its own metrics with its own prefix. |
 
 Decisions:
-- **Process boundary (R46).** The metrics code runs in the proxy process, as a library. `Observe` only adds to in-memory counters, after the response, so it meets R46 with no extra process. A separate process is chosen only if the latency benchmark (section 10) shows that the in-process version breaks the budget of R46 and the separate process passes it. A separate process adds a write to a socket on each request, so it must never block: a full buffer drops the data and counts it. In the diagram, the dashed green box is a logical group, not a process.
+- **Process boundary (R46).** R46 decides where the metrics code runs. A separate process is allowed only if it satisfies R46. The first build is an in-process library, because it is the cheapest way to test R46: `Observe` only adds to in-memory counters, after the response. This is a starting point for the latency benchmark (section 10), not a decision. The benchmark ran on the first build: the calls run in the handler's deferred `finish`, after the response, and add about 12 to 35 microseconds at p50. The noise on the test machine is too large to state a p99. If a later benchmark shows that the in-process version breaks R46, move the work to a separate process and measure that against R46 too. A separate process adds a write to a socket on each request, so it must never block: a full buffer drops the data and counts it. In the diagram, the dashed green box is a logical group, not a process.
 - **Pricing (R47).** No shared rate table. Each proxy gives the module its own `Pricer`.
 - **`Kind` on `PricedOp`.** The simplest change is one new field, `PricedOp.Kind`, copied from the input `Operation` when the library builds the result. It is a pure copy and adds no import, so R23 holds. The alternative, passing the input operations to `Observe` as well, was rejected: it adds a second argument and a join by `OpID`.
 
@@ -238,7 +239,7 @@ Open choices:
 
 ## 5. Proposed metrics
 
-OTel metric names use dots and units. The Prometheus names below are what you see after the collector converts them. Counters get `_total`. A unit suffix such as `_usd` stays. Check the final names in Prometheus.
+OTel metric names use dots and units. The Prometheus names below are what you see after the collector converts them. Counters get `_total`. A unit suffix such as `_usd` stays. Check the final names in Prometheus. Put the unit in the name, as `usd` or `tokens`, and never set an OTel unit of `USD` on a counter: the exporter appends the unit as written, and the series becomes `_USD_total`. A test compares the names Prometheus shows with the tables.
 
 Prefix `llm_` is for the common set. It is neutral, so both proxies can emit it, and it keeps the names clear of other tools on the same central server.
 
@@ -540,7 +541,7 @@ Alerts go to Alertmanager. Thresholds are proposals.
 
 ## 9. Delivery plan
 
-1. **Hook.** Add `Sink`, `Result.Totals()`, `ByKind()`, `Failed()` to the `accountant`. Test them. No OTel.
+1. **Hook.** Add `PricedOp.Kind` to the `accountant`, and `Observer`, `Observation` and `Multi` to `accountant/metrics`. Test them. The `accountant` imports no OTel.
 2. **Shared module.** Create `accountant/metrics` with the savings set (section 5.2). Test with an in-memory OTel reader.
 3. **Proxy wiring.** Call the sink after each response. Add the inference set (5.1) and the health set (5.5). Add the settings for the collector URL, the token and the interval, and the switch that turns the push off (R19).
 4. **Keep-alive and cache sets** (5.3, 5.4).
@@ -576,8 +577,7 @@ Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money bot
 | Export failure | A failed push is counted. The next successful push carries the totals, so a counter does not lose counts. |
 | Machine ID | The `machine` label is the install ID. It holds no host name (R43). |
 | Pull path gone | After the retirement, `/metrics` is not served. The proxy dashboard shows the same figures as before (R22, R8). |
-| Default URL | With the default config, the proxy pushes to the shipped URL with no other setting (R19). |
-| No URL | With an empty URL, the proxy makes no outgoing connection, starts normally and logs one line (R19). |
+| No URL | With no URL, the proxy makes no outgoing connection, starts normally, logs one warning and reports no metrics (R19). |
 | Turned off | With the push turned off, the proxy makes no outgoing connection for metrics (R19). |
 | Agreement | For one session, the sink totals equal the dashboard `request_components` totals. |
 | End to end | Proxy to a local collector to Prometheus. The expected names and labels appear. |
