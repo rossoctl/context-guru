@@ -81,7 +81,7 @@ type DiskOptions struct {
 var metadataPrefixes = []string{
 	BilledPrefix, BilledThreadPrefix, LenPrefix, TTLPrefix, SeenPrefix,
 	SweepDropPrefix, SweepKeepPrefix, SweepExpandPrefix, RestorePrefix, UsagePrefix, ToolDeferPrefix,
-	ToolSearchOffPrefix,
+	ToolSearchOffPrefix, KeptPrefix,
 }
 
 // contentPrefixes hold text the proxy made or kept: the summary, extract_llm's rewrite, a frozen

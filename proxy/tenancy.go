@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -591,6 +592,8 @@ func (s *TenantSource) ObserveNamespaces(fn func(tenantID string)) {
 func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	cfgDoc := s.reg.Config(t)
 
+	// prev is the tenancy a config change replaces; build's result may inherit its keep marks.
+	var prev *Tenancy
 	s.mu.Lock()
 	if c, ok := s.cache.get(t.ID); ok {
 		// A configuration change must take effect on the next request, so the cache
@@ -616,6 +619,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			s.mu.Unlock()
 			return &tn, nil
 		}
+		prev = c.t
 		s.cache.remove(t.ID)
 		slog.Info("context-guru: tenant configuration changed; rebuilding pipeline",
 			"tenant", t.ID)
@@ -628,6 +632,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	if err != nil {
 		return nil, err
 	}
+	carryKeepMarks(prev, tn)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -635,12 +640,40 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	// already published so two requests never hold different stores for one tenant.
 	if c, ok := s.cache.get(t.ID); ok {
 		if c.config == cfgDoc {
+			// A concurrent request built the same config first, after this one removed the old
+			// entry, so its build had no prev and holds no marks. Carry into the published one.
+			// Put of the same keys is idempotent, and the marks are session state that the expand
+			// path already writes into a published store.
+			carryKeepMarks(prev, c.t)
 			return c.t, nil
 		}
 		s.cache.remove(t.ID)
 	}
 	s.cache.put(t.ID, &cached{config: cfgDoc, t: tn})
 	return tn, nil
+}
+
+// carryKeepMarks moves the "keep in full" marks (#1097) from the tenancy a config change replaces
+// to its rebuilt one, when both run the same components in the same order. A mark says the agent
+// expanded an output, so the new pipeline must keep sending it in full: if it compacts it again,
+// the early prefix changes and the provider rewrites a warm cache. With a different component set
+// the old marks are not carried: that is a new pipeline, and it behaves as it did before #1097.
+// The names alone decide: a change to a setting that is not a component (for example
+// expand.fixed_restore) also carries the marks. That is the safe direction, because content stays in full.
+// Only the marks move. The frozen decisions and the stashed originals stay behind, which is the
+// honest cost the rebuild always had.
+// It cannot fail a request: a store that cannot carry leaves the new store empty.
+func carryKeepMarks(prev, next *Tenancy) {
+	if prev == nil || next == nil || prev.Pipe == nil || next.Pipe == nil {
+		return
+	}
+	if !slices.Equal(prev.Pipe.Names(), next.Pipe.Names()) {
+		return
+	}
+	if n := store.CarryPrefix(prev.Store, next.Store, store.KeptPrefix); n > 0 {
+		slog.Info("context-guru: kept the keep-in-full marks across the pipeline rebuild",
+			"tenant", next.ID, "marks", n)
+	}
 }
 
 // build constructs a tenancy from a configuration document. It fails OPEN in one

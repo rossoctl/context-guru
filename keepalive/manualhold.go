@@ -30,7 +30,7 @@ import (
 //   - A new request on the thread replaces the entry and restarts the 300 s. A press that READ the
 //     cache refreshed the provider's entry, so it restarts it too.
 //
-// The existing bounds apply unchanged: MaxBodyBytes per body, MaxSessions entries, MaxBytes in all.
+// The existing bounds apply unchanged: Policy.BodyLimit per body, MaxSessions entries, MaxBytes in all.
 
 // ManualHoldMax is how long a manual-only hold lives, from the start of the last REAL request on the
 // thread. Nothing else extends it: not a press (a press every 30 s would otherwise hold a caller's
@@ -50,7 +50,7 @@ const (
 // Why a thread cannot be pinged, for the button to say. Pingable is the other half of the answer.
 const (
 	ReasonNotOptedIn  = "not opted in" // no automatic keep-alive and the request did not ask to be held
-	ReasonTooLarge    = "too large"    // the body is over MaxBodyBytes
+	ReasonTooLarge    = "too large"    // the body is over the per-body limit (Policy.BodyLimit)
 	ReasonExpired     = "expired"      // it was held, and the hold ran out
 	ReasonOverBudget  = "over budget"  // one ping would cost more than the per-ping ceiling
 	ReasonUnsupported = "unsupported"  // a shape that cannot be pinged cheaply (thinking enabled, an unsupported route)
