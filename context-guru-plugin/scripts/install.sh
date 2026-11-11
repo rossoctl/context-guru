@@ -67,7 +67,7 @@ R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_STATUSLINE=0 R_NOGI
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
 R_PORT_COMMITTED=0
-R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
+R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG= R_STRATLIST_DEFERRED=0
 R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS= R_OWNPROJECTROUTE=
 # What step 0 FOUND, read before it writes, so route_unwind_port can undo what this install made
 # and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
@@ -504,7 +504,7 @@ everywhere, not only here (a machine-wide switch-off set in /plugin is left as i
   # that exist, and the catch-all asserted "(no spend)" about every name it had not been told about -
   # so a fourth strategy that spends, or 1-hour-head gaining a ping, would make this state something
   # false in the one sentence a human is asked to agree to. consent_question= and confirm_command=
-  # could no longer disagree with each other; this is consent_question= disagreeing with STRATEGIES.
+  # could no longer disagree with each other; this is consent_question= disagreeing with the proxy's table.
   #
   # An unknown spend status reads as SPENDING, not as free: the sentence a user consents to is the
   # wrong place to resolve an uncertainty in their favour.
@@ -674,24 +674,12 @@ route_report() {
   fi
 }
 
-route_main() {
-  route_resolve_options
-
-  # A typo'd strategy name used to reach step 4b, where `settings.py strategy set` correctly refused it
-  # with exit 2 — and `|| true` plus a catch-all `*)` turned that refusal into `strategy_warning=`.
-  # No config file written means `none`, so `--cache-strategy 5-minute-ping` installed a DIFFERENT
-  # mechanism from the one named and reported `result=routed`. That is the same shape as the unknown
-  # flag this script refuses eighty lines down: a dropped decision that reports success. Checked here,
-  # before a binary is downloaded, against the one machine-readable list of names.
-  local slist names
-  slist=$("$(route_here)/settings.py" strategy list 2>/dev/null) || slist=""
+# route_check_strategy <strategy-list output>: map an old name to its new one, refuse a name the proxy
+# does not offer, and read whether it spends. Names, aliases and spends all come from the list.
+route_check_strategy() {
+  local slist=$1 names aliases pair
   names=$(printf '%s\n' "$slist" | sed -n 's/^names=//p')
-  # An empty list is NOT an unknown name, and conflating them made the script state a false thing
-  # about the caller's input: with settings.py unavailable, `--cache-strategy 5-min-ping` - the
-  # default, and obviously a strategy - was refused as "is not a strategy. Known: unavailable", with
-  # the one fault the user could act on buried as a word inside a sentence about a typo. The skill's
-  # next move is to ask which name they meant, about a name that was right. `${names:-unavailable}`
-  # showed the empty case was anticipated; it just routed into the wrong reason.
+  # An empty list is NOT an unknown name: conflating them stated a false thing about the caller's input.
   if [ -z "$names" ]; then
     route_needs "strategy_list_unavailable" "could not read the strategy list, so --cache-strategy \
 $R_STRATEGY was not checked and cache_strategy= in this report may be wrong too. This is a broken \
@@ -700,7 +688,6 @@ installed, started or written."
   fi
   # A name from before the ping-count rename (`5-min-ping`) is accepted and mapped to its new name, so a
   # saved option or a remembered command still installs. `aliases=` is old:new pairs.
-  local aliases pair
   aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
   for pair in ${aliases//,/ }; do
     [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
@@ -710,10 +697,69 @@ installed, started or written."
     *) route_needs "unknown_strategy" "--cache-strategy $R_STRATEGY is not a strategy. Known: \
 ${names}. Nothing was installed, started or written." ;;
   esac
-  # Whether this strategy spends the user's own money is half of what its NAME means, and STRATEGIES
-  # is where that is decided - so it is read from the same output as the names rather than restated
-  # here. Fact keys mangle `-` to `_`.
+  # Whether this strategy spends the user's own money is half of what its NAME means, and the proxy's
+  # table is where that is decided - so it is read from the same output as the names. Fact keys mangle
+  # `-` to `_`.
   R_SPENDS=$(printf '%s\n' "$slist" | sed -n "s/^spends_${R_STRATEGY//-/_}=//p")
+}
+
+# route_check_strategy_late <list>: the same check after the binary is installed. It refuses (and takes
+# the port bookkeeping back) instead of asking, because the plan was already agreed to.
+route_check_strategy_late() {
+  local slist=$1 names aliases pair
+  names=$(printf '%s\n' "$slist" | sed -n 's/^names=//p')
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
+  case ",${names}," in
+    *",${R_STRATEGY},"*) : ;;
+    *) route_unwind_port
+       emit "result=refused"; emit "reason=unknown_strategy"
+       emit "note=--cache-strategy $R_STRATEGY is not a strategy. Known: ${names}. The proxy binary was installed; no routing was written."
+       exit 2 ;;
+  esac
+  R_SPENDS=$(printf '%s\n' "$slist" | sed -n "s/^spends_${R_STRATEGY//-/_}=//p")
+}
+
+route_main() {
+  route_resolve_options
+
+  # A typo'd strategy name used to reach step 4b, where `settings.py strategy set` correctly refused it
+  # with exit 2 - and `|| true` plus a catch-all `*)` turned that refusal into `strategy_warning=`.
+  # No config file written means `none`, so `--cache-strategy 5-minute-ping` installed a DIFFERENT
+  # mechanism from the one named and reported `result=routed`. That is the same shape as the unknown
+  # flag this script refuses eighty lines down: a dropped decision that reports success. Checked here,
+  # before anything is written, against the one machine-readable list of names.
+  #
+  # The list comes from the proxy binary (`settings.py strategy list` runs `context-guru-proxy
+  # strategies`). On a machine with NO binary yet there is nothing to ask, and this script does not
+  # keep a copy of the table to ask instead: the name is checked after step 1 installs the binary
+  # (route_check_strategy_after_install), and the consent question says the spend status is not
+  # known yet. A binary older than v0.7.1 is a hard stop with the update advice.
+  local slist
+  slist=$("$(route_here)/settings.py" strategy list 2>&1) || slist=$slist
+  R_STRATLIST_DEFERRED=0
+  if [ "$(kv "$slist" result)" = error ]; then
+    case "$(kv "$slist" reason)" in
+      no_proxy_binary) R_STRATLIST_DEFERRED=1; slist=""
+                       [ "$R_STRATEGY" = none ] && R_SPENDS=false ;;
+      *) route_needs "strategy_list_unavailable" "$(kv "$slist" note). Nothing was installed, started \
+or written." ;;
+    esac
+  fi
+  if [ "$R_STRATLIST_DEFERRED" = 0 ]; then
+    route_check_strategy "$slist"
+  elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ]; then
+    # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
+    # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
+    # Two names pass unchecked (owner decision): `none` needs no table, and `auto` is the plugin's own
+    # default, which the remote proxy checks when it loads the setting.
+    route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
+context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
+Install the proxy v0.7.1 or later, or pass --cache-strategy none. Nothing was installed, started \
+or written."
+  fi
 
   if [ "$R_MODE" = attach ]; then
     [ -n "$R_BASEURL" ] || route_needs "attach_needs_base_url" \
@@ -896,6 +942,8 @@ handling auth), replace (theirs is recorded and uninstall puts it back), or abor
 
   if [ "$R_PLAN" = 1 ]; then
     emit "result=planned"
+    [ "$R_STRATLIST_DEFERRED" = 1 ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ] && emit "strategy_unchecked=true" \
+      && emit "strategy_unchecked_note=no proxy binary yet, so cache strategy $R_STRATEGY is checked after the binary is installed; an unknown name is then refused before any routing is written"
     if [ "$R_MODE" = attach ]; then emit "binary=(not needed in attach mode)"
     else emit "binary=would_check"; fi
     route_report
@@ -1011,6 +1059,21 @@ back - see port_unwound. A checksum failure must never be worked around."
     esac
     R_ONPATH=$(kv "$iout" on_path)
     [ "$R_ONPATH" = false ] && R_BIN=$(kv "$iout" path)
+    # The binary exists now, so the strategy name can be checked against its table. Nothing is routed
+    # yet; the port bookkeeping is taken back, as for any other failure before routing.
+    if [ "$R_STRATLIST_DEFERRED" = 1 ]; then
+      local dl dlargs=()
+      [ -n "$R_BIN" ] && dlargs=(--bin "$R_BIN")
+      dl=$("$(route_here)/settings.py" strategy list "${dlargs[@]+"${dlargs[@]}"}" 2>&1) || true
+      if [ "$(kv "$dl" result)" != ok ]; then
+        route_unwind_port
+        emit "result=error"; emit "reason=strategy_list_unavailable"
+        emit "detail=$(kv "$dl" note)"
+        emit "note=no routing was written. The proxy binary was installed, but it cannot list its cache strategies."
+        exit 3
+      fi
+      route_check_strategy_late "$dl"
+    fi
   fi
 
   # ---- step 4b: the cache strategy, BEFORE the proxy starts -----------------------------
@@ -1021,7 +1084,7 @@ back - see port_unwound. A checksum failure must never be worked around."
   # `strategy sync` before every launch, so the plugin option wins from the next session onwards. It
   # is still passed here so the very first proxy has the right one without waiting for a sync.
   sout=$("$(route_here)/settings.py" strategy set --name "$R_STRATEGY" \
-           --port "$R_PORT" --preset "$R_PRESET" 2>&1) || true
+           --port "$R_PORT" --preset "$R_PRESET" ${R_BIN:+--bin "$R_BIN"} 2>&1) || true
   case "$(kv "$sout" result)" in
     set|cleared|unchanged) : ;;
     # `not_ours` is genuinely non-fatal: a config we did not write is not a reason to refuse an

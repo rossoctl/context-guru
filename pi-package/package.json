@@ -1,6 +1,6 @@
 {
   "name": "@rossoctl/context-guru-pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Route Pi through a local context-guru proxy: keep the prompt cache warm and carry less context.",
   "license": "Apache-2.0",
   "private": true,

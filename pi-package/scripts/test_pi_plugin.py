@@ -339,17 +339,6 @@ class Controller(Sandbox):
             pi_plugin.write_proxy_config("off", "auto")
         self.assertEqual(path.read_text(), "preset: high\n")
 
-    def test_strategies_match_the_claude_code_plugin(self):
-        """One name, one behaviour: each shared strategy sets the same cache keys on both clients."""
-        claude = HERE.parents[1] / "context-guru-plugin/scripts/settings.py"
-        if not claude.exists():
-            self.skipTest("Claude Code plugin not in this checkout")
-        script = ("import json, runpy, sys; m = runpy.run_path(sys.argv[1]); "
-                  "print(json.dumps({k: v['cache'] for k, v in m['STRATEGIES'].items()}))")
-        theirs = json.loads(subprocess.check_output([sys.executable, "-c", script, str(claude)], text=True))
-        for name, spec in pi_plugin.STRATEGIES.items():
-            self.assertEqual(spec["cache"], theirs[name], name)
-
     def test_reset_hatch_dry_run(self):
         out = subprocess.run(["sh", str(HERE / "reset.sh"), "--dry-run"], capture_output=True, text=True,
                              env=dict(os.environ))
