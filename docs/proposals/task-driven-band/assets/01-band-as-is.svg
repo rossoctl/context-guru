@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" width="1100" height="800" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <style>
+    .mono { font-family: Menlo, Consolas, monospace; font-size: 20px; fill: #d8d8d8; }
+    .dim { fill: #8a8a8a; }
+    .green { fill: #8fc79a; }
+    .cyan { fill: #4ea8d2; }
+    .blue { fill: #5c9dff; }
+    .org { fill: #d9805f; }
+    .badge { fill: #f2b84b; }
+    .bt { font-size: 13px; font-weight: 700; fill: #1b1b1b; text-anchor: middle; }
+    .h { font-size: 15px; font-weight: 700; fill: #222; }
+    .c { font-size: 14px; fill: #333; }
+    .m { font-family: Menlo, Consolas, monospace; font-size: 13px; fill: #444; }
+    .row { fill: #f6f6f6; }
+    .lead { stroke: #f2b84b; stroke-width: 1.5; }
+  </style>
+  <rect width="1100" height="800" fill="#ffffff"/>
+  <text x="40" y="32" font-size="20" font-weight="700" fill="#222">cg plugin band, as it is today: what is displayed where</text>
+
+  <!-- Mock band -->
+  <rect x="40" y="50" width="1020" height="230" rx="10" fill="#222" stroke="#555"/>
+  <text x="62" y="76" font-size="17" fill="#8a8a8a">From the cg plugin</text>
+
+  <!-- Row 1 -->
+  <text class="mono org" x="70" y="130">◆</text>
+  <text class="mono dim" x="100" y="130">next</text>
+  <text class="mono green" x="162" y="130">$0.04</text>
+  <text class="mono dim" x="250" y="130">· $0.92 cold</text>
+  <rect x="460" y="107" width="92" height="34" rx="6" fill="#2d5a94" stroke="#4a7fc0"/>
+  <text class="mono" x="506" y="131" text-anchor="middle" style="fill:#fff">Ping</text>
+  <rect x="580" y="107" width="82" height="34" rx="6" fill="none" stroke="#777"/>
+  <text class="mono dim" x="621" y="131" text-anchor="middle">hide</text>
+  <text class="mono blue" x="695" y="131" text-decoration="underline">dash ↗</text>
+
+  <!-- Row 2 -->
+  <text class="mono green" x="70" y="196">saved $3.65</text>
+  <text class="mono dim" x="236" y="196">of</text>
+  <text class="mono" x="272" y="196" style="fill:#fff">$15.52</text>
+  <text class="mono dim" x="370" y="196">|</text>
+  <text class="mono dim" x="394" y="196">cache</text>
+  <circle cx="492" cy="189" r="9" fill="#4ea8d2"/>
+  <text class="mono cyan" x="512" y="196">11:51 ↻</text>
+  <text class="mono dim" x="624" y="196">|</text>
+  <text class="mono dim" x="648" y="196">ctx</text>
+  <text class="mono green" x="696" y="196">37%</text>
+
+  <!-- Row 3 note -->
+  <text x="70" y="233" font-size="13" fill="#6a6a6a" font-style="italic">row 3 (sub-agent chips) not drawn: no named sub-agent</text>
+
+  <!-- Row 4 -->
+  <text class="mono dim" x="70" y="266" style="font-size:18px">try</text>
+  <text class="mono" x="112" y="266" style="font-size:18px;fill:#3d6aa5">/cg:insights</text>
+  <text class="mono dim" x="270" y="266" style="font-size:18px">— see where your money goes</text>
+
+  <text x="1048" y="126" font-size="13" fill="#8a8a8a" text-anchor="end">ROW 1</text>
+  <text x="1048" y="192" font-size="13" fill="#8a8a8a" text-anchor="end">ROW 2</text>
+  <text x="1048" y="262" font-size="13" fill="#8a8a8a" text-anchor="end">ROW 4</text>
+
+  <!-- Badges row 1 -->
+  <g>
+    <line class="lead" x1="190" y1="100" x2="190" y2="110"/><circle class="badge" cx="190" cy="92" r="10"/><text class="bt" x="190" y="97">1</text>
+    <line class="lead" x1="320" y1="100" x2="320" y2="112"/><circle class="badge" cx="320" cy="92" r="10"/><text class="bt" x="320" y="97">2</text>
+    <line class="lead" x1="506" y1="100" x2="506" y2="107"/><circle class="badge" cx="506" cy="92" r="10"/><text class="bt" x="506" y="97">3</text>
+    <line class="lead" x1="621" y1="100" x2="621" y2="107"/><circle class="badge" cx="621" cy="92" r="10"/><text class="bt" x="621" y="97">4</text>
+    <line class="lead" x1="740" y1="100" x2="740" y2="112"/><circle class="badge" cx="740" cy="92" r="10"/><text class="bt" x="740" y="97">5</text>
+  </g>
+  <!-- Badges row 2 -->
+  <g>
+    <line class="lead" x1="150" y1="166" x2="150" y2="174"/><circle class="badge" cx="150" cy="158" r="10"/><text class="bt" x="150" y="163">6</text>
+    <line class="lead" x1="320" y1="166" x2="320" y2="174"/><circle class="badge" cx="320" cy="158" r="10"/><text class="bt" x="320" y="163">7</text>
+    <line class="lead" x1="500" y1="166" x2="500" y2="174"/><circle class="badge" cx="500" cy="158" r="10"/><text class="bt" x="500" y="163">8</text>
+    <line class="lead" x1="720" y1="166" x2="720" y2="174"/><circle class="badge" cx="720" cy="158" r="10"/><text class="bt" x="720" y="163">9</text>
+  </g>
+  <!-- Badge row 4 -->
+  <g>
+    <circle class="badge" cx="860" cy="260" r="10"/><text class="bt" x="860" y="265">10</text>
+    <line class="lead" x1="850" y1="260" x2="780" y2="260"/>
+  </g>
+
+  <!-- Table -->
+  <text x="40" y="320" class="h" style="font-size:17px">Legend</text>
+  <rect x="40" y="330" width="1020" height="28" fill="#e6e6e6"/>
+  <text x="56" y="349" class="h">#</text>
+  <text x="96" y="349" class="h">Shows</text>
+  <text x="380" y="349" class="h">Meaning</text>
+  <text x="720" y="349" class="h">Source (register.tsx / model.ts)</text>
+
+  <g id="rows">
+    <rect class="row" x="40" y="358" width="1020" height="30"/>
+    <circle class="badge" cx="60" cy="373" r="9"/><text class="bt" x="60" y="378">1</text>
+    <text x="96" y="378" class="c">next $0.04</text><text x="380" y="378" class="c">price of next message, cache warm</text><text x="720" y="378" class="m">next_warm_usd, usd()</text>
+
+    <circle class="badge" cx="60" cy="403" r="9"/><text class="bt" x="60" y="408">2</text>
+    <text x="96" y="408" class="c">· $0.92 cold</text><text x="380" y="408" class="c">same message if the cache is cold</text><text x="720" y="408" class="m">next_cold_usd ?? rewrite_usd</text>
+
+    <rect class="row" x="40" y="418" width="1020" height="30"/>
+    <circle class="badge" cx="60" cy="433" r="9"/><text class="bt" x="60" y="438">3</text>
+    <text x="96" y="438" class="c">[Ping]</text><text x="380" y="438" class="c">button: keep the cache warm now</text><text x="720" y="438" class="m">ping() → cg.py ping (POST)</text>
+
+    <circle class="badge" cx="60" cy="463" r="9"/><text class="bt" x="60" y="468">4</text>
+    <text x="96" y="468" class="c">[hide]</text><text x="380" y="468" class="c">button: hide the band</text><text x="720" y="468" class="m">setHidden($, true)</text>
+
+    <rect class="row" x="40" y="478" width="1020" height="30"/>
+    <circle class="badge" cx="60" cy="493" r="9"/><text class="bt" x="60" y="498">5</text>
+    <text x="96" y="498" class="c">dash ↗</text><text x="380" y="498" class="c">link to the dashboard</text><text x="720" y="498" class="m">DASHBOARD const / v.url</text>
+
+    <circle class="badge" cx="60" cy="523" r="9"/><text class="bt" x="60" y="528">6</text>
+    <text x="96" y="528" class="c">saved $3.65</text><text x="380" y="528" class="c">session saving (main + other threads)</text><text x="720" y="528" class="m">money.*.saved_usd, moneyPair()</text>
+
+    <rect class="row" x="40" y="538" width="1020" height="30"/>
+    <circle class="badge" cx="60" cy="553" r="9"/><text class="bt" x="60" y="558">7</text>
+    <text x="96" y="558" class="c">of $15.52</text><text x="380" y="558" class="c">cost without ContextGuru (baseline)</text><text x="720" y="558" class="m">money.*.baseline_usd</text>
+
+    <circle class="badge" cx="60" cy="583" r="9"/><text class="bt" x="60" y="588">8</text>
+    <text x="96" y="588" class="c">cache ● 11:51 ↻</text><text x="380" y="588" class="c">time to cold; ↻ = a ping or plan holds it; cyan = held</text><text x="720" y="588" class="m">cacheClock(), ttl_s, held_until_ms</text>
+
+    <rect class="row" x="40" y="598" width="1020" height="30"/>
+    <circle class="badge" cx="60" cy="613" r="9"/><text class="bt" x="60" y="618">9</text>
+    <text x="96" y="618" class="c">ctx 37%</text><text x="380" y="618" class="c">context window used (green &lt;50%, amber &lt;70%, red)</text><text x="720" y="618" class="m">ctxNumbers(), ctxBar()</text>
+
+    <circle class="badge" cx="60" cy="643" r="9"/><text class="bt" x="60" y="648" style="font-size:11px">10</text>
+    <text x="96" y="648" class="c">try /cg:insights …</text><text x="380" y="648" class="c">rotating command tip, 1 per 12 s</text><text x="720" y="648" class="m">rotatingTip(), ROTATE, ROTATE_MS</text>
+  </g>
+
+  <!-- Data flow -->
+  <text x="40" y="690" class="h" style="font-size:17px">Data flow</text>
+  <g font-size="14">
+    <rect x="40" y="703" width="220" height="50" rx="6" fill="#eef3fa" stroke="#9db7d8"/>
+    <text x="150" y="725" text-anchor="middle" fill="#223">cg.py cachestate --json</text>
+    <text x="150" y="743" text-anchor="middle" fill="#667" font-size="12">on-disk cache, polled every 15 s</text>
+
+    <rect x="320" y="703" width="220" height="50" rx="6" fill="#eef3fa" stroke="#9db7d8"/>
+    <text x="430" y="725" text-anchor="middle" fill="#223">view() in model.ts</text>
+    <text x="430" y="743" text-anchor="middle" fill="#667" font-size="12">doc → prices, clock, savings, ctx</text>
+
+    <rect x="600" y="703" width="220" height="50" rx="6" fill="#eef3fa" stroke="#9db7d8"/>
+    <text x="710" y="725" text-anchor="middle" fill="#223">band (register.tsx)</text>
+    <text x="710" y="743" text-anchor="middle" fill="#667" font-size="12">clock row redrawn every 1 s</text>
+
+    <rect x="860" y="703" width="200" height="50" rx="6" fill="#fdf3e3" stroke="#e0b878"/>
+    <text x="960" y="725" text-anchor="middle" fill="#223">cg.py ping</text>
+    <text x="960" y="743" text-anchor="middle" fill="#667" font-size="12">only on a Ping press (the one write)</text>
+
+    <g stroke="#666" stroke-width="1.5" fill="#666">
+      <line x1="260" y1="728" x2="316" y2="728"/><polygon points="316,723 326,728 316,733" stroke="none"/>
+      <line x1="540" y1="728" x2="596" y2="728"/><polygon points="596,723 606,728 596,733" stroke="none"/>
+      <line x1="856" y1="728" x2="826" y2="728"/><polygon points="826,723 816,728 826,733" stroke="none"/>
+    </g>
+  </g>
+  <text x="40" y="784" font-size="12" fill="#888">Narrow layout (under 80 columns) as in the screenshot. Wide layout adds bars to cache and ctx and spells out "next message", "if cold", "dashboard".</text>
+</svg>
