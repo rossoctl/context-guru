@@ -11,8 +11,10 @@ Run this command. It only reads:
 python3 "$HOME/.bob/plugins/context-guru/scripts/bob_plugin.py" configure --show
 ```
 
-Report `cache_strategy=` (it is `none`) and `allowed_cache_strategies=` (only `none`). Explain
-`cache_note=` in plain words:
+Report `cache_strategy=` (it is `none`) and `allowed_cache_strategies=` (only `none`). The command
+reads that list from the proxy's strategy table. If it prints `reason=strategy_table_unreadable`,
+the proxy is too old: tell the user to run the context-guru-update skill. Explain `cache_note=` in
+plain words:
 
 - A keep-alive ping sends the last request again while the user is idle, so the provider keeps its
   prompt cache. context-guru does this only for Anthropic and OpenAI Responses caches.
