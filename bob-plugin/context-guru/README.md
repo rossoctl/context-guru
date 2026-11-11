@@ -34,9 +34,10 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
   `bob-PORT.yaml`, with `bob-ultrahigh` also Bob's prices `bob-PORT-prices.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
   before the first change (`backup/`), and the reset script `context-guru-reset`.
 
-By default the proxy runs only lossless components: `format`, `toon` and `cachesplit`. The opt-in
-`bob-ultrahigh` preset also cuts content. The model gets cut content back through the expand repair
-(test T4 passed on the real Bob IDE, 2026-11-11).
+By default the proxy runs the `bob-ultrahigh` preset. It cuts content, and it keeps the originals,
+summaries and held answers on your Mac. The model gets cut content back through the expand repair
+(test T4 passed on the real Bob IDE, 2026-11-11). For lossless components only (`format`, `toon`
+and `cachesplit`), run `configure --preset lossless`.
 
 ## Install
 
@@ -142,8 +143,8 @@ Or ask Bob "which context-guru preset runs". Bob has three presets:
 
 | Preset | Does |
 |---|---|
-| `lossless` (default) | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. |
-| `bob-ultrahigh` (opt-in) | context-guru's `ultrahigh`, set up for Bob (see below). It cuts content, and the model can get it back. |
+| `lossless` | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. It stores no content. |
+| `bob-ultrahigh` (default) | context-guru's `ultrahigh`, set up for Bob (see below). It cuts content, and the model can get it back. |
 | `off` | Sends requests through as they are. |
 
 ### `bob-ultrahigh`
@@ -151,8 +152,7 @@ Or ask Bob "which context-guru preset runs". Bob has three presets:
 It is `ultrahigh` with 4 Bob changes:
 
 1. **Summaries use Bob's own model.** No model is named. A summary call goes only to Bob's server,
-   under your Bob login, and Bob bills it like any request. **These calls do not work on Bob yet:**
-   they fail, and the request goes to Bob unchanged. A later release fixes this.
+   with your own Bob key, and uses your Bob quota like any request.
 2. **`extract_llm` runs on Bob,** though Bob caches. Bob bills a cache rewrite at the input rate,
    so a rewrite costs little.
 3. **The sweep may apply on a warm cache** (`warm: true`), behind its cost gate.

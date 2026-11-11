@@ -53,11 +53,11 @@ class Installed(TempHome):
 # ---------------------------------------------------------------------------- configure
 
 class ConfigureTest(Installed):
-    def test_show_reports_lossless_and_none_and_changes_nothing(self):
+    def test_show_reports_bob_ultrahigh_and_none_and_changes_nothing(self):
         before = self.tree()
         code, out, _ = self.run_main("configure", "--show")
         self.assertEqual(code, 0, out)
-        self.assertIn("preset=lossless\n", out)
+        self.assertIn("preset=bob-ultrahigh\n", out)
         self.assertIn("cache_strategy=none\n", out)
         self.assertIn("allowed_presets=off,lossless,bob-ultrahigh\n", out)
         self.assertIn("allowed_cache_strategies=none\n", out)
@@ -106,7 +106,7 @@ class ConfigureTest(Installed):
             "lossless": "pipeline: [format, toon, cachesplit]\n",
             "bob-ultrahigh": BOB_ULTRAHIGH.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
         self.assertEqual(PLUGIN.PRICED_PRESETS, ("bob-ultrahigh",))
-        self.assertEqual(PLUGIN.DEFAULT_PRESET, "lossless")
+        self.assertEqual(PLUGIN.DEFAULT_PRESET, "bob-ultrahigh")
         self.assertEqual(PLUGIN.BOB_CACHE_STRATEGIES, ("none",))
 
     def test_an_unmanaged_config_is_refused(self):
@@ -124,7 +124,7 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("result=restart_failed", out)
         self.assertIn("rolled_back=true", out)
-        self.assertEqual(self.config.read_text(), LOSSLESS)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
         self.assertEqual(PLUGIN.launchd_plist().read_bytes(), plist)
         self.assertEqual(self.bootstraps(calls), 2)
 
@@ -134,12 +134,13 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("rolled_back=false", out)
         self.assertIn("fix=", out)
-        self.assertEqual(self.config.read_text(), LOSSLESS)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
 
     def plist_env(self):
         return plistlib.loads(PLUGIN.launchd_plist().read_bytes()).get("EnvironmentVariables")
 
     def test_preset_bob_ultrahigh_writes_the_tested_config_and_restarts(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
         calls = len(self.launchctl_calls())
         code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
         self.assertEqual(code, 0, out)
@@ -151,6 +152,7 @@ class ConfigureTest(Installed):
                          "preset=bob-ultrahigh")
 
     def test_bob_ultrahigh_gives_the_proxy_bobs_flat_prices(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
         self.assertIsNone(self.plist_env())
         self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
         prices = PLUGIN.proxy_prices(self.port)
@@ -166,6 +168,7 @@ class ConfigureTest(Installed):
         self.assertEqual(self.config.read_text(), LOSSLESS)
 
     def test_a_failed_restart_on_bob_ultrahigh_puts_everything_back(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
         plist = PLUGIN.launchd_plist().read_bytes()
         with mock.patch.object(PLUGIN, "wait_healthy", side_effect=[False, True]):
             code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")

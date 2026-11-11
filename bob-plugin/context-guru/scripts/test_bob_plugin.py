@@ -562,6 +562,12 @@ class SetupTest(TempHome):
         self.assertIn(f"rc_file={self.rc}", out)
         self.assertIn(f"settings={self.home / '.bob/settings/settings.json'}", out)
         self.assertIn("consent_question=", out)
+        self.assertIn("preset=bob-ultrahigh\n", out)
+        self.assertIn("preset_effects=", out)
+        question = out.split("consent_question=")[1]
+        for words in ("stores content on this Mac", "your own Bob key", "flat prices",
+                      "configure --preset lossless"):
+            self.assertIn(words, question)
         self.assertIn("log in to Bob once", out)
         self.assertEqual(self.tree(), before)
         self.assertEqual(self.launchctl_calls(), [])
@@ -677,7 +683,7 @@ class SetupTest(TempHome):
             "--config", str(state / f"bob-{proxy.port}.yaml")])
         self.assertNotIn("--idle-exit", plist["ProgramArguments"])
         self.assertEqual((state / f"bob-{proxy.port}.yaml").read_text(),
-                         PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n")
+                         PLUGIN.CONFIG_MARKER + "\n" + PLUGIN.BOB_PRESETS["bob-ultrahigh"])
         self.assertEqual(self.rc.read_bytes(),
                          b"alias g=git\n" + ROUTE.block(proxy.port))
         self.assertTrue(HOOKS.is_installed(self.home / ".bob/settings/settings.json"))

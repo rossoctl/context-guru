@@ -88,7 +88,13 @@ components:
            switch_mode, update_todo_list, spawn_subagent, start_subtask]
 """,
 }
-DEFAULT_PRESET = "lossless"
+DEFAULT_PRESET = "bob-ultrahigh"
+# What the default preset does. setup --plan shows it, so the user's yes covers it.
+PRESET_EFFECTS = ("This preset stores content on this Mac (originals, summaries and held "
+                  "answers, so the model can get cut content back), sends summary calls to "
+                  "Bob's server with your own Bob key (they use your Bob quota), and uses "
+                  "Bob's flat prices on the dashboard. To keep requests uncut, run "
+                  "configure --preset lossless after setup.")
 # The presets that get Bob's flat prices (prices.yaml) as the proxy's MODEL_PRICES. The sweep's warm
 # cost gate needs them: without them it prices a cache rewrite at Claude rates and cuts nothing warm.
 PRICED_PRESETS = ("bob-ultrahigh",)
@@ -618,9 +624,11 @@ def setup(args):
               settings=bob_settings(), service_file=launchd_plist(), state=state_dir(),
               upstream=args.upstream, reset=reset_path(),
               note=LOGIN_NOTE + ", and once more after you remove it.",
+              preset=DEFAULT_PRESET, preset_effects=PRESET_EFFECTS,
               consent_question="Send IBM Bob's model traffic on this Mac through a local "
-                               "context-guru proxy that always runs, and add a block to your "
-                               "shell startup file and two hooks to Bob's settings?")
+                               "context-guru proxy that always runs, add a block to your "
+                               "shell startup file and two hooks to Bob's settings, and use the "
+                               f"{DEFAULT_PRESET} preset? " + PRESET_EFFECTS)
         if advice:
             facts(rc_advice=advice)
         return 0
