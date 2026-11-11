@@ -275,8 +275,17 @@ func ResolveTier(body []byte, u Usage, usageOK, prev bool) bool {
 	if !usageOK || !apply.AllBreakpointsAskExtendedTTL(body) {
 		return false
 	}
-	if u.CacheWrite > 0 {
-		return u.CacheWrite1h >= u.CacheWrite
+	return BilledOneHour(u.CacheWrite, u.CacheWrite1h, prev)
+}
+
+// BilledOneHour is the response half of ResolveTier: whether the tier the response billed is the
+// one-hour one, once the request asked for it on every breakpoint. A response that wrote tokens bills
+// its tier on them: one hour needs every written token at the one-hour tier. A response that only
+// read the cache bills no tier, so it inherits prev, the thread's last billed one. The proxy's
+// accountant path calls this with its own record of prev, so the two decide a read-only turn alike.
+func BilledOneHour(cacheWrite, cacheWrite1h int64, prev bool) bool {
+	if cacheWrite > 0 {
+		return cacheWrite1h >= cacheWrite
 	}
 	return prev
 }

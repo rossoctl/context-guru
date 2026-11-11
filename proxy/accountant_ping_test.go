@@ -372,6 +372,37 @@ func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
 	}
 }
 
+// Issue #1078: a read-only turn bills no tier, so the entry keeps the tier of the thread's last
+// write, as keepalive.ResolveTier decides. A gateway that bills 1h as 5m on turn 1 must not look
+// like a 1h cache on turn 2 because turn 2 only read: the entry the read found is a 5m one, and
+// the library would call a 20-minute gap after it hot and overstate a rescue.
+func TestAReadOnlyTurnKeepsTheLastBilledTier(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"model":"claude-sonnet-5","system":[{"type":"text","text":"` + strings.Repeat("x", 4000) +
+		`","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	n := int64(len(body))
+	phaseAfter := func(first Usage) accountant.CachePhase {
+		st, pings := newSavingsTracker(), NewPingStore()
+		step := func(at time.Time, u Usage) accountant.Result {
+			c := &capture{savings: st, pings: pings, provider: string(bschemas.Anthropic)}
+			c.accBegin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "claude-sonnet-5", At: at}, body)
+			c.accEnd(thread.Result{}, body, nil)
+			c.accWait()
+			c.accBilledTTL(u)
+			return st.compute(c.accReq, u)
+		}
+		step(t0, first)
+		step(t0.Add(2*time.Minute), Usage{CacheRead: n}) // reads only: no tier billed
+		return step(t0.Add(22*time.Minute), Usage{CacheWrite: n, CacheWrite1h: n}).Phase
+	}
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: 0}); got == accountant.PhaseHot {
+		t.Errorf("billed 5m, then a read-only turn, gap 20m: phase = %q, want not hot", got)
+	}
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: n}); got != accountant.PhaseHot {
+		t.Errorf("billed 1h, then a read-only turn, gap 20m: phase = %q, want hot", got)
+	}
+}
+
 // A panic in the library while a ping is priced is recovered: the keeper's goroutine must live (issue #918).
 func TestPingSavingsRecoversFromALibraryPanic(t *testing.T) {
 	origOps, origStd := pingOps, accountantStandalone

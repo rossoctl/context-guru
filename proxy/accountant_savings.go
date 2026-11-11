@@ -19,6 +19,8 @@ type savingsTracker struct {
 	onEnd func(*accountant.Request)
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
+	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
+	billed1h *tierStore
 }
 
 // clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does
@@ -38,7 +40,7 @@ func (s *savingsTracker) drop(req *accountant.Request) {
 }
 
 func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore()}
+	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore()}
 }
 
 // begin opens the request record with the client body, before any component ran. The Trackers bound
