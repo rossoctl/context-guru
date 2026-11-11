@@ -8,6 +8,8 @@
 #   sudo ./install.sh token revoke NAME  remove that install's token (restarts the collector)
 #   sudo ./install.sh token list         the names of the tokens, never the tokens
 #   sudo ./install.sh remove             drop the containers, KEEP the data
+#   sudo CENTRAL_HOST=metrics.example.com ./install.sh nginx
+#                                        install the TLS front end (needs nginx and a certificate)
 #
 # Proxies push to this server. Each proxy needs the collector URL and its token:
 #   Cortex:       port 4318      context-guru:  port 4319
@@ -341,6 +343,103 @@ print("%d rules, %d unhealthy" % (n, bad))' 2>/dev/null || echo "unknown")
   return_fails
 }
 
+# --- nginx (the TLS front end) -----------------------------------------------------------------
+
+# A proxy refuses to send its token over plain http to a remote host, so every remote install needs
+# this. It renders nginx.example.conf for one host name and one certificate, checks the certificate,
+# and puts the result live only if `nginx -t` passes. Settings (environment):
+#   CENTRAL_HOST   the name the proxies use in their URL. Required.
+#   TLS_CERT       the certificate chain, leaf first. Default /etc/ssl/central/fullchain.pem
+#   TLS_KEY        its private key.                    Default /etc/ssl/central/privkey.pem
+cmd_nginx() {
+  need_root
+  local host="${CENTRAL_HOST:-}" cert="${TLS_CERT:-/etc/ssl/central/fullchain.pem}" key="${TLS_KEY:-/etc/ssl/central/privkey.pem}"
+  local nx="${NGINX_ETC:-/etc/nginx}"
+  [ -n "$host" ] || { no "set CENTRAL_HOST to the name the proxies will use, for example metrics.example.com"; exit 1; }
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { no "CENTRAL_HOST '$host' is not a host name"; exit 1; }
+  if ! command -v nginx >/dev/null 2>&1; then
+    no "nginx is not installed: sudo dnf -y install nginx"
+    exit 1
+  fi
+
+  say "Certificate"
+  [ -r "$cert" ] && [ -r "$key" ] || { no "cannot read $cert and $key"; exit 1; }
+  if ! openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then
+    no "$cert is not a valid certificate, or it has expired"; exit 1
+  fi
+  # Compare the public keys, not a modulus: that works for RSA and EC alike.
+  local a b
+  a=$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null | openssl sha256)
+  b=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl sha256)
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "the certificate and the private key match"; else no "the certificate and the private key do NOT match"; exit 1; fi
+  if [ "$(grep -c 'BEGIN CERTIFICATE' "$cert")" -lt 2 ]; then
+    warn "$cert holds ONE certificate. If a CA signed it, the intermediate is missing and clients that trust only the root will fail."
+  else
+    ok "the chain holds the intermediate"
+  fi
+  if openssl x509 -in "$cert" -noout -checkend $((21*86400)) >/dev/null 2>&1; then
+    ok "valid for more than 21 days"
+  else
+    warn "expires within 21 days: $(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)"
+  fi
+  if ! openssl x509 -in "$cert" -noout -checkhost "$host" 2>/dev/null | grep -q "does match"; then
+    warn "the certificate does not name $host. A proxy that checks the name will refuse it."
+  fi
+
+  say "nginx"
+  install -d -m0755 "$nx/conf.d" "$nx/backups"
+  local live="$nx/conf.d/central-metrics.conf" inc="$nx/central-proxy.inc" prev="" previnc=""
+  # Render. Only the host name and the two certificate paths change.
+  local new; new=$(mktemp)
+  sed -e "s#server_name metrics.example.com;#server_name $host;#" \
+      -e "s#ssl_certificate     /etc/ssl/central/fullchain.pem;#ssl_certificate     $cert;#" \
+      -e "s#ssl_certificate_key /etc/ssl/central/privkey.pem;#ssl_certificate_key $key;#" \
+      "$CENTRAL_DIR/nginx.example.conf" > "$new"
+  if ! grep -q "server_name $host;" "$new" || ! grep -q "ssl_certificate     $cert;" "$new"; then
+    rm -f "$new"; no "could not render nginx.example.conf (did its lines change?)"; exit 1
+  fi
+  # Validate with the new files in place, and put the old ones back if nginx refuses them. Backups
+  # live outside conf.d: nginx includes conf.d/*.conf, and a backup that matches would define the
+  # server twice.
+  if [ -f "$live" ]; then prev="$nx/backups/central-metrics.conf.$(date +%Y%m%d-%H%M%S)"; cp -a "$live" "$prev"; fi
+  if [ -f "$inc" ]; then previnc="$nx/backups/central-proxy.inc.$(date +%Y%m%d-%H%M%S)"; cp -a "$inc" "$previnc"; fi
+  install -m0644 "$new" "$live"; rm -f "$new"
+  install -m0644 "$CENTRAL_DIR/central-proxy.inc" "$inc"
+  if ! nginx -t >/dev/null 2>&1; then
+    no "nginx -t refused the new configuration. The old files are put back:"
+    nginx -t 2>&1 | sed 's/^/    /' || true   # set -e must not stop us before the old files are back
+    if [ -n "$prev" ]; then cp -a "$prev" "$live"; else rm -f "$live"; fi
+    if [ -n "$previnc" ]; then cp -a "$previnc" "$inc"; else rm -f "$inc"; fi
+    exit 1
+  fi
+  ok "$live (valid)${prev:+, the old one is in $prev}"
+
+  # SELinux (RHEL): nginx may not connect to the collector's ports unless this is on.
+  if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != Disabled ] && command -v setsebool >/dev/null 2>&1; then
+    setsebool -P httpd_can_network_connect on && ok "SELinux: httpd_can_network_connect is on"
+  fi
+  # firewalld: let the proxies in on 443 only. The collector ports stay on loopback.
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-service=https >/dev/null && firewall-cmd --reload >/dev/null && ok "firewalld: https is open"
+  fi
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl enable --now nginx >/dev/null 2>&1 || true
+    systemctl reload nginx && ok "nginx reloaded"
+  else
+    warn "no systemd here: start or reload nginx yourself"
+  fi
+  # The distro nginx.conf ships a port-80 server, and a package upgrade can bring it back. A proxy
+  # sends its token on every push, so a cleartext port is a leak waiting for one mistyped URL.
+  if ss -ltn 2>/dev/null | grep -qE '(^|[^0-9.]):80\s'; then
+    warn "something listens on port 80. Comment out the default server in $nx/nginx.conf."
+  else
+    ok "nothing listens on port 80"
+  fi
+  say "Next"
+  printf '  curl -sS -o /dev/null -w "%%{http_code}\\n" https://%s/cortex/v1/metrics   # expect 401 (no token)\n' "$host"
+  return_fails
+}
+
 # --- remove ----------------------------------------------------------------------------------
 
 cmd_remove() {
@@ -355,6 +454,7 @@ case "${1:-}" in
   install) cmd_install ;;
   status)  cmd_status ;;
   token)   shift; cmd_token "$@" ;;
+  nginx)   cmd_nginx ;;
   remove)  cmd_remove ;;
-  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2 ;;
 esac
