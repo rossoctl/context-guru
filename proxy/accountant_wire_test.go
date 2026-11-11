@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"io"
 	"math"
 	"net/http"
@@ -302,6 +303,8 @@ func TestAccBeginRecoversAndDrops(t *testing.T) {
 	s.trackers = nil // BeginRequest on a nil Trackers panics
 	c := &capture{savings: s}
 	c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s"}, benchBody())
+	c.accEnd(thread.Result{ID: thread.Primary}, benchBody(), nil)
+	c.accWait()
 	if c.accReq != nil {
 		t.Error("a panicked begin left a record")
 	}

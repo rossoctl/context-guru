@@ -349,6 +349,7 @@ func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
 			c := &capture{savings: st, pings: pings, provider: string(bschemas.Anthropic)}
 			c.accBegin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "claude-sonnet-5", At: at}, body)
 			c.accEnd(thread.Result{}, body, nil)
+			c.accWait()
 			if c.accReq.Facts.TTL != time.Hour {
 				t.Fatalf("asked 1h on every breakpoint, facts TTL = %v", c.accReq.Facts.TTL)
 			}
