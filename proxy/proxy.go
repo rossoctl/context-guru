@@ -1697,7 +1697,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
+			h.newRecCtx(r, provider, orig, tn, explicitSess), di, tr.TouchAlias)
 	}
 }
 

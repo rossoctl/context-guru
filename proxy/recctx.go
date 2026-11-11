@@ -82,6 +82,25 @@ func (h *Handler) recordFor(tn *Tenancy) bool {
 	return tn != nil && tn.RecordTraces
 }
 
+// recordDeclined reports whether the client asked, on this request, not to be recorded
+// (x-context-guru-record: off). It is a per-session opt-OUT: the header is set once for a whole
+// Claude Code session, so every request of that session carries it.
+//
+// It can only narrow consent. The operator's --record and the account's own opt-in remain
+// the gates that allow recording; this header can never switch recording on, and a missing or
+// unrecognised value changes nothing. Anything but an explicit "off" is ignored on purpose, so
+// a typo cannot silently stop a recording the person wanted.
+func recordDeclined(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("x-context-guru-record"))) {
+	case "off", "false", "no", "0":
+		return true
+	}
+	return false
+}
+
 // newRecCtx resolves the recording context, or the zero value when recording is off.
 //
 // THE TRACE ID IS THE WHOLE POINT OF THIS FUNCTION, and it must not come from tr.Session.
@@ -95,9 +114,10 @@ func (h *Handler) recordFor(tn *Tenancy) bool {
 // documents it as stable across compaction where the content-hash fallback is not. The derived
 // key is the fallback, and it is PREFIXED so an analyst can see at a glance that a file is not
 // keyed on a real session. explicitSess is the chat handler's explicit id (explicitSessionOf).
-// So a Bob IDE file is keyed on its X-Task-Id, like the pipeline's session.
-func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string) recCtx {
-	if !h.recordFor(tn) {
+// So a Bob IDE file is keyed on its X-Task-Id, like the pipeline's session. r carries the
+// per-session opt-out (recordDeclined); nil means no opt-out.
+func (h *Handler) newRecCtx(r *http.Request, provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string) recCtx {
+	if !h.recordFor(tn) || recordDeclined(r) {
 		return recCtx{}
 	}
 	id := session.ExplicitID(gjson.GetBytes(orig, "metadata.user_id").String())
