@@ -140,8 +140,8 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 // instead of asking the query planner to bound something that is not bounded by nature.
 func TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan(t *testing.T) {
 	db := openTestDB(t)
-	plan := explainPlan(t, db, `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
-		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`, nil)
+	plan := explainPlan(t, db, `SELECT tenant_id, model, MIN(split_stable_tokens), MAX(split_stable_tokens)
+		FROM requests WHERE split_stable_tokens > 0 GROUP BY tenant_id, model`, nil)
 	full := strings.Join(plan, " | ")
 	if !strings.Contains(full, "SCAN requests") {
 		t.Errorf("expected CachesplitSizeSpread's own query to scan the whole table (that is "+
@@ -168,7 +168,7 @@ func TestCachesplitSizeSpreadIsCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := first["m-cached"], [2]int{5_000, 5_000}; got != want {
+	if got, want := first["t1"]["m-cached"], [2]int{5_000, 5_000}; got != want {
 		t.Fatalf("first call: m-cached spread = %v, want %v", got, want)
 	}
 
@@ -183,7 +183,7 @@ func TestCachesplitSizeSpreadIsCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := second["m-cached"], first["m-cached"]; got != want {
+	if got, want := second["t1"]["m-cached"], first["t1"]["m-cached"]; got != want {
 		t.Errorf("second call (within the TTL) = %v, want the FIRST call's cached %v — "+
 			"a changed answer means this re-queried instead of serving the cache", got, want)
 	}

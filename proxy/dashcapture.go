@@ -173,6 +173,11 @@ type capture struct {
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
 	accClient []byte
+	// accMeta and accOpen are what accBegin noted for accEnd to hand to the accountant's job.
+	accMeta accountant.RequestMeta
+	accOpen bool
+	// accJob is the accountant's work in flight (nil before accEnd and after accWait).
+	accJob *accJob
 	// accPreDefer is the body tool deferral read, set only on a request it changed (#908). It splits
 	// the envelope diff in two, so deferral's edits to `tools` are reported under its own operator.
 	accPreDefer []byte
@@ -813,8 +818,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// (acc_fallback reason no_result). The thread state is left as the
 	// previous request left it; the next request then sees a longer gap, which the library
 	// handles (a phase it cannot prove is unknown and falls back too).
-	// Whatever way the request ended, the client hash begin kept for end is not needed past here. end removes it
-	// on the normal path and accDrop on a recovered panic; this covers any path that reached neither.
+	// The job is joined first: every read of the record below needs it. Whatever way the request ended, the client
+	// hash the job's begin kept for end is not needed past here. end removes it on the normal path and accDrop on a
+	// recovered panic; this covers any path that reached neither.
+	c.accWait()
 	defer c.savings.drop(c.accReq)
 	// accCompute is its own span: the accountant's compute is not the dashboard's capture work (#1059).
 	endAcc := timedSpan("accCompute")
@@ -969,6 +976,7 @@ func (c *capture) accDrop() {
 	if c != nil {
 		c.savings.drop(c.accReq)
 		c.accReq = nil
+		c.accOpen = false
 	}
 }
 
@@ -983,7 +991,7 @@ func (c *capture) rejected() bool {
 func (c *capture) noResultWhy(usageOK bool) string {
 	switch {
 	case c.accReq == nil:
-		return "no_record" // no session, or the pipeline did not run: accBegin never opened a record
+		return "no_record" // no session, or the pipeline did not run: accEnd never noted a request, or the job opened none
 	case !usageOK:
 		return "no_usage"
 	case c.accNoResult != "":

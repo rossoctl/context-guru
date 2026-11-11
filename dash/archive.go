@@ -103,15 +103,15 @@ func (d *DB) coldSessions(idleBefore int64, kind string, limit int) ([]coldCandi
 	case ArchiveContent:
 		// Only sessions that still have content locally are worth a content pass.
 		notYet = `AND EXISTS (SELECT 1 FROM request_content c WHERE c.request_id = r.id)
-		          AND r.session_id NOT IN (SELECT session_id FROM archived_sessions WHERE content_path <> '')`
+		          AND (r.tenant_id, r.session_id) NOT IN (SELECT tenant_id, session_id FROM archived_sessions WHERE content_path <> '')`
 	case ArchiveFull:
-		notYet = `AND r.session_id NOT IN (SELECT session_id FROM archived_sessions WHERE full_path <> '')`
+		notYet = `AND (r.tenant_id, r.session_id) NOT IN (SELECT tenant_id, session_id FROM archived_sessions WHERE full_path <> '')`
 	default:
 		return nil, fmt.Errorf("dash: unknown archive kind %q", kind)
 	}
-	q := `SELECT r.session_id, MAX(r.tenant_id), MIN(r.ts), MAX(r.ts), COUNT(*)
+	q := `SELECT r.session_id, r.tenant_id, MIN(r.ts), MAX(r.ts), COUNT(*)
 	      FROM requests r WHERE r.session_id <> '' ` + notYet + `
-	      GROUP BY r.session_id HAVING MAX(r.ts) < ?
+	      GROUP BY r.tenant_id, r.session_id HAVING MAX(r.ts) < ?
 	      ORDER BY MAX(r.ts) ASC LIMIT ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, idleBefore, limit)
 	if err != nil {
@@ -133,8 +133,8 @@ func (d *DB) coldSessions(idleBefore int64, kind string, limit int) ([]coldCandi
 // for the disk-pressure path — which archives rather than deletes.
 func (d *DB) oldestLocalSessions(limit int) ([]coldCandidate, error) {
 	return d.scanCandidates(
-		`SELECT session_id, MAX(tenant_id), MIN(ts), MAX(ts), COUNT(*) FROM requests
-		 GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, limit)
+		`SELECT session_id, tenant_id, MIN(ts), MAX(ts), COUNT(*) FROM requests
+		 GROUP BY tenant_id, session_id ORDER BY MAX(ts) ASC LIMIT ?`, limit)
 }
 
 // scanCandidates runs a candidate query and scans its rows.
@@ -159,15 +159,16 @@ func (d *DB) scanCandidates(q string, args ...any) ([]coldCandidate, error) {
 // row-quota path — which archives rather than deletes, exactly like the disk path.
 func (d *DB) oldestLocalSessionsOfTenant(tenant string, limit int) ([]coldCandidate, error) {
 	return d.scanCandidates(
-		`SELECT session_id, MAX(tenant_id), MIN(ts), MAX(ts), COUNT(*) FROM requests
-		 WHERE tenant_id = ? GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, tenant, limit)
+		`SELECT session_id, tenant_id, MIN(ts), MAX(ts), COUNT(*) FROM requests
+		 WHERE tenant_id = ? GROUP BY tenant_id, session_id ORDER BY MAX(ts) ASC LIMIT ?`, tenant, limit)
 }
 
-// sessionEvents loads a session's full events, content included, for export. The
-// archiver runs behind the tenant boundary rather than in front of it — it moves
-// whatever the retention rules picked — so it reads with scoping off.
-func (d *DB) sessionEvents(sessionID string) ([]*Event, error) {
-	return d.SessionEvents(Filter{TenantAll: true}, sessionID, true)
+// sessionEvents loads one tenant's session in full, content included, for export. The archiver
+// runs behind the tenant boundary rather than in front of it, but it still moves ONE tenant's
+// session at a time (#1069): with scoping off, a session id two tenants share would put both
+// tenants' transcripts into a single object filed under one of them.
+func (d *DB) sessionEvents(tenant, sessionID string) ([]*Event, error) {
+	return d.SessionEvents(Filter{Tenant: tenant}, sessionID, true)
 }
 
 // encodeArchive renders events as gzipped JSONL.
@@ -262,7 +263,7 @@ func (r *Recorder) ArchiveSessionContent(ctx context.Context, c coldCandidate) (
 	if r.remote == nil {
 		return 0, errors.New("dash: no cold storage configured")
 	}
-	evs, err := r.db.sessionEvents(c.SessionID)
+	evs, err := r.db.sessionEvents(c.TenantID, c.SessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -294,7 +295,7 @@ func (r *Recorder) ArchiveSessionContent(ctx context.Context, c coldCandidate) (
 	}
 	// Only now is it safe to drop the local copy.
 	res, err := r.db.sql.Exec(`DELETE FROM request_content WHERE request_id IN (
-		SELECT id FROM requests WHERE session_id = ?)`, c.SessionID)
+		SELECT id FROM requests WHERE tenant_id = ? AND session_id = ?)`, c.TenantID, c.SessionID)
 	if err != nil {
 		// The object is uploaded but the local delete failed. Harmless and
 		// self-correcting: the index row below is not written, so the next pass
@@ -316,7 +317,7 @@ func (r *Recorder) ArchiveSessionFull(ctx context.Context, c coldCandidate) (int
 	if r.remote == nil {
 		return 0, errors.New("dash: no cold storage configured")
 	}
-	evs, err := r.db.sessionEvents(c.SessionID)
+	evs, err := r.db.sessionEvents(c.TenantID, c.SessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -342,7 +343,7 @@ func (r *Recorder) ArchiveSessionFull(ctx context.Context, c coldCandidate) (int
 		slog.Warn("dash: could not read the aliases of a session being archived",
 			"session", c.SessionID, "err", aerr)
 	}
-	res, err := r.db.sql.Exec(`DELETE FROM requests WHERE session_id = ?`, c.SessionID)
+	res, err := r.db.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = ?`, c.TenantID, c.SessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -379,7 +380,7 @@ func (d *DB) markArchived(c coldCandidate, kind, path string, size int64, remote
 	if _, err := d.sql.Exec(`INSERT INTO archived_sessions
 	  (session_id,tenant_id,first_ts,last_ts,requests,archived_at,remote)
 	  VALUES (?,?,?,?,?,?,?)
-	  ON CONFLICT(session_id) DO UPDATE SET
+	  ON CONFLICT(tenant_id, session_id) DO UPDATE SET
 	    last_ts=MAX(last_ts,excluded.last_ts), requests=MAX(requests,excluded.requests),
 	    archived_at=excluded.archived_at, remote=excluded.remote`,
 		c.SessionID, c.TenantID, c.FirstTS, c.LastTS, c.Requests, now, remote); err != nil {
@@ -391,8 +392,8 @@ func (d *DB) markArchived(c coldCandidate, kind, path string, size int64, remote
 		col, sizeCol = "full_path", "full_bytes"
 	}
 	_, err := d.sql.Exec(
-		`UPDATE archived_sessions SET `+col+` = ?, `+sizeCol+` = ? WHERE session_id = ?`,
-		path, size, c.SessionID)
+		`UPDATE archived_sessions SET `+col+` = ?, `+sizeCol+` = ? WHERE tenant_id = ? AND session_id = ?`,
+		path, size, c.TenantID, c.SessionID)
 	return err
 }
 
@@ -430,12 +431,23 @@ func (d *DB) ArchivedSessions(f Filter, limit int) ([]ArchivedSession, error) {
 	return out, rows.Err()
 }
 
-// ArchivedSessionByID reads one index row.
+// ArchivedSessionByID reads one index row of ANY tenant, the most recently archived when two
+// tenants share the id (#1069). It is for a caller with no tenant in view: a manager's
+// service-wide scope. A caller that has a tenant uses ArchivedSessionOf.
 func (d *DB) ArchivedSessionByID(sessionID string) (ArchivedSession, error) {
+	return d.archivedSession(`WHERE session_id = ?`, sessionID)
+}
+
+// ArchivedSessionOf reads one tenant's index row.
+func (d *DB) ArchivedSessionOf(tenant, sessionID string) (ArchivedSession, error) {
+	return d.archivedSession(`WHERE tenant_id = ? AND session_id = ?`, tenant, sessionID)
+}
+
+func (d *DB) archivedSession(where string, args ...any) (ArchivedSession, error) {
 	var a ArchivedSession
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT session_id,tenant_id,first_ts,last_ts,requests,
 	  content_path,content_bytes,full_path,full_bytes,archived_at,remote
-	  FROM archived_sessions WHERE session_id = ?`, sessionID).Scan(
+	  FROM archived_sessions `+where+` ORDER BY archived_at DESC LIMIT 1`, args...).Scan(
 		&a.SessionID, &a.TenantID, &a.FirstTS, &a.LastTS, &a.Requests,
 		&a.ContentPath, &a.ContentBytes, &a.FullPath, &a.FullBytes, &a.ArchivedAt, &a.Remote)
 	return a, err
@@ -444,11 +456,11 @@ func (d *DB) ArchivedSessionByID(sessionID string) (ArchivedSession, error) {
 // FetchArchived reads a session back from cold storage WITHOUT reinserting it. A
 // read-only restore: the dashboard can show an archived session without dragging it
 // back into the hot tier and re-triggering the eviction that put it there.
-func (r *Recorder) FetchArchived(ctx context.Context, sessionID string) ([]*Event, error) {
+func (r *Recorder) FetchArchived(ctx context.Context, tenant, sessionID string) ([]*Event, error) {
 	if r.remote == nil {
 		return nil, errors.New("dash: no cold storage configured")
 	}
-	a, err := r.db.ArchivedSessionByID(sessionID)
+	a, err := r.db.ArchivedSessionOf(tenant, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -468,8 +480,8 @@ func (r *Recorder) FetchArchived(ctx context.Context, sessionID string) ([]*Even
 
 // FetchArchivedContent returns the archived transcripts for one request, for the
 // diff view of a session whose content has moved out.
-func (r *Recorder) FetchArchivedContent(ctx context.Context, sessionID string, requestID int64) ([]ContentRow, error) {
-	evs, err := r.FetchArchived(ctx, sessionID)
+func (r *Recorder) FetchArchivedContent(ctx context.Context, tenant, sessionID string, requestID int64) ([]ContentRow, error) {
+	evs, err := r.FetchArchived(ctx, tenant, sessionID)
 	if err != nil {
 		return nil, err
 	}

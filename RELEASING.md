@@ -11,7 +11,7 @@ The process was first used for v0.5.1 and v0.5.2.
 | Role | Does |
 |---|---|
 | **Release owner** | Decides what goes into the release. Approves the release notes. Gives the integrator authority to merge. |
-| **Integrator** | Keeps the release list. Starts reviews, merges, rebases, runs the integration check, writes the notes, tags. |
+| **Integrator** | Keeps the release list. Starts reviews, merges, merges `main` into a ready PR that waits only for that, runs the integration check, writes the notes, tags. |
 | **PR author** | Writes the change and its tests. Fixes review findings. |
 | **Reviewer** | Gives one independent review of one PR. Never the author of that PR. Each PR has 2 reviewers. |
 
@@ -110,7 +110,18 @@ A review without this block does not count toward the 2.
 
 ### Check that a PR is ready
 
-**The session that says a PR is ready owns it until it is ready:** the rebase on `main`, the 2 approvals at the final head, and green CI. The integrator checks; it does not rebase, review or fix. If something is missing, tell the owning session exactly what. The one exception: the integrator may re-run once a flaky CI test that the PR does not touch.
+**The session that says a PR is ready owns it until it is ready:** the rebase on `main`, the 2 approvals at the final head, and green CI. The integrator checks; it does not rebase, review or fix. If something is missing, tell the owning session exactly what. There are two exceptions:
+
+- **A flaky CI test.** The integrator may re-run once a flaky CI test that the PR does not touch.
+- **A merge of `main`** (owner rule, David Amid, 2026-11-11: "typically if the holding pattern is a merge of main, this should be under your responsibility"). This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
+  1. The integrator starts a subagent with its own worktree.
+  2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on the box).
+  3. The subagent pushes without force.
+  4. The integrator runs `scripts/release/approval-still-valid.sh <pr> <approved-sha>` and `git show --remerge-diff <merge-commit>`. It posts both outputs on the PR.
+  5. The script may print `CHANGED` after a clean merge, because `main` can change lines near the PR's hunks. Then the remerge-diff decides. **Empty output** means nobody resolved a conflict by hand, so both approvals stay valid.
+  6. If the remerge-diff shows a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
+  7. A resolution that needs a design choice goes back to the PR owner.
+  8. Code fixes stay with the PR owner.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
@@ -164,6 +175,8 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 **Conflicts during a rebase:**
 - **Mechanical** (both sides add a line to the same list): resolve it, and say how in the merge body.
 - **Semantic** (the code was restructured under the PR): stop and hand the rebase to the author. Then review the author's conflict resolution before you merge.
+
+This section is about a stacked PR rebase. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
 ### Defects found on the way
 

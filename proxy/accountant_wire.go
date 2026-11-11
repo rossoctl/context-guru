@@ -23,32 +23,84 @@ func accThreadID(id string) string {
 	return id
 }
 
-// accBegin opens the accountant record with the body the agent sent. Nil-safe.
+// accBegin notes the body the agent sent. It does no work: parsing and hashing a large body cost a request
+// milliseconds before it went upstream (issue #1059), so the record is opened by accEnd, off the request
+// path. Nil-safe.
 func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
 	defer c.timed("accBegin")()
 	if c == nil || c.savings == nil {
 		return
 	}
-	// The savings record is a side figure. A panic while hashing a hostile body must cost that figure only, and
-	// must not reach the pre-forward recover, which would throw away the pipeline's rewrite of the request
-	// (issue #918). The record is dropped, and the event books no saving.
+	c.accMeta, c.accClient, c.accOpen = meta, client, true
+}
+
+// accJob is the accountant's work for one request, running on its own goroutine. w is a private capture that
+// holds only what the work reads and writes, so the request goroutine and the job share no field. w is read only
+// after done is closed.
+type accJob struct {
+	done chan struct{}
+	w    *capture
+}
+
+// accEnd hands the thread, the forwarded body and the operations to the accountant and returns at once. The
+// parsing, hashing and bookkeeping run on another goroutine; finish waits for them (accWait) before it prices the
+// request, so a request's record is complete before the request is priced. The order of two requests of one thread
+// is usual, not guaranteed: finish runs after the response is flushed, so a client can send the next turn first.
+// The library recomputes a figure when another request of the thread intervened (Result.Recomputed). Nil-safe; a no-op when accBegin did not note a request.
+func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
+	defer c.timed("accEnd")()
+	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
+		return
+	}
+	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer}
+	job := &accJob{done: make(chan struct{}), w: w}
+	meta, client := c.accMeta, c.accClient
+	ops = append([]accountant.Operation(nil), ops...)
+	// Publish the job last: finish waits for a published job, so nothing that can fail may sit between this line
+	// and the go statement.
+	c.accJob = job
+	go func() {
+		defer close(job.done)
+		w.accRun(meta, client, th, forwarded, ops)
+	}()
+}
+
+// accWait joins the accountant's work and takes its results into c. Idempotent. Nil-safe.
+func (c *capture) accWait() {
+	defer c.timed("accWait")()
+	if c == nil || c.accJob == nil {
+		return
+	}
+	job := c.accJob
+	<-job.done
+	c.accJob = nil
+	c.accReq, c.accThread, c.accPingWindow = job.w.accReq, job.w.accThread, job.w.accPingWindow
+	if job.w.accNoResult != "" {
+		c.accNoResult = job.w.accNoResult
+	}
+}
+
+// accRun opens the record and ends it. It runs off the request path, on the job's private capture.
+//
+// The savings record is a side figure. A panic while hashing a hostile body must cost that figure only: the
+// request is already on its way, and a panic on this goroutine would end the process. The record is dropped, and
+// the event books no saving (issue #918).
+func (c *capture) accRun(meta accountant.RequestMeta, client []byte, th thread.Result, forwarded []byte, ops []accountant.Operation) {
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("accountant: BeginRequest panicked; the request is recorded with no saving", "panic", p)
+			slog.Error("accountant: the record panicked; the request is recorded with no saving", "panic", p)
 			c.accDrop()
 		}
 	}()
 	c.accReq = c.savings.begin(meta, client)
-	c.accClient = client
+	c.accEndNow(th, forwarded, ops)
 }
 
-// accEnd records the thread, the forwarded body and the operations. A thread that continues
+// accEndNow records the thread, the forwarded body and the operations. A thread that continues
 // another by content names it as its parent, but starts with no state of its own: accountant carries
-// Thread.Parent and does not read it (design §4.1). Nil-safe; a no-op when accBegin did not open a
-// record.
-func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
-	defer c.timed("accEnd")()
-	if c == nil || c.savings == nil || c.accReq == nil {
+// Thread.Parent and does not read it (design §4.1).
+func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant.Operation) {
+	if c.accReq == nil {
 		return
 	}
 	t := accountant.Thread{ID: accThreadID(th.ID)}

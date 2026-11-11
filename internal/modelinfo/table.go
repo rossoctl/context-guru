@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -27,7 +28,13 @@ import (
 // Nothing in a Table is a secret: these are list prices. It is a plain file, and a
 // missing or malformed one is a startup error rather than a silent fallback — a
 // price list that failed to load looks exactly like "this model is free".
-type Table struct{ entries []tableEntry }
+type Table struct {
+	entries []tableEntry
+	// bareTail derives a qualified entry's own bare id (e.g. "claude-sonnet-5" for
+	// "aws/claude-sonnet-5") so a request that omits the provider prefix still reaches
+	// the specific entry instead of falling through to a wildcard family. See lookup.
+	bareTail map[string]tableEntry
+}
 
 type tableEntry struct {
 	match  string // normalized model id, or a substring of one
@@ -111,11 +118,18 @@ func ParseTable(b []byte) (*Table, error) {
 		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
 	t := &Table{}
+	seen := map[string]bool{}
 	for i, m := range f.Models {
 		match := strings.ToLower(strings.TrimSpace(m.Match))
 		if match == "" {
 			return nil, fmt.Errorf("model price list: entry %d has no match", i)
 		}
+		// Two entries for one match are two rates for one model, and lookup would pick
+		// whichever sorted first. deriveBareTails relies on a match being unique.
+		if seen[match] {
+			return nil, fmt.Errorf("model price list: %q appears more than once", m.Match)
+		}
+		seen[match] = true
 		prefix := strings.HasSuffix(match, "*")
 		match = strings.TrimSuffix(match, "*")
 		if m.Window > 0 && m.CompactionPoint > m.Window {
@@ -160,7 +174,72 @@ func ParseTable(b []byte) (*Table, error) {
 	sort.SliceStable(t.entries, func(i, j int) bool {
 		return len(t.entries[i].match) > len(t.entries[j].match)
 	})
+	t.bareTail = deriveBareTails(t.entries)
 	return t, nil
+}
+
+// deriveBareTails indexes each qualified, non-family entry (e.g. "aws/claude-sonnet-5")
+// by its own bare tail ("claude-sonnet-5") — the fix for #324, mirroring
+// modelinfo.LiteLLM.fetch, which does the same for the public price map
+// (`m[full]=w; if _,ok:=m[tail]; !ok { m[tail]=w }`). Without it, a request whose
+// model id lacks the provider prefix the operator wrote the specific rate under fell
+// straight past that entry to whichever wildcard family entry happened to
+// prefix-match — silently, at the wrong rate.
+//
+// Two rules keep this from introducing a new silent-wrong-price bug of its own:
+//
+//   - An entry the operator wrote bare, on purpose (no `/`), always wins: this
+//     function skips any tail already claimed by a literal entry, so lookup's own
+//     first (exact) pass finds that entry before ever consulting this index.
+//   - A tail claimed by TWO OR MORE differently-priced providers is ambiguous — a
+//     bare request for it cannot be resolved without guessing which provider it
+//     meant, and guessing is exactly the mechanism that caused #324. "Differently
+//     priced" covers the window and compaction point the entry also serves, not only
+//     the rate: Window, WindowExact and CompactionPoint read the same entry, and a
+//     5x-too-high window reported as exact is as wrong as a wrong price. Such a tail is
+//     not indexed at all here, so it falls through to the family/public-map passes
+//     instead of silently picking one provider's rate for the other's traffic.
+func deriveBareTails(entries []tableEntry) map[string]tableEntry {
+	literal := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		literal[e.match] = true
+	}
+	tails := map[string]tableEntry{}
+	ambiguous := map[string]bool{}
+	for _, e := range entries {
+		if e.prefix || !e.qualified {
+			continue // families and bare entries don't need a derived tail
+		}
+		i := strings.LastIndexByte(e.match, '/')
+		if i < 0 {
+			continue // no provider prefix to strip, e.g. a bare "gpt-5.6-sol" entry
+		}
+		tail := e.match[i+1:]
+		if tail == "" || literal[tail] {
+			continue // an explicit bare entry for this tail already wins on its own
+		}
+		if prev, ok := tails[tail]; ok && prev.match != e.match {
+			// Two providers at one rate and one window are not a guess.
+			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
+				ambiguous[tail] = true
+			}
+			continue
+		}
+		tails[tail] = e
+	}
+	if len(ambiguous) > 0 {
+		names := make([]string, 0, len(ambiguous))
+		for tail := range ambiguous {
+			delete(tails, tail)
+			names = append(names, tail)
+		}
+		sort.Strings(names)
+		slog.Warn("model price list: bare id is ambiguous between two qualified entries that "+
+			"differ in rate, window or compaction point; not indexing it — a request for it falls through to the family/"+
+			"public rate instead of guessing which provider's rate applies",
+			"tails", names)
+	}
+	return tails
 }
 
 // Len is how many entries were loaded, for the startup log line.
@@ -173,14 +252,15 @@ func (t *Table) Len() int {
 
 // lookup finds the most specific entry for a model id.
 //
-// Two passes, not three, and that is the whole subtlety. An exact match wins outright.
-// Everything else — a family `prefix*` and a bare id matched by containment — competes in
-// ONE pass ordered by match length, because entries are sorted longest-first. Three
-// separate passes made specificity depend on the KIND of match rather than on how specific
-// it was: `gemini-2.5*` (a prefix entry) beat `gemini-2.5-pro` (an exact entry reached only
-// by containment) for `gcp/gemini-2.5-pro-preview-05-06`, pricing a Pro deployment at
-// Flash's rate — a 4x underprice on its cost, its baseline and every saving derived from
-// them.
+// Precedence, most specific first: (1) an exact match, full id or literal bare id;
+// (2) a bare id resolving to the one qualified entry it is the tail of (#324); then
+// (3) a family `prefix*` and a bare id matched by containment, which compete in ONE
+// pass ordered by match length, because entries are sorted longest-first.
+//
+// (3) used to be two separate passes, and that was its own bug: `gemini-2.5*` (a
+// prefix entry) beat `gemini-2.5-pro` (an exact entry reached only by containment)
+// for `gcp/gemini-2.5-pro-preview-05-06`, pricing a Pro deployment at Flash's rate —
+// a 4x underprice on its cost, its baseline and every saving derived from them.
 //
 // Containment is restricted twice over, for the symmetric reason. A `*` entry only ever
 // matches as a prefix, and a non-`*` entry is only matched by containment when it LOOKS
@@ -197,6 +277,16 @@ func (t *Table) lookup(model string) (tableEntry, bool) {
 	full, tail := Normalize(model)
 	for _, e := range t.entries {
 		if e.match == full || e.match == tail {
+			return e, true
+		}
+	}
+	// A bare id resolves to the one qualified entry it is the tail of (#324), before
+	// any wildcard family is consulted — see deriveBareTails for precedence and the
+	// ambiguous case.
+	// Only for a request that carries no provider prefix. `vertex/claude-sonnet-5` shares the
+	// tail of `aws/claude-sonnet-5` but is another provider's traffic; it must not take aws's rate.
+	if full == tail {
+		if e, ok := t.bareTail[tail]; ok {
 			return e, true
 		}
 	}

@@ -291,13 +291,15 @@ type KeepAliveLedger struct {
 	// The winner/loser split over the sessions the mechanism TOUCHED. 85 of 119 lose about a
 	// third of a cent service-wide, funding a large rebate on 34 — the panel states that in
 	// words, unconditionally, above the fold.
-	Sessions       int64   `json:"sessions_touched"`
-	Winners        int64   `json:"winners"`
-	Losers         int64   `json:"losers"`
-	WorstSession   string  `json:"worst_session"`
-	WorstNetUSD    float64 `json:"worst_net_usd"`
-	Addressable    int64   `json:"addressable_misses"`
-	AddressableUSD float64 `json:"addressable_usd"`
+	Sessions     int64  `json:"sessions_touched"`
+	Winners      int64  `json:"winners"`
+	Losers       int64  `json:"losers"`
+	WorstSession string `json:"worst_session"`
+	// WorstSessionTenant says whose WorstSession it is: two tenants can hold the same session id.
+	WorstSessionTenant string  `json:"worst_session_tenant,omitempty"`
+	WorstNetUSD        float64 `json:"worst_net_usd"`
+	Addressable        int64   `json:"addressable_misses"`
+	AddressableUSD     float64 `json:"addressable_usd"`
 	// PingsThatReadNothing is the operator's check on SavedUSD: a ping that read nothing
 	// refreshed nothing. PingsThatWrote is worse — it CREATED an entry, which costs 12.5x a
 	// read, and the keeper stops pinging that session.
@@ -340,7 +342,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// Seven independent reads, four of them a pass over every request (the saving, the per-session
 	// saving, the addressable CTE, the tokens). They ran back to back; each goroutine fills its own fields.
 	var (
-		saved, spent map[string]float64
+		saved, spent map[sessKey]float64
 		from         sql.NullInt64
 		lat          kvcache.Latency
 		days         float64
@@ -415,7 +417,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		return nil, err
 	}
 	o.NetUSD = o.SavedUSD - o.PingUSD
-	nets := map[string]float64{}
+	nets := map[sessKey]float64{}
 	for s, v := range saved {
 		nets[s] += v
 	}
@@ -431,7 +433,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 			o.Losers++
 		}
 		if net < o.WorstNetUSD {
-			o.WorstNetUSD, o.WorstSession = net, s
+			o.WorstNetUSD, o.WorstSession, o.WorstSessionTenant = net, s.session, s.tenant
 		}
 	}
 	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
@@ -531,22 +533,26 @@ func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
 	return l, nil
 }
 
+// sessKey names one session: its tenant and its id (#501). A bare session id is not enough to
+// key a per-session figure, because two tenants can hold rows under the same one.
+type sessKey struct{ tenant, session string }
+
 // sumBySession groups one column by session under an extra predicate.
-func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[string]float64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[sessKey]float64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]float64{}
+	out := map[sessKey]float64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var v float64
-		if err := rows.Scan(&s, &v); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &v); err != nil {
 			return nil, err
 		}
-		out[s] = v
+		out[k] = v
 	}
 	return out, rows.Err()
 }
@@ -993,12 +999,12 @@ type KeepAliveSessionTokens struct {
 // keepAliveSessionTokens answers KeepAliveSessionTokens for each of the given sessions, keyed by
 // session id. It reads through sessionTokens, the Sessions tab's query: one read of the given
 // sessions only, on a session index.
-func (d *DB) keepAliveSessionTokens(f Filter, ids []string) (map[string]KeepAliveSessionTokens, error) {
+func (d *DB) keepAliveSessionTokens(f Filter, ids []string) (map[sessKey]KeepAliveSessionTokens, error) {
 	toks, err := d.sessionTokens(f, ids)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]KeepAliveSessionTokens, len(toks))
+	out := make(map[sessKey]KeepAliveSessionTokens, len(toks))
 	for id, t := range toks {
 		out[id] = KeepAliveSessionTokens{KeepAliveTokens: t.KeepAliveTokens,
 			KeepAlivePingTokens: t.KeepAlivePingTokens, TokensUnmeasured: t.TokensUnmeasured}
@@ -1018,15 +1024,15 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	}
 	aCond, aArgs := addressable(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
+		SELECT session_id, tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
 		FROM addressable WHERE session_id <> ''
-		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
+		GROUP BY tenant_id, session_id ORDER BY 4 DESC, tenant_id, session_id LIMIT ?`,
 		append(append([]any(nil), aArgs...), limit)...)
 	if err != nil {
 		return nil, err
 	}
 	out := []*KeepAliveSessionRow{}
-	byID := map[string]*KeepAliveSessionRow{}
+	byID := map[sessKey]*KeepAliveSessionRow{}
 	for rows.Next() {
 		var s KeepAliveSessionRow
 		if err := rows.Scan(append([]any{&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD},
@@ -1035,7 +1041,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 			return nil, err
 		}
 		out = append(out, &s)
-		byID[s.SessionID] = &s
+		byID[sessKey{s.TenantID, s.SessionID}] = &s
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -1049,15 +1055,15 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	cond, args := f.where()
 	for _, s := range out {
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), MAX(r.ts) FROM requests r
-			WHERE `+cond+` AND r.session_id = ?`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ?`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
 			return nil, err
 		}
 		var prefix sql.NullInt64
 		var model sql.NullString
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_read + r.cache_write, r.model FROM requests r
-			WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&prefix, &model); err != nil &&
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&prefix, &model); err != nil &&
 			err != sql.ErrNoRows {
 			return nil, err
 		}
@@ -1088,9 +1094,10 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 		return nil, err
 	}
 	for _, s := range out {
-		s.SavedUSD, s.PingUSD, s.Pings = saved[s.SessionID], spent[s.SessionID], pings[s.SessionID]
+		k := sessKey{s.TenantID, s.SessionID}
+		s.SavedUSD, s.PingUSD, s.Pings = saved[k], spent[k], pings[k]
 		s.NetUSD = s.SavedUSD - s.PingUSD
-		s.KeepAliveSessionTokens = toks[s.SessionID]
+		s.KeepAliveSessionTokens = toks[k]
 	}
 	return out, nil
 }
@@ -1318,30 +1325,30 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		return nil, err
 	}
 	for i := range out.Rows {
-		id := out.Rows[i].SessionID
-		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[id], spent[id]
-		out.Rows[i].Pings = pings[id]
-		out.Rows[i].KeepAliveSessionTokens = toks[id]
+		k := sessKey{out.Rows[i].TenantID, out.Rows[i].SessionID}
+		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[k], spent[k]
+		out.Rows[i].Pings = pings[k]
+		out.Rows[i].KeepAliveSessionTokens = toks[k]
 	}
 	return out, nil
 }
 
 // countBySession counts rows per session under an extra predicate.
-func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) countBySession(cond string, args []any, extra string) (map[sessKey]int64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[sessKey]int64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var n int64
-		if err := rows.Scan(&s, &n); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &n); err != nil {
 			return nil, err
 		}
-		out[s] = n
+		out[k] = n
 	}
 	return out, rows.Err()
 }
@@ -1996,7 +2003,25 @@ type KeepAliveRecommendation struct {
 	// ServiceLoUSD/ServiceHiUSD is the service-wide interval, for scale in a refusal.
 	ServiceLoUSD float64 `json:"service_lo_usd,omitempty"`
 	ServiceHiUSD float64 `json:"service_hi_usd,omitempty"`
+	// Learned is the same forecast at the learned 5-hour weights (#1047), on a Claude subscription
+	// whose fit passed the gate. nil otherwise, and on a refusal for too little data, which no weight
+	// changes. The dashboard shows it in place of the API-price forecast on a subscription.
+	Learned *LearnedForecast `json:"learned,omitempty"`
 	KeepAliveCoverage
+}
+
+// LearnedForecast is the recommendation's yes or no and range at the learned 5-hour weights: the
+// same replay, with the saving and the ping cost each scaled by ForecastScale. Dollars at API
+// input prices, with the token kinds weighed as the 5-hour limit weighs them.
+type LearnedForecast struct {
+	Refused     string  `json:"refused,omitempty"`
+	IdleSeconds int     `json:"idle_seconds,omitempty"`
+	MaxPings    int     `json:"max_pings,omitempty"`
+	LoUSD       float64 `json:"lo_usd,omitempty"`
+	HiUSD       float64 `json:"hi_usd,omitempty"`
+	// Requests and Windows are what the weight fit used: the label says "from N requests".
+	Requests int `json:"requests"`
+	Windows  int `json:"windows"`
 }
 
 // PlanCounts are the counts of the per-wait plan in force: a tool wait up to ToolWaitMax pings,
@@ -2044,6 +2069,19 @@ const (
 // recMaxPings) and the fixed-K interval comes beside it; with WaitPlan off the interval is the
 // fixed-K one, as before #858.
 func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveRecommendation, error) {
+	return d.keepAliveRecommend(f, wait, nil)
+}
+
+// KeepAliveRecommendLearned is KeepAliveRecommend plus the forecast at the learned 5-hour weights
+// (Learned), from a fit that passed the gate.
+func (d *DB) KeepAliveRecommendLearned(f Filter, wait keepalive.Policy, fit FiveHourFit) (*KeepAliveRecommendation, error) {
+	if !fit.OK || fit.Forecast == nil {
+		return d.keepAliveRecommend(f, wait, nil)
+	}
+	return d.keepAliveRecommend(f, wait, &fit)
+}
+
+func (d *DB) keepAliveRecommend(f Filter, wait keepalive.Policy, fit *FiveHourFit) (*KeepAliveRecommendation, error) {
 	wait.MaxPings, wait.Idle = recMaxPings, recIdleSeconds*time.Second
 	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD, Plan: PlanFixed}
 	if wait.WaitPlan {
@@ -2133,31 +2171,47 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
 	// net is one session's value under a model: planned says "the per-wait plan with base k", else
-	// "k pings for every wait".
-	net := func(s string, k int, planned bool) float64 {
+	// "k pings for every wait". sc weighs the saving and the ping cost: API prices are all 1s, the
+	// learned 5-hour weights are the fit's ForecastScale (#1047).
+	net := func(s string, k int, planned bool, sc ForecastScale) float64 {
 		pol := wait
 		pol.MaxPings = k
 		var v float64
 		for _, m := range bySession[s] {
+			save := sc.Save5m
+			if m.ttl >= time.Hour || m.facts.OneHour {
+				save = sc.Save1h
+			}
 			if planned {
 				if planReaches(pol, m) {
-					v += m.usd * recRecoverableShare
+					v += m.usd * recRecoverableShare * save
 				}
 			} else if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
-				v += m.usd * recRecoverableShare
+				v += m.usd * recRecoverableShare * save
 			}
 		}
 		for _, sp := range bySpan[s] {
 			if planned {
-				v -= float64(sp.planPings(pol)) * pingUSD
+				v -= float64(sp.planPings(pol)) * pingUSD * sc.Ping
 			} else {
-				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD
+				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD * sc.Ping
 			}
 		}
 		return v
 	}
+	apiPrices := ForecastScale{Save5m: 1, Save1h: 1, Ping: 1}
 	planned := wait.WaitPlan
-	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned) })
+	if fit != nil {
+		sc := *fit.Forecast
+		llo, lhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, sc) })
+		out.Learned = &LearnedForecast{Refused: recRefusal(out.N, out.Sessions, llo, lhi),
+			Requests: fit.Requests, Windows: fit.Windows}
+		if out.Learned.Refused == "" {
+			out.Learned.IdleSeconds, out.Learned.MaxPings = recIdleSeconds, recMaxPings
+			out.Learned.LoUSD, out.Learned.HiUSD = llo, lhi
+		}
+	}
+	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, apiPrices) })
 	// Condition 3, and it is a ONE-SIDED test. An interval that spans zero cannot tell the
 	// effect from nothing; an interval entirely BELOW zero is worse than inconclusive — this
 	// account's own gaps say the mechanism would cost it money — and both are refusals. The
@@ -2165,33 +2219,41 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	// interval was -$39 to -$5, which is what the first live look at this route produced: an
 	// account whose median idle gap is 57 minutes has almost nothing inside any coverage worth
 	// having, so it pays for pings and converts nothing.
-	if lo <= 0 {
-		if hi < 0 {
-			out.Refused = fmt.Sprintf("your own history says this would COST you money: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
-				"below zero. Your idle gaps are mostly too long for any setting worth having to "+
-				"reach", out.N, out.Sessions, lo, hi)
-		} else {
-			out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
-				"includes no change at all", out.N, out.Sessions, lo, hi)
-		}
+	if out.Refused = recRefusal(out.N, out.Sessions, lo, hi); out.Refused != "" {
 		return out, nil
 	}
 	out.IdleSeconds, out.MaxPings = recIdleSeconds, recMaxPings
 	out.LoUSD, out.HiUSD = lo, hi
 	if planned {
-		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false) })
+		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false, apiPrices) })
 		out.FixedK = &RecInterval{LoUSD: flo, HiUSD: fhi}
 	}
 	// K=3 is offered only where it beats K=2 by more than this account's OWN noise — its
 	// interval has to clear K=2's entirely. Anything weaker than that is the comparison this
 	// project has got wrong five times: two numbers whose intervals overlap are a tie, and on
 	// the production corpus K=2 and K=3 ARE a tie for every account. The panel says so.
-	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned) }); lo3 > hi {
+	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned, apiPrices) }); lo3 > hi {
 		out.AltMaxPings = 3
 	}
 	return out, nil
+}
+
+// recRefusal is condition 3's refusal for a 90% interval, or "" when it does not refuse. A ONE-SIDED
+// test: an interval that spans zero cannot tell the effect from nothing, and one entirely below zero
+// says the mechanism would cost money. Both refuse.
+func recRefusal(n, sessions int64, lo, hi float64) string {
+	if lo > 0 {
+		return ""
+	}
+	if hi < 0 {
+		return fmt.Sprintf("your own history says this would COST you money: over %d "+
+			"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
+			"below zero. Your idle gaps are mostly too long for any setting worth having to "+
+			"reach", n, sessions, lo, hi)
+	}
+	return fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
+		"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
+		"includes no change at all", n, sessions, lo, hi)
 }
 
 // bootstrapCI resamples the units WITH REPLACEMENT and returns the 90% interval of the total.

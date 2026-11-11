@@ -27,6 +27,17 @@ type Agent interface {
 	// upstream reports fields the shared parser does not know. base is that reading. A reply it
 	// cannot read must return base unchanged (fail open).
 	ReadUsage(contentType string, reply []byte, base Usage) Usage
+	// ModelTarget is where the host sends its own calls to this route's model (a summary, the
+	// sweep's question). The agent never sees the key: the host builds the header from it.
+	ModelTarget() ModelTarget
+}
+
+// ModelTarget is the chat path on the route's upstream, and the scheme of the Authorization header
+// that carries the caller's key. "" in a field means the host default for it (/v1/chat/completions,
+// Bearer). The host ignores a field it cannot use safely, and keeps its default for that field.
+type ModelTarget struct {
+	Path       string // for example /inference/v1/chat/completions
+	AuthScheme string // for example Apikey
 }
 
 // Usage is the token counts ReadUsage reads and returns. It is a neutral copy of the counts in
@@ -50,3 +61,4 @@ func (Base) Name() string                                   { return "" }
 func (Base) Paths() []string                                { return nil }
 func (Base) SessionID(http.Header) string                   { return "" }
 func (Base) ReadUsage(_ string, _ []byte, base Usage) Usage { return base }
+func (Base) ModelTarget() ModelTarget                       { return ModelTarget{} }
