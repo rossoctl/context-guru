@@ -1,12 +1,11 @@
-// Command context-guru-proxy is the LLM proxy integration and the
-// eval-containers gateway. It runs the context-guru component pipeline on
-// inbound chat requests, then forwards them to the configured upstream
-// provider, exposing /openai + /anthropic on one port plus /healthz, /stats,
-// and /expand.
+// The standard proxy startup: flags, configuration, the dashboard, hosted mode, the handler and the
+// server. cmd/context-guru-proxy calls Main with no hooks; a host with its own parts calls it with
+// its Hooks (hooks.go).
 //
 // Config is loaded from --config (YAML); upstreams and listen address from
 // flags/env. Fail open: on any pipeline trouble the original request is
 // forwarded untouched.
+
 package proxyapp
 
 import (
@@ -63,7 +62,14 @@ func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
 	return ln, nil
 }
 
-func main() {
+// Main runs the proxy until a signal or the idle watchdog stops it. It is the whole of
+// cmd/context-guru-proxy's main; hooks adds a host's own parts at fixed points (see Hooks). Like a
+// main, it reads os.Args and the global flag set, and a startup error ends the process.
+func Main(hooks Hooks) {
+	uiPath := "/dashboard/"
+	if hooks.UIPath != "" {
+		uiPath = hooks.UIPath
+	}
 	// SUBCOMMANDS, before any flag is defined: the release ships this one binary, so a one-off job the
 	// installer runs has to live in it. Only an exact first argument dispatches; every flag form
 	// (`-listen`, `--version`) still reaches the proxy's own parsing below.
@@ -143,7 +149,7 @@ func main() {
 		// NOTE: deliberately NO "disable observability in production" gate — for a
 		// tool whose value IS observability, that would be backwards.
 		dashOn = flag.Bool("dashboard", envBool("DASHBOARD", false),
-			"enable the persistent dashboard (embedded UI at /dashboard/, JSON+SSE at /api/*)")
+			"enable the persistent dashboard (embedded UI at "+uiPath+", JSON+SSE at /api/*)")
 		dashDB = flag.String("dashboard-db", envOr("DASHBOARD_DB", "./context-guru-dashboard.db"),
 			"dashboard SQLite path; ':memory:' keeps history in RAM only (lost on restart)")
 		dashRetain = flag.Duration("dashboard-retention", envDuration("DASHBOARD_RETENTION", 7*24*time.Hour),
@@ -156,7 +162,7 @@ func main() {
 		// gets pattern scrubbing, and a pattern denylist is always one unseen credential
 		// shape behind reality (a review of 22 realistic shapes found 11 leaking). So the
 		// default is the safe one and the operator turns it on for their own transcripts.
-		dashContent = flag.Bool("dashboard-content", envBool("DASHBOARD_CONTENT", false),
+		dashContent = flag.Bool("dashboard-content", envBool("DASHBOARD_CONTENT", hooks.Defaults.DashboardContent),
 			"capture before/after message text for the diff view; stores arbitrary agent output on disk (scrubbed of known credential shapes and size-capped first), so it is opt-in")
 		dashContentCap = flag.Int("dashboard-content-cap", envInt("DASHBOARD_CONTENT_CAP", 16<<10),
 			"maximum bytes stored per captured before/after blob")
@@ -271,6 +277,9 @@ func main() {
 		dashBenchIgnored = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
 			"deprecated and ignored: the dashboard no longer has a Benchmarks tab")
 	)
+	if hooks.Flags != nil {
+		hooks.Flags(flag.CommandLine)
+	}
 	flag.Parse()
 	if *dashBenchIgnored != "" {
 		slog.Warn("--dashboard-bench-dirs / DASHBOARD_BENCH_DIRS is ignored: the dashboard no longer has a Benchmarks tab")
@@ -452,7 +461,7 @@ func main() {
 		} else {
 			slog.Info("dashboard: recovered the restart grace clock across the restart", "threads", n)
 		}
-		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
+		slog.Info("dashboard enabled", "url", "http://"+addr+uiPath, "db", rec.DB().Path(),
 			"content_capture", *dashContent)
 	}
 
@@ -480,6 +489,9 @@ func main() {
 			"note", "bodies are redacted on a best-effort pattern denylist, which is not a guarantee",
 			"hosted", "only accounts that opted in on their settings page are recorded, each under dir/<account id>/")
 	}
+
+	// What the hooks see. Each field is set as its part is built.
+	app := &App{Config: cfg, Recorder: rec, Windows: windows, Prices: priceResolver(windows)}
 
 	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
 	// proxy checks exactly one field (Options.Tenants) to decide which world it is in.
@@ -522,7 +534,12 @@ func main() {
 				KeyEnv: u.KeyEnv, Header: u.Header}
 		}
 		defAnthropic, defOpenAI, defBob := defaultUpstreams(list)
-		reg, err = tenant.Open(*controlDB, tenant.Options{
+		if hooks.BeforeControlDB != nil {
+			if err := hooks.BeforeControlDB(*controlDB); err != nil {
+				log.Fatalf("control database: %v", err)
+			}
+		}
+		topts := tenant.Options{
 			ManagerEmail:       *managerEmail,
 			EmailDomains:       splitComma(*registerDomains),
 			DefaultUpAnthropic: defAnthropic,
@@ -531,12 +548,23 @@ func main() {
 			// Reject a bad configuration when a user SAVES it, so the failure is a 400
 			// on their settings page instead of a silent pass-through on their next turn.
 			Validate: validateTenantDoc,
-		})
+		}
+		if hooks.TenantOptions != nil {
+			hooks.TenantOptions(&topts)
+		}
+		reg, err = tenant.Open(*controlDB, topts)
 		if err != nil {
 			log.Fatalf("control database: %v", err)
 		}
 		defer reg.Close()
+		app.Registry, app.Upstreams = reg, upstreams
+		if hooks.Hosted != nil {
+			if err := hooks.Hosted(app); err != nil {
+				log.Fatalf("context-guru: %v", err)
+			}
+		}
 		tenants = proxy.NewTenantSource(reg, emitter, buildHostedTenantConfig, *maxTenancies)
+		app.Tenants = tenants
 		// Make the per-tenant row quota a manager can set actually bind. Wired here
 		// rather than in dash.Options because the recorder starts before the control
 		// database opens, and because the value has to be read fresh — a manager can
@@ -555,8 +583,8 @@ func main() {
 		// config spending the server's ambient provider credential) cannot occur.
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
-			"register_domains", *registerDomains, "manager", *managerEmail != "")
-		if *managerEmail == "" {
+			"register_domains", *registerDomains, "manager", topts.ManagerEmail != "")
+		if topts.ManagerEmail == "" {
 			slog.Warn("context-guru: no --manager-email set; no account will be able to " +
 				"administer other tenants until one is configured")
 		}
@@ -668,7 +696,7 @@ func main() {
 	if *dashDB != "" && *dashDB != ":memory:" {
 		tdPath = filepath.Join(filepath.Dir(*dashDB), tooldefer.FileName)
 	}
-	h := proxy.New(pipe, pstore, agg, proxy.Options{
+	popts := proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
 		AdaptOverride: adaptOverride,
@@ -746,7 +774,12 @@ func main() {
 			}
 			return oc.Build(emitter)
 		},
-	})
+	}
+	if hooks.ProxyOptions != nil {
+		hooks.ProxyOptions(&popts, app)
+	}
+	h := proxy.New(pipe, pstore, agg, popts)
+	app.Handler = h
 
 	// Rates for the one figure that has to be priced on READ: what the volatile-tail split
 	// earned on requests written before there was any per-request split size to price. Set
@@ -772,7 +805,11 @@ func main() {
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
 	// and the write routes (control plane) must never disagree about who the caller is.
 	if tenants != nil && rec != nil {
-		h.API().SetAuth(h.DashAuth())
+		auth := h.DashAuth()
+		if hooks.DashAuth != nil {
+			auth = hooks.DashAuth(auth)
+		}
+		h.API().SetAuth(auth)
 		h.API().SetWhoami(h.DashWhoami())
 		// The per-tenant half of the capture decision, read fresh because a tenant can
 		// toggle its consent at any time. Without it the dashboard reported the
@@ -840,16 +877,29 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 
+	// The dashboard's mount moves before Mux(), which reads the route table.
+	if hooks.UIPath != "" {
+		if api := h.API(); api != nil {
+			api.SetUIPath(hooks.UIPath)
+		}
+	}
 	// Activity stamping is wired ONLY when the watchdog is on, so an ordinary deployment's
 	// handler chain is byte-identical to before.
 	mux := h.Mux()
+	app.Mux = mux
+	if hooks.Mount != nil {
+		hooks.Mount(mux, app)
+	}
 	var handler http.Handler = mux
+	if hooks.Handler != nil {
+		handler = hooks.Handler(handler, app)
+	}
 	act := &activityClock{}
 	if *idleExit > 0 {
 		// Launch counts as activity, so the threshold is measured from a moment that means
 		// something rather than from whenever the watchdog goroutine is first scheduled.
 		act.touch(time.Now())
-		handler = stampActivity(mux, act, time.Now)
+		handler = stampActivityThrough(mux, handler, act, time.Now)
 		slog.Info("context-guru: idle-exit armed", "after", *idleExit,
 			"check_every", idleCheckInterval(*idleExit))
 	}

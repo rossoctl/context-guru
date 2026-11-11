@@ -22,7 +22,11 @@ func TestMain(m *testing.M) {
 		// make main() reject its command line for the wrong reason.
 		os.Args = append([]string{"context-guru-proxy"},
 			strings.Fields(os.Getenv("CG_TEST_MAIN_ARGS"))...)
-		main()
+		hooks := Hooks{}
+		if os.Getenv("CG_TEST_HOOKS") == "1" {
+			hooks = testHooks() // hooks_test.go
+		}
+		Main(hooks)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
