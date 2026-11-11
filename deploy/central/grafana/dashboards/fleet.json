@@ -78,7 +78,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 8,
+        "w": 7,
         "h": 5
       },
       "targets": [
@@ -119,6 +119,58 @@
       }
     },
     {
+      "id": 13,
+      "type": "stat",
+      "title": "Saving rate",
+      "description": "Net saved as a share of what the traffic would have cost without the proxy. The baseline is spend plus net saved, which is what you would have paid. The exact baseline counter (llm_savings_baseline_usd_total) is not built yet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 7,
+        "y": 0,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "(sum(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) - sum(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) / clamp_min(sum(increase(llm_inference_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) + (sum(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) - sum(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))), 1e-9)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#73BF69"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "text": {
+          "valueSize": 56
+        }
+      }
+    },
+    {
       "id": 2,
       "type": "stat",
       "title": "Gross saved",
@@ -128,9 +180,9 @@
         "uid": "central-prom"
       },
       "gridPos": {
-        "x": 8,
+        "x": 11,
         "y": 0,
-        "w": 5,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -173,9 +225,9 @@
         "uid": "central-prom"
       },
       "gridPos": {
-        "x": 13,
+        "x": 15,
         "y": 0,
-        "w": 5,
+        "w": 4,
         "h": 5
       },
       "targets": [
@@ -222,9 +274,9 @@
         "uid": "central-prom"
       },
       "gridPos": {
-        "x": 18,
+        "x": 19,
         "y": 0,
-        "w": 6,
+        "w": 5,
         "h": 5
       },
       "targets": [

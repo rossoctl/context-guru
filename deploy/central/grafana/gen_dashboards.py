@@ -144,13 +144,16 @@ def fleet():
     f = FILTER
     P = []
     # Money first (spec 6.0, rule 1). The tiles cover the selected time range (default: 7 days).
-    P.append(stat(1, "NET SAVED", net(), 0, 0, w=8, h=5, unit=USD, decimals=2, c=GREEN, big=True,
+    P.append(stat(1, "NET SAVED", net(), 0, 0, w=7, h=5, unit=USD, decimals=2, c=GREEN, big=True,
                   desc="Saved minus added over the selected range. This is the number that says whether the proxy pays. Cache effects are a breakdown and are not added."))
-    P.append(stat(2, "Gross saved", inc("llm_savings_saved_usd_total"), 8, 0, w=5, h=5, unit=USD, decimals=2,
+    P.append(stat(13, "Saving rate", f'{net()} / clamp_min({inc("llm_inference_cost_usd_total")} + {net()}, 1e-9)', 7, 0, w=4, h=5,
+                  unit="percentunit", decimals=1, c=GREEN, big=True,
+                  desc="Net saved as a share of what the traffic would have cost without the proxy. The baseline is spend plus net saved, which is what you would have paid. The exact baseline counter (llm_savings_baseline_usd_total) is not built yet."))
+    P.append(stat(2, "Gross saved", inc("llm_savings_saved_usd_total"), 11, 0, w=4, h=5, unit=USD, decimals=2,
                   desc="Cost the proxy removed, before what it cost to do so."))
-    P.append(stat(3, "Added cost", inc("llm_savings_added_usd_total"), 13, 0, w=5, h=5, unit=USD, decimals=2, c=ORANGE,
+    P.append(stat(3, "Added cost", inc("llm_savings_added_usd_total"), 15, 0, w=4, h=5, unit=USD, decimals=2, c=ORANGE,
                   desc="What the proxy's own work cost: its model calls and the cache writes it caused."))
-    P.append(stat(4, "Spend", inc("llm_inference_cost_usd_total"), 18, 0, w=6, h=5, unit=USD, decimals=2,
+    P.append(stat(4, "Spend", inc("llm_inference_cost_usd_total"), 19, 0, w=5, h=5, unit=USD, decimals=2,
                   desc="What the providers billed over the selected range. Each proxy prices with its own rate table."))
     P.append(series(5, "Net saved per day", [(net(fn="inc").replace("$__range", "1d"), "net")], 0, 5, 24, 7, unit=USD,
                     kind="barchart", time_from="30d", interval="1d",
