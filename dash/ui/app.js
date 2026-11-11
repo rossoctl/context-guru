@@ -9886,7 +9886,6 @@ async function loadKARecommend(subP) {
   loadingState(host, 2);
   let raw, sub;
   try {
-    // The subscription flag (kaSubscription never throws) decides which forecast this panel shows.
     [raw, sub] = await Promise.all([api('keepalive/recommend'), subP || kaState.sub]);
   } catch (e) {
     if (aborted(e)) return;
@@ -9894,8 +9893,7 @@ async function loadKARecommend(subP) {
     return;
   }
   kaState.recommend = raw;
-  // The same forecast as the decision row above (#1047): the learned one on a subscription with a
-  // fit that passed its gate, so the two panels never give opposite verdicts.
+  // The decision row's forecast (#1047), so the two panels never disagree.
   const fv = forecastView(raw, sub), rec = fv.rec;
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
