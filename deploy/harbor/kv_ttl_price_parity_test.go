@@ -35,7 +35,7 @@ func TestPythonPriceReaderMatchesGoTable(t *testing.T) {
 `
 	ids := []string{
 		"claude-opus-5-5", "claude-opus-5", "claude-opus-5-5[1m]", "claude-opus-5-50",
-		"aws/claude-sonnet-5", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
+		"aws/claude-sonnet-5", "claude-sonnet-5", "vertex/claude-sonnet-5", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
 		"aws/claude-fable-5-1[1m]", "claude-haiku-4-5", "claude-mythos-5-1", "gemini-3-flash-preview",
 		"azure/gpt-5.5", "premium", "claude-sonnet-4-6", "nobody-knows-this-one", "",
 	}

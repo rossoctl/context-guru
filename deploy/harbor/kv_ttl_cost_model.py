@@ -239,6 +239,7 @@ import math
 import os
 import re
 import sqlite3
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -498,6 +499,7 @@ class PriceBook:
                  ping_input_tokens: int = DEFAULT_PING_INPUT_TOKENS,
                  ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS):
         self._entries = list(entries or ())
+        self._bare_tails: dict[str, ModelPricing] = {}
         self.write_1h_multiple = float(write_1h_multiple)
         self.ping_input_tokens = int(ping_input_tokens)
         self.ping_output_tokens = int(ping_output_tokens)
@@ -561,6 +563,7 @@ class PriceBook:
         # ordering or of the KIND of match.
         entries.sort(key=lambda e: len(e[0]), reverse=True)
         book._entries = entries
+        book._bare_tails = _derive_bare_tails(entries)
         return book
 
     def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
@@ -623,6 +626,10 @@ class PriceBook:
         for match, _prefix, _qual, price in self._entries:
             if match == full or match == tail:
                 return hit(price)
+        # A bare id resolves to the one qualified entry it is the tail of (#324), before any
+        # family is consulted — table.go's lookup, same gate: no provider prefix on the request.
+        if full == tail and tail in self._bare_tails:
+            return hit(self._bare_tails[tail])
         for match, prefix, qualified, price in self._entries:  # longest first
             if prefix:
                 if full.startswith(match) or tail.startswith(match):
@@ -632,6 +639,39 @@ class PriceBook:
                 return hit(price)
         return ModelPricing(model=model, ping_input_tokens=self.ping_input_tokens,
                             ping_output_tokens=self.ping_output_tokens)
+
+
+def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]]) -> dict[str, ModelPricing]:
+    """Index each qualified, non-family entry by its bare tail — table.go's deriveBareTails.
+
+    An entry the operator wrote bare wins on its own, and a tail two providers price
+    differently is dropped with a warning rather than guessed.
+    """
+    def rates(p: ModelPricing) -> ModelPricing:
+        # The entry's own id and a read rate derived from that id are not part of its rate.
+        return replace(p, model="", cache_read=0.0 if p.read_derived else p.cache_read)
+
+    literal = {e[0] for e in entries}
+    tails: dict[str, tuple[str, ModelPricing]] = {}
+    ambiguous: set[str] = set()
+    for match, prefix, qualified, price in entries:
+        if prefix or not qualified or "/" not in match:
+            continue
+        tail = match.rsplit("/", 1)[-1]
+        if not tail or tail in literal:
+            continue
+        prev = tails.get(tail)
+        if prev is not None and prev[0] != match:
+            if rates(prev[1]) != rates(price):
+                ambiguous.add(tail)
+            continue
+        tails[tail] = (match, price)
+    if ambiguous:
+        for tail in ambiguous:
+            del tails[tail]
+        warnings.warn(f"model price list: bare id is ambiguous between two qualified entries at "
+                      f"different rates; not indexing it: {sorted(ambiguous)}")
+    return {tail: price for tail, (_m, price) in tails.items()}
 
 
 # ── the trajectory ─────────────────────────────────────────────────────────

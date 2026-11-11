@@ -85,9 +85,11 @@ models:
   # ── litellm-gateway: the bare aliases ────────────────────────────────────────────
   # The gateway also serves several ids WITHOUT a provider prefix (`claude-opus-4-8`,
   # `claude-sonnet-4-6`, `gemini-2.5-pro`, …) and with mixed case (`Azure/gpt-4o`).
-  # Case is normalised on lookup; the missing prefix is not, so these families catch
-  # the aliases. They sit below the specific entries above and only apply where none
-  # of those matched.
+  # Case is normalised on lookup; the missing prefix is not. A bare id first takes the
+  # qualified entry it is the tail of (`claude-sonnet-5` takes `aws/claude-sonnet-5`); a
+  # tail that two entries price differently, or give different windows, is dropped with
+  # a load-time warning. The families below catch every other bare alias. They sit below
+  # the specific entries above and only apply where none of those matched.
   - {match: "claude-opus*",   in: 3.80, out: 19.00}
   - {match: "claude-sonnet*", in: 2.28, out: 11.40, note: "the 4-x rate; 5 is listed specifically above"}
   - {match: "claude-haiku*",  in: 0.76, out: 3.80}
