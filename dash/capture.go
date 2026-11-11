@@ -372,10 +372,11 @@ func (r *Recorder) Record(e *Event) {
 	// A keep-alive ping that READ or WROTE the cache touched the provider's entry, so it counts
 	// on the restart grace's clock (#766) — this is the one dash write a ping produces, since
 	// pings never run ObserveThread. A write re-created the entry and started a fresh lifetime
-	// (#580). A ping that billed neither is not counted, the same rule the keeper's own refresh
-	// bookkeeping uses. Recorded here, before the queue, so ThreadRefreshedAt answers at once even
+	// (#580). A ping that billed neither, or that the upstream rejected, is not counted: the same
+	// rules the keeper's refresh bookkeeping and SeedGraceSessions use. Status 0 is an event
+	// that carries none. Recorded here, before the queue, so ThreadRefreshedAt answers at once even
 	// if the row is still in flight (the row is the restart's recovery path).
-	if e.KeepAlive && (e.CacheRead > 0 || e.CacheWrite > 0) && e.SessionID != "" {
+	if e.KeepAlive && (e.CacheRead > 0 || e.CacheWrite > 0) && (e.Status == 0 || (e.Status >= 200 && e.Status < 300)) && e.SessionID != "" {
 		key := thread.Key(e.SessionID, e.ThreadID)
 		r.mu.Lock()
 		r.touchGraceLocked(key, e.TS)

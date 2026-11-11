@@ -52,7 +52,17 @@ func TestARestartRecoversTheGraceClockIncludingCacheReadingPings(t *testing.T) {
 	s2ping.SessionID = "s2"
 	s2ping.CacheRead = 0
 	rec.Record(&s2ping)
-	waitForRowCount(t, rec, 4)
+	// s4: its ping found the entry gone and re-wrote it (#580): a write starts a fresh lifetime.
+	// s5: the same ping, but the upstream rejected it, so it wrote no entry.
+	rec.Record(&Event{TS: now - twoHours, TenantID: "t1", SessionID: "s4", Status: 200, Model: "m", TokensBefore: 10})
+	s4ping := *ping
+	s4ping.SessionID, s4ping.CacheRead, s4ping.CacheWrite = "s4", 0, 900
+	rec.Record(&s4ping)
+	rec.Record(&Event{TS: now - twoHours, TenantID: "t1", SessionID: "s5", Status: 200, Model: "m", TokensBefore: 10})
+	s5ping := s4ping
+	s5ping.SessionID, s5ping.Status = "s5", 500
+	rec.Record(&s5ping)
+	waitForRowCount(t, rec, 8)
 	rec.Close()
 
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
@@ -60,8 +70,8 @@ func TestARestartRecoversTheGraceClockIncludingCacheReadingPings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rec2.Close()
-	if n, err := rec2.SeedGraceSessions(now); err != nil || n != 2 {
-		t.Fatalf("SeedGraceSessions recovered %d threads (err %v), want 2", n, err)
+	if n, err := rec2.SeedGraceSessions(now); err != nil || n != 4 {
+		t.Fatalf("SeedGraceSessions recovered %d threads (err %v), want 4", n, err)
 	}
 	if at, ok := rec2.ThreadRefreshedAt(thread.Key("s1", "")); !ok || at != now-60_000 {
 		t.Errorf("pinged thread's refresh = (%d, %v), want the ping's time (%d, true)", at, ok, now-60_000)
@@ -69,13 +79,19 @@ func TestARestartRecoversTheGraceClockIncludingCacheReadingPings(t *testing.T) {
 	if at, ok := rec2.ThreadRefreshedAt(thread.Key("s2", "")); !ok || at != now-twoHours {
 		t.Errorf("cache-blind pinged thread's refresh = (%d, %v), want the real request's time (%d, true)", at, ok, now-twoHours)
 	}
+	if at, ok := rec2.ThreadRefreshedAt(thread.Key("s4", "")); !ok || at != now-60_000 {
+		t.Errorf("re-written thread's refresh = (%d, %v), want the ping's time (%d, true)", at, ok, now-60_000)
+	}
+	if at, ok := rec2.ThreadRefreshedAt(thread.Key("s5", "")); !ok || at != now-twoHours {
+		t.Errorf("rejected re-write's refresh = (%d, %v), want the real request's time (%d, true)", at, ok, now-twoHours)
+	}
 	if _, ok := rec2.ThreadRefreshedAt("s3"); ok {
 		t.Errorf("a thread with no rows reads as known to the grace clock")
 	}
 	// Attribution stays ping-free: the recency seed answers the real request's gap, not the
 	// ping's, or a ping would re-date the thread across the restart (SeedSessions' own rule).
-	if n, err := rec2.SeedSessions(now); err != nil || n != 2 {
-		t.Fatalf("SeedSessions recovered %d threads (err %v), want 2", n, err)
+	if n, err := rec2.SeedSessions(now); err != nil || n != 4 {
+		t.Fatalf("SeedSessions recovered %d threads (err %v), want 4", n, err)
 	}
 	if seen, _, since, _ := rec2.ObserveThread("t1", "s1", "", "m", now, 0); !seen || since != twoHours {
 		t.Errorf("pinged thread's attributed gap = %d ms (seen %v), want %d — the gap since its own last request",
@@ -138,6 +154,12 @@ func TestAPingThatReWroteTheEntryCountsOnTheGraceClock(t *testing.T) {
 		TokensBefore: 10, KeepAlive: true, CacheWrite: 900})
 	if at, _ := rec.ThreadRefreshedAt(key); at != now-60_000 {
 		t.Fatalf("a re-writing ping did not move the grace clock: %d, want %d", at, now-60_000)
+	}
+	// A ping the upstream rejected wrote no entry, as in the keeper and the restart seed.
+	rec.Record(&Event{TS: now - 30_000, TenantID: "t1", SessionID: "s1", Model: "m", Status: 500,
+		TokensBefore: 10, KeepAlive: true, CacheWrite: 900})
+	if at, _ := rec.ThreadRefreshedAt(key); at != now-60_000 {
+		t.Fatalf("a rejected ping moved the grace clock to %d, want it still at %d", at, now-60_000)
 	}
 }
 

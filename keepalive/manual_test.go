@@ -219,6 +219,32 @@ func TestPingNowCreditsNothingWhenThePingMissed(t *testing.T) {
 	}
 }
 
+// A manual ping that read nothing but wrote re-created the entry (#580): the refresh clock moves to
+// it, the automatic schedule does not restart, and there is still no rewrite credit.
+func TestPingNowMovesTheRefreshClockWhenThePingReWrote(t *testing.T) {
+	k, _, clock := manualKeeper(t)
+	k.mu.Lock()
+	before := k.live[sess1.id()].refreshedAt
+	k.mu.Unlock()
+	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, nil
+	})
+	at := clock.advance(20 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: sess1, RewriteUSD: 0.18}); err != nil {
+		t.Fatal(err)
+	}
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	got, started := e.refreshedAt, e.startedAt
+	k.mu.Unlock()
+	if !got.Equal(at) || got.Equal(before) {
+		t.Errorf("refreshedAt = %v after a manual ping that re-wrote, want its start %v (was %v)", got, at, before)
+	}
+	if started.Equal(at) {
+		t.Errorf("a manual ping that only wrote restarted the automatic schedule at %v", started)
+	}
+}
+
 // The upstream failing is an error to the caller, and the audit row still records the attempt's status.
 func TestPingNowReportsAnUpstreamTransportFailure(t *testing.T) {
 	k, sink, _ := manualKeeper(t)

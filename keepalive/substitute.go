@@ -249,8 +249,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
 	// prefix a ping would (it is built from the byte-identical forwarded body — see
 	// offload.registerKeepAliveCandidate), so it refreshes the SAME liveness clock
-	// cache_state: pre_expiry reads, and only when it actually read something.
-	if u.CacheRead > 0 {
+	// cache_state: pre_expiry reads, and only when it read or wrote something: a write re-created
+	// the entry and started a fresh lifetime (#580).
+	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		j.touch(provider, startedAt.UnixMilli())
 	}
 	var cost float64
@@ -262,7 +263,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
-	if u.CacheRead > 0 {
+	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()

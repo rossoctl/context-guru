@@ -50,11 +50,11 @@ type kaEntry struct {
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// refreshedAt is the last moment this entry's provider-side cache entry is KNOWN refreshed:
-	// the real request that created it, or a later ping or summary substitute call that actually
-	// READ the cache (CacheRead > 0). A ping or substitute that wrote instead of reading refreshed
-	// nothing that was there before, so it must not move this clock — see record1 and
-	// recordSummarySubstitute, both gated on CacheRead > 0 the same way. Surfaced to hosts via
-	// Plan.RefreshedAt, for a status line.
+	// the real request that created it, or a later ping or summary substitute call that READ the
+	// cache (CacheRead > 0) or WROTE it (CacheWrite > 0, which re-created the entry and started a
+	// fresh lifetime, #580). A call that billed neither touched nothing. See record1, manual ping and
+	// recordSummarySubstitute, all gated the same way. Surfaced to hosts via Plan.RefreshedAt, for a
+	// status line.
 	refreshedAt time.Time
 	// startedAt is when the last upstream request on this session STARTED — a real request
 	// or a ping, whichever was later.
@@ -713,7 +713,7 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 
 // ArriveAt is Arrive plus the instant the entry's provider-side cache was last known refreshed
 // (see kaEntry.refreshedAt) — the real request that started the idle span, or the start of the
-// last ping that READ the cache. Zero when there was no entry.
+// last ping that READ or WROTE the cache. Zero when there was no entry.
 func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refreshedAt time.Time) {
 	if k == nil || key.Session == "" {
 		return 0, 0, "", time.Time{}
