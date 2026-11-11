@@ -1867,8 +1867,8 @@ function renderSavedLedger(o, ka, partial) {
       capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, sub ? null : usd) }) : null,
       o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
         text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
-          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm. '
-          + 'Estimated saving, not in any total: ' + estRange(o.estimated_saved_low_usd || 0, o.estimated_saved_usd || 0) + '.' }) : null,
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm.'
+          + (sub ? '' : ' Estimated saving, not in any total: ' + estRange(o.estimated_saved_low_usd || 0, o.estimated_saved_usd || 0) + '.') }) : null,
     ]));
 
   // Tools and skills filter.

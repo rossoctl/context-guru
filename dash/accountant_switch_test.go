@@ -690,6 +690,29 @@ func TestPriceMode_HeldEstimateIsBoundedByReadAndWrite(t *testing.T) {
 	}
 }
 
+// The deferral's figure is out of the held ceiling, so its tokens are out of the floor: a held request that
+// also deferred tools keeps a floor of the other removed tokens at the read rate, never a negative one.
+func TestPriceMode_HeldFloorLeavesTheDeferralOut(t *testing.T) {
+	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
+	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
+		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 4000, SavedUnique: 4000}}}
+	e.SetAccountant(accountant.Result{
+		Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}},
+		Ops: []accountant.PricedOp{
+			{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheWrite5m: 4000}},
+			{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheWrite5m: 12000}}}})
+	e.PriceMode(p, true)
+	if !e.EstimateHeld {
+		t.Fatal("the request was not held")
+	}
+	if want := 4000 * 2.5e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("ceiling %v, want %v without the deferral", e.EstimatedSavedUSD, want)
+	}
+	if want := 4000 * 0.2e-6; !accNear(e.EstimatedSavedLowUSD, want) {
+		t.Errorf("floor %v, want %v without the deferral", e.EstimatedSavedLowUSD, want)
+	}
+}
+
 // The floor and the ceiling are stored with the request and summed on both Overview paths.
 func TestOverviewSumsTheHeldFloor(t *testing.T) {
 	db := openTestDB(t)

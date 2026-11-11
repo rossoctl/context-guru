@@ -478,8 +478,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
 	low := delta
 	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
+		if o.DryRun || o.Call != nil || o.Operator == "context-guru."+DeferComponent {
+			continue // the deferral's figure is out of the held ceiling, so its tokens are out of the floor
 		}
 		s := o.Saved
 		low -= tierUSD(p, s) - float64(s.Input+s.CacheRead+s.CacheWrite5m+s.CacheWrite1h)*p.CacheRead
