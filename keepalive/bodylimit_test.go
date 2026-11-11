@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -17,6 +18,7 @@ func padBody(n int) string {
 // #1100: a body over 8 MiB with a cheap prefix is held and pinged.
 func TestABodyOver8MiBUnderTheCostCapIsPinged(t *testing.T) {
 	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-6, Output: 1e-6, CacheRead: 1e-6, CacheWrite: 1e-6}}})
 	recordOne(t, k, kaPolicy(), padBody(9<<20), clock.now())
 	if got := k.Stats().Live; got != 1 {
 		t.Fatalf("held %d sessions, want 1 for a 9 MiB body under the cost cap", got)
@@ -33,19 +35,16 @@ func TestABodyOver8MiBUnderTheCostCapIsPinged(t *testing.T) {
 func TestABigBodyOverTheCostCapIsStillRefused(t *testing.T) {
 	k, fd, clock := testKeeper(t)
 	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-3, Output: 1e-3, CacheRead: 1e-3, CacheWrite: 1e-3}}})
-	recordHold(k, sess1, clock.now(), padBody(9<<20), kaPolicy(), false)
-	recordHold(k, sess1, clock.now().Add(time.Second), padBody(9<<20), kaPolicy(), false)
-	if k.Stats().Live != 0 {
-		t.Fatal("held a body whose ping is over the cost cap")
-	}
-	if st := stateOf(k, sess1); st.Pingable || st.Reason == "" || st.Reason == ReasonTooLarge {
-		t.Errorf("state = %+v, want a cost reason, not %q", st, ReasonTooLarge)
+	recordHold(k, sess1, clock.now(), padBody(9<<20), kaPolicy(), true)
+	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonOverBudget {
+		t.Errorf("state = %+v, want %q", st, ReasonOverBudget)
 	}
 }
 
 // The memory guard: a body over the per-body limit is refused, and many large bodies stay in MaxBytes.
 func TestTheMemoryGuardHolds(t *testing.T) {
-	k, _, clock := testKeeper(t)
+	k, fd0, clock := testKeeper(t)
+	fd0.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-6, Output: 1e-6, CacheRead: 1e-6, CacheWrite: 1e-6}}})
 	recordHold(k, sess1, clock.now(), padBody(MaxBodyBytes), kaPolicy(), true)
 	if _, ok := k.Entry(sess1); ok {
 		t.Error("held a body over the per-body limit")
@@ -53,7 +52,8 @@ func TestTheMemoryGuardHolds(t *testing.T) {
 	if st := stateOf(k, sess1); st.Pingable || st.Reason != ReasonTooLarge {
 		t.Errorf("state = %+v, want %q", st, ReasonTooLarge)
 	}
-	k, _, clock = testKeeper(t)
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-6, Output: 1e-6, CacheRead: 1e-6, CacheWrite: 1e-6}}})
 	big := padBody(MaxBodyBytes - 4096)
 	for i := 0; i < 12; i++ {
 		recordHold(k, Key{Tenant: "t1", Session: "big" + string(rune('a'+i))}, clock.now(), big, kaPolicy(), true)
@@ -88,5 +88,28 @@ func TestBodyLimitDefaultsAndClamps(t *testing.T) {
 		if got := (Policy{MaxBodyBytes: c.in}).BodyLimit(); got != c.want {
 			t.Errorf("BodyLimit(%d) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// An unpriced model has no cost cap to judge a big body, so the old 8 MiB limit stays for it.
+func TestAnUnpricedModelKeepsThe8MiBLimit(t *testing.T) {
+	k, _, clock := testKeeper(t) // the fake has no prices
+	recordHold(k, sess1, clock.now(), padBody(9<<20), kaPolicy(), true)
+	if _, ok := k.Entry(sess1); ok {
+		t.Error("held a 9 MiB body for an unpriced model")
+	}
+	if st := stateOf(k, sess1); st.Reason != ReasonTooLarge {
+		t.Errorf("reason = %q, want %q", st.Reason, ReasonTooLarge)
+	}
+	k, _, clock = testKeeper(t)
+	recordHold(k, sess1, clock.now(), padBody(7<<20), kaPolicy(), true)
+	if _, ok := k.Entry(sess1); !ok {
+		t.Error("refused a 7 MiB body for an unpriced model")
+	}
+}
+
+func TestTheConfigBodyLimitMirrorsTheLibrary(t *testing.T) {
+	if config.DefaultKeepAliveMaxBodyBytes != MaxBodyBytes {
+		t.Errorf("config default %d != keepalive.MaxBodyBytes %d", config.DefaultKeepAliveMaxBodyBytes, MaxBodyBytes)
 	}
 }

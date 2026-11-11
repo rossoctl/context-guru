@@ -162,7 +162,7 @@ func TestManualHoldRespectsTheBodyEntryAndByteCaps(t *testing.T) {
 	}
 
 	k, _, clock := testKeeper(t)
-	recordHold(k, sess1, clock.now(), pad(MaxBodyBytes), offPolicy, true) // over 8 MiB with the JSON around it
+	recordHold(k, sess1, clock.now(), pad(MaxBodyBytes), offPolicy, true) // over the per-body limit with the JSON around it
 	if _, ok := k.Entry(sess1); ok {
 		t.Error("a body over the per-body cap was held")
 	}

@@ -1219,6 +1219,8 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 		ToolWaitMinPrefix:    r.KeepAliveToolWaitMinPrefixTokens,
 		BackgroundExtraPings: r.KeepAliveBackgroundExtraPings,
 		HumanExtraPings:      r.KeepAliveHumanExtraPings,
+		// A memory guard, like the plan fields: a manual hold or a manager strategy can arm a hold on a parked account.
+		MaxBodyBytes: r.KeepAliveMaxBodyBytes,
 	}
 	// Resolve the defaults only when something is actually switched on. A parked block
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a

@@ -316,7 +316,7 @@ while the proxy holds the thread. When it is false, `ping_reason` is one of:
 `not opted in` (no keep-alive for the account and the request did not carry the header),
 `below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
 `over budget` (one ping would cost more than the per-ping cost ceiling),
-`too large` (the body is over 8 MiB), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
+`too large` (the body is over the per-body limit, 32 MiB, or 8 MiB for a model with no price), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
 `done` (the thread's last response ended with a terminal tool such as `StructuredOutput`, so the agent is finished and the proxy sends no pings),
 `unavailable` (the route is failing in a row, or the provider refused this credential),
 `pings used` (the planned pings ran out and the proxy let go of the thread),
@@ -332,7 +332,7 @@ even when the account has no automatic keep-alive. Nothing is pinged for it. The
 the key from the start of the LAST REAL request for at most 300 seconds on a 5-minute cache, and for at most
 59 minutes on a 1-hour cache (the proxy reads the tier from the traffic), then releases and zeroes them. Only a
 new request starts that time again. A press never does, so pressing
-cannot keep a credential held. The usual limits still apply: 8 MiB per body, 512 threads, 128 MiB in all, and
+cannot keep a credential held. The usual limits still apply: 32 MiB per body (8 MiB for an unpriced model), 512 threads, 128 MiB in all, and
 the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
 before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the
 header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`

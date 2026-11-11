@@ -240,7 +240,7 @@ const (
 	//
 	// THIS is the binding ceiling, not MaxSessions — tune this one. A gated session
 	// carries at least a 20k-token prefix, so ~100 KB to 1 MiB of body, and 128 MiB therefore
-	// binds around 130 large sessions: well before the 512-session count. The replay reports a
+	// binds around 130 large sessions (4 bodies at the per-body limit): well before the 512-session count. The replay reports a
 	// peak of 11 live sessions, but it drives ~350-byte synthetic bodies, so it exercises the
 	// count bound and says nothing about this one.
 	MaxBytes = 128 << 20
@@ -250,7 +250,8 @@ const (
 	MaxTurnKeys = 20000
 	// MaxBodyBytes is the default limit on one held body: a memory guard, not a cost guard. Bytes
 	// are a poor proxy for tokens (base64 images and escaped text are big in bytes and cheap in
-	// tokens), so the per-ping cost cap (Policy.Ceiling) decides whether a ping is worth it. This
+	// tokens), so the per-ping cost cap (Policy.Ceiling) decides whether a ping is worth it. The cap
+	// can judge only a priced model: for an unpriced one the keeper keeps LegacyMaxBodyBytes. This
 	// limit only stops one thread from taking more than a quarter of MaxBytes. When the total goes
 	// over MaxBytes, evictLocked drops entries. Policy.MaxBodyBytes overrides it per policy.
 	MaxBodyBytes = 32 << 20
