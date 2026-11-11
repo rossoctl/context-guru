@@ -640,6 +640,9 @@ func (h *Handler) Mux() *http.ServeMux {
 		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
 		h.mountManualPing(m)
 	}
+	// The per-session recording opt-out (recoptout.go). Every deployment: opting out must work
+	// wherever recording can.
+	h.mountRecordOptOut(m)
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,

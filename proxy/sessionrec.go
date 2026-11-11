@@ -26,7 +26,9 @@ package proxy
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -58,8 +60,13 @@ const (
 // each is written once, as it is built -- so memory no longer grows with the length of a
 // session, as it did with the file writer this replaces.
 type recSession struct {
-	lastSpan string
+	lastSpan      string
+	markerChecked bool // the session's .no-record marker was looked for once in this process
 }
+
+// noRecordSuffix names the marker a declined session leaves beside its (deleted) wire file:
+// <session>.no-record. It keeps the opt-out across a proxy restart, and an operator can see it.
+const noRecordSuffix = ".no-record"
 
 type sessionRecorder struct {
 	dir     string     // local OTLP JSON files, one per session; "" when only exporting
@@ -74,8 +81,13 @@ type sessionRecorder struct {
 
 	sessions map[string]*recSession // writer-goroutine-owned
 
-	captured, dropped, errors, written atomic.Int64
-	warnedDrop                         atomic.Bool
+	// declMu guards declined AND is held by the writer from the decline check to the end of the
+	// write, so a Decline cannot fall between them and have its deleted file re-created.
+	declMu   sync.Mutex
+	declined map[string]bool // declKey -> the session opted out
+
+	captured, dropped, errors, written, skipped atomic.Int64
+	warnedDrop                                  atomic.Bool
 }
 
 // newSessionRecorder returns nil when both dir and endpoint are empty, matching newCapture's
@@ -130,6 +142,7 @@ func newSessionRecorder(dir, endpoint string, bodyCap, teeCap, queue int, log *s
 		ch:       make(chan *recEvent, queue),
 		done:     make(chan struct{}),
 		sessions: make(map[string]*recSession),
+		declined: make(map[string]bool),
 	}
 	r.wg.Add(1)
 	go r.run()
@@ -171,7 +184,7 @@ func (r *sessionRecorder) Close() error {
 	}
 	r.log.Info("cg.record: stopped", "dir", r.dir,
 		"turns_captured", r.captured.Load(), "turns_written", r.written.Load(),
-		"turns_dropped", r.dropped.Load(), "errors", r.errors.Load())
+		"turns_dropped", r.dropped.Load(), "turns_declined", r.skipped.Load(), "errors", r.errors.Load())
 	return nil
 }
 
@@ -228,6 +241,10 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		s = &recSession{}
 		r.sessions[key] = s
 	}
+	if r.isDeclined(e.tenantID, e.traceID, s) { // cheap early skip; checked again under the lock
+		r.skipped.Add(1)
+		return
+	}
 	turn, err := r.buildTurn(e, s.lastSpan)
 	if err != nil {
 		r.errors.Add(1)
@@ -235,6 +252,12 @@ func (r *sessionRecorder) handle(e *recEvent) {
 		return
 	}
 	turn.Redact(r.bodyCap)
+	r.declMu.Lock()
+	defer r.declMu.Unlock()
+	if r.declinedLocked(e.tenantID, e.traceID, s) {
+		r.skipped.Add(1)
+		return
+	}
 	span := turn.ToOTLP()
 	if r.exp != nil {
 		if err := r.exp.export(e.tenantID, span); err != nil {
@@ -385,6 +408,76 @@ func (r *sessionRecorder) appendWire(e *recEvent) error {
 		return err
 	}
 	return f.Close()
+}
+
+func declKey(tenantID, traceID string) string { return tenantID + "\x00" + traceID }
+
+// sessionDir is where a tenant's files go: its own subdirectory in hosted mode, else the root.
+func (r *sessionRecorder) sessionDir(tenantID string) string {
+	if tenantID == "" {
+		return r.dir
+	}
+	return filepath.Join(r.dir, sanitizeTraceID(tenantID))
+}
+
+func (r *sessionRecorder) isDeclined(tenantID, traceID string, s *recSession) bool {
+	r.declMu.Lock()
+	defer r.declMu.Unlock()
+	return r.declinedLocked(tenantID, traceID, s)
+}
+
+// declinedLocked reports whether a session opted out. The marker file is looked for once per
+// session per process: after that, the map alone answers, and Decline keeps the map current.
+// The caller holds declMu; s is the writer's own.
+func (r *sessionRecorder) declinedLocked(tenantID, traceID string, s *recSession) bool {
+	key := declKey(tenantID, traceID)
+	if r.declined[key] {
+		return true
+	}
+	if r.dir == "" || s.markerChecked {
+		return false
+	}
+	s.markerChecked = true
+	if _, err := os.Stat(filepath.Join(r.sessionDir(tenantID), sanitizeTraceID(traceID)+noRecordSuffix)); err == nil {
+		r.declined[key] = true
+		return true
+	}
+	return false
+}
+
+// Decline stops recording one session of one tenant and deletes what was already written for it.
+// It is the per-session opt-out (POST /api/me/record/off). It writes the .no-record marker FIRST,
+// then removes the wire file: if the removal fails, no further call is written anyway.
+//
+// It returns whether a wire file was deleted. Spans already sent to an OTLP collector
+// (--record-otlp) cannot be called back; only later ones are stopped. With no --record dir the
+// opt-out holds in memory only, until the proxy restarts.
+func (r *sessionRecorder) Decline(tenantID, traceID string) (bool, error) {
+	if r == nil {
+		return false, nil
+	}
+	r.declMu.Lock()
+	defer r.declMu.Unlock()
+	r.declined[declKey(tenantID, traceID)] = true
+	if r.dir == "" {
+		return false, nil
+	}
+	dir := r.sessionDir(tenantID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	base := filepath.Join(dir, sanitizeTraceID(traceID))
+	if err := os.WriteFile(base+noRecordSuffix, nil, 0o600); err != nil {
+		return false, err
+	}
+	switch err := os.Remove(base + ".wire.jsonl"); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // sanitizeTraceID makes a session id safe as a filename.
