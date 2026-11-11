@@ -252,3 +252,29 @@ func TestCompletePrefixedChatPrefersMaxCompletionTokensWhenBothAreSent(t *testin
 		t.Fatalf("err=%v body=%s", err, got)
 	}
 }
+
+// The prefixed Chat ask (the sweep's question) uses the client's Path too, so it reaches a route
+// with its own path (Bob) and not only /v1/chat/completions.
+func TestOpenAIPrefixedChatPostsToItsPath(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"", "/v1/chat/completions"},
+		{"/inference/v1/chat/completions", "/inference/v1/chat/completions"},
+	} {
+		var got string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":1}}`))
+		}))
+		d, ref := dispatchtest.HTTP(up.URL, nil)
+		_, _, err := OpenAI{D: d, Ref: ref, Model: "m", Path: tc.path}.CompletePrefixedChat(context.Background(),
+			[]byte(`{"model":"m","messages":[{"role":"user","content":"task"}]}`), "judge")
+		up.Close()
+		if err != nil {
+			t.Fatalf("Path %q: err %v", tc.path, err)
+		}
+		if got != tc.want {
+			t.Errorf("Path %q: posted to %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}

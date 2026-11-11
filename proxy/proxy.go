@@ -1099,8 +1099,15 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
-		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
+		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
+		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
+		target := agentModelTarget(r.Context(), h.agentFor(up.path))
+		auth := AuthHeader(bschemas.OpenAI, key, "")
+		if target.AuthScheme != "" {
+			auth = http.Header{"Authorization": {target.AuthScheme + " " + key}}
+		}
+		ref := h.dispatch.incoming(up, auth)
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model, Path: target.Path}
 	}
 	return nil
 }
