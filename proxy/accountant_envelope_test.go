@@ -250,3 +250,34 @@ func TestMessageOpsExplainTheDeferralList(t *testing.T) {
 		}
 	}
 }
+
+// #908: the edits tool deferral makes to `tools` belong to the tooldefer operator, not to toolschema
+// or to nobody. Its row then carries the cost the accountant sees (added bytes), which dash holds out
+// because the deferral ledger prices the deferral.
+func TestEnvelopeOpsOwnTheDeferralEdits(t *testing.T) {
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+	a := `{"name":"a","description":"x"}`
+	b := `{"name":"b","description":"y"}`
+	bd := `{"name":"b","description":"y","defer_loading":true}`
+	search := `{"type":"tool_search_tool_bm25_20251119","name":"tool_search_tool_bm25"}`
+	cl := []byte(`{"tools":[` + a + `,` + b + `],` + msgs + `}`)
+	fw := []byte(`{"tools":[` + a + `,` + bd + `,` + search + `],` + msgs + `}`)
+	c := &capture{accClient: cl, accPreDefer: cl}
+	ops := c.envelopeOpsFor(fw)
+	if len(ops) != 2 {
+		t.Fatalf("ops %+v, want the deferred rewrite and the search tool", ops)
+	}
+	for _, o := range ops {
+		if o.Operator != "context-guru.tooldefer" {
+			t.Errorf("operator %q, want context-guru.tooldefer (%+v)", o.Operator, o)
+		}
+	}
+	if got, want := opsDelta(ops, accountant.SectionTools), sectionDelta(cl, fw, accountant.SectionTools); got != want {
+		t.Errorf("ops explain %d tools bytes, bodies differ by %d", got, want)
+	}
+	// A rewrite the client's own body already carries (Claude Code defers on its own) is not ours.
+	cl2 := []byte(`{"tools":[` + a + `,` + bd + `],` + msgs + `}`)
+	if ops := envelopeOps(cl2, cl2); len(ops) != 0 {
+		t.Errorf("ops %+v for an unchanged deferred tool", ops)
+	}
+}

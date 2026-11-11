@@ -297,6 +297,14 @@ type KeepAliveLedger struct {
 	// requests — see KeepAliveLatencyDiagnostic. Known is false (and every figure zero) on
 	// a window too small to measure it, never a fabricated number.
 	Latency kvcache.Latency `json:"latency"`
+	// The same two halves in tokens, by tier, for a Claude subscription (#1022). Tokens is the
+	// rescue: the sum of the accountant's keep-alive figure (tok_ka_*), as /api/stats
+	// tokens.by_feature.keepalive. PingTokens is what the pings paid, as /api/stats
+	// keepalive_ping_tokens. The two are never netted: the tiers have no common unit.
+	// TokensUnmeasured counts the agent requests with no token figure (acc_priced = 0).
+	Tokens           TokenFlow  `json:"tokens"`
+	PingTokens       TierTokens `json:"keepalive_ping_tokens"`
+	TokensUnmeasured int64      `json:"tokens_unmeasured_requests"`
 	KeepAliveCoverage
 }
 
@@ -314,8 +322,8 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	aCond, aArgs := addressable(f)
-	// Six independent reads, three of them a pass over every request (the saving, the per-session
-	// saving, the addressable CTE). They ran back to back; each goroutine fills its own fields.
+	// Seven independent reads, four of them a pass over every request (the saving, the per-session
+	// saving, the addressable CTE, the tokens). They ran back to back; each goroutine fills its own fields.
 	var (
 		saved, spent map[string]float64
 		from         sql.NullInt64
@@ -370,6 +378,17 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		return d.sql.QueryRowContext(d.readCtx(), aCond+`
 		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
 			&o.Addressable, &o.AddressableUSD)
+	})
+	// The tokens: the rescue over agent rows and the pings' billed tiers, in one pass. A ping row
+	// stores no token figure, so the plain sum over kaCond is the agent rows' sum (tokenSumTerms).
+	g.Go(func() error {
+		var agg accTokensAgg
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT `+tokenSumTerms(flowColumns("tok_ka"))+`,
+		`+accTokenTailTerms+` FROM requests r WHERE `+kaCond, kaArgs...).Scan(agg.dest(8)...); err != nil {
+			return err
+		}
+		o.Tokens, o.PingTokens, o.TokensUnmeasured = flowOf(agg.sums), agg.ping, agg.unmeasured
+		return nil
 	})
 	g.Go(func() error {
 		days = d.windowDays(kaCond, kaArgs)
@@ -588,7 +607,8 @@ type KeepAliveBehaviour struct {
 	Gaps        []AccountGaps `json:"account_gaps"`
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
 	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
-	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is 20k since #858), and the panel says so.
+	// costs almost nothing at 20k (the pre-#435 gate), and the panel says so. The shipped floors are 20k for a
+	// tool wait, background work, a teammate or a subagent and 80k for a main thread that waits for a person or for an unknown cause (#858).
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -608,7 +628,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate and is the shipped floor again since #858 (80,000 in between).
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped floor for all but a main thread that waits for a person or for an unknown cause (#858); 80,000 is the general floor. Both are edges.
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -1290,10 +1310,27 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 	return n
 }
 
-// kaGateMinPrefix is the billed-prefix floor a replay gates on: the shipped default, mirroring
-// config.DefaultKeepAliveMinPrefix (20000 since #858), which this package may not import. Pinned by
+// kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
+// shipped defaults, mirroring config.DefaultKeepAliveMinPrefix (80000) and
+// config.DefaultKeepAliveToolWaitMinPrefix (20000), which this package may not import. The second
+// applies to a tool wait, background work, a teammate and any subagent wait (keepalive.Policy.WaitMinPrefix). Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
-const kaGateMinPrefix = 20000
+const (
+	kaGateMinPrefix         = 80000
+	kaGateToolWaitMinPrefix = 20000
+)
+
+// gatePolicy is the policy a replay gates and counts with: wait, with the shipped floors where it
+// states none.
+func gatePolicy(wait keepalive.Policy) keepalive.Policy {
+	if wait.MinPrefixTokens <= 0 {
+		wait.MinPrefixTokens = kaGateMinPrefix
+	}
+	if wait.ToolWaitMinPrefix <= 0 {
+		wait.ToolWaitMinPrefix = kaGateToolWaitMinPrefix
+	}
+	return wait
+}
 
 // pingSpan is one idle span a live keep-alive would send pings in.
 type pingSpan struct {
@@ -1378,7 +1415,7 @@ func scanFacts(thread, stop, wf, provider string, seen, hour int64) keepalive.Sp
 // DefaultWaitPolicy is the shipped keep-alive policy for the replay: the per-wait plan on, with
 // `base` as the base ping count. A host that knows the account's own policy supplies that instead.
 func DefaultWaitPolicy(base int) keepalive.Policy {
-	return keepalive.Policy{WaitPlan: true, MaxPings: base}
+	return keepalive.Policy{WaitPlan: true, MaxPings: base, MinPrefixTokens: kaGateMinPrefix, ToolWaitMinPrefix: kaGateToolWaitMinPrefix}
 }
 
 // pingSpans is the ONE definition of "the idle spans a live keep-alive would ping in", shared by
@@ -1400,9 +1437,8 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at 20k (the shipped default since #858) and not at the account's own configured floor: the host
-// hands this package only the plan settings (SetWaitPolicy), not the floor. An account that tuned its
-// floor sees a replay of the default policy, and the panel's copy names 20k so the page stays self-consistent.
+// gates at the shipped floors by wait cause (80k for a main thread that waits for a person or for an unknown cause, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
+// a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //
 // THE COUNT (#858, #868). The live policy picks the count per wait (keepalive.Policy.WaitPings: a tool
 // wait up to 8, background K+3, a person K+1, no tool call yet 0). With withFacts, every span carries the
@@ -1413,11 +1449,13 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // The span is the gap to the next request of the SESSION, and the wait is read from the request that
 // opens it, on its own thread. When the main agent and a subagent interleave, the last request before the
 // idle gap is the one that decides, as it would for the keeper's per-thread entry that is still warm last.
-func (d *DB) pingSpans(f Filter, minPrefix int64, withFacts bool) ([]pingSpan, error) {
+func (d *DB) pingSpans(f Filter, pol keepalive.Policy, withFacts bool) ([]pingSpan, error) {
 	cond, args := f.where()
+	pol = gatePolicy(pol)
 	if withFacts {
-		return d.pingSpansWithFacts(cond, args, minPrefix)
+		return d.pingSpansWithFacts(cond, args, pol)
 	}
+	minPrefix := int64(pol.MinPrefixTokens)
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
 	// is evaluated on, and LEAD is NULL exactly on the session-final row.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH s AS (
@@ -1449,13 +1487,15 @@ func (d *DB) pingSpans(f Filter, minPrefix int64, withFacts bool) ([]pingSpan, e
 
 // pingSpansWithFacts is pingSpans with the plan's facts. One statement: the facts window and the span
 // windows run over the same filtered rows.
-func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pingSpan, error) {
+func (d *DB) pingSpansWithFacts(cond string, args []any, pol keepalive.Policy) ([]pingSpan, error) {
+	// SQL admits the lowest floor of any wait; the loop then applies the floor of each span's own wait.
+	minPrefix := int64(pol.LowestMinPrefix())
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH `+factsCTE(cond)+`, s AS (
 		SELECT session_id, thread_id, provider, hour, stop, wf, seen, prefix,
 		       ROW_NUMBER() OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - 1 AS turn,
 		       (LEAD(ts) OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - ts) / 1000.0 AS gap_s
 		FROM t)
-		SELECT session_id, gap_s, thread_id, provider, hour, stop, wf, seen FROM s
+		SELECT session_id, gap_s, thread_id, provider, hour, stop, wf, seen, prefix FROM s
 		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
 		append(args, minPrefix)...)
 	if err != nil {
@@ -1466,12 +1506,15 @@ func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pin
 	for rows.Next() {
 		var sess, thread, prov, stop, wf string
 		var gap sql.NullFloat64
-		var seen, hour int64
-		if err := rows.Scan(&sess, &gap, &thread, &prov, &hour, &stop, &wf, &seen); err != nil {
+		var seen, hour, prefix int64
+		if err := rows.Scan(&sess, &gap, &thread, &prov, &hour, &stop, &wf, &seen, &prefix); err != nil {
 			return nil, err
 		}
-		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid,
-			facts: scanFacts(thread, stop, wf, prov, seen, hour)})
+		facts := scanFacts(thread, stop, wf, prov, seen, hour)
+		if !pol.SpanPrefixOK(facts, prefix) {
+			continue
+		}
+		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid, facts: facts})
 	}
 	return out, rows.Err()
 }
@@ -1638,6 +1681,9 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		k = recMaxPings
 	}
 	// The keeper applies per-wait counts only below 300 s of Idle: at 300 s or more it keeps the base.
+	// Known gap: this also turns the per-cause floor off (one general floor), while the keeper at 300 s or
+	// more keeps the per-cause floor and only the base count. So at 300 s or more the replay can
+	// under-count pings on 20k-80k tool waits and subagent spans.
 	if idleSeconds >= 300 {
 		wait.WaitPlan = false
 	}
@@ -1674,7 +1720,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	// on the panel, which says which pings are counted.
 	g.Go(func() error {
 		var err error
-		spans, err = d.pingSpans(f, kaGateMinPrefix, wait.WaitPlan)
+		spans, err = d.pingSpans(f, wait, wait.WaitPlan)
 		return err
 	})
 	g.Go(func() error {
@@ -1954,7 +2000,7 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	})
 	g.Go(func() error {
 		var err error
-		spans, err = d.pingSpans(f, kaGateMinPrefix, wait.WaitPlan)
+		spans, err = d.pingSpans(f, wait, wait.WaitPlan)
 		return err
 	})
 	if err := g.Wait(); err != nil {

@@ -402,3 +402,30 @@ func TestAccTokens_RoundTripThroughTheStore(t *testing.T) {
 		t.Errorf("list read back %+v, wrote %+v", page.Requests, e.AccTokens)
 	}
 }
+
+// The Cache strategy tab reads its token figures from the ledger (#1022): the rescue and the pings'
+// tiers, each as /api/stats reports it for the same filter, never netted into one figure.
+func TestAccTokens_KeepAliveLedgerMatchesTheStats(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	accTokensFixture(t, db, now)
+	for _, f := range []Filter{{Tenant: "t1", Session: "s1"}, {Tenant: "t1", Since: now - 60_000}} {
+		o, err := db.Overview(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := db.KeepAliveLedger(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Tokens != o.Tokens.ByFeature["keepalive"] {
+			t.Errorf("%+v: ledger rescue %+v, stats %+v", f, l.Tokens, o.Tokens.ByFeature["keepalive"])
+		}
+		if l.PingTokens != o.KeepAlivePingTokens || l.PingTokens == (TierTokens{}) {
+			t.Errorf("%+v: ledger pings %+v, stats %+v", f, l.PingTokens, o.KeepAlivePingTokens)
+		}
+		if l.TokensUnmeasured != o.TokensUnmeasuredRequests {
+			t.Errorf("%+v: ledger unmeasured %d, stats %d", f, l.TokensUnmeasured, o.TokensUnmeasuredRequests)
+		}
+	}
+}

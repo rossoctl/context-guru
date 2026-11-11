@@ -521,7 +521,7 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
         rep.fact(f"options_file.{key}", opt_sources[key])
 
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.default_strategy()))
     rep.fact("preset", preset)
     rep.fact("preset_configured", "preset" in opts)
     rep.fact("cache_strategy", strategy)
@@ -894,30 +894,6 @@ def collect_capabilities(f: Fetcher, rep: Report, window: Window, sessions: int 
         rep.fact(f"server.{name}.calls", int(_num(row.get("calls"))))
         rep.fact(f"server.{name}.unused_usd", round(_num(row.get("unused_usd")), 4))
         rep.fact(f"server.{name}.priced", bool(row.get("priced")))
-
-    # What the account already did for itself. This is a saving the product caused and it used to
-    # be thrown away entirely: once a server stops being declared, no component ran and no filter
-    # fired, so the reduction registered nowhere. It is reported and never added to the filter's
-    # realized savings, because an account that removed a server locally AND has it in a
-    # server-side filter list would otherwise be credited twice for one reduction.
-    self_removed = [r for r in (_get_in(tools, "self_removed") or []) if isinstance(r, dict)]
-    if self_removed:
-        credited = sum(_num(r.get("avoided_usd")) for r in self_removed)
-        names = ", ".join(str(r.get("server") or r.get("name")) for r in self_removed[:5])
-        rep.fact("self_removed_items", len(self_removed))
-        rep.fact("self_removed_usd", round(credited, 4))
-        rep.findings.append(Finding(
-            "self-removed-credit", "ok",
-            f"You already removed {len(self_removed)} capability(ies), and it worked",
-            f"{names} stopped being declared partway through the window. The requests after that "
-            f"would have re-read them: {_usd(credited)} avoided over "
-            f"{window.days:.1f} days. "
-            + ("Some of these also appear on a server-side filter list, so the same reduction may "
-               "be credited there too — reported, not netted."
-               if any(r.get("overlap") for r in self_removed) else ""),
-            "Nothing to fix. This is the mechanism the findings above are asking for, working.",
-            "measured over the window",
-            usd_window=credited, usd_month=window.monthly(credited)))
 
     # The rest of the decision surface: what excluding something has really saved, and what is
     # safe to offer next. `doc` was read above, where the verdict needed the floor.
@@ -2062,7 +2038,7 @@ def main() -> int:
     window = Window(stats)
     opts, _ = _configured_options()
     preset = str(opts.get("preset") or settings.DEFAULT_PRESET)
-    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.DEFAULT_STRATEGY))
+    strategy = settings.canonical_strategy(str(opts.get("cache_strategy") or settings.default_strategy()))
 
     # Nothing below has anything to say about an account with no retained requests, and each
     # collector would say it separately: measured against an empty store they produce

@@ -42,9 +42,14 @@ route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
   upper bound; tokens removed; where input tokens went, as 100% columns of cache read, cache write
   and fresh; time added per request and requests with cache misses) and a live requests table.
   Every plot shows exact figures on hover.
+  On a Claude subscription the Overview shows every saving in **tokens**, not dollars, with an
+  estimate of the 5-hour limit share below the total. See
+  [On a subscription, the Overview shows tokens](#on-a-subscription-the-overview-shows-tokens).
 - **Savings** — Cache strategy (also called keep-alive), Inventory (the [tool inventory](#tool-inventory-panel)), Cleanup (what to remove, with one command) and Usage over time.
 - **Traffic** — Sessions (newest or costliest first; six columns, more with a checkbox) and
-  Requests, including a git-style diff of exactly what was rewritten on the wire.
+  Requests, including a git-style diff of exactly what was rewritten on the wire. On a Claude
+  subscription the Sessions tab shows tokens, not dollars. See
+  [On a subscription, the Sessions tab shows tokens](#on-a-subscription-the-sessions-tab-shows-tokens).
 - **Admin** — Config, Cache strategies, Tenants, Setup, Settings, Archive and Feedback
   (some of these appear only in a [hosted service](hosted.md)).
 - **Advanced** — Preset steps (per-component economics), [Cache detail](#kv-cache-panel) (the KV-cache view),
@@ -433,8 +438,8 @@ equal the full totals.
   plus the `cachesplit` component's `saved_usd`. Full read only.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
   `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
-  not agent traffic, so this is not in `tokens.caused`. The keep-alive's net is
-  `tokens.by_feature.keepalive` less this. Full read only.
+  not agent traffic, so this is not in `tokens.caused`. Show it beside the keep-alive rescue, never
+  subtracted from it: the tiers have no common unit. Full read only.
 - **`tokens_unmeasured_requests`.** The requests in the period with no token figure: rows from
   before the accountant, and rows it could not price. That is "not measured", not "saved nothing".
 - A request whose estimate is held out of the totals (`estimated_requests`) is held out of the
@@ -455,6 +460,106 @@ equal the full totals.
 "keepalive_ping_tokens": {"input": 3, "cache_read": 9000, "cache_write_5m": 20, "cache_write_1h": 10},
 "keepalive_ping_output_tokens": 1
 ```
+
+### On a subscription, the Overview shows tokens
+
+When `GET /api/me/limits` says the account is on a Claude subscription (`subscription: true`, or an
+open 5-hour window), the Overview shows every saving in tokens. Dollars do not show.
+
+- **Who sees it.** A member or a local proxy on a subscription. A manager's Overview spans other
+  accounts, so it keeps dollars and shows no estimate. API-key, Bedrock and Vertex users keep
+  dollars. In hosted mode `/api/me/limits` answers `{}` for now, so hosted users keep dollars (#997).
+- **The display rule.** One line per saving: the saved tiers that are not 0, in the order `wr`
+  (`cache_write_5m`), `wr1h` (`cache_write_1h`), `rd` (`cache_read`), `in` (`input`). The caused
+  tiers follow as `cost`. Example: `saved 85.0k wr · cost 40.0k rd`. Tiers are never added.
+- **Zero or not measured** (`tokenFigure` in `dash/ui/savings.js`, one rule for every screen):
+  - a figure with tokens shows its line;
+  - an all-zero figure with no unpriced request shows `saved 0 tokens`. The server leaves a
+    feature with no tokens out of `by_feature`, so a missing feature on a priced period is a zero;
+  - an all-zero figure while `tokens_unmeasured_requests` is more than 0, or a server with no
+    `tokens` (before #999), shows `not measured`.
+- **The total.** `tokens.saved` and `tokens.caused`. The cards add up to it, tier by tier.
+- **Keep-alive pings** show on a line of their own, under the total and on the Cache card:
+  `Keep-alive pings (not in the total): cost 900 wr · 410.0k rd`. A ping is not agent traffic, so
+  `keepalive_ping_tokens` is not in the total or in any card's cost. Every screen follows this rule:
+  the band's lean read has no ping tokens.
+- **The cards** read `tokens.by_feature`:
+  - Cache: `keepalive` (the rescue), `cachesplit` and `ttl`, with one row each, and the pings line.
+    A row with no tokens does not show; with no rows, the list does not show. Manual pings have no
+    token figure, so they do not show.
+  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
+  - Preset: every other entry (the preset's components and `ended_change`).
+- **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
+  weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
+  `min(used% × saved_usd / cost_usd, 100 − used%)` for the window: the provider stops a user at
+  100%, so the share saved is never more than the room that was left. At the cap the line says that
+  without context-guru the limit would have been hit. The estimate is for the whole account, so it
+  is hidden while a page filter (a session, a time range, a model, ...) narrows the Overview.
+- **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
+  how many requests have no token figure.
+
+### On a subscription, the Sessions tab shows tokens
+
+The Sessions tab uses the same test and the same display rule as the Overview (#1023). Managers,
+API-key users and hosted mode keep dollars. Three columns change:
+
+| Column (dollars) | On a subscription | Source in `/api/sessions` |
+|---|---|---|
+| Cost | **Tokens used**: the session's billed input tokens by tier, for example `1.6k wr · 20.0k rd · 400 in`. `n/a` with the reason when no turn reported usage, as the dollar cell. Output tokens are not in it. context-guru's own model calls (`cg_llm_cost_usd`) have no token form, so they do not show. | `used_tokens` |
+| Net saved $ | **Tokens saved**: `saved … · cost …`. The shared rule for zero: an all-zero figure reads `saved 0 tokens` when every request of the session was priced, and `not measured` when any was not, or when the row has no `tokens`. A † marks a measured figure on a session with requests that have no token figure. | `tokens`, `tokens_unmeasured_requests` |
+| Keep-alive net | **Keep-alive**: the rescue on one line, through the same rule for zero (`not measured` when the session has unpriced requests), and the pings on a line of their own (`Keep-alive pings (not in the total): cost …`). The pings are never added into the rescue's cost. `n/a` when the cache strategy did not run. | `keepalive_tokens`, `keepalive_ping_tokens` |
+
+Each session row in `/api/sessions` has these fields for every caller:
+
+- **`tokens`.** The session's accountant figure (`tok_total_*`) less the keep-alive rescue. It is the
+  token form of `saved_usd`, and it also has the split, the 1-hour head and the ended-change break.
+- **`keepalive_tokens`.** The accountant's own keep-alive rescue figure (`tok_ka_*`). It is a
+  different measurement from `keepalive_saved_usd`, the legacy credit that is checked on read, so the
+  two can disagree on a session. `tokens` plus `keepalive_tokens` is the
+  session's `/api/stats` `tokens.saved` and `tokens.caused`, tier by tier.
+- **`keepalive_ping_tokens`.** What the session's pings paid, in billed tokens by tier.
+- **`used_tokens`.** The agent requests' billed input tokens by tier (`fresh_input`, `cache_read`,
+  and `cache_write` split into 5-minute and 1-hour).
+- **`tokens_unmeasured_requests`.** The session's agent requests with no token figure.
+
+The table paints on the sessions answer and does not wait for `/api/me/limits`. When the limits
+answer changes the view, the table paints again. The Overview and the Sessions tab share one
+limits request while it is in flight, and the Sessions tab reuses a good answer for a minute. A
+failed limits read keeps dollars and is asked again on the next load. **Costliest first** still orders by the dollar cost, labelled "at API
+prices": one order in tokens would add the tiers.
+
+**Query cost.** A second query reads these figures for the sessions on the page only
+(`session_id IN (…)`, on a session index). The list's own aggregate does not change. On a test
+database of 20,000 requests (no `-race`), the list takes 103 ms and the token read 2.5 ms of it
+(`TestSessionTokens_StaysCheapOnALargeWindow`).
+
+### On a subscription, the Cache strategy tab shows tokens
+
+The same rule applies to the Cache strategy tab (`#/keepalive`). The same people see it: a member
+or a local proxy on a subscription. Managers, API-key users and hosted mode keep dollars.
+
+- **Source.** `GET /api/keepalive` (the ledger) has the token form of its two halves, for the same
+  filter:
+  - `tokens`: the rescue, as `{saved, caused}` by tier. It equals `/api/stats`
+    `tokens.by_feature.keepalive`.
+  - `keepalive_ping_tokens`: what the pings paid, by tier. It equals `/api/stats`
+    `keepalive_ping_tokens`.
+  - `tokens_unmeasured_requests`: the requests with no token figure.
+- **Two lines, never netted.** The measured figure is the rescue line, for example
+  `saved 85.0k wr · cost 40.0k rd`. The pings show on their own line: `Pings: cost 900 wr · 410.0k rd`.
+  The ping cost is never added into the rescue's cost.
+- **Not measured is not zero.** When the rescue is all zero and `tokens_unmeasured_requests` is more
+  than 0, the rescue line says `not measured`. Only a zero from priced requests says `saved 0 tokens`.
+- **Ping output tokens.** The pings line has the input-side tiers only. The pings tile says that it
+  leaves out the pings' output tokens.
+- **What changes.** The measured tiles, the facts list, the measured line under the forecast, and the
+  head of "Which sessions gained and which lost". The count of expiries still worth acting on shows
+  without its dollars.
+- **What stays in dollars.** The forecast ("Forecast for all your traffic") is a replay that adds
+  saved writes and paid reads in dollars. A yes or no in tokens needs a rule that weighs one tier
+  against another, so the forecast keeps dollars, with the line `Forecast at API-price weights`.
+  "Ahead" or "Behind", the winner and loser split, and the "costs more than it saves" banner use
+  the dollar net too, and say "at API-price weights". The tables below the ledger stay in dollars.
 
 ## KV-cache panel
 

@@ -54,6 +54,7 @@ func TestWaitPlanDefaultsMatchConfig(t *testing.T) {
 	if DefaultToolWaitMaxPings != config.DefaultKeepAliveToolWaitMaxPings ||
 		DefaultBackgroundExtraPings != config.DefaultKeepAliveBackgroundExtraPings ||
 		DefaultHumanExtraPings != config.DefaultKeepAliveHumanExtraPings ||
+		DefaultToolWaitMinPrefix != config.DefaultKeepAliveToolWaitMinPrefix ||
 		MaxWaitPings != config.MaxKeepAliveWaitPings {
 		t.Error("the keepalive and config wait-plan defaults drifted")
 	}

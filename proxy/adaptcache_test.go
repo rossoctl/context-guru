@@ -682,12 +682,30 @@ func seedStopReasonHistory(t *testing.T, f *mgrFixture, tid string) {
 			f.rec.Record(e)
 		}
 	}
-	for end := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		if p, _ := f.rec.DB().Requests(dash.Filter{Tenant: tid}, 0, 1); p != nil && p.Total >= sessions*perSession {
-			return
+	// The writer stores each row in its own transaction (the fixture sets BatchSize 1), so under -race on a loaded runner 160 rows can take
+	// longer than any short fixed wait. The recorder has no flush call, so wait on its counters: every captured row ends as written, dropped or
+	// errored. A drop or an error fails at once with the counts. The long bound is only a safety net.
+	for end := time.Now().Add(2 * time.Minute); ; time.Sleep(5 * time.Millisecond) {
+		st := f.rec.Stats()
+		if st.Dropped > 0 || st.Errors > 0 {
+			t.Fatalf("the writer lost rows: captured %d, written %d, dropped %d, errors %d", st.Captured, st.Written, st.Dropped, st.Errors)
+		}
+		if st.Written >= st.Captured {
+			p, err := f.rec.DB().Requests(dash.Filter{Tenant: tid}, 0, 1)
+			if err != nil {
+				t.Fatalf("reading the seeded rows: %v (captured %d, written %d)", err, st.Captured, st.Written)
+			}
+			if p != nil && p.Total >= sessions*perSession {
+				return
+			}
+			var total int64
+			if p != nil {
+				total = p.Total
+			}
+			t.Fatalf("the writer stored every captured row but the tenant has %d of %d: captured %d, written %d", total, sessions*perSession, st.Captured, st.Written)
 		}
 		if time.Now().After(end) {
-			t.Fatal("the writer did not persist the rows")
+			t.Fatalf("the writer did not persist the rows in time: captured %d, written %d, dropped %d, errors %d, queued %d", st.Captured, st.Written, st.Dropped, st.Errors, st.Queued)
 		}
 	}
 }
@@ -827,6 +845,28 @@ func TestAdaptLabelsStateTheSpacingTheArmsRunAt(t *testing.T) {
 	for _, id := range []string{"default", "K1", "K2", "K3"} {
 		if d := adaptLabels[id][1]; !strings.Contains(d, want) {
 			t.Errorf("adapt arm %s says %q, want it to name the %s spacing the arms run at", id, d, want)
+		}
+	}
+}
+
+// The adapt replay gives a row the floor of its wait, as the keeper does: 20k for a tool stop or a
+// subagent, the general floor otherwise, and the general floor only for OpenAI (the keeper plans no
+// wait for OpenAI).
+func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
+	pol := CachePolicy{WaitPlan: true, MinPrefixTokens: 80000}
+	for _, c := range []struct {
+		name string
+		f    rowFacts
+		want int
+	}{
+		{"main tool stop", rowFacts{stop: "tool_use"}, 20000},
+		{"main end_turn", rowFacts{stop: "end_turn"}, 80000},
+		{"subagent end_turn", rowFacts{stop: "end_turn", subagent: true}, 20000},
+		{"openai tool stop", rowFacts{stop: "tool_calls", openai: true}, 80000},
+		{"openai subagent", rowFacts{stop: "end_turn", openai: true, subagent: true}, 80000},
+	} {
+		if got := rowFloor(pol, &c.f); got != c.want {
+			t.Errorf("%s: floor %d, want %d", c.name, got, c.want)
 		}
 	}
 }

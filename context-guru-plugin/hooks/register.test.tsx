@@ -284,12 +284,12 @@ test('a release the user has not declined shows `▲ update` first on the status
 test('on a Claude subscription the money gives way to the 5-hour limit and the tokens saved in it', async ($, on) => {
   usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
   const calls: string[][] = []
-  docOverride = d => ({ ...d, window_saved: 'saved 1.2M rd / 85.0k wr' })
+  docOverride = d => ({ ...d, window_saved: 'saved 85.0k wr · cost 40.0k rd' })
   await boot($, on, true, calls)
   usage = docOverride = null
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
   const row = (await dump(ui)).split('\n')[1]
-  expect(row).toMatch(/^5h 34% · this session saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
+  expect(row).toMatch(/^5h 34% · this session saved 85\.0k wr · cost 40\.0k rd │ cache ● /)
   // the next message is in tokens too: the 90k cached prefix is read when warm, written again when cold
   expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd · 90\.0k wr if cold/)
   expect(await dump(ui)).not.toMatch(/\$/)
