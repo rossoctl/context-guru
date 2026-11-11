@@ -22,8 +22,8 @@ rng = np.random.default_rng(886)
 def canvas(title, w=16, h=10):
     fig = plt.figure(figsize=(w, h), dpi=100, facecolor=BG)
     fig.text(0.015, 0.972, title, color=TXT, fontsize=17, weight="bold", va="center")
-    chips = ["proxy: All", "machine: All", "model: All", "Last 7 days"]
-    for x, c in zip([0.575, 0.675, 0.785, 0.885], chips):
+    chips = ["proxy: All", "machine: All", "Last 7 days"]
+    for x, c in zip([0.70, 0.80, 0.90], chips):
         fig.text(x, 0.972, f" {c} ", color=TXT, fontsize=9.5, va="center",
                  bbox=dict(boxstyle="round,pad=0.35", fc="#22252b", ec=EDGE))
     fig.text(0.985, 0.012, "FICTIVE DATA  -  layout only, not a result", color=ORG, fontsize=10,
@@ -94,11 +94,11 @@ def save(fig, name):
 def fleet():
     fig = canvas("Fleet overview", h=10.6)
     # Row 1: money first
-    stat(fig, [0.015, 0.785, 0.30, 0.14], "NET SAVED TODAY", "$ 41.20", GREEN, "+12% vs yesterday",
-         GREEN, big=True)
-    stat(fig, [0.325, 0.785, 0.20, 0.14], "Gross saved today", "$ 58.90", TXT, "saved_usd")
-    stat(fig, [0.535, 0.785, 0.20, 0.14], "Added cost today", "$ 17.70", ORG, "added_usd (cost of our changes)")
-    stat(fig, [0.745, 0.785, 0.24, 0.14], "Spend today", "$ 212.40", TXT, "what the providers billed")
+    stat(fig, [0.015, 0.785, 0.30, 0.14], "NET SAVED", "$ 288.40", GREEN, "last 7 days",
+         DIM, big=True)
+    stat(fig, [0.325, 0.785, 0.20, 0.14], "Gross saved", "$ 412.30", TXT, "saved_usd")
+    stat(fig, [0.535, 0.785, 0.20, 0.14], "Added cost", "$ 123.90", ORG, "added_usd (cost of our changes)")
+    stat(fig, [0.745, 0.785, 0.24, 0.14], "Spend", "$ 1,486.80", TXT, "what the providers billed")
     # Row 2: net saved per day
     ax = panel(fig, [0.04, 0.555, 0.945, 0.19], "Net saved per day", "last 30 days")
     d = np.clip(np.linspace(8, 40, 30) + rng.normal(0, 5, 30), 2, None)
@@ -140,7 +140,7 @@ def savings():
              "compact", "mask"]
     vals = [412, 368, 301, 240, 177, 122, 64, 18, -41, -96]
     bars_h(ax, comps, vals)
-    ax = panel(fig, [0.385, 0.70, 0.60, 0.225], "Net by kind", "USD per hour, stacked")
+    ax = panel(fig, [0.385, 0.70, 0.60, 0.225], "Net by kind (USD per hour)", "stacked")
     t = np.arange(168); day = np.clip(0.5 + 0.5 * np.sin((t % 24 - 9) / 24 * 2 * np.pi), 0, None)
     rew = 2.0 * day + 0.1; spe = -0.45 * day; stt = 0.5 * day
     ax.stackplot(t, rew, stt, colors=[GREEN, BLUE], labels=["rewrite", "setting"], alpha=0.8)
@@ -240,10 +240,10 @@ def machines():
     ax.set_xticks([]); ax.set_yticks([])
     for s in ax.spines.values():
         s.set_color(EDGE)
-    ax.set_title("Saving rate by preset", color=TXT, fontsize=10.5, loc="left", pad=7)
-    head = ("preset", "machines", "net saved", "saving rate", "estimated")
-    data = [("house", "14", "$ 3,210", "19.4 %", "2.8 %"), ("lean", "6", "$ 1,090", "14.1 %", "3.0 %"),
-            ("max", "3", "$ 720", "23.7 %", "6.9 %"), ("custom", "1", "$ 38", "5.2 %", "11.0 %")]
+    ax.set_title("By preset", color=TXT, fontsize=10.5, loc="left", pad=7)
+    head = ("preset", "machines", "net saved", "net / 1,000 req", "estimated")
+    data = [("house", "14", "$3,210", "$0.46", "2.8 %"), ("lean", "6", "$1,090", "$0.38", "3.0 %"),
+            ("max", "3", "$720", "$0.51", "6.9 %"), ("custom", "1", "$38", "$0.09", "11.0 %")]
     xs = [0.04, 0.27, 0.45, 0.66, 0.84]
     for x, h in zip(xs, head):
         ax.text(x, 0.84, h, color=DIM, fontsize=10, weight="bold", transform=ax.transAxes)
@@ -251,7 +251,7 @@ def machines():
         for x, cell in zip(xs, row):
             ax.text(x, 0.68 - i * 0.14, cell, color=YEL if (x == 0.84 and float(cell.split()[0]) > 10) else TXT,
                     fontsize=11, transform=ax.transAxes)
-    ax.text(0.04, 0.06, "Saving rate = net saved / baseline cost. It needs the baseline counter (not built yet).",
+    ax.text(0.04, 0.06, "Saving rate (net / baseline cost) arrives with the baseline counter.",
             color=DIM, fontsize=8.5, transform=ax.transAxes)
     ax = panel(fig, [0.045, 0.06, 0.37, 0.35], "Net saved by proxy", "USD, last 30 days")
     ax.bar([0, 1], [3520, 1538], color=[BLUE, TEAL], width=0.5)

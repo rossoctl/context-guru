@@ -391,13 +391,13 @@ Target: **under 2,000 active series per machine.** For 50 machines this is 100,0
 
 All dashboards use the central Prometheus. They are Grafana JSON files in `deploy/grafana/dashboards/`. Each panel states its query. Use `$__rate_interval`.
 
-Filters on every dashboard: `proxy`, `machine`, `model`, time range. The default range is the last 7 days.
+Filters on every dashboard: `proxy`, `machine`, time range. The default range is the last 7 days. There is no `model` filter: the savings metrics carry no `model` label (section 5.2). A tile such as "Net saved" covers the selected range.
 
 The pictures below are **fictive screenshots**. Every number in them is invented. They show layout and wording, not results. `docs/prometheus/mockups/gen_mockups.py` draws them, so they can change with the design.
 
 ### 6.0 Design rules
 
-1. **Money first.** The first screen answers "do we save money?" in 5 seconds. The largest tile, at the top left, is **Net saved today**. Health comes below it.
+1. **Money first.** The first screen answers "do we save money?" in 5 seconds. The largest tile, at the top left, is **Net saved** over the selected range. Health comes below it.
 2. **One question for each dashboard.** The question is the first line of its section. A panel that does not help answer it moves to another dashboard.
 3. **The same colors everywhere.** Green is saved. Orange is added cost. Red is a loss or a failure. Yellow needs a look. Blue and purple only separate series.
 4. **Counters are never shown raw.** A total uses `increase()` over the selected range. A trend uses `rate()` with `$__rate_interval`.
@@ -418,14 +418,18 @@ Order, top to bottom: the four money tiles, the daily net saved, the hourly tren
 | Panel | Type | Query idea |
 |---|---|---|
 | Machines reporting | stat | `count(count by (machine) (llm_proxy_info))`. Use `llm_proxy_info`: it is always 1, so an idle machine still shows. A request counter has no series until the first request. |
-| Requests per minute | time series | `sum(rate(llm_inference_requests_total[...]))` by `proxy` |
-| Error rate | stat | errors / requests |
-| Spend today | stat | `increase(llm_inference_cost_usd_total[1d])` |
-| Gross saved today | stat | `increase(llm_savings_saved_usd_total[1d])` |
-| Added cost today | stat | `increase(llm_savings_added_usd_total[1d])` |
-| **Net saved today** | stat | saved - added |
-| Saving rate | stat | net / baseline |
-| Net saved per day | bar | `increase(...[1d])` for 30 days |
+| **Net saved** | stat | `sum(increase(saved_usd[$__range])) - sum(increase(added_usd[$__range]))`. The largest tile (rule 1). |
+| Gross saved | stat | `increase(llm_savings_saved_usd_total[$__range])` |
+| Added cost | stat | `increase(llm_savings_added_usd_total[$__range])` |
+| Spend | stat | `increase(llm_inference_cost_usd_total[$__range])` |
+| Net saved per day | bar | One bar per day for 30 days, whatever the dashboard range. |
+| Saved vs added | time series | both rates, per hour |
+| Net saved by machine | bar gauge | the best 8 machines |
+| Silent machines | stat | `max_over_time(llm_proxy_info[1d]) unless llm_proxy_info`, the same logic as the `MachineSilent` alert. |
+| 5xx error rate | stat | 5xx requests / requests |
+| Requests per minute | stat | `sum(rate(llm_inference_requests_total[...])) * 60` |
+| Alerts firing | stat | `count(ALERTS{alertstate="firing"})` |
+| Saving rate | stat | net / baseline. **Not built:** it needs the baseline counter. |
 
 ### 6.2 Savings
 
