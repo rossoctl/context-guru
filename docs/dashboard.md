@@ -563,7 +563,10 @@ or a local proxy on a subscription. Managers, API-key users and hosted mode keep
   against another, so the forecast keeps dollars, with the line `Forecast at API-price weights`.
   With learned 5-hour weights, the forecast uses them: the line says `Forecast at learned 5-hour
   weights (from N requests), in API dollars`, and the yes or no and the range come from
-  `learned` in `/api/keepalive/recommend`.
+  `learned` in `/api/keepalive/recommend`. Both panels that show the forecast use it: the decision
+  row and "Which setting should I use?" (the suggested setting, its range, or its refusal), each
+  with the same line. The fixed-count comparison and the 3-ping offer are API-price figures, so that
+  panel leaves them out when it shows the learned forecast.
   "Ahead" or "Behind", the winner and loser split, and the "costs more than it saves" banner use
   the dollar net too, and say "at API-price weights". The tables below the ledger stay in dollars.
 

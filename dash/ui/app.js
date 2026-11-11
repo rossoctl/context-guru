@@ -9045,7 +9045,7 @@ async function loadKeepAlive() {
   // still fills from its own request, so one slow query never blanks another.
   const ledger = keepAliveLedger();
   const subP = kaSubscription();
-  loadKARecommend();
+  loadKARecommend(subP);
   const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
     // The limits read is fast; the ledger and the flag land together, so the tiles never flip units.
@@ -9881,24 +9881,29 @@ async function loadKACalc() {
  * whose relative half-width is at least 62%, and it crosses zero for 5 of 12 — so the honest
  * sentence is "the direction is resolvable, the size is not", and it is on the page.
  */
-async function loadKARecommend() {
+async function loadKARecommend(subP) {
   const host = clear($('#ka-recommend'));
   loadingState(host, 2);
-  let rec;
+  let raw, sub;
   try {
-    rec = await api('keepalive/recommend');
+    // The subscription flag (kaSubscription never throws) decides which forecast this panel shows.
+    [raw, sub] = await Promise.all([api('keepalive/recommend'), subP || kaState.sub]);
   } catch (e) {
     if (aborted(e)) return;
     errorState(host, 'Could not work out a recommendation', e);
     return;
   }
-  kaState.recommend = rec;
+  kaState.recommend = raw;
+  // The same forecast as the decision row above (#1047): the learned one on a subscription with a
+  // fit that passed its gate, so the two panels never give opposite verdicts.
+  const fv = forecastView(raw, sub), rec = fv.rec;
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
   // "Winner" tile that contradicted it.
   // If the ledger has not landed yet, its own handler renders the decision row with this payload.
-  if (kaState.ledger) renderKADecision(kaState.ledger, rec);
+  if (kaState.ledger) renderKADecision(kaState.ledger, raw);
   clear(host);
+  if (fv.label) host.appendChild(el('p', { class: 'ka-sentence', 'data-testid': 'ka-rec-weights' }, fv.label));
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are
     // too long for this to reach" is a finding, not a shortage of data, and it is a `bad` banner

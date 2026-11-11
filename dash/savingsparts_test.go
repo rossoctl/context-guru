@@ -107,6 +107,9 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 		"'data-testid': 'ka-measured-tokens'",
 		"'data-testid': 'ka-forecast-weights'",
 		"const fv = forecastView(recIn, kaState.sub), rec = fv.rec;", // the learned forecast on a subscription (#1047)
+		"const fv = forecastView(raw, sub), rec = fv.rec;",           // the detail panel shows the same forecast (#1047)
+		"'data-testid': 'ka-rec-weights' }, fv.label",                // with the same weight label
+		"loadKARecommend(subP);",
 		"'data-testid': 'ka-split-tokens'",
 		"tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd)", // the dollar view stays for everyone else
 		"o.tokens_unmeasured_requests > 0",

@@ -38,7 +38,10 @@ func TestMeFiveHourWeightsEndpoint(t *testing.T) {
 	evs = append(evs, fhEvents(fhSim{w: realW, windows: 1, perWindow: 100, seed: 22}.rows(), "thin", true)...)
 	ping := &Event{TS: time.Now().Add(-30 * time.Minute).UnixMilli(), TenantID: "a", SessionID: "s", Model: "m",
 		Provider: "anthropic", KeepAlive: true, CacheRead: 90_000, OutputTokens: 1}
-	evs = append(evs, ping)
+	// A ping on another tenant in the same window must not count for tenant a.
+	other := *ping
+	other.TenantID, other.CacheRead = "c", 7_000_000
+	evs = append(evs, ping, &other)
 	if err := db.insertBatch(evs); err != nil {
 		t.Fatal(err)
 	}

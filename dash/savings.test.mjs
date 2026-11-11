@@ -404,6 +404,7 @@ test('without a fit that passed the gate, the estimate and its label stay at API
 test('the Cache strategy forecast uses the learned range and label on a subscription only', () => {
   const { forecastView } = createRequire(import.meta.url)('./ui/savings.js');
   const rec = { refused: 'your own history cannot tell this apart from zero', n: 40, sessions: 9,
+    plan: 'wait_plan', fixed_k: { lo_usd: -1, hi_usd: 2 }, alt_max_pings: 3,
     learned: { idle_seconds: 240, max_pings: 2, lo_usd: 1.5, hi_usd: 4, requests: 1234, windows: 5 } };
   // A manager or an API key: the payload as it is, no label.
   assert.deepEqual(forecastView(rec, false), { rec, label: null });
@@ -412,6 +413,8 @@ test('the Cache strategy forecast uses the learned range and label on a subscrip
   assert.equal(v.rec.refused, undefined);
   assert.equal(v.rec.lo_usd, 1.5); assert.equal(v.rec.hi_usd, 4); assert.equal(v.rec.max_pings, 2);
   assert.equal(v.rec.n, 40);
+  // The API-price comparisons do not show beside a learned range.
+  assert.equal(v.rec.fixed_k, undefined); assert.equal(v.rec.alt_max_pings, undefined);
   assert.equal(v.label, 'Forecast at learned 5-hour weights (from 1,234 requests), in API dollars. A subscription does not bill per token.');
   // A learned refusal wins over a dollar yes.
   const r2 = forecastView({ lo_usd: 1, hi_usd: 2, idle_seconds: 240, max_pings: 2,

@@ -75,6 +75,8 @@ const (
 
 // FiveHourRow is one request row for the fit: numbers only.
 type FiveHourRow struct {
+	// ID is the row id: the order of two rows in the same millisecond.
+	ID    int64
 	TsMs  int64
 	Reset int64   // limit_5h_reset, unix seconds: the window's key
 	Util  float64 // limit_5h_utilization, 0..1
@@ -151,7 +153,12 @@ func FitFiveHourWeights(rows []FiveHourRow, price func(model string) (TierPrice,
 	}
 	keys := make([]int64, 0, len(windows))
 	for k, w := range windows {
-		sort.SliceStable(w, func(i, j int) bool { return w[i].TsMs < w[j].TsMs })
+		sort.Slice(w, func(i, j int) bool {
+			if w[i].TsMs != w[j].TsMs {
+				return w[i].TsMs < w[j].TsMs
+			}
+			return w[i].ID < w[j].ID
+		})
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
@@ -349,17 +356,7 @@ func fhNNLS(spans []fhSpan, present [fhTiers]bool) [fhTiers]float64 {
 	if n == 0 || len(spans) == 0 {
 		return out
 	}
-	scale := make([]float64, n)
-	for k, j := range cols {
-		var s float64
-		for _, sp := range spans {
-			s += sp.x[j] * sp.x[j]
-		}
-		scale[k] = math.Sqrt(s / float64(len(spans)))
-		if scale[k] == 0 {
-			scale[k] = 1
-		}
-	}
+	scale := fhColScale(spans, cols)
 	// G = AᵀA and h = Aᵀb on the scaled columns.
 	G := make([][]float64, n)
 	h := make([]float64, n)
@@ -380,6 +377,24 @@ func fhNNLS(spans []fhSpan, present [fhTiers]bool) [fhTiers]float64 {
 		out[j] = x[k] / scale[k]
 	}
 	return out
+}
+
+// fhColScale is each column's root mean square over the spans (1 for an all-zero column). The fit
+// and its standard errors both work on columns divided by it: token counts reach the millions, so
+// the raw XᵀX reaches 1e16 and loses precision in the solve.
+func fhColScale(spans []fhSpan, cols []int) []float64 {
+	scale := make([]float64, len(cols))
+	for k, j := range cols {
+		var s float64
+		for _, sp := range spans {
+			s += sp.x[j] * sp.x[j]
+		}
+		scale[k] = math.Sqrt(s / float64(len(spans)))
+		if scale[k] == 0 {
+			scale[k] = 1
+		}
+	}
+	return scale
 }
 
 // lawsonHanson solves min |Ax-b|² with x >= 0, given G = AᵀA and h = Aᵀb.
@@ -472,9 +487,19 @@ func solvePassive(G [][]float64, h []float64, passive []bool) []float64 {
 }
 
 // gaussSolve solves the augmented system A (m rows, m+1 columns) by elimination with partial
-// pivoting. A singular column reads 0.
+// pivoting. A singular column reads 0: a pivot below 1e-12 of the largest entry.
 func gaussSolve(A [][]float64) []float64 {
 	m := len(A)
+	var big float64
+	for _, row := range A {
+		for _, v := range row[:m] {
+			big = math.Max(big, math.Abs(v))
+		}
+	}
+	tol := 1e-12 * big
+	if tol == 0 {
+		tol = 1e-300
+	}
 	for c := 0; c < m; c++ {
 		p := c
 		for r := c + 1; r < m; r++ {
@@ -483,7 +508,7 @@ func gaussSolve(A [][]float64) []float64 {
 			}
 		}
 		A[c], A[p] = A[p], A[c]
-		if math.Abs(A[c][c]) < 1e-12 {
+		if math.Abs(A[c][c]) < tol {
 			continue
 		}
 		for r := 0; r < m; r++ {
@@ -498,7 +523,7 @@ func gaussSolve(A [][]float64) []float64 {
 	}
 	out := make([]float64, m)
 	for c := 0; c < m; c++ {
-		if math.Abs(A[c][c]) >= 1e-12 {
+		if math.Abs(A[c][c]) >= tol {
 			out[c] = A[c][m] / A[c][c]
 		}
 	}
@@ -506,7 +531,8 @@ func gaussSolve(A [][]float64) []float64 {
 }
 
 // fhRelSE is each positive weight's relative standard error, from σ²(XᵀX)⁻¹ on the positive tiers.
-// +Inf for a tier at 0 or one the fit could not resolve.
+// +Inf for a tier at 0 or one the fit could not resolve. It solves on the scaled columns (fhColScale),
+// as the fit does: with X = X̃·D, (XᵀX)⁻¹ = D⁻¹(X̃ᵀX̃)⁻¹D⁻¹, so Var(w_j) = σ²[(X̃ᵀX̃)⁻¹]_kk / d_k².
 func fhRelSE(spans []fhSpan, w [fhTiers]float64, ssr float64) [fhTiers]float64 {
 	var out [fhTiers]float64
 	for j := range out {
@@ -523,23 +549,28 @@ func fhRelSE(spans []fhSpan, w [fhTiers]float64, ssr float64) [fhTiers]float64 {
 		return out
 	}
 	sigma2 := ssr / float64(len(spans)-n)
-	for k, j := range cols {
-		// Var(w_j) = σ² [(XᵀX)⁻¹]_jj: solve (XᵀX) v = e_k and read v_k.
-		A := make([][]float64, n)
-		for a, ja := range cols {
-			A[a] = make([]float64, n+1)
-			for b, jb := range cols {
-				for _, s := range spans {
-					A[a][b] += s.x[ja] * s.x[jb]
-				}
+	scale := fhColScale(spans, cols)
+	G := make([][]float64, n)
+	for a, ja := range cols {
+		G[a] = make([]float64, n)
+		for b, jb := range cols {
+			for _, s := range spans {
+				G[a][b] += s.x[ja] / scale[a] * s.x[jb] / scale[b]
 			}
+		}
+	}
+	for k, j := range cols {
+		// Solve (X̃ᵀX̃) v = e_k and read v_k.
+		A := make([][]float64, n)
+		for a := range cols {
+			A[a] = append(append([]float64(nil), G[a]...), 0)
 			if a == k {
 				A[a][n] = 1
 			}
 		}
 		v := gaussSolve(A)
 		if v[k] > 0 {
-			out[j] = math.Sqrt(sigma2*v[k]) / w[j]
+			out[j] = math.Sqrt(sigma2*v[k]) / scale[k] / w[j]
 		}
 	}
 	return out

@@ -249,3 +249,69 @@ func TestLawsonHansonKeepsWeightsNonNegative(t *testing.T) {
 		t.Fatalf("weights %v, want the second clamped to 0", w)
 	}
 }
+
+// The standard errors do not depend on the unit of the token counts, also when input and cache read
+// move together. Unscaled, XᵀX reaches 1e16 at real counts and its solve loses precision.
+func TestFiveHourRelSEIsScaleFreeOnCorrelatedColumns(t *testing.T) {
+	build := func(unit float64) []fhSpan {
+		r := rand.New(rand.NewSource(32))
+		var spans []fhSpan
+		for i := 0; i < 200; i++ {
+			rd := 2e6 + r.Float64()*3e6
+			in := rd * 0.002 * (1 + 0.05*r.NormFloat64()) // input follows cache read closely
+			wr := 1e5 + r.Float64()*4e5
+			dy := 1e-8*rd + 3e-7*in + 3.75e-7*wr + 0.002*r.NormFloat64()
+			spans = append(spans, fhSpan{dy: dy, x: [fhTiers]float64{in * unit, rd * unit, wr * unit}})
+		}
+		return spans
+	}
+	var ref [fhTiers]float64
+	for i, unit := range []float64{1, 1e-9, 1e4} {
+		spans := build(unit)
+		present := [fhTiers]bool{true, true, true}
+		w := fhNNLS(spans, present)
+		var ssr float64
+		for _, s := range spans {
+			e := s.dy - fhDot(w, s.x)
+			ssr += e * e
+		}
+		se := fhRelSE(spans, w, ssr)
+		t.Logf("unit %g: rel_se input %.4f cache_read %.4f write %.4f", unit, se[fhInput], se[fhCacheRead], se[fhWrite5m])
+		for _, j := range []int{fhCacheRead, fhWrite5m} {
+			if math.IsInf(se[j], 0) || math.IsNaN(se[j]) {
+				t.Fatalf("unit %g: tier %s has no standard error", unit, fhTierNames[j])
+			}
+		}
+		if i == 0 {
+			ref = se
+			continue
+		}
+		for j := 0; j <= fhWrite5m; j++ {
+			if math.IsInf(ref[j], 0) != math.IsInf(se[j], 0) || (!math.IsInf(se[j], 0) && math.Abs(se[j]-ref[j]) > 1e-6*ref[j]) {
+				t.Errorf("unit %g: tier %s rel_se %.6g, want %.6g as at unit 1", unit, fhTierNames[j], se[j], ref[j])
+			}
+		}
+	}
+}
+
+// Two rows in one millisecond keep their insert order (the row id), whatever order they come in:
+// read newest first, they would look like a fall and lose their spans.
+func TestFiveHourFitOrdersOneMillisecondByID(t *testing.T) {
+	rows := fhSim{w: realW, windows: 8, perWindow: 400, seed: 33}.rows()
+	for i := range rows {
+		rows[i].ID = int64(i + 1)
+		rows[i].TsMs = rows[i].TsMs / 600_000 * 600_000 // many rows share one timestamp
+	}
+	want := FitFiveHourWeights(rows, apiPrice)
+	rev := make([]FiveHourRow, len(rows))
+	for i := range rows {
+		rev[len(rows)-1-i] = rows[i]
+	}
+	got := FitFiveHourWeights(rev, apiPrice)
+	if got.Spans != want.Spans || got.Requests != want.Requests || got.Weights["cache_read"] != want.Weights["cache_read"] {
+		t.Errorf("newest first: %d spans, %d requests; oldest first: %d spans, %d requests", got.Spans, got.Requests, want.Spans, want.Requests)
+	}
+	if want.Spans < 100 {
+		t.Errorf("only %d spans: the shared timestamps lost data", want.Spans)
+	}
+}

@@ -134,6 +134,7 @@ function weightsLabel(n) {
 }
 
 // The Cache strategy forecast on a subscription (#1042, #1047). `rec` is /api/keepalive/recommend.
+// Both panels that show it (the decision row and "Which setting should I use?") read it from here.
 // With `rec.learned` (a fit that passed the gate) the yes or no and the range are the learned ones;
 // without it, the API-price ones, as before. `label` is the line above the verdict, or null when
 // `sub` is false (a manager, an API key): no change there.
@@ -141,8 +142,9 @@ function forecastView(rec, sub) {
   if (!sub || !rec) return { rec, label: null };
   const l = rec.learned;
   if (!l) return { rec, label: 'Forecast at API-price weights. A subscription does not bill per token.' };
+  // fixed_k and alt_max_pings are API-price comparisons: they are left out, so no panel mixes the two.
   const merged = Object.assign({}, rec, { refused: l.refused || undefined, idle_seconds: l.idle_seconds,
-    max_pings: l.max_pings, lo_usd: l.lo_usd, hi_usd: l.hi_usd });
+    max_pings: l.max_pings, lo_usd: l.lo_usd, hi_usd: l.hi_usd, fixed_k: undefined, alt_max_pings: undefined });
   return { rec: merged, label: 'Forecast at ' + weightsLabel(l.requests) + ', in API dollars. A subscription does not bill per token.' };
 }
 

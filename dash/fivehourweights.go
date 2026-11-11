@@ -1,7 +1,6 @@
 package dash
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -35,7 +34,7 @@ func (d *DB) FiveHourRows(f Filter, sinceMs int64) ([]FiveHourRow, error) {
 	if f.TenantAll {
 		cond, args = `r.limit_seen = 1`, nil
 	}
-	q := `SELECT r.ts, r.limit_5h_reset, r.limit_5h_utilization, r.fresh_input, r.cache_read,
+	q := `SELECT r.id, r.ts, r.limit_5h_reset, r.limit_5h_utilization, r.fresh_input, r.cache_read,
 			MAX(r.cache_write - r.cache_write_1h, 0), r.cache_write_1h, r.output_tokens, r.model
 		FROM requests r
 		WHERE ` + cond + ` AND r.ts >= ? AND r.limit_5h_utilization IS NOT NULL AND r.limit_5h_reset IS NOT NULL
@@ -48,7 +47,7 @@ func (d *DB) FiveHourRows(f Filter, sinceMs int64) ([]FiveHourRow, error) {
 	var out []FiveHourRow
 	for rows.Next() {
 		var r FiveHourRow
-		if err := rows.Scan(&r.TsMs, &r.Reset, &r.Util, &r.Input, &r.CacheRead, &r.Write5m, &r.Write1h, &r.Output, &r.Model); err != nil {
+		if err := rows.Scan(&r.ID, &r.TsMs, &r.Reset, &r.Util, &r.Input, &r.CacheRead, &r.Write5m, &r.Write1h, &r.Output, &r.Model); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -103,9 +102,24 @@ func (a *API) fiveHourFit(r *http.Request, f Filter) (fit FiveHourFit) {
 		return e.fit
 	}
 	a.fiveHour.mu.Unlock()
+	// Concurrent first loads of one account share one read and one fit (the jsonInflight group the
+	// other caches use, under a key of its own).
+	v, _, _ := a.jsonInflight.Do("fivehour\x00"+key, func() (any, error) {
+		return a.computeFiveHourFit(r, f, key), nil
+	})
+	return v.(FiveHourFit)
+}
+
+// computeFiveHourFit reads the rows, fits, and caches the answer, a fit below the gate too. A read
+// error is not cached: it may be the leading caller's own cancelled request.
+func (a *API) computeFiveHourFit(r *http.Request, f Filter, key string) (fit FiveHourFit) {
+	readFailed := false
 	defer func() {
 		if p := recover(); p != nil {
 			fit = FiveHourFit{Reason: fmt.Sprintf("the fit failed: %v", p)}
+		}
+		if readFailed {
+			return
 		}
 		a.fiveHour.mu.Lock()
 		if a.fiveHour.m == nil || len(a.fiveHour.m) > 256 {
@@ -116,6 +130,7 @@ func (a *API) fiveHourFit(r *http.Request, f Filter) (fit FiveHourFit) {
 	}()
 	rows, err := a.db(r).FiveHourRows(f, time.Now().Add(-fhLookback).UnixMilli())
 	if err != nil {
+		readFailed = true
 		return FiveHourFit{Reason: "the rows could not be read"}
 	}
 	return FitFiveHourWeights(rows, tierPriceFn(a.priceFn(r)))
@@ -182,7 +197,7 @@ func (a *API) meFiveHourWeights(w http.ResponseWriter, r *http.Request) {
 	if since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64); since > 0 && body.OK {
 		if ping, err := a.db(r).PingTokensSince(f, since); err == nil {
 			body.WindowPing = &ping
-		} else if err != sql.ErrNoRows {
+		} else {
 			// Fail open: without the pings the page cannot net them, so it keeps the dollar estimate.
 			body.FiveHourFit = FiveHourFit{Reason: "the pings could not be read"}
 		}
