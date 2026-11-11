@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
@@ -1125,4 +1127,135 @@ func TestUnsetKeyEnvRefusesInsteadOfForwardingAPlaceholder(t *testing.T) {
 			t.Errorf("caller's own credential did not reach the upstream: %q", got)
 		}
 	})
+}
+
+// #1097: a config change rebuilds the tenant pipeline. The "keep in full" marks must survive it
+// when the component set is the same, or dedup compacts an expanded output again and the warm
+// cache is rewritten.
+func keepMarkFixture(t *testing.T) (*hostedFixture, *tenant.Tenant) {
+	t.Helper()
+	f := newHostedFixture(t, "up", "openai")
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		cfg, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		pipe, err := cfg.Build(e)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		return BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Preset: "test"}, nil
+	}, 0)
+	a, _ := f.register(t, "a@ibm.com")
+	return f, a
+}
+
+func setTenantConfig(t *testing.T, f *hostedFixture, a *tenant.Tenant, doc string) *tenant.Tenant {
+	t.Helper()
+	if err := f.reg.Update(a, a.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := f.reg.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestKeepMarksSurviveARebuildWithTheSameComponents(t *testing.T) {
+	f, a := keepMarkFixture(t)
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 5\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 9\n")
+	second, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Store == first.Store {
+		t.Fatal("the config change did not rebuild the tenancy")
+	}
+	if !offload.KeptVerbatim(second.Store, "sess", "the expanded output") {
+		t.Fatal("the keep mark was lost in the rebuild")
+	}
+	if offload.KeptVerbatim(second.Store, "other", "the expanded output") {
+		t.Fatal("the mark must stay session-scoped")
+	}
+}
+
+func TestKeepMarksDoNotSurviveARebuildWithDifferentComponents(t *testing.T) {
+	f, a := keepMarkFixture(t)
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup, extract]\n")
+	second, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offload.KeptVerbatim(second.Store, "sess", "the expanded output") {
+		t.Fatal("a different component set must start clean, as before #1097")
+	}
+}
+
+// #1097, review round 1: two requests race a config change. A removes the old entry and builds
+// slowly. B arrives after the remove, so it has no prev, and it publishes first. A must still
+// return a tenancy that holds the marks.
+func TestKeepMarksSurviveTwoConcurrentRebuilds(t *testing.T) {
+	f := newHostedFixture(t, "up", "openai")
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		cfg, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		pipe, err := cfg.Build(e)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		// Call 1 is the first build. Call 2 is request A, which blocks. Call 3 is request B.
+		if calls.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Preset: "test"}, nil
+	}, 0)
+	a, _ := f.register(t, "a@ibm.com")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 5\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 9\n")
+
+	type res struct {
+		tn  *Tenancy
+		err error
+	}
+	done := make(chan res)
+	go func() { tn, err := f.h.opts.Tenants.ForTenant(a); done <- res{tn, err} }()
+	<-entered
+	b, err := f.h.opts.Tenants.ForTenant(a) // publishes while A still builds
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.tn != b {
+		t.Fatal("A did not return the tenancy B published; the test no longer forces the interleaving")
+	}
+	if !offload.KeptVerbatim(r.tn.Store, "sess", "the expanded output") {
+		t.Fatal("the keep mark was lost when a second request published the rebuild first")
+	}
 }
