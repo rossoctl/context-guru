@@ -286,6 +286,10 @@ CREATE TABLE IF NOT EXISTS requests (
   auth_subscription    INTEGER NOT NULL DEFAULT 0,
   -- The part of sweep_false_expands whose drop was applied on a WARM request (#491).
   sweep_false_expands_warm INTEGER NOT NULL DEFAULT 0,
+  -- The tokens of the restored copies this request carried (expand.fixed_restore, #481): content the
+  -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
+  -- none was inserted.
+  restored_tokens INTEGER NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -940,6 +944,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The part of sweep_false_expands whose drop was applied on a warm request (#491). Additive, 0 on
 	// every earlier row, which is true: no warm drop existed then.
 	{"requests", "sweep_false_expands_warm", "INTEGER NOT NULL DEFAULT 0"},
+	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
+	// every earlier row: those were not recorded, so they read as no copy.
+	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was

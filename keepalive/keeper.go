@@ -50,11 +50,11 @@ type kaEntry struct {
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// refreshedAt is the last moment this entry's provider-side cache entry is KNOWN refreshed:
-	// the real request that created it, or a later ping or summary substitute call that actually
-	// READ the cache (CacheRead > 0). A ping or substitute that wrote instead of reading refreshed
-	// nothing that was there before, so it must not move this clock — see record1 and
-	// recordSummarySubstitute, both gated on CacheRead > 0 the same way. Surfaced to hosts via
-	// Plan.RefreshedAt, for a status line.
+	// the real request that created it, or a later ping or summary substitute call that READ the
+	// cache (CacheRead > 0) or WROTE it (CacheWrite > 0, which re-created the entry and started a
+	// fresh lifetime, #580). A call that billed neither touched nothing. See record1, manual ping and
+	// recordSummarySubstitute, all gated the same way. Surfaced to hosts via Plan.RefreshedAt, for a
+	// status line.
 	refreshedAt time.Time
 	// startedAt is when the last upstream request on this session STARTED — a real request
 	// or a ping, whichever was later.
@@ -713,7 +713,7 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 
 // ArriveAt is Arrive plus the instant the entry's provider-side cache was last known refreshed
 // (see kaEntry.refreshedAt) — the real request that started the idle span, or the start of the
-// last ping that READ the cache. Zero when there was no entry.
+// last ping that READ or WROTE the cache. Zero when there was no entry.
 func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refreshedAt time.Time) {
 	if k == nil || key.Session == "" {
 		return 0, 0, "", time.Time{}
@@ -1716,9 +1716,11 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// away?" must not. The recency map answers the second and stays untouched; this writes only
 	// the first, so the dashboard's idle-gap statistics are unaffected.
 	//
-	// GATED ON CacheRead > 0, because only a ping that actually read the entry refreshed it. A ping
-	// that WROTE (the entry was already gone) refreshed nothing that was there before, and claiming
-	// otherwise would make the clock lie in the expensive direction.
+	// GATED ON CacheRead > 0 || CacheWrite > 0, because only a ping that billed the cache touched the
+	// entry. A ping that READ it refreshed it. A ping that WROTE (the entry was already gone) re-created
+	// it, which starts a fresh lifetime at that ping all the same: left on the earlier clock, the next
+	// real request is aged by the whole gap and a live entry reads as ttl_expiry (#580). A ping that
+	// billed neither left the entry alone.
 	//
 	// Anchored on the ping's START, not its completion, for the same reason kaEntry.startedAt is:
 	// the provider's lifetime runs from request start.
@@ -1726,14 +1728,14 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// j.raw is the UNMASKED body copy, and reading it here is safe: fire zeroizes it in a defer that
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
-	if status >= 200 && status < 300 && u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		j.touch(provider, startedAt.UnixMilli())
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
-	if u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()

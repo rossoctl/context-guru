@@ -71,6 +71,7 @@ func limitStatusOK(s string) bool {
 // noteLimits records the subscription limit headers of an upstream answer. On a request with
 // several upstream rounds the last answer that carried them wins: it is the newest share.
 func (c *capture) noteLimits(h http.Header) {
+	defer c.timed("noteLimits")()
 	if c == nil {
 		return
 	}

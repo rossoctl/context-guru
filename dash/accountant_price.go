@@ -229,11 +229,11 @@ const DeferComponent = "tooldefer"
 
 // envelopeComponents are the operators that change the request envelope (tools, system, cache
 // marks) and may have no pipeline row: the proxy reports them from a body diff
-// (proxy/accountant_envelope.go). expand and adjudicate are never pipeline components; headttl is
-// a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
+// (proxy/accountant_envelope.go). expand, adjudicate and expand_restore (the copy fixed_restore
+// inserts, #481) are never pipeline components; headttl is a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
 // the rewrite ran from an equivalent gate (cacheinject runs the split too).
 var envelopeComponents = map[string]bool{
-	"expand": true, "adjudicate": true, "headttl": true,
+	"expand": true, "adjudicate": true, "headttl": true, "expand_restore": true,
 	"toolschema": true, "toolfilter": true, "cachesplit": true,
 	"tailbreakpoint": true, "tooldefer": true,
 }
