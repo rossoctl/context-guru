@@ -1,4 +1,4 @@
-package main
+package proxyapp
 
 import (
 	"os"
@@ -16,7 +16,7 @@ func installSH(t *testing.T, script string, args ...string) string {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
-	src, err := filepath.Abs("../../deploy/service/install.sh")
+	src, err := filepath.Abs("../deploy/service/install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestPreflightReadsKeyEnvFromConfigNotComments(t *testing.T) {
 	// The shipped example carries the documenting comment verbatim. Two real entries and
 	// a trailing comment are appended, because the case that must STILL be checked is
 	// the configured one.
-	example, err := os.ReadFile("../../deploy/service/upstreams.example.yaml")
+	example, err := os.ReadFile("../deploy/service/upstreams.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

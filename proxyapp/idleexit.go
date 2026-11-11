@@ -1,4 +1,4 @@
-package main
+package proxyapp
 
 import (
 	"fmt"
@@ -115,6 +115,12 @@ func isCatchAll(pattern string) bool { return patternPath(pattern) == "/" }
 // worth the machinery: the dashboard UI polls every 30s, so its SSE stream is never the only
 // traffic in practice, and the threshold's floor is an hour.
 func stampActivity(mux *http.ServeMux, act *activityClock, now func() time.Time) http.Handler {
+	return stampActivityThrough(mux, mux, act, now)
+}
+
+// stampActivityThrough is stampActivity for a mux that a host has wrapped (Hooks.Handler): mux
+// still decides which requests count as use, and next serves them.
+func stampActivityThrough(mux *http.ServeMux, next http.Handler, act *activityClock, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Ask the mux which pattern this request resolves to, rather than comparing r.URL.Path.
 		//
@@ -140,7 +146,7 @@ func stampActivity(mux *http.ServeMux, act *activityClock, now func() time.Time)
 		if use {
 			act.touch(now())
 		}
-		mux.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 		if use {
 			act.touch(now())
 		}
