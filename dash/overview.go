@@ -1474,10 +1474,12 @@ func percentileOf(xs []float64, p float64) float64 {
 }
 
 // sessionScope is the row condition that selects ONE session's rows for a per-session window or
-// count (#501). Session ids are client-supplied, so two tenants can present the same one; a
-// bare `session_id = ?` would rank or count both tenants' rows as one session. TenantAll (a
-// manager's service-wide view) has no single tenant to add, and there every window partitions
-// by (tenant_id, session_id), so the two tenants' rows are still kept apart.
+// count (#501). Defense in depth: on the hosted path the stored id is already `tenant:base`
+// (session.Scoped), so two tenants cannot normally share one. A row written another way (a
+// test, a direct insert, an import) can, and a bare `session_id = ?` would then rank or count
+// both tenants' rows as one session. TenantAll (a manager's service-wide view) has no single
+// tenant to add, and there every window partitions by (tenant_id, session_id), so the two
+// tenants' rows are still kept apart.
 func sessionScope(f Filter) (string, []any) {
 	if f.TenantAll {
 		return "r.session_id = ?", []any{f.Session}

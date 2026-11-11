@@ -325,7 +325,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// Seven independent reads, four of them a pass over every request (the saving, the per-session
 	// saving, the addressable CTE, the tokens). They ran back to back; each goroutine fills its own fields.
 	var (
-		saved, spent map[string]float64
+		saved, spent map[sessKey]float64
 		from         sql.NullInt64
 		lat          kvcache.Latency
 		days         float64
@@ -400,7 +400,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		return nil, err
 	}
 	o.NetUSD = o.SavedUSD - o.PingUSD
-	nets := map[string]float64{}
+	nets := map[sessKey]float64{}
 	for s, v := range saved {
 		nets[s] += v
 	}
@@ -416,7 +416,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 			o.Losers++
 		}
 		if net < o.WorstNetUSD {
-			o.WorstNetUSD, o.WorstSession = net, s
+			o.WorstNetUSD, o.WorstSession = net, s.session
 		}
 	}
 	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
@@ -516,22 +516,26 @@ func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
 	return l, nil
 }
 
+// sessKey names one session: its tenant and its id (#501). A bare session id is not enough to
+// key a per-session figure, because two tenants can hold rows under the same one.
+type sessKey struct{ tenant, session string }
+
 // sumBySession groups one column by session under an extra predicate.
-func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[string]float64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[sessKey]float64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]float64{}
+	out := map[sessKey]float64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var v float64
-		if err := rows.Scan(&s, &v); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &v); err != nil {
 			return nil, err
 		}
-		out[s] = v
+		out[k] = v
 	}
 	return out, rows.Err()
 }
@@ -956,15 +960,15 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	}
 	aCond, aArgs := addressable(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0)
+		SELECT session_id, tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM addressable WHERE session_id <> ''
-		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
+		GROUP BY tenant_id, session_id ORDER BY 4 DESC, tenant_id, session_id LIMIT ?`,
 		append(append([]any(nil), aArgs...), limit)...)
 	if err != nil {
 		return nil, err
 	}
 	out := []*KeepAliveSessionRow{}
-	byID := map[string]*KeepAliveSessionRow{}
+	byID := map[sessKey]*KeepAliveSessionRow{}
 	for rows.Next() {
 		var s KeepAliveSessionRow
 		if err := rows.Scan(&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD); err != nil {
@@ -972,7 +976,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 			return nil, err
 		}
 		out = append(out, &s)
-		byID[s.SessionID] = &s
+		byID[sessKey{s.TenantID, s.SessionID}] = &s
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -986,15 +990,15 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	cond, args := f.where()
 	for _, s := range out {
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), MAX(r.ts) FROM requests r
-			WHERE `+cond+` AND r.session_id = ?`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ?`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
 			return nil, err
 		}
 		var prefix sql.NullInt64
 		var model sql.NullString
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_read + r.cache_write, r.model FROM requests r
-			WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&prefix, &model); err != nil &&
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&prefix, &model); err != nil &&
 			err != sql.ErrNoRows {
 			return nil, err
 		}
@@ -1017,7 +1021,8 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 		return nil, err
 	}
 	for _, s := range out {
-		s.SavedUSD, s.PingUSD, s.Pings = saved[s.SessionID], spent[s.SessionID], pings[s.SessionID]
+		k := sessKey{s.TenantID, s.SessionID}
+		s.SavedUSD, s.PingUSD, s.Pings = saved[k], spent[k], pings[k]
 		s.NetUSD = s.SavedUSD - s.PingUSD
 	}
 	return out, nil
@@ -1235,29 +1240,29 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		return nil, err
 	}
 	for i := range out.Rows {
-		id := out.Rows[i].SessionID
-		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[id], spent[id]
-		out.Rows[i].Pings = pings[id]
+		k := sessKey{out.Rows[i].TenantID, out.Rows[i].SessionID}
+		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[k], spent[k]
+		out.Rows[i].Pings = pings[k]
 	}
 	return out, nil
 }
 
 // countBySession counts rows per session under an extra predicate.
-func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) countBySession(cond string, args []any, extra string) (map[sessKey]int64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[sessKey]int64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var n int64
-		if err := rows.Scan(&s, &n); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &n); err != nil {
 			return nil, err
 		}
-		out[s] = n
+		out[k] = n
 	}
 	return out, rows.Err()
 }

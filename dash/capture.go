@@ -901,7 +901,7 @@ func (r *Recorder) seedModels(since int64) ([]string, error) {
 func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 	rows, err := r.db.sql.Query(`SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h FROM (
 			SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h,
-				ROW_NUMBER() OVER (PARTITION BY session_id, thread_id, model ORDER BY ts DESC, id DESC) AS rn
+				ROW_NUMBER() OVER (PARTITION BY tenant_id, session_id, thread_id, model ORDER BY ts DESC, id DESC) AS rn
 			FROM requests
 			WHERE ts >= ? AND keepalive = 0 AND cache_write > 0 AND status >= 200 AND status < 300)
 		WHERE rn = 1`, since)
@@ -917,7 +917,14 @@ func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 			return nil, err
 		}
 		if write1h >= write {
-			out[thread.Key(sid, tid)+"\x00"+model] = ts
+			// The key carries no tenant: the session id already does, as `tenant:base`
+			// (session.Scoped). The ranking above is per tenant all the same (#1071), so one
+			// tenant's later write cannot hide another's; on a key two rows still share, the
+			// newer write stands.
+			k := thread.Key(sid, tid) + "\x00" + model
+			if ts > out[k] {
+				out[k] = ts
+			}
 		}
 	}
 	return out, rows.Err()
@@ -956,7 +963,7 @@ func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
 		WHERE r.ts >= ? AND r.session_id != ''
 			AND r.status >= 200 AND r.status < 300
 			AND (r.keepalive = 0 OR (r.keepalive = 1 AND r.cache_read > 0))
-		GROUP BY r.session_id, r.thread_id, r.session_alias`,
+		GROUP BY r.tenant_id, r.session_id, r.thread_id, r.session_alias`,
 		now-staleSession)
 	if err != nil {
 		return 0, err
@@ -969,9 +976,16 @@ func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
 		if err := rows.Scan(&sid, &tid, &alias, &ts); err != nil {
 			return 0, err
 		}
-		seeded[thread.Key(sid, tid)] = ts
+		// Grouped per tenant (#1071). The key has no tenant, so a key two groups share keeps the
+		// newer clock.
+		keys := []string{thread.Key(sid, tid)}
 		if alias != "" && alias != sid {
-			seeded[thread.Key(alias, tid)] = ts
+			keys = append(keys, thread.Key(alias, tid))
+		}
+		for _, k := range keys {
+			if ts > seeded[k] {
+				seeded[k] = ts
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

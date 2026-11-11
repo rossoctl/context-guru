@@ -171,9 +171,9 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 // wrong INSIDE the ranking; tenant_id would not — see below).
 //
 // #501: the ranking is per (tenant_id, session_id), and the session-scoped form adds
-// `tenant_id = ?` alongside `session_id = ?` (sessionScope). Session ids are client-supplied, so
-// two tenants can present the same one, and a ranking over session_id alone would see BOTH
-// tenants' rows as one session. TenantAll (a manager's service-wide view) has no single tenant
+// `tenant_id = ?` alongside `session_id = ?` (sessionScope). The hosted path namespaces the id by
+// tenant already (session.Scoped), so this is defense in depth: a row written another way could
+// share an id, and a ranking over session_id alone would see BOTH tenants' rows as one session. TenantAll (a manager's service-wide view) has no single tenant
 // to add; the partition keeps the tenants apart there.
 func cachesplitHistoricalQuery(f Filter, cond string, args []any) (string, []any) {
 	rnCond, rnArgs := "", []any{}
