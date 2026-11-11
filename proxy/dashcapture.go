@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -32,6 +33,32 @@ import (
 //
 // Everything expensive — redaction of captured content, gzip, the insert, the SSE
 // fan-out — happens on the writer goroutine, after the response has been sent.
+
+// spendHook is a TEST-ONLY hook. It is nil in production, and then each timed call costs one atomic
+// load and a deferred no-op. A test sets it to learn how long the dashboard's own calls ran on the
+// request goroutine, which is the dashboard's cost with the runner's speed taken out
+// (TestDashboardAddsNoRequestLatencyWithContentCapture). Same idea as the nil test hook in extract_llm.go.
+var spendHook atomic.Pointer[func(call string, d time.Duration)]
+
+func noopSpan() {}
+
+// timedSpan starts timing one dashboard call. Defer the func it returns.
+func timedSpan(call string) func() {
+	hook := spendHook.Load()
+	if hook == nil {
+		return noopSpan
+	}
+	start := time.Now()
+	return func() { (*hook)(call, time.Since(start)) }
+}
+
+// timed is timedSpan for a capture method. A nil capture (dashboard off) is never timed.
+func (c *capture) timed(call string) func() {
+	if c == nil {
+		return noopSpan
+	}
+	return timedSpan(call)
+}
 
 // capture is the per-request scratchpad the chat handler fills as it goes.
 type capture struct {
@@ -170,6 +197,7 @@ type capture struct {
 // newCapture starts a capture for one request, or returns nil when the dashboard
 // is off — every call site is nil-safe, so the disabled path costs one nil check.
 func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenancy) *capture {
+	defer timedSpan("newCapture")()
 	if h.rec == nil {
 		return nil
 	}
@@ -203,6 +231,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 // An empty name means no override took effect, so the tenancy's default — the label
 // newCapture set — is the honest one and stays.
 func (c *capture) notePreset(name string) {
+	defer c.timed("notePreset")()
 	if c == nil || name == "" {
 		return
 	}
@@ -217,6 +246,7 @@ func (c *capture) notePreset(name string) {
 // Nil-safe: with the dashboard off there is nothing to attribute and the context is
 // returned unchanged.
 func (c *capture) llmCtx(ctx context.Context) context.Context {
+	defer c.timed("llmCtx")()
 	if c == nil {
 		return ctx
 	}
@@ -227,6 +257,7 @@ func (c *capture) llmCtx(ctx context.Context) context.Context {
 // unique-savings share. The dedup map lives in the recorder (process-wide), which
 // is what makes "unique" mean the same thing here and in /stats.
 func (c *capture) noteTrace(tr apply.Trace) {
+	defer c.timed("noteTrace")()
 	if c == nil {
 		return
 	}
@@ -243,6 +274,7 @@ func (c *capture) noteTrace(tr apply.Trace) {
 
 // noteAgentCompaction records that this request is the agent's own compaction request.
 func (c *capture) noteAgentCompaction(v bool) {
+	defer c.timed("noteAgentCompaction")()
 	if c != nil {
 		c.agentComp = v
 	}
@@ -250,6 +282,7 @@ func (c *capture) noteAgentCompaction(v bool) {
 
 // noteThread records which thread of the session this request belongs to.
 func (c *capture) noteThread(res thread.Result) {
+	defer c.timed("noteThread")()
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
@@ -264,6 +297,7 @@ func (c *capture) noteThread(res thread.Result) {
 // after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
 // the same body threadFor already matches on.
 func (c *capture) noteWaitBody(body []byte) {
+	defer c.timed("noteWaitBody")()
 	if c != nil {
 		c.waitBody = body
 	}
@@ -277,6 +311,7 @@ func (c *capture) noteWaitBody(body []byte) {
 // body the capture already holds would produce a key no request ever derives. See
 // apply.EnforcedSessionIDFor, the same door the expand repair and the observe job use.
 func (c *capture) noteAliasSource(pipe *components.Pipeline, api string, bypass bool) {
+	defer c.timed("noteAliasSource")()
 	if c == nil {
 		return
 	}
@@ -289,6 +324,7 @@ func (c *capture) noteAliasSource(pipe *components.Pipeline, api string, bypass 
 // caller's choices, and reporting a value we injected as theirs would make the dashboard's
 // per-effort cost breakdown a statement about ourselves.
 func (c *capture) noteMeta(m dash.Meta) {
+	defer c.timed("noteMeta")()
 	if c != nil {
 		c.meta = m
 	}
@@ -299,6 +335,7 @@ func (c *capture) noteMeta(m dash.Meta) {
 // environment block out of the transcript it forwards, and reading the project from the rewritten
 // body would record "unattributed" on exactly the requests the pipeline acted on.
 func (c *capture) noteProject(p string) {
+	defer c.timed("noteProject")()
 	if c != nil {
 		c.project = p
 	}
@@ -316,6 +353,7 @@ func (c *capture) noteProject(p string) {
 // inventory on its first request and nothing on the other 64. Measured in
 // dash.BenchmarkScanInventory.
 func (c *capture) noteInventory(provider string, body []byte) {
+	defer c.timed("noteInventory")()
 	if c == nil {
 		return
 	}
@@ -447,11 +485,13 @@ func toolChoiceMode(v gjson.Result) string {
 }
 
 func (c *capture) noteCG(ms float64) {
+	defer c.timed("noteCG")()
 	if c != nil {
 		c.cgMs = ms
 	}
 }
 func (c *capture) noteUpstream(ms float64, status int) {
+	defer c.timed("noteUpstream")()
 	if c != nil {
 		c.upstream, c.status = ms, status
 	}
@@ -459,6 +499,7 @@ func (c *capture) noteUpstream(ms float64, status int) {
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
 func (c *capture) noteKeepAlive(ka kaArrival) {
+	defer c.timed("noteKeepAlive")()
 	if c != nil {
 		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
 		c.kaRefreshedAt = ka.refreshedAt
@@ -468,17 +509,20 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 // noteCompactionPoint records C (billed tokens) and its source, so the replay cap and the
 // episode panel read the figure this request ran under and not a recomputed one (#948).
 func (c *capture) noteCompactionPoint(tokens int, source string) {
+	defer c.timed("noteCompactionPoint")()
 	if c != nil {
 		c.cpoint, c.cpointSrc = tokens, source
 	}
 }
 
 func (c *capture) noteModel(model string) {
+	defer c.timed("noteModel")()
 	if c != nil {
 		c.model = model
 	}
 }
 func (c *capture) noteExpand(tokens int) {
+	defer c.timed("noteExpand")()
 	if c != nil {
 		c.expands++
 		c.expandTok += tokens
@@ -490,6 +534,7 @@ func (c *capture) noteExpand(tokens int) {
 // the totals. note.First is true only for the first expand of a drop, so a stale tool error repaired
 // on every later turn is one false drop and not many.
 func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
+	defer c.timed("noteSweepExpand")()
 	if c == nil || !note.Sweep {
 		return
 	}
@@ -513,6 +558,7 @@ type deferFacts struct {
 // booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
 // none) and how many different tools its searches loaded.
 func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
+	defer c.timed("noteDefer")()
 	if c == nil {
 		return
 	}
@@ -534,6 +580,7 @@ func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) 
 // duration instead of the two being averaged into one number — an average over both would
 // report a healthy TTFB for exactly the requests that had the worst one.
 func (c *capture) observeSSE(ttfbMs float64, buffered bool) {
+	defer c.timed("observeSSE")()
 	if c == nil {
 		return
 	}
@@ -541,6 +588,7 @@ func (c *capture) observeSSE(ttfbMs float64, buffered bool) {
 }
 
 func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, contentCap, contentMax int) {
+	defer c.timed("finish")()
 	if c == nil {
 		return
 	}
@@ -775,6 +823,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// recovered panic; this covers any path that reached neither.
 	c.accWait()
 	defer c.savings.drop(c.accReq)
+	// accCompute is its own span: the accountant's compute is not the dashboard's capture work (#1059).
+	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
 		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
@@ -799,6 +849,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
 		}
 	}
+	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accUnsupportedWire {
 		e.SetAccountantUnsupportedWire()
@@ -904,6 +955,7 @@ type LiveFacts struct {
 
 // liveFacts reads them off the capture (nil-safe). ttfbMs is the streamed first-byte delay, 0 on buffered responses, as the dashboard records it.
 func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
+	defer c.timed("liveFacts")()
 	if c == nil {
 		return nil
 	}
@@ -913,6 +965,7 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
 func (c *capture) noteRounds(n int) {
+	defer c.timed("noteRounds")()
 	if c != nil {
 		c.rounds = n
 	}

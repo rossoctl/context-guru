@@ -79,6 +79,10 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	// diff and reports each as an added declaration. The sum check passes, the override applies, and
 	// each injection is a cost on a row of its own.
 	waitForRows(t, rec, 1)
+	// The recorder counts a row just before it calls the tap, so wait for the tap too.
+	for i := 0; i < 400 && len(tap.all()) < 1; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
 	e := tap.all()[0]
 	res, _ := e.AccountantResult()
 	for _, c := range res.Checks {

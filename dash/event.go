@@ -423,6 +423,10 @@ type Event struct {
 	// SweepFalseExpandsWarm is the part of SweepFalseExpands whose drop was applied on a WARM request
 	// (#491), so the warm false-drop rate counts expands as well as references.
 	SweepFalseExpandsWarm int `json:"sweep_false_expands_warm"`
+	// RestoredTokens is what the restored copies this request carried added to it
+	// (expand.fixed_restore, #481). Every later turn of a session carries them again, and the
+	// pipeline's TokensAfter counts them.
+	RestoredTokens int `json:"restored_tokens"`
 	// SweepAnswerUSD is, on a keep-alive ping row the sweep's question replaced, what the answer cost
 	// beyond the read the ping would have paid anyway (#404 point 9). Booked once, on the ping row, as
 	// the summary's call is (#458). It is part of CostUSD, not added to it, and it is a separate
@@ -792,6 +796,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens
+	e.RestoredTokens = tr.RestoredTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass
 	} else if e.Mode == "" {

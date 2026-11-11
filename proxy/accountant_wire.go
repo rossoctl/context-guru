@@ -27,6 +27,7 @@ func accThreadID(id string) string {
 // milliseconds before it went upstream (issue #1059), so the record is opened by accEnd, off the request
 // path. Nil-safe.
 func (c *capture) accBegin(meta accountant.RequestMeta, client []byte) {
+	defer c.timed("accBegin")()
 	if c == nil || c.savings == nil {
 		return
 	}
@@ -47,6 +48,7 @@ type accJob struct {
 // is usual, not guaranteed: finish runs after the response is flushed, so a client can send the next turn first.
 // The library recomputes a figure when another request of the thread intervened (Result.Recomputed). Nil-safe; a no-op when accBegin did not note a request.
 func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Operation) {
+	defer c.timed("accEnd")()
 	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
 		return
 	}
@@ -233,6 +235,7 @@ func accPingKey(session, threadID string) string { return session + "\x00" + thr
 // lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd and is not
 // redone; it matters only when another thread of the session touched the entry. Nil-safe.
 func (c *capture) accBilledTTL(u Usage) {
+	defer c.timed("accBilledTTL")()
 	if c == nil || c.accReq == nil {
 		return
 	}

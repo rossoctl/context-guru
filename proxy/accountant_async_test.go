@@ -141,7 +141,7 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 			`"stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":1,"cache_creation_input_tokens":300}}`)
 	}))
 	defer up.Close()
-	h, rec, tap := accHandlerYAML(t, up.URL, "pipeline: [extract]\n")
+	h, _, tap := accHandlerYAML(t, up.URL, "pipeline: [extract]\n")
 	var accountantDone atomic.Int64 // unix nanos at which the accountant's work ended
 	h.savings.onEnd = func(*accountant.Request) {
 		time.Sleep(accountantDelay)
@@ -167,10 +167,10 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 			time.Duration(reached.Load()-done), accountantDelay)
 	}
 	// waitForRows polls for about 2 s, the same as the accountant's delay, so poll longer here.
-	for i := 0; i < 2000 && rec.Stats().Written < 1; i++ {
+	for i := 0; i < 2000 && len(tap.all()) < 1; i++ {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if rec.Stats().Written < 1 {
+	if len(tap.all()) < 1 {
 		t.Fatal("the row was never written")
 	}
 	if _, ok := tap.all()[0].AccountantResult(); !ok {
