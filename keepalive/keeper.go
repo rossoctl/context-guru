@@ -88,7 +88,7 @@ type kaEntry struct {
 	// without corrupting a slice something else still reads.
 	//
 	// Masked for the reason the credential is, and the asymmetry decides it: a leaked key is
-	// rotatable, a leaked transcript is not. This is up to 8 MiB of the user's conversation, and
+	// rotatable, a leaked transcript is not. This is up to 32 MiB (Policy.BodyLimit) of the user's conversation, and
 	// XOR over it costs a memcpy-shaped pass on a path that runs a few hundred times a day.
 	// The prefix hash covers this content, which is why the ping must resend it verbatim.
 	body []byte
@@ -860,7 +860,15 @@ func (k *Keeper) Record(r Record) {
 		}
 		return
 	}
-	if len(body) > MaxBodyBytes {
+	// The cost cap is what lets a body past the old 8 MiB limit, so it must be able to judge it. With
+	// no price for the model (or no usage to size the prefix) the projected cost is 0 and the cap would
+	// pass any size: keep the old limit then (#1100).
+	limit := pol.BodyLimit()
+	if limit > LegacyMaxBodyBytes && len(body) > LegacyMaxBodyBytes &&
+		k.projectedPingUSD(model, u.CacheRead+u.CacheWrite, route, r.Endpoint) == 0 {
+		limit = LegacyMaxBodyBytes
+	}
+	if len(body) > limit {
 		refuse(ReasonTooLarge)
 		k.retire(key)
 		k.skipped.Add(1)
