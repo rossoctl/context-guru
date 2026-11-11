@@ -553,7 +553,7 @@ func withKeepAlive(f Filter) Filter {
 const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 	AND r.split_tail_hash <> COALESCE((
 		SELECT p.split_tail_hash FROM requests p
-		WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
+		WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
 		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
@@ -572,7 +572,7 @@ const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 const afterOurMutation = `EXISTS (
 			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
 				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
+				WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
 				  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
 		)`
@@ -892,14 +892,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// #492: same scoping fix as `later` above, same reason — PARTITION BY session_id means a
 		// session with no pings of its own can never match `before.s` for a different reason: the
 		// CTE's own WHERE used to be every session that EVER pinged, not just the caller's.
-		beforeCond, beforeArgs := "r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
+		beforeCond, beforeArgs := "(r.tenant_id, r.session_id) IN (SELECT k.tenant_id, k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
 		if f.Session != "" {
-			beforeCond, beforeArgs = "r.session_id = ?", []any{f.Session}
+			beforeCond, beforeArgs = sessionScope(f)
 		}
 		return d.sql.QueryRowContext(d.readCtx(), `WITH before AS (
 				SELECT r.id AS rid, SUM(CASE WHEN `+cond+` AND r.saved_unique > 0
 						THEN r.saved_unique ELSE 0 END)
-					OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id
+					OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id
 						ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS s
 				FROM requests r
 				WHERE `+beforeCond+`)
@@ -1183,15 +1183,15 @@ func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
 	if f.Session != "" {
 		return `SELECT COALESCE(SUM(r.saved_unique * (
 				SELECT COUNT(*) FROM requests p
-				WHERE p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
+				WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
 			)),0)
 			FROM requests r WHERE ` + cond + ` AND r.saved_unique > 0`, args
 	}
 	return `WITH later AS (
-			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
-				- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.tenant_id, r.session_id)
+				- ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS n
 			FROM requests r
-			WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
+			WHERE (r.tenant_id, r.session_id) IN (SELECT s.tenant_id, s.session_id FROM requests s WHERE s.saved_unique > 0))
 		SELECT COALESCE(SUM(r.saved_unique * later.n),0)
 		FROM requests r JOIN later ON later.rid = r.id WHERE ` + cond + ` AND r.saved_unique > 0`, args
 }
@@ -1212,11 +1212,12 @@ func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
 func compactionResetsQuery(f Filter, cond string, args []any) (string, []any) {
 	prevCond, prevArgs := "", []any{}
 	if f.Session != "" {
-		prevCond, prevArgs = "WHERE r.session_id = ?", []any{f.Session}
+		c, a := sessionScope(f)
+		prevCond, prevArgs = "WHERE "+c, a
 	}
 	q := `WITH prev AS (
 		SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
-			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+			OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
 		FROM requests r
 		` + prevCond + `
 	) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
@@ -1469,4 +1470,16 @@ func percentileOf(xs []float64, p float64) float64 {
 	}
 	sort.Float64s(xs)
 	return xs[int64(float64(len(xs)-1)*p)]
+}
+
+// sessionScope is the row condition that selects ONE session's rows for a per-session window or
+// count (#501). Session ids are client-supplied, so two tenants can present the same one; a
+// bare `session_id = ?` would rank or count both tenants' rows as one session. TenantAll (a
+// manager's service-wide view) has no single tenant to add, and there every window partitions
+// by (tenant_id, session_id), so the two tenants' rows are still kept apart.
+func sessionScope(f Filter) (string, []any) {
+	if f.TenantAll {
+		return "r.session_id = ?", []any{f.Session}
+	}
+	return "r.tenant_id = ? AND r.session_id = ?", []any{f.Tenant, f.Session}
 }

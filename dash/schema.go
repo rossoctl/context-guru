@@ -347,6 +347,8 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts       ON requests(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_session  ON requests(session_id, ts);
+-- #501: the per-session correlated counts also match tenant_id; with it in the index they stay index-only.
+CREATE INDEX IF NOT EXISTS idx_requests_session_tenant ON requests(session_id, tenant_id, ts);
 CREATE INDEX IF NOT EXISTS idx_requests_model    ON requests(model, ts);
 -- Tenant-leading indexes: in a hosted deployment every query is tenant-scoped, so
 -- a tenant-leading index is the difference between a seek and a full scan once the

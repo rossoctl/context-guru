@@ -112,15 +112,15 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 		return out, err
 	}
 	defer rows.Close()
-	priced := map[string]float64{} // model -> value of one qualifying request
+	priced := map[string]float64{} // tenant|model -> value of one qualifying request
 	seen := map[string]bool{}
 	for rows.Next() {
-		var model string
+		var tenant, model string
 		var read, write int64
-		if err := rows.Scan(&model, &read, &write); err != nil {
+		if err := rows.Scan(&tenant, &model, &read, &write); err != nil {
 			return out, err
 		}
-		sp, ok := sizes[model]
+		sp, ok := sizes[tenant][model]
 		if !ok || sp[0] != sp[1] {
 			// No measured stable half, or no CONSTANT one. See the file comment: min != max
 			// on most models here, and the two ends of that spread differ by 31x in what they
@@ -132,7 +132,7 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
-		v, done := priced[model]
+		v, done := priced[tenant+"|"+model]
 		if !done {
 			price, ok := p.Price(context.Background(), model)
 			if !ok || price.Zero() {
@@ -146,7 +146,7 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 			if delta := miss - price.CacheRead; delta > 0 {
 				v = float64(stable) * delta
 			}
-			priced[model] = v
+			priced[tenant+"|"+model] = v
 		}
 		if v <= 0 {
 			out.Uncovered++
@@ -177,17 +177,14 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 func cachesplitHistoricalQuery(f Filter, cond string, args []any) (string, []any) {
 	rnCond, rnArgs := "", []any{}
 	if f.Session != "" {
-		if f.TenantAll {
-			rnCond, rnArgs = "WHERE r.session_id = ?", []any{f.Session}
-		} else {
-			rnCond, rnArgs = "WHERE r.tenant_id = ? AND r.session_id = ?", []any{f.Tenant, f.Session}
-		}
+		c, a := sessionScope(f)
+		rnCond, rnArgs = "WHERE "+c, a
 	}
 	return `WITH rn AS (
-		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS n
 		FROM requests r
 		` + rnCond + `
-	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
+	) SELECT r.tenant_id, r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
 		WHERE ` + cond + ` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, append(rnArgs, args...)
 }
 
@@ -222,7 +219,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 	// dropped, plus each tenant scope separately -- the frozen corpus returns ZERO rows for the
 	// shipped predicate, so a check against it alone proves nothing.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH rn AS (
-		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS n
 		FROM requests r
 	) SELECT r.tenant_id, r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
 		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, args...)
@@ -232,7 +229,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 	defer rows.Close()
 	acc := map[string]*CachesplitHistorical{}
 	seen := map[string]map[string]bool{}
-	priced := map[string]float64{} // model -> value of one qualifying request, shared across tenants
+	priced := map[string]float64{} // tenant|model -> value of one qualifying request
 	for rows.Next() {
 		var tenant, model string
 		var read, write int64
@@ -245,7 +242,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 			acc[tenant] = h
 			seen[tenant] = map[string]bool{}
 		}
-		sp, ok := sizes[model]
+		sp, ok := sizes[tenant][model]
 		if !ok || sp[0] != sp[1] {
 			h.Uncovered++ // same refusal as CachesplitHistoricalUSD; see its file comment
 			continue
@@ -254,7 +251,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
-		v, done := priced[model]
+		v, done := priced[tenant+"|"+model]
 		if !done {
 			price, ok := p.Price(context.Background(), model)
 			if !ok || price.Zero() {
@@ -268,7 +265,7 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 			if delta := miss - price.CacheRead; delta > 0 {
 				v = float64(stable) * delta
 			}
-			priced[model] = v
+			priced[tenant+"|"+model] = v
 		}
 		if v <= 0 {
 			h.Uncovered++
@@ -307,10 +304,12 @@ const cachesplitSizeSpreadTTL = 5 * time.Minute
 type cachesplitSizeSpreadCache struct {
 	mu    sync.Mutex
 	at    time.Time
-	sizes map[string][2]int
+	sizes map[string]map[string][2]int // tenant -> model -> [min, max]
 }
 
-// CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
+// CachesplitSizeSpread reports the recorded minimum and maximum stable half per tenant and
+// model (#501: per tenant, so one tenant's recorded sizes cannot decide whether another's credit
+// applies). The
 // estimate above credits a model only where those are equal; this is where that gets checked
 // instead of assumed, and it is what decides the refusal rather than merely reporting on it.
 //
@@ -318,7 +317,7 @@ type cachesplitSizeSpreadCache struct {
 // a cache MISS still runs the full, deployment-wide scan — nothing here makes the QUERY itself
 // bounded, only how OFTEN it runs. #502's EXPLAIN test documents the miss case directly rather
 // than pretending it does not exist.
-func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
+func (d *DB) CachesplitSizeSpread() (map[string]map[string][2]int, error) {
 	c := d.sizeSpread
 	c.mu.Lock()
 	stale := c.sizes
@@ -328,19 +327,22 @@ func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
 		return stale, nil
 	}
 
-	out := map[string][2]int{}
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
-		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`)
+	out := map[string]map[string][2]int{}
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, model, MIN(split_stable_tokens), MAX(split_stable_tokens)
+		FROM requests WHERE split_stable_tokens > 0 GROUP BY tenant_id, model`)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var m string
+			var tenant, m string
 			var lo, hi int
-			if serr := rows.Scan(&m, &lo, &hi); serr != nil {
+			if serr := rows.Scan(&tenant, &m, &lo, &hi); serr != nil {
 				err = serr
 				break
 			}
-			out[m] = [2]int{lo, hi}
+			if out[tenant] == nil {
+				out[tenant] = map[string][2]int{}
+			}
+			out[tenant][m] = [2]int{lo, hi}
 		}
 		if err == nil {
 			err = rows.Err()
