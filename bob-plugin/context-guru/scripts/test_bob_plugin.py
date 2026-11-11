@@ -1445,6 +1445,38 @@ class BinaryCheckTest(TempHome):
         self.assertIn("no --bob-upstream", out)
         self.assertIn("result=binary_install_failed", out)
 
+    def test_a_binary_too_old_for_the_default_preset_is_skipped(self):
+        folder = self.root / "v071"
+        folder.mkdir()
+        path = fake_binary(folder, "context-guru-proxy v0.7.1 (commit abc)")
+        os.environ["CONTEXT_GURU_BIN"] = str(path)
+        reasons = []
+        self.assertIsNone(PLUGIN.find_binary(reasons, PLUGIN.DEFAULT_PRESET))
+        self.assertIn("needs context-guru-proxy v0.7.2", reasons[0])
+        self.assertEqual(PLUGIN.find_binary(None, "lossless"), str(path))
+
+    def test_setup_downloads_when_the_binary_on_path_is_too_old(self):
+        folder = self.root / "v071"
+        folder.mkdir()
+        os.environ["CONTEXT_GURU_BIN"] = str(fake_binary(folder, "context-guru-proxy v0.7.1"))
+        os.environ.pop("CONTEXT_GURU_VERSION", None)
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=RuntimeError("offline")) as install:
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        install.assert_called_once()
+        self.assertEqual(code, 2)
+        self.assertIn("binary_skipped=", out)
+        self.assertIn("needs context-guru-proxy v0.7.2", out)
+
+    def test_setup_refuses_a_pinned_release_that_is_too_old(self):
+        os.environ["CONTEXT_GURU_BIN"] = str(self.root / "missing")
+        os.environ["CONTEXT_GURU_VERSION"] = "v0.7.1"
+        with mock.patch.object(PLUGIN, "install_release_binary") as install:
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        install.assert_not_called()
+        self.assertEqual(code, 2)
+        self.assertIn("reason=proxy_too_old", out)
+
 
 @unittest.skipUnless(shutil.which("osascript"), "reset.sh is macOS only")
 class NonAsciiHomeTest(TempHome):

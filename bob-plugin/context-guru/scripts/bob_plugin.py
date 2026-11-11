@@ -351,8 +351,25 @@ def binary_problem(path):
     return None
 
 
-def find_binary(reasons=None):
-    """The first context-guru-proxy that has the Bob gateway. Say why each other one is skipped."""
+def preset_release_problem(version, preset):
+    """Why a proxy of this release cannot load the preset, or None. Unknown versions pass."""
+    need = PRESET_MINIMUM_RELEASE.get(preset)
+    if not need:
+        return None
+    try:
+        too_old = release_version(version) < need
+    except RuntimeError:
+        return None
+    if not too_old:
+        return None
+    return (f"{preset} needs context-guru-proxy v{'.'.join(map(str, need))} or newer; "
+            f"this one is {version}")
+
+
+def find_binary(reasons=None, preset=None):
+    """The first context-guru-proxy that has the Bob gateway. Say why each other one is skipped.
+
+    preset: the preset setup will write. A binary too old to load it is skipped."""
     candidates = []
     found = shutil.which(os.environ.get("CONTEXT_GURU_BIN", "context-guru-proxy"))
     if found:
@@ -361,6 +378,9 @@ def find_binary(reasons=None):
         candidates.append(str(managed_binary().resolve()))
     for candidate in dict.fromkeys(candidates):
         problem = binary_problem(candidate)
+        if problem is None and preset:
+            if release := preset_release_problem(binary_version(candidate), preset):
+                problem = f"{candidate}: {release}"
         if problem is None:
             return candidate
         if reasons is not None:
@@ -686,20 +706,29 @@ def _remove_old_rc_block(old_rc, created):
 
 def _setup_changes(args, shell, rc_file, advice):
     """The part of setup that changes files. Runs under the state lock."""
+    existing = read_record()
+    port = record_port(existing) or first_free_port()
+    try:
+        wanted = read_preset(port)  # what write_proxy_config will keep, or DEFAULT_PRESET
+    except RuntimeError:
+        wanted = None  # an unmanaged file: write_proxy_config refuses it later
     skipped = []
-    executable = find_binary(skipped)
+    executable = find_binary(skipped, wanted)
     for reason in skipped:
         facts(binary_skipped=reason)
     if not executable:
         try:
+            pinned = os.environ.get("CONTEXT_GURU_VERSION")
+            if pinned and (release := preset_release_problem(pinned, wanted)):
+                facts(result="refused", reason="proxy_too_old", preset=wanted,
+                      detail=f"{release}. Unset CONTEXT_GURU_VERSION or pick a newer release.")
+                return 2
             executable, version = install_release_binary()
             facts(binary="installed", binary_version=version, binary_path=executable)
         except Exception as error:
             facts(result="binary_install_failed", detail=error)
             return 2
 
-    existing = read_record()
-    port = record_port(existing) or first_free_port()
     old_rc = existing.get("rc_file")
     same_rc = old_rc is not None and rc_file is not None and str(rc_file) == old_rc
     # rc_created is about one file. Keep the old value only for the same file: after a change of
