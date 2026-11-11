@@ -42,8 +42,9 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 	for _, want := range []string{
 		"ctl('/api/me/limits')",
 		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
-		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered())", // a filter hides the estimate
-		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
+		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered(), state.sub.fit)", // a filter hides the estimate
+		"ctl('/api/me/fivehour-weights?since=' + fiveHourStartMs(f))",                                                  // the learned weights (#1047)
+		"'data-testid': 'saved-total-usd'",                                                                             // the dollar view is still there for everyone else
 		"loadOverviewLimits();",
 		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
 		"if (seq !== state.subSeq) return;",                                    // an older answer is dropped
@@ -86,6 +87,13 @@ func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
 		}
 	}
 	html := readUI(t, "ui/index.html")
+	// The Sessions table only: the Cache strategy tab has token labels of its own (#1048).
+	start := strings.Index(html, `data-testid="sessions-table"`)
+	if start < 0 {
+		t.Fatal("index.html has no Sessions table")
+	}
+	html = html[start:]
+	html = html[:strings.Index(html, "</table>")]
 	if n := strings.Count(html, "data-sub-label="); n != 3 {
 		t.Errorf("index.html has %d Sessions headers with a token label, want 3", n)
 	}
@@ -105,6 +113,10 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 		"tk ? tile('ka-net-tok'",
 		"'data-testid': 'ka-measured-tokens'",
 		"'data-testid': 'ka-forecast-weights'",
+		"const fv = forecastView(recIn, kaState.sub), rec = fv.rec;", // the learned forecast on a subscription (#1047)
+		"const fv = forecastView(raw, sub), rec = fv.rec;",           // the detail panel shows the same forecast (#1047)
+		"'data-testid': 'ka-rec-weights' }, fv.label",                // with the same weight label
+		"loadKARecommend(subP);",
 		"'data-testid': 'ka-split-tokens'",
 		"tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd)", // the dollar view stays for everyone else
 		"o.tokens_unmeasured_requests > 0",
@@ -115,6 +127,56 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+}
+
+// On a Claude subscription the Cache strategy tab's tables show tokens (#1048). The cells are tested
+// in savings.test.mjs (kaSessionTokenCells, bandTokens, tierSeries). This checks the wiring: each
+// dollar cell has its token form, the pings keep a line or a column of their own, the price
+// what-ifs keep dollars with their API-price label, and the headers change.
+func TestKeepAliveTablesSubscriptionTokensAreWired(t *testing.T) {
+	app := stripComments(readUI(t, "ui/app.js"))
+	for _, want := range []string{
+		"subLabels($('#ka-downside-panel'), sub);",
+		"subLabels(panel, kaState.sub);",                           // the downside headers follow the units before the sessions land
+		"So far in this window${tk.measured ? ' (measured)' : ''}", // "(measured)" only on a measured rescue
+		"subLabels($('#ka-live-panel'), sub);",
+		"subLabels($('#ka-behaviour-panel'), sub);",
+		"const c = sub ? kaSessionTokenCells(s, compact) : null;",
+		"c ? el('td', { class: 'num', 'data-testid': 'ka-expiry-tok' }, c.expiry || '—')",
+		"c ? el('td', { class: 'num', 'data-testid': 'ka-pings-tok' }, c.pings || '—')", // the pings: a column of their own
+		"c ? el('td', { class: 'num', 'data-testid': 'ka-rescue-tok' }, c.ran ? c.rescue : '—')",
+		"'data-testid': 'ka-net-weights'",                // no net in tokens: ahead or behind at API-price weights
+		"el('td', { class: 'num' }, usd(s.expiry_usd)),", // the dollar view stays for everyone else
+		"sub ? kaLiveTokens(r) :",
+		"'data-testid': 'ka-live-pings-tok', text: PING_LABEL + ': ' + c.pings", // the pings: a line of their own
+		"${sub ? ' at API-price weights' : ''}",
+		"'cost a lapse would charge, at API-price weights.",
+		"tierSeries(b.daily).map(",
+		"const cost = (g) => (sub ? bandTokens(g, compact) : usd(g.usd));",
+		"kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands, sub);",
+		"'data-testid': 'ka-calc-weights'", // the ladder is a price what-if: dollars, labelled
+		"(sub ? 'Net of the names list.' : 'Net of the names list and the searches.')",
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+	html := readUI(t, "ui/index.html")
+	for id, n := range map[string]int{"ka-downside-panel": 5, "ka-live-panel": 4, "ka-behaviour-panel": 2} {
+		start := strings.Index(html, `id="`+id+`"`)
+		if start < 0 {
+			t.Fatalf("index.html has no #%s", id)
+		}
+		// The panel runs to the next panel's heading: a panel holds one h2, and nested panels hold h3s.
+		h2 := strings.Index(html[start:], "<h2")
+		end := strings.Index(html[start+h2+1:], "<h2")
+		if h2 < 0 || end < 0 {
+			t.Fatalf("#%s: no heading after it", id)
+		}
+		if got := strings.Count(html[start:start+h2+1+end], "data-sub-label="); got != n {
+			t.Errorf("#%s has %d token labels, want %d", id, got, n)
 		}
 	}
 }

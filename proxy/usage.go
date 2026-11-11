@@ -158,17 +158,9 @@ var nestedUsagePaths = [...]string{"response.usage", "usageMetadata", "data.usag
 // healthy traffic reads as an outage — and it costs the same thing: an operator who cannot tell
 // from the counter which one they have. `{}` is treated the same way for the same reason: a
 // provider that sent an empty object told us nothing, which is `absent`, not a missing spelling.
-func usagePresent(v gjson.Result) bool {
-	if !v.IsObject() {
-		return false
-	}
-	empty := true
-	v.ForEach(func(gjson.Result, gjson.Result) bool {
-		empty = false
-		return false // one field is enough
-	})
-	return !empty
-}
+//
+// The rule is providerusage.Present, shared with agent/bob.
+func usagePresent(v gjson.Result) bool { return providerusage.Present(v) }
 
 // parseUsage extracts the four billed token tiers from a buffered response body,
 // in whichever dialect it is written. This is the number that actually matters on

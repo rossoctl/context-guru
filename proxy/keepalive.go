@@ -204,7 +204,7 @@ type kaArrival struct {
 	refreshed  int64
 	strategyID string
 	// refreshedAt is when the provider's entry was last known refreshed: the previous real
-	// request's start, or the start of the last ping that READ the cache. Zero when no entry.
+	// request's start, or the start of the last ping that READ or WROTE the cache. Zero when no entry.
 	refreshedAt time.Time
 }
 

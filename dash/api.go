@@ -98,6 +98,8 @@ type API struct {
 	promptCache jsonCache
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
 	spendCache jsonCache
+	// fiveHour holds the learned 5-hour weights per account (#1047), for fhCacheTTL.
+	fiveHour fhCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// The flight key holds the cache pointer AND the entry key, so two caches never share a flight.
 	// The entry key is the same principal-scoped cacheKey as the caches, so two tenants never share a
@@ -813,6 +815,7 @@ func (a *API) routes() []route {
 	rs = append(rs, a.insightsRoutes()...)
 	// The subscription limit values (#984), declared beside their handler in limits.go.
 	rs = append(rs, a.limitsRoutes()...)
+	rs = append(rs, a.fiveHourRoutes()...)
 	return rs
 }
 
@@ -1034,7 +1037,13 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		evs, f.Tenant, f.TenantAll = keep, owner, false
 	}
 	var arch *ArchivedSession
-	if meta, mErr := a.db(r).ArchivedSessionByID(session); mErr == nil {
+	// With a tenant in view the lookup is that tenant's; a shared id (#1069) otherwise returns
+	// whichever tenant archived it last, and the ownership test below would refuse the owner.
+	lookup := func() (ArchivedSession, error) { return a.db(r).ArchivedSessionOf(f.Tenant, session) }
+	if f.TenantAll {
+		lookup = func() (ArchivedSession, error) { return a.db(r).ArchivedSessionByID(session) }
+	}
+	if meta, mErr := lookup(); mErr == nil {
 		// Ownership again: the index is keyed by an id a caller could guess, and this
 		// row is the thing that says "there is something to fetch".
 		if a.auth == nil || f.TenantAll || meta.TenantID == f.Tenant {
@@ -1071,7 +1080,7 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("fetch") == "1" {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
-			rows, ferr := a.rec.FetchArchived(ctx, session)
+			rows, ferr := a.rec.FetchArchived(ctx, arch.TenantID, session)
 			switch {
 			case errors.Is(ferr, ErrRemoteMissing):
 				state = TranscriptNeverArchived
@@ -1177,7 +1186,13 @@ func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.PathValue("session")
-	meta, err := a.db(r).ArchivedSessionByID(session)
+	var meta ArchivedSession
+	var err error
+	if a.auth == nil || p.Manager {
+		meta, err = a.db(r).ArchivedSessionByID(session)
+	} else {
+		meta, err = a.db(r).ArchivedSessionOf(p.TenantID, session)
+	}
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "no such archived session")
 		return
@@ -1190,7 +1205,7 @@ func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	evs, err := a.rec.FetchArchived(ctx, session)
+	evs, err := a.rec.FetchArchived(ctx, meta.TenantID, session)
 	if err != nil {
 		// Distinguish the two, because they mean different things to whoever is
 		// looking: one is "this was never archived", the other is "cold storage is
@@ -1624,10 +1639,10 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	// discover and call — is more moving parts for the same wait.
 	archived := false
 	if trusted && len(e.Content) == 0 && e.SessionID != "" {
-		if meta, err := a.db(r).ArchivedSessionByID(e.SessionID); err == nil && meta.ContentPath != "" {
+		if meta, err := a.db(r).ArchivedSessionOf(e.TenantID, e.SessionID); err == nil && meta.ContentPath != "" {
 			archived = true
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-			rows, ferr := a.rec.FetchArchivedContent(ctx, e.SessionID, e.ID)
+			rows, ferr := a.rec.FetchArchivedContent(ctx, e.TenantID, e.SessionID, e.ID)
 			cancel()
 			if ferr == nil {
 				e.Content = rows

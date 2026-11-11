@@ -1730,7 +1730,7 @@ function renderSavedLedger(o, ka, partial) {
   const totalTok = presetTok + filterTok;
   // A Claude subscription does not bill per token: every saving is in tokens (/api/stats `tokens`),
   // with the 5-hour share as an estimate below the total. null keeps the dollar view.
-  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered()) : null;
+  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered(), state.sub.fit) : null;
   const unmeasured = o.tokens_unmeasured_requests || 0;
   const heroMain = sub
     ? el('div', { class: 'ov-hero-money' },
@@ -1753,6 +1753,7 @@ function renderSavedLedger(o, ka, partial) {
     'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic.',
     'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing". "saved 0 tokens" is a measured zero.',
     'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
+    'With enough history, the estimate uses learned 5-hour weights instead: how much of the limit one token of each kind used, learned from the share the provider reported after each request. It is then the saved tokens, less the tokens a saving cost and the keep-alive pings, each kind times its weight.',
     'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
     'The share saved can never be more than 100% less the share used: Anthropic stops you at 100%. When the estimate reaches that cap, the line says that without context-guru you would have hit the 5-hour limit.',
     'The estimate is for your whole account. It is hidden while a filter (a session, a time range, a model...) narrows this page.',
@@ -1878,7 +1879,10 @@ function renderSavedLedger(o, ka, partial) {
   // Tool deferral (ultrahigh). Drawn only on an account that deferred: no card for 0.
   if (parts.defer !== 0 || (ft && hasTokens(ft.defer))) {
     grid.appendChild(card('tooldefer', 'saved-defer', 'Tool deferral', '#/tools',
-      'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches. Not counted in Your preset.',
+      // In tokens the figure is net of the names list only: the searches are requests of their own
+      // and have no request-token figure here (#988 review).
+      'Keeps tool definitions out of the prompt until the model searches for them. '
+        + (sub ? 'Net of the names list.' : 'Net of the names list and the searches.') + ' Not counted in Your preset.',
       [saving('saved-defer-usd', parts.defer, ft && ft.defer, true)]));
   }
   host.appendChild(grid);
@@ -1922,6 +1926,8 @@ async function loadOverviewLimits() {
       const f = liveFiveHour(limits, Date.now());
       if (f) {
         try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+        // The learned 5-hour weights (#1047). Any failure keeps the estimate at API prices.
+        try { sub.fit = await ctl('/api/me/fivehour-weights?since=' + fiveHourStartMs(f)); } catch (e) { /* API prices */ }
       }
     }
   } catch (e) { /* no subscription signal: the dollar view */ }
@@ -3097,13 +3103,22 @@ function onSubscription() {
   return meLimits(60000).then((l) => isSubscription(l, Date.now()), () => false);
 }
 
+/** The elements under `host` that name dollars take their token label (data-sub-label, and
+ *  data-sub-title when set) on a subscription, and their own content back otherwise. The dollar
+ *  content is kept as nodes, so its markup (an em, a br) comes back as it was. */
+function subLabels(host, sub) {
+  if (!host) return;
+  for (const n of $$('[data-sub-label]', host)) {
+    if (!n.usdNodes) { n.usdNodes = [...n.childNodes].map((c) => c.cloneNode(true)); n.dataset.usdTitle = n.title; }
+    if (sub) n.textContent = n.dataset.subLabel;
+    else n.replaceChildren(...n.usdNodes.map((c) => c.cloneNode(true)));
+    n.title = sub && n.dataset.subTitle !== undefined ? n.dataset.subTitle : n.dataset.usdTitle;
+  }
+}
+
 /** The Sessions headers that name dollars take their token label (data-sub-label) on a subscription. */
 function sessionHeaders(sub) {
-  for (const th of $$('thead th[data-sub-label]', $('[data-testid=sessions-table]'))) {
-    if (th.dataset.usdLabel === undefined) { th.dataset.usdLabel = th.textContent; th.dataset.usdTitle = th.title; }
-    th.textContent = sub ? th.dataset.subLabel : th.dataset.usdLabel;
-    th.title = sub ? th.dataset.subTitle : th.dataset.usdTitle;
-  }
+  subLabels($('[data-testid=sessions-table]'), sub);
   // "Costliest" still orders by the dollar cost: one token order would add the tiers. The dollar
   // order weights them at API prices, as the 5-hour estimate does.
   const opt = $('#sess-sort option[value=cost]');
@@ -9008,7 +9023,8 @@ Object.assign(loaders, { feedback: loadFeedback });
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
 const kaState = { ledger: null, recommend: null,
   // sub is true on a Claude subscription (#1022): the measured figures show in tokens, and the
-  // forecast keeps dollars with an "at API-price weights" label. False for a manager, an API key,
+  // forecast keeps dollars with an "at API-price weights" label, or "at learned 5-hour weights" when the
+  // fit passed its gate (#1047, forecastView). False for a manager, an API key,
   // Bedrock, Vertex and hosted mode (`{}`), which keep dollars.
   sub: false, behaviour: null, sessions: [], calc: null, armed: [], live: null,
   x: 280, k: 2,
@@ -9041,7 +9057,7 @@ async function loadKeepAlive() {
   // still fills from its own request, so one slow query never blanks another.
   const ledger = keepAliveLedger();
   const subP = kaSubscription();
-  loadKARecommend();
+  loadKARecommend(subP);
   const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
     // The limits read is fast; the ledger and the flag land together, so the tiles never flip units.
@@ -9115,8 +9131,10 @@ function renderKACoverage(o) {
  * built with a placeholder and filled when that lands — the ledger must never wait on it
  * (see loadKeepAlive).
  */
-function renderKADecision(o, rec) {
+function renderKADecision(o, recIn) {
   const host = clear($('#ka-decision'));
+  // On a subscription with learned 5-hour weights, the forecast is the learned one (#1047).
+  const fv = forecastView(recIn, kaState.sub), rec = fv.rec;
   const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
   if (!rec && ledgerNet === null) { host.hidden = true; return; }
   host.hidden = false;
@@ -9149,8 +9167,7 @@ function renderKADecision(o, rec) {
   const tk = kaState.sub && ledgerNet !== null ? kaTokenLines(o, compact) : null;
   host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
     el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
-    kaState.sub ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' },
-      'Forecast at API-price weights. A subscription does not bill per token.') : null,
+    fv.label ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' }, fv.label) : null,
     el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
     el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
     el('p', { class: 'ka-sentence' }, sentence),
@@ -9250,6 +9267,8 @@ function renderKADownside(o) {
   const worst = clear($('#ka-worst'));
   const panel = $('#ka-downside-panel');
   panel.classList.remove('bad');
+  // The headers follow the units now: the sessions fetch can land later, or fail (#1065 review).
+  subLabels(panel, kaState.sub);
   if (!o.sessions_touched) {
     emptyState(host, 'This mechanism has not touched any of your sessions yet',
       'The service-wide split above is what to expect if you switch it on.');
@@ -9330,6 +9349,9 @@ function renderKASessions() {
   const body = clear($('#ka-sessions-body'));
   const wide = wideScope();
   showScopeCol('[data-testid="ka-sessions-table"]', wide);
+  // On a subscription the dollar columns show tokens (#1048): kaSessionTokenCells.
+  const sub = kaState.sub;
+  subLabels($('#ka-downside-panel'), sub);
   if (!kaState.sessions.length) {
     tableMessage(body, 11, 'No cache expiries worth acting on in this window',
       'Nothing here has anything to keep warm.');
@@ -9338,17 +9360,27 @@ function renderKASessions() {
   }
   for (const s of kaState.sessions) {
     const net = s.net_usd;
+    const c = sub ? kaSessionTokenCells(s, compact) : null;
     body.appendChild(el('tr', {},
       el('td', {}, el('code', { class: 'clip', text: s.session_id })),
       wide ? el('td', {}, s.tenant_id || '—') : el('td', { hidden: 'hidden' }),
       el('td', { class: 'num' }, num(s.turns)),
       el('td', { class: 'num' }, num(s.expiries)),
-      el('td', { class: 'num' }, usd(s.expiry_usd)),
+      c ? el('td', { class: 'num', 'data-testid': 'ka-expiry-tok' }, c.expiry || '—')
+        : el('td', { class: 'num' }, usd(s.expiry_usd)),
       el('td', { class: 'num' }, s.pings ? num(s.pings) : '—'),
-      el('td', { class: 'num' }, s.pings ? usd(s.ping_usd) : '—'),
-      el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
-      el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
-        s.pings || s.saved_usd ? usd(net) : '—'),
+      // The pings' own column: what they paid is never added into the rescue beside it.
+      c ? el('td', { class: 'num', 'data-testid': 'ka-pings-tok' }, c.pings || '—')
+        : el('td', { class: 'num' }, s.pings ? usd(s.ping_usd) : '—'),
+      c ? el('td', { class: 'num', 'data-testid': 'ka-rescue-tok' }, c.ran ? c.rescue : '—')
+        : el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
+      // Tokens of different kinds have no common unit, so a subscription sees no net: only ahead or
+      // behind, decided by the dollar net at API-price weights, as the ledger's "Where it stands" (#1042).
+      c ? el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : ''), 'data-testid': 'ka-net-weights',
+        title: 'Decided at API-price weights. A subscription does not bill per token.' },
+      s.pings || s.saved_usd ? (net < 0 ? 'Behind' : net > 0 ? 'Ahead' : 'Even') : '—')
+        : el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
+          s.pings || s.saved_usd ? usd(net) : '—'),
       // 0 here means the last request reported no usage at all, which is an absence rather than
       // a prompt of no size — and it is also the reason such a session cannot be priced.
       el('td', { class: 'num' }, s.last_prefix > 0 ? compact(s.last_prefix) : '—'),
@@ -9373,14 +9405,24 @@ function renderKASessions() {
   // "$81.40 of $81.40" tautology, one step less degenerate: the numerator was fixed and the
   // denominator was not. The account's total is already on the page, in "Still on the table".
   const all = (kaState.ledger || {}).addressable_usd || 0;
-  const lead = kaState.sessions.length > 8
-    ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
-      + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
-    : `${usd(all)} of cache expiries across ${kaState.sessions.length} of your sessions. `
-      + 'Where it concentrates does NOT transfer forward: ';
+  // On a subscription the concentration is counted in expiries, not dollars: the expiries' tokens
+  // are by tier and do not add up. The order is still the dollar cost, at API-price weights.
+  const allN = (kaState.ledger || {}).addressable_misses || 0;
+  const lead = sub
+    ? (kaState.sessions.length > 8
+      ? `The top 8 of these hold ${num(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiries, 0))}`
+        + ` of ${num(allN)} cache expiries. That concentration is real and it does NOT transfer forward: `
+      : `${num(allN)} cache expiries across ${kaState.sessions.length} of your sessions. `
+        + 'Where it concentrates does NOT transfer forward: ')
+    : kaState.sessions.length > 8
+      ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
+        + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
+      : `${usd(all)} of cache expiries across ${kaState.sessions.length} of your sessions. `
+        + 'Where it concentrates does NOT transfer forward: ';
   $('#ka-sessions-note').textContent = lead +
     'sessions are ephemeral (median lifetime about zero hours), so this is a description of the ' +
-    'past and not a list to act on next week.';
+    'past and not a list to act on next week.' +
+    (sub ? ' The rows are in order of what the expiries cost at API-price weights.' : '');
 }
 
 /**
@@ -9474,6 +9516,10 @@ function renderKALive() {
   const warn = clear($('#ka-live-warning'));
   const wide = wideScope();
   showScopeCol('[data-testid="ka-live-table"]', wide);
+  // On a subscription the measured column shows tokens (#1048). One warm-up, a lapse and the
+  // break-even are a price what-if, with no token form yet: they keep dollars, labelled so.
+  const sub = kaState.sub;
+  subLabels($('#ka-live-panel'), sub);
   const rows = live.rows || [];
   if (!rows.length) {
     tableMessage(body, 11, 'No session of yours has a live cache entry',
@@ -9496,7 +9542,7 @@ function renderKALive() {
         + `${(live.soon_seconds / 60).toFixed(1).replace(/\.0$/, '')} minutes.`),
       ' ',
       live.soon_usd > 0
-        ? `Between them they would pay ${usd(live.soon_usd)} to re-create what they are about to lose`
+        ? `Between them they would pay ${usd(live.soon_usd)}${sub ? ' at API-price weights' : ''} to re-create what they are about to lose`
           + (live.soon_unpriced
             ? `, excluding ${num(live.soon_unpriced)} with no rate on the price list`
             : '')
@@ -9527,7 +9573,7 @@ function renderKALive() {
             + `${r.breakeven_1h_minutes.toFixed(0)} minutes.` },
           `${num(r.breakeven_pings)} · ${r.breakeven_minutes.toFixed(0)}m`)
         : '—'),
-      el('td', { class: 'num' }, r.saved_usd || r.ping_usd
+      sub ? kaLiveTokens(r) : el('td', { class: 'num' }, r.saved_usd || r.ping_usd
         ? usd(r.saved_usd - r.ping_usd)
         : '—'),
       el('td', {}, kaState.canArm && mySession(r)
@@ -9540,6 +9586,16 @@ function renderKALive() {
   // Realised against potential, both from figures already on this page, and the difference
   // between them named for what it is.
   const led = kaState.ledger || {};
+  if (sub) {
+    const tk = kaTokenLines(led, compact);
+    $('#ka-live-hint').textContent =
+      `So far in this window${tk.measured ? ' (measured)' : ''}: ${tk.rescuesText} ${PING_LABEL}: ${tk.pings}. `
+      + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of rewrite `
+      + 'cost a lapse would charge, at API-price weights. That is a CEILING, not a measurement: it is only earned by a '
+      + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
+      + 'on: below it, pinging is cheaper than the lapse it prevents.';
+    return;
+  }
   $('#ka-live-hint').textContent =
     `So far in this window: ${usd(led.saved_usd || 0)} of rewrites avoided against `
     + `${usd(led.ping_usd || 0)} of pings, a net of ${usd(led.net_usd || 0)} (measured). `
@@ -9547,6 +9603,19 @@ function renderKALive() {
     + 'cost a lapse would charge. That is a CEILING, not a measurement: it is only earned by a '
     + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
     + 'on: below it, pinging is cheaper than the lapse it prevents.';
+}
+
+/** The live table's REALISED cell in tokens, on a subscription (#1048): the rescue on one line, and
+ *  what the pings paid on a line of its own, never added into it. `—` when the strategy did not run. */
+function kaLiveTokens(r) {
+  const c = kaSessionTokenCells(r, compact);
+  if (!c.ran) return el('td', { class: 'num' }, '—');
+  return el('td', {
+    class: 'num', 'data-testid': 'ka-live-realised-tok',
+    title: 'The first line is the cache rewrites the pings avoided (a ceiling). The second is what the pings paid: it is on its own line, not in any total.',
+  },
+  el('div', { text: c.rescue }),
+  c.pings ? el('div', { class: 'small', 'data-testid': 'ka-live-pings-tok', text: PING_LABEL + ': ' + c.pings }) : null);
 }
 
 /**
@@ -9638,15 +9707,21 @@ async function loadKABehaviour() {
     return;
   }
   kaState.behaviour = b;
+  // On a subscription the expiries' cost shows as the tokens they billed, by tier (#1048).
+  const sub = kaState.sub;
+  subLabels($('#ka-behaviour-panel'), sub);
+  const cost = (g) => (sub ? bandTokens(g, compact) : usd(g.usd));
   const days = (b.daily || []).map((d) => [d.ts, d.misses]);
   const usdPts = (b.daily || []).map((d) => [d.ts, d.usd]);
   // TWO charts. A count and a dollar figure share no scale, and a second y-axis is the single
   // most common way a chart implies a relationship it has not measured.
   lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
     { yFmt: num, xFmt: whenAxis });
-  lineChart($('#ka-chart-usd'),
-    [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
-    { yFmt: usd, xFmt: whenAxis });
+  // In tokens: one line per tier, on one token scale. The tiers are never added into one line.
+  lineChart($('#ka-chart-usd'), sub
+    ? tierSeries(b.daily).map((t, i) => ({ name: t.name, color: SERIES[i], points: t.points }))
+    : [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
+  { yFmt: sub ? compact : usd, xFmt: whenAxis });
 
   // 3b: the gap bands, in EDGE ORDER — the order is the meaning, so they are never sorted by
   // size — with everything beyond the current coverage in the de-emphasis gray.
@@ -9658,12 +9733,12 @@ async function loadKABehaviour() {
     `setting cannot reach. ${num(b.phantom_ttl_rows)} further ttl_expiry rows are left out: they wrote nothing, so there was nothing to protect.`;
   barRows($('#ka-gap-bands'), (b.gap_bands || []).map((g) => ({
     label: g.label + (g.beyond ? ' (beyond coverage)' : ''),
-    value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
+    value: g.n, display: num(g.n) + ' · ' + cost(g),
     color: g.beyond ? KA_MUTED : SERIES[0],
-    title: `${g.n} expiries costing ${usd(g.usd)}`,
+    title: `${g.n} expiries ${sub ? 'billing' : 'costing'} ${cost(g)}`,
     onclick: () => { setFilter('reason', 'ttl_expiry'); go('requests'); },
   })), { emptyDetail: 'No cache expiries in this window.' });
-  kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands);
+  kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands, sub);
 
   // 3e: prefix size, and the measured reason the 20k gate is nearly free.
   const above = b.addressable_misses > 0
@@ -9674,10 +9749,10 @@ async function loadKABehaviour() {
     `${above} were already past 20k tokens, so the 20k floor costs almost nothing. ` +
     'A main thread that waits for a person or an unknown cause needs 80k.';
   barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
-    label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
-    color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
+    label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + cost(g),
+    color: SERIES[0], title: `${g.n} expiries ${sub ? 'billing' : 'costing'} ${cost(g)}`,
   })), { emptyDetail: 'No cache expiries in this window.' });
-  kaTable('#ka-prefix-bands', 'Cached prompt size', b.prefix_bands);
+  kaTable('#ka-prefix-bands', 'Cached prompt size', b.prefix_bands, sub);
 
   // 3c: 24 bins, in the VIEWER's own timezone with the offset stated. "What times of day" is
   // a human question and a UTC-only axis answers a different one.
@@ -9692,8 +9767,8 @@ async function loadKABehaviour() {
     const start = (Number(h.label) * 60 + offMin + 1440) % 1440;
     const hh = String(Math.floor(start / 60)).padStart(2, '0');
     const mm = String(start % 60).padStart(2, '0');
-    return { label: `${hh}:${mm}`, value: h.n, display: num(h.n) + ' · ' + usd(h.usd),
-      color: SERIES[0], title: `${h.n} expiries costing ${usd(h.usd)}`, sort: start };
+    return { label: `${hh}:${mm}`, value: h.n, display: num(h.n) + ' · ' + cost(h),
+      color: SERIES[0], title: `${h.n} expiries ${sub ? 'billing' : 'costing'} ${cost(h)}`, sort: start };
   }).sort((a, c) => a.sort - c.sort);
   barRows($('#ka-hour-bins'), bins, { emptyDetail: 'No cache expiries in this window.' });
 
@@ -9717,17 +9792,18 @@ async function loadKABehaviour() {
   }
 }
 
-/** kaTable adds the table view of a band chart, as the existing panels do. */
-function kaTable(sel, dim, bands) {
+/** kaTable adds the table view of a band chart, as the existing panels do. `sub`: the cost column
+ *  shows the tokens the expiries billed, by tier (#1048). */
+function kaTable(sel, dim, bands, sub) {
   const host = $(sel);
   if (!bands || !bands.length) return;
   const rows = bands.map((b) => el('tr', {}, el('td', {}, b.label),
-    el('td', { class: 'num' }, num(b.n)), el('td', { class: 'num' }, usd(b.usd))));
+    el('td', { class: 'num' }, num(b.n)), el('td', { class: 'num' }, sub ? bandTokens(b, compact) : usd(b.usd))));
   host.appendChild(el('details', { class: 'why' },
     el('summary', {}, 'Table view'),
     el('table', { class: 'grid' },
       el('thead', {}, el('tr', {}, el('th', {}, dim), el('th', { class: 'num' }, 'Expiries'),
-        el('th', { class: 'num' }, 'Cost'))),
+        el('th', { class: 'num' }, sub ? 'Tokens billed' : 'Cost'))),
       el('tbody', {}, ...rows))));
 }
 
@@ -9787,6 +9863,12 @@ async function loadKACalc() {
       'on. A service-wide average would be misleading: per-ping cost runs from $0.0004 at the ' +
       'median to $0.2275 at the 99th percentile.');
     return;
+  }
+  // The ladder is a replay priced at one prefix: a price what-if, with no token form yet. On a
+  // subscription it keeps dollars and says they are at API-price weights (#1048), as the forecast does.
+  if (kaState.sub) {
+    host.appendChild(el('p', { class: 'ka-sentence', 'data-testid': 'ka-calc-weights' },
+      'Dollars at API-price weights. A subscription does not bill per token.'));
   }
   const src = { session: 'the selected session’s last cached prompt',
     account_median: 'your own median cached prompt at a lapse',
@@ -9876,24 +9958,27 @@ async function loadKACalc() {
  * whose relative half-width is at least 62%, and it crosses zero for 5 of 12 — so the honest
  * sentence is "the direction is resolvable, the size is not", and it is on the page.
  */
-async function loadKARecommend() {
+async function loadKARecommend(subP) {
   const host = clear($('#ka-recommend'));
   loadingState(host, 2);
-  let rec;
+  let raw, sub;
   try {
-    rec = await api('keepalive/recommend');
+    [raw, sub] = await Promise.all([api('keepalive/recommend'), subP || kaState.sub]);
   } catch (e) {
     if (aborted(e)) return;
     errorState(host, 'Could not work out a recommendation', e);
     return;
   }
-  kaState.recommend = rec;
+  kaState.recommend = raw;
+  // The decision row's forecast (#1047), so the two panels never disagree.
+  const fv = forecastView(raw, sub), rec = fv.rec;
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
   // "Winner" tile that contradicted it.
   // If the ledger has not landed yet, its own handler renders the decision row with this payload.
-  if (kaState.ledger) renderKADecision(kaState.ledger, rec);
+  if (kaState.ledger) renderKADecision(kaState.ledger, raw);
   clear(host);
+  if (fv.label) host.appendChild(el('p', { class: 'ka-sentence', 'data-testid': 'ka-rec-weights' }, fv.label));
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are
     // too long for this to reach" is a finding, not a shortage of data, and it is a `bad` banner

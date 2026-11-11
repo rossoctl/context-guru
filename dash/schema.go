@@ -283,6 +283,10 @@ CREATE TABLE IF NOT EXISTS requests (
   auth_subscription    INTEGER NOT NULL DEFAULT 0,
   -- The part of sweep_false_expands whose drop was applied on a WARM request (#491).
   sweep_false_expands_warm INTEGER NOT NULL DEFAULT 0,
+  -- The tokens of the restored copies this request carried (expand.fixed_restore, #481): content the
+  -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
+  -- none was inserted.
+  restored_tokens INTEGER NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -362,7 +366,7 @@ CREATE INDEX IF NOT EXISTS idx_requests_model    ON requests(model, ts);
 -- session's transcripts are the bulk of the bytes and go early, while its numbers
 -- are small and stay queryable locally for much longer.
 CREATE TABLE IF NOT EXISTS archived_sessions (
-  session_id    TEXT PRIMARY KEY,
+  session_id    TEXT    NOT NULL,
   tenant_id     TEXT    NOT NULL DEFAULT '',
   first_ts      INTEGER NOT NULL DEFAULT 0,
   last_ts       INTEGER NOT NULL DEFAULT 0,
@@ -372,7 +376,8 @@ CREATE TABLE IF NOT EXISTS archived_sessions (
   full_path     TEXT    NOT NULL DEFAULT '',  -- whole session; local rows deleted
   full_bytes    INTEGER NOT NULL DEFAULT 0,
   archived_at   INTEGER NOT NULL DEFAULT 0,
-  remote        TEXT    NOT NULL DEFAULT ''
+  remote        TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, session_id)  -- #1069: a bare session_id let two tenants share a row
 );
 CREATE INDEX IF NOT EXISTS idx_archived_tenant ON archived_sessions(tenant_id, last_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_tenant   ON requests(tenant_id, ts DESC);
@@ -936,6 +941,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The part of sweep_false_expands whose drop was applied on a warm request (#491). Additive, 0 on
 	// every earlier row, which is true: no warm drop existed then.
 	{"requests", "sweep_false_expands_warm", "INTEGER NOT NULL DEFAULT 0"},
+	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
+	// every earlier row: those were not recorded, so they read as no copy.
+	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
@@ -1090,6 +1098,77 @@ func migrateToolUsesProject(db *sql.DB) error {
 	return tx.Commit()
 }
 
+// migrateArchivedSessionsKey rebuilds archived_sessions with PRIMARY KEY (tenant_id, session_id)
+// (#1069). The key used to be session_id alone, so a second tenant archiving a session id the first
+// had already archived overwrote the first's row: the index is the ONLY record of what is in cold
+// storage, so that tenant's archived session became unreachable. Run on every open, before the
+// version check, like the other table rebuilds. Idempotent: it probes the key and returns when it
+// already leads with tenant_id, or when the table does not exist yet (`ddl` creates it right).
+func migrateArchivedSessionsKey(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(archived_sessions)`)
+	if err != nil {
+		return nil
+	}
+	cols, tenantPK := 0, 0
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols++
+		if name == "tenant_id" {
+			tenantPK = pk
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Zero columns is a missing table, not an error, and rebuilding from nothing would fail the
+	// open (see migrateToolUsesProject for what a failed open costs).
+	if cols == 0 || tenantPK > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE archived_sessions_new (
+			session_id    TEXT    NOT NULL,
+			tenant_id     TEXT    NOT NULL DEFAULT '',
+			first_ts      INTEGER NOT NULL DEFAULT 0,
+			last_ts       INTEGER NOT NULL DEFAULT 0,
+			requests      INTEGER NOT NULL DEFAULT 0,
+			content_path  TEXT    NOT NULL DEFAULT '',
+			content_bytes INTEGER NOT NULL DEFAULT 0,
+			full_path     TEXT    NOT NULL DEFAULT '',
+			full_bytes    INTEGER NOT NULL DEFAULT 0,
+			archived_at   INTEGER NOT NULL DEFAULT 0,
+			remote        TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id)
+		)`,
+		`INSERT INTO archived_sessions_new(session_id, tenant_id, first_ts, last_ts, requests,
+			content_path, content_bytes, full_path, full_bytes, archived_at, remote)
+		 SELECT session_id, tenant_id, first_ts, last_ts, requests,
+			content_path, content_bytes, full_path, full_bytes, archived_at, remote
+		 FROM archived_sessions`,
+		`DROP TABLE archived_sessions`,
+		`ALTER TABLE archived_sessions_new RENAME TO archived_sessions`,
+		`CREATE INDEX IF NOT EXISTS idx_archived_tenant ON archived_sessions(tenant_id, last_ts DESC)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
@@ -1105,6 +1184,9 @@ func migrate(db *sql.DB) error {
 	// existing database at the current version returns early below, so a migration placed after
 	// that check would never run on exactly the databases that need it.
 	if err := migrateToolUsesProject(db); err != nil {
+		return err
+	}
+	if err := migrateArchivedSessionsKey(db); err != nil {
 		return err
 	}
 	var have string

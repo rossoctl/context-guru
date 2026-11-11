@@ -34,6 +34,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
@@ -872,7 +873,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
 		if ok {
-			res = finishRestore(res, restore, string(provider), body, msgs)
+			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
 		return res
 	}
@@ -1071,7 +1072,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 	res.Body, res.Changed = out, changed
-	return finishRestore(res, restore, string(provider), body, msgs)
+	return finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 }
 
 // resolveCacheAware decides whether cache-aware compaction is active for this
@@ -2298,21 +2299,39 @@ func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shif
 // pipeline's output cannot be forwarded either: it compacted the originals on the promise of a
 // copy. So it falls back to fallback, the body before the pipeline, which carries every original in
 // full at its own position.
-func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result) Result {
+func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result, dryRun bool) Result {
 	if len(plan) == 0 {
 		return res
 	}
-	// Either branch below changes the forwarded body after Trace.Ops was computed: the fallback
-	// forwards the pre-pipeline body, and an insertion shifts the wire index of every later
-	// message. No operation can be trusted to describe the wire any more, so all are dropped.
-	res.Trace.OpsDropped += len(res.Trace.Ops)
-	res.Trace.Ops = nil
-	nb, tokens, ok := plan.insert(wire, res.Body, client)
+	pre := gjson.GetBytes(res.Body, expand.MessagesField(wire)).Array()
+	at := plan.positions(pre, client)
+	nb, tokens, ok := plan.insertAt(wire, res.Body, at)
 	if !ok {
+		// The fallback forwards the pre-pipeline body: no operation describes it, and nothing was
+		// compacted on the wire.
+		res.Trace.OpsDropped += len(res.Trace.Ops)
+		res.Trace.Ops = nil
+		if res.Trace.Run != nil {
+			res.Trace.Run.TokensAfter = res.Trace.Run.TokensBefore
+		}
 		res.Body, res.Changed = fallback, true
 		return res
 	}
 	res.Body, res.Changed = nb, true
 	res.Restored, res.RestoredTokens = len(plan), tokens
+	// The pipeline's token counts stop before the copies, so a saving read off them would credit
+	// the compaction of an output that is back on the wire in full (#481).
+	if res.Trace.Run != nil {
+		res.Trace.Run.TokensAfter += tokens
+	}
+	// The pipeline's operations stay valid: the library maps their positions through the copies'
+	// splices, which come last in pipeline order. If a copy cannot be placed, none can be trusted.
+	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array(), dryRun)
+	if !placed {
+		res.Trace.OpsDropped += len(res.Trace.Ops)
+		res.Trace.Ops = nil
+		return res
+	}
+	res.Trace.Ops = append(res.Trace.Ops, ro...)
 	return res
 }

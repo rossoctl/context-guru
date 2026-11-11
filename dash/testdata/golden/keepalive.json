@@ -45,5 +45,6 @@
  },
  "tokens_unmeasured_requests": 591,
  "winners": 0,
- "worst_net_usd": -0.0004
+ "worst_net_usd": -0.0004,
+ "worst_session_tenant": "t1"
 }

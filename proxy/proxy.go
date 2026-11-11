@@ -29,6 +29,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -265,6 +267,8 @@ type Handler struct {
 	// bobWin is Bob's own max_input_tokens for each model id, from its model/info response (#963).
 	bobWinMu sync.Mutex
 	bobWin   map[string]int
+	// agentFor finds the client agent that owns a route: agent.ForPath, or a test's own registry.
+	agentFor func(path string) agent.Agent
 	pipe     *components.Pipeline
 	store    store.Store
 	agg      *metrics.Aggregator
@@ -437,7 +441,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
-	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
+	h := &Handler{agentFor: agent.ForPath, pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
 	// The tracker needs a dashboard: the Result is attached to the recorded event.
@@ -730,23 +734,39 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // one response the catch-all does not forward verbatim. See forwardBobProfile.
 const bobProfilePath = "/admin/v1/profile"
 
-// bobModelPath is Bob's model route. Only a request on it may take its session from
-// X-Task-Id (see explicitSessionOf).
-const bobModelPath = "/inference/v1/chat/completions"
+// bobModelPath is Bob's model route.
+const bobModelPath = bob.ModelPath
 
 // explicitSessionOf is the explicit session id a chat request gives to apply. Every place that
 // derives this request's session calls it. So the pipeline, the expand repair, the observe
 // record and the wire recorder use the same id.
 //
-// The Bob IDE sends its task id only in the X-Task-Id header. The header has no vendor prefix,
-// so any client can send it. So only the Bob model route reads it. It comes after every other
-// id (session.Explicit). Other routes get the session header unchanged.
-func explicitSessionOf(r *http.Request, upPath string, body []byte) string {
+// The agent that owns the route may add a session id from a header (agent.Agent.SessionID). It
+// comes after every other id (session.Explicit). With no agent id, the request gets the session
+// header unchanged, as a route no agent owns does. So an agent that does not override SessionID
+// changes nothing on its route. (The body's own ids, such as Bob Shell's metadata.taskId, are read
+// downstream either way: sessionIDFrom.)
+func (h *Handler) explicitSessionOf(r *http.Request, upPath string, body []byte) string {
 	sess := r.Header.Get("x-context-guru-session")
-	if upPath != bobModelPath {
+	id := agentSessionID(r, h.agentFor(upPath))
+	if id == "" {
 		return sess
 	}
-	return apply.ExplicitSession(sess, body, r.Header.Get("X-Task-Id"))
+	return apply.ExplicitSession(sess, body, id)
+}
+
+// agentSessionID is a.SessionID, fail open: a panic in the agent gives "", no agent id, so the
+// request keeps the session it has without one.
+func agentSessionID(r *http.Request, a agent.Agent) (id string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			logging.From(r.Context()).Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", a), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return a.SessionID(r.Header)
 }
 
 func isBobProfile(r *http.Request) bool {
@@ -1042,6 +1062,9 @@ func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRat
 // Reading up.setKey rather than re-deriving the credential is the fix and the invariant:
 // there is one decision, and both exits read it.
 //
+// A route whose agent owns its auth (agent.ModelTarget) never gets the server-held OpenAI key:
+// that key belongs to the OpenAI upstream, not to the agent's server.
+//
 // FAIL OPEN: no credential, no upstream or no model name returns nil, and the
 // component degrades to its deterministic path. It never errors the request.
 func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, body []byte, r *http.Request) components.Model {
@@ -1073,14 +1096,23 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
 		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
-		if key == "" {
+		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
+		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
+		target, owned := agentModelTarget(r.Context(), h.agentFor(up.path))
+		// The operator's OpenAI key belongs to the OpenAI upstream. A route whose agent owns its auth
+		// is another provider's server, so it gets the caller's key or no model call.
+		if key == "" && !owned {
 			key = h.serverKey(h.opts.OpenAIKey)
 		}
 		if key == "" {
 			return nil
 		}
-		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
-		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
+		auth := AuthHeader(bschemas.OpenAI, key, "")
+		if target.AuthScheme != "" {
+			auth = http.Header{"Authorization": {target.AuthScheme + " " + key}}
+		}
+		ref := h.dispatch.incoming(up, auth)
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model, Path: target.Path}
 	}
 	return nil
 }
@@ -1322,7 +1354,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
 		// Once, so the pipeline, the expand repair and the wire recorder use one id.
-		explicitSess := explicitSessionOf(r, static.path, body)
+		explicitSess := h.explicitSessionOf(r, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -1509,9 +1541,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
-			// The savings tracker begins HERE, after applyMode, and not before it: the session
-			// (tr.Session) is known only once the pipeline has run, and BeginRequest only records
-			// the client body, so opening the record late loses nothing. `orig` is what the agent
+			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
+			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
+			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
 			//
@@ -1877,9 +1909,9 @@ var errNoUpstream = errors.New("no upstream configured")
 // next request would otherwise carry the content.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
 	wire := schema.WireFor(string(provider), up.path)
-	// Only Bob's model route reads the cache writes Bob adds to its OpenAI chat usage block
-	// (bobUsage). Every other route keeps the shared parser's reading unchanged.
-	bob := up.path == bobModelPath
+	// The agent that owns the route may correct the shared parser's usage reading
+	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
+	ag := h.agentFor(up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -2060,7 +2092,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSessionOf(r, up.path, body),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
@@ -2254,7 +2286,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2352,7 +2384,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2379,9 +2411,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
-			if bob {
-				u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u)
-			}
+			u = readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
@@ -2754,12 +2784,12 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
-	return h.streamRecOn(w, resp, tee, false)
+	return h.streamRecOn(w, resp, tee, agent.Base{})
 }
 
-// streamRecOn is streamRec for a chat route. bob is true only on Bob's model route, where the
-// usage block also carries the cache writes (bobUsage).
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, bob bool) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
+// the shared parser's usage reading (readAgentUsage).
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2792,8 +2822,13 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if bob && ok {
-		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u)
+	if ok {
+		// The request's context carries its logger. A test's hand-built response has no request.
+		ctx := context.Background()
+		if resp.Request != nil {
+			ctx = resp.Request.Context()
+		}
+		u = readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
