@@ -30,7 +30,7 @@ type Hooks struct {
 	Defaults Defaults
 
 	// UIPath moves the dashboard from /dashboard/ to this path (dash.API.SetUIPath). "" keeps
-	// /dashboard/.
+	// /dashboard/. It must be rooted and slash-terminated; Main checks it before anything opens.
 	UIPath string
 
 	// BeforeControlDB runs in hosted mode, before the control database at path opens. An error
@@ -41,7 +41,8 @@ type Hooks struct {
 	TenantOptions func(opts *tenant.Options)
 
 	// Hosted runs in hosted mode, just after the control database opens. app.Registry and
-	// app.Upstreams are set; app.Handler and app.Mux are not yet. An error stops the start.
+	// app.Upstreams are set; app.Tenants, app.Handler and app.Mux are not yet. An error stops the
+	// start.
 	Hosted func(app *App) error
 
 	// ProxyOptions changes the proxy options, just before proxy.New.

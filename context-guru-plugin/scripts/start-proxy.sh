@@ -793,7 +793,7 @@ fi
 # start spending the caller's credential on idle pings.
 #
 # --config REPLACES the preset entirely rather than layering over it (see loadConfig in
-# cmd/context-guru-proxy/main.go: `--config` bypasses the `--preset` flag/PRESET env var above
+# proxyapp/main_run.go: `--config` bypasses the `--preset` flag/PRESET env var above
 # completely once it is set). That is why the file the keepalive skill writes always states its
 # OWN `preset:` line — a config that forgot it would silently turn off cachesplit the moment
 # keep-alive was turned on, the exact opposite of what enabling it is supposed to do.

@@ -629,7 +629,7 @@ var presets = map[string][]string{
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
 	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
 	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
-	// cmd/context-guru-proxy/main.go). Asserting it here is how five documents came to repeat
+	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
 	// tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by

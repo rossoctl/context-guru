@@ -23,9 +23,9 @@ func TestCachePolicyCarriesToolWaitMinPrefix(t *testing.T) {
 	}
 }
 
-// TestCachePolicyActivePathCarriesCoresFields pins the fields only an active policy sets, so a future
+// TestCachePolicyActivePathCarriesItsResolvedFields pins the fields only an active policy sets, so a future
 // refactor of cachePolicy cannot drop them unnoticed.
-func TestCachePolicyActivePathCarriesCoresFields(t *testing.T) {
+func TestCachePolicyActivePathCarriesItsResolvedFields(t *testing.T) {
 	p := cachePolicy(config.CacheConfig{KeepAlive: true, HeadTTL1h: true})
 	if !p.KeepAlive || !p.HeadTTL1h || !p.WaitPlan {
 		t.Errorf("active policy lost a switch: %+v", p)

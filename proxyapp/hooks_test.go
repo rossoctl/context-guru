@@ -74,18 +74,19 @@ func TestHooksRunInOrderAndTakeEffect(t *testing.T) {
 	dir := t.TempDir()
 	env := append(hostedEnv(t), "CG_TEST_HOOKS=1", "CG_TEST_MAIN_ARGS=--hook-flag=yes",
 		"DASHBOARD=true", "DASHBOARD_DB="+filepath.Join(dir, "dash.db"))
-	out, resp := bootAndGet(t, env, "/hooktest")
+	out, got := bootAndGet(t, env, "/hooktest", "/hookdash/", "/dashboard/")
+	resp := got["/hooktest"]
 
-	var got []string
+	var ran []string
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "hook:") {
-			got = append(got, strings.Fields(line)[0])
+			ran = append(ran, strings.Fields(line)[0])
 		}
 	}
 	want := []string{"hook:Flags", "hook:BeforeControlDB", "hook:TenantOptions", "hook:Hosted",
 		"hook:ProxyOptions", "hook:DashAuth", "hook:Mount", "hook:Handler"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("hooks ran as %v, want %v\n%s", got, want, out)
+	if strings.Join(ran, " ") != strings.Join(want, " ") {
+		t.Fatalf("hooks ran as %v, want %v\n%s", ran, want, out)
 	}
 	for _, s := range []string{
 		"hook:BeforeControlDB control.db",
@@ -93,7 +94,7 @@ func TestHooksRunInOrderAndTakeEffect(t *testing.T) {
 		"hook:ProxyOptions tenants true handler false",
 		"hook:Mount handler true mux true",
 		"manager=true",         // TenantOptions reached the registry and its log line
-		"/hookdash/",           // UIPath reached the dashboard's log line
+		"/hookdash/",           // UIPath reached the dashboard's log line (the route is checked below)
 		"content_capture=true", // Defaults.DashboardContent
 	} {
 		if !strings.Contains(out, s) {
@@ -104,12 +105,36 @@ func TestHooksRunInOrderAndTakeEffect(t *testing.T) {
 		t.Errorf("GET /hooktest = %q, X-Hook %q; want the mounted route through the wrapper",
 			resp.body, resp.header.Get("X-Hook"))
 	}
+	// UIPath moved the ROUTE, not only the log line: SetUIPath must run before Mux() reads the table.
+	// The old path is not served. In hosted mode it gets the auth layer's 401, not a 404.
+	moved, old := got["/hookdash/"], got["/dashboard/"]
+	if moved.status != http.StatusOK || !strings.Contains(strings.ToLower(moved.body), "<html") ||
+		old.status == http.StatusOK {
+		t.Errorf("GET /hookdash/ = %d (html %v), GET /dashboard/ = %d; want the dashboard page at "+
+			"/hookdash/ only", moved.status, strings.Contains(strings.ToLower(moved.body), "<html"), old.status)
+	}
+}
+
+// A BAD UIPATH STOPS THE START BEFORE ANYTHING OPENS. dash.SetUIPath panics on one, and Main calls
+// it only after the port is bound.
+func TestCheckUIPath(t *testing.T) {
+	for _, p := range []string{"", "/stats/", "/a/b/"} {
+		if err := checkUIPath(p); err != nil {
+			t.Errorf("checkUIPath(%q) = %v, want nil", p, err)
+		}
+	}
+	for _, p := range []string{"/", "stats/", "/stats", "stats"} {
+		if err := checkUIPath(p); err == nil {
+			t.Errorf("checkUIPath(%q) = nil, want an error", p)
+		}
+	}
 }
 
 // NO HOOKS IS THE BINARY. The zero Hooks keeps /dashboard/ and content capture off.
 func TestNoHooksKeepsTheBinaryDefaults(t *testing.T) {
 	env := []string{"DASHBOARD=true", "DASHBOARD_DB=" + filepath.Join(t.TempDir(), "dash.db")}
-	out, resp := bootAndGet(t, env, "/hooktest")
+	out, got := bootAndGet(t, env, "/hooktest")
+	resp := got["/hooktest"]
 	if !strings.Contains(out, "/dashboard/") || !strings.Contains(out, "content_capture=false") {
 		t.Errorf("a boot with no hooks changed the dashboard defaults:\n%s", out)
 	}
@@ -124,9 +149,22 @@ type probe struct {
 	header http.Header
 }
 
-// bootAndGet starts Main in a subprocess on a free port, waits until it answers, sends one GET,
-// then stops the process and returns everything it printed.
-func bootAndGet(t *testing.T, env []string, path string) (string, probe) {
+// bootAndGet starts Main in a subprocess on a free port, waits until it answers, sends one GET per
+// path, then stops the process and returns everything it printed.
+//
+// The port is found by binding :0 and closing it, so another process can take it before the child
+// binds. The child then exits on "address already in use", and the boot is retried on a new port.
+func bootAndGet(t *testing.T, env []string, paths ...string) (string, map[string]probe) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		out, got, portTaken := bootAndGetOnce(t, env, paths)
+		if !portTaken || attempt == 3 {
+			return out, got
+		}
+	}
+}
+
+func bootAndGetOnce(t *testing.T, env []string, paths []string) (string, map[string]probe, bool) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -144,22 +182,46 @@ func bootAndGet(t *testing.T, env []string, path string) (string, probe) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	defer func() { _ = cmd.Process.Kill(); <-exited }()
 
-	var p probe
-	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+	get := func(path string) (probe, error) {
 		r, err := http.Get("http://" + addr + path)
-		if err == nil {
-			b, _ := io.ReadAll(r.Body)
-			_ = r.Body.Close()
-			p = probe{status: r.StatusCode, body: string(b), header: r.Header}
+		if err != nil {
+			return probe{}, err
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		return probe{status: r.StatusCode, body: string(b), header: r.Header}, nil
+	}
+	got := map[string]probe{}
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		select {
+		case <-exited:
+			out := buf.String()
+			if strings.Contains(out, "address already in use") {
+				return out, nil, true
+			}
+			t.Fatalf("the proxy exited before it answered on %s:\n%s", addr, out)
+		default:
+		}
+		if p, err := get(paths[0]); err == nil {
+			got[paths[0]] = p
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the proxy never answered on %s:\n%s", addr, buf.String())
 		}
 	}
-	return buf.String(), p
+	for _, path := range paths[1:] {
+		p, err := get(path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		got[path] = p
+	}
+	return buf.String(), got, false
 }
 
 // syncBuffer is a bytes.Buffer the subprocess's two pipes can write at once.

@@ -332,6 +332,11 @@ func Main(hooks Hooks) {
 	if err := checkIdleExit(*idleExit, *upstreamsPath, *bob, cfg.Store); err != nil {
 		log.Fatalf("context-guru: %v", err)
 	}
+	// A host's UIPath is checked here too, for the same reason: dash.SetUIPath panics on a bad one,
+	// and it runs only after the port is bound and the databases are open.
+	if err := checkUIPath(hooks.UIPath); err != nil {
+		log.Fatalf("context-guru: %v", err)
+	}
 
 	agg := metrics.NewAggregator()
 	// kaKeepAlive is the keep-alive mechanism's own sink (components.KeepAliveEmitter): it
@@ -492,12 +497,23 @@ func Main(hooks Hooks) {
 
 	// What the hooks see. Each field is set as its part is built.
 	app := &App{Config: cfg, Recorder: rec, Windows: windows, Prices: priceResolver(windows)}
+	// hookFailed stops the start on a hook's error. log.Fatalf runs no defers, so it closes the
+	// databases that are open first: otherwise their WAL/-shm files stay behind (see checkIdleExit).
+	var reg *tenant.Registry
+	hookFailed := func(hook string, err error) {
+		if reg != nil {
+			_ = reg.Close()
+		}
+		if rec != nil {
+			_ = rec.Close()
+		}
+		log.Fatalf("context-guru: Hooks.%s: %v", hook, err)
+	}
 
 	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
 	// proxy checks exactly one field (Options.Tenants) to decide which world it is in.
 	var tenants *proxy.TenantSource
 	var upstreams map[string]proxy.Upstream
-	var reg *tenant.Registry
 	if *upstreamsPath != "" {
 		// The single-tenant capture hooks are REFUSED here, before anything opens a
 		// database or a socket.
@@ -536,7 +552,7 @@ func Main(hooks Hooks) {
 		defAnthropic, defOpenAI, defBob := defaultUpstreams(list)
 		if hooks.BeforeControlDB != nil {
 			if err := hooks.BeforeControlDB(*controlDB); err != nil {
-				log.Fatalf("control database: %v", err)
+				hookFailed("BeforeControlDB", err)
 			}
 		}
 		topts := tenant.Options{
@@ -560,7 +576,7 @@ func Main(hooks Hooks) {
 		app.Registry, app.Upstreams = reg, upstreams
 		if hooks.Hosted != nil {
 			if err := hooks.Hosted(app); err != nil {
-				log.Fatalf("context-guru: %v", err)
+				hookFailed("Hosted", err)
 			}
 		}
 		tenants = proxy.NewTenantSource(reg, emitter, buildHostedTenantConfig, *maxTenancies)
@@ -970,6 +986,18 @@ func Main(hooks Hooks) {
 	<-idle
 	// The deferred Close calls (recorder, registry) run after this, which is what
 	// actually flushes the capture batch and closes the databases cleanly.
+}
+
+// checkUIPath applies dash.SetUIPath's rule to a host's Hooks.UIPath, so a bad one stops the start
+// before anything opens. "" is the default path and is always valid.
+func checkUIPath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if !strings.HasPrefix(p, "/") || !strings.HasSuffix(p, "/") || p == "/" {
+		return fmt.Errorf("Hooks.UIPath %q: the dashboard path must be rooted and slash-terminated, e.g. \"/stats/\"", p)
+	}
+	return nil
 }
 
 // armShutdown makes graceful shutdown able to finish while the dashboard's live
