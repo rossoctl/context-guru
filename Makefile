@@ -41,13 +41,14 @@ build-static: ## Same as build, plus -trimpath — the exact build releases ship
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
 	@file bin/$(BINARY) 2>/dev/null || true
 
+# The dash package took 1140 s on CI (2026-11-11), so 20m was too close to the limit.
 .PHONY: test
 test: ## Run all tests with the race detector
-	go test -race -timeout 20m ./...
+	go test -race -timeout 40m ./...
 
 .PHONY: cover
 cover: ## Run all tests with race + cross-package coverage; write coverage.out and print total
-	go test -race -timeout 20m -coverpkg=./... -coverprofile=coverage.out ./...
+	go test -race -timeout 40m -coverpkg=./... -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -1
 
 # NPM_REGISTRY overrides the npm registry for this build only, e.g. when the default one rejects

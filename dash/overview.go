@@ -586,6 +586,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		CacheTTL: map[string]int64{},
 	}
 	var cgAvg, upAvg, ttfbAvg, upBufAvg sql.NullFloat64
+	var restoredTok int64
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), COUNT(DISTINCT r.session_id),
 		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
 		COALESCE(SUM(r.attempted_tokens),0), COALESCE(SUM(r.frozen_tokens),0),
@@ -632,7 +633,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN 1 ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
-		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
+		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0), COALESCE(SUM(r.restored_tokens),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cg_latency_ms),0),
 		-- Streaming split. A "streamed" row is one with a measured first byte; a buffered row
@@ -697,7 +698,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
 		&o.SplitCreditedMoved,
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
-		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &restoredTok, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
 		&o.SSEStreamed, &o.SSEBuffered, &ttfbAvg, &upBufAvg,
 		&o.Breakpoints.System, &o.Breakpoints.Tools, &o.Breakpoints.Messages,
@@ -1141,7 +1142,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.InvalidConfigRecent = invalidConfigRecent
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
-	o.SafetyCost.RestoredTokens = o.ExpandTokens
+	// Both are paid for twice: the round that served the expand, and the copy each later turn of a
+	// fixed_restore session sends again (#481).
+	o.SafetyCost.RestoredTokens = o.ExpandTokens + restoredTok
 	o.SafetyCost.RevertedRuns = o.Reverts
 	o.SafetyCost.CGLLMCostUSD = o.CGLLMCostUSD
 	// The freeze's own caveat, on the payload rather than only in a comment: frozen == 0 is

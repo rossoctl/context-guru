@@ -11,7 +11,7 @@ const DEFAULT_PRESET = "off"
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
 // The plugin downloads this release unless CONTEXT_GURU_VERSION says otherwise. `strategies` exists
 // from v0.7.1. An older binary cannot give the plugin its strategy table, so there is no fallback.
-const PINNED_VERSION = "v0.7.1"
+const PINNED_VERSION = "v0.7.2"
 
 // The strategy table has one owner: the proxy. `context-guru-proxy strategies` prints it as JSON.
 // The plugin keeps no copy. It runs the command with a short time limit. A binary that does not know

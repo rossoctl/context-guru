@@ -130,7 +130,7 @@ not tested live yet.
 You need:
 
 - OpenCode 1.19.5. Other versions are not tested.
-- Proxy v0.7.1 or later. The plugin downloads v0.7.1, or uses the `context-guru-proxy` on your `PATH`.
+- Proxy v0.7.1 or later. The plugin downloads v0.7.2, or uses the `context-guru-proxy` on your `PATH`.
 - macOS or Linux.
 
 Install it:

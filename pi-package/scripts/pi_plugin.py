@@ -58,8 +58,8 @@ DEFAULT_STRATEGY = "auto"
 # fills the cache keys. The config is strict YAML, so an older binary refuses the `strategy` key.
 NAMED_STRATEGY_RELEASE = (0, 7, 1)
 
-# The same strategies, keys and values as the Claude Code plugin (context-guru-plugin/scripts/settings.py),
-# so one name means one behaviour on both clients. `none` writes no cache keys at all.
+# The same strategies, keys and values as the proxy's table (config/strategy.go; pi-package/strategies_test.go
+# checks it), so one name means one behaviour on every client. `none` writes no cache keys at all.
 #
 # For a binary of NAMED_STRATEGY_RELEASE or later, the config names the strategy and the proxy's own
 # table applies. This copy then gives only the names, the consent text and the `desc` lines. The keys

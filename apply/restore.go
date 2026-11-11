@@ -1,6 +1,9 @@
 package apply
 
 import (
+	"sort"
+
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
@@ -93,17 +96,19 @@ func (p restorePlan) insert(wire string, out []byte, client []gjson.Result) ([]b
 		return out, 0, true
 	}
 	outMsgs := gjson.GetBytes(out, expand.MessagesField(wire)).Array()
-	shift := len(client) - len(outMsgs)
+	return p.insertAt(wire, out, p.positions(outMsgs, client))
+}
+
+// insertAt is insert with the positions already resolved (positions).
+func (p restorePlan) insertAt(wire string, out []byte, at []int) ([]byte, int, bool) {
+	if len(p) == 0 {
+		return out, 0, true
+	}
 	ins := make([]expand.Insertion, 0, len(p))
 	tokens := 0
-	for _, it := range p {
-		at := it.anchor.At - shift
-		if shift != 0 && !(at >= 1 && at <= len(outMsgs) &&
-			(it.anchor.At == len(client) || (at < len(outMsgs) && outMsgs[at].Raw == client[it.anchor.At].Raw))) {
-			at = len(outMsgs)
-		}
+	for i, it := range p {
 		text := expand.RestoredText(it.anchor.ID, it.original)
-		ins = append(ins, expand.Insertion{At: at, Text: text})
+		ins = append(ins, expand.Insertion{At: at[i], Text: text})
 		tokens += schema.TextTokens(text)
 	}
 	nb, ok := expand.InsertRestored(wire, out, ins)
@@ -111,4 +116,55 @@ func (p restorePlan) insert(wire string, out []byte, client []gjson.Result) ([]b
 		return out, 0, false
 	}
 	return nb, tokens, true
+}
+
+// positions is where each item of the plan goes in outMsgs, the messages of the body the pipeline
+// produced: the index of the message it is inserted before, in the plan's order. See insert for
+// how a count-changing pipeline moves the anchors.
+func (p restorePlan) positions(outMsgs, client []gjson.Result) []int {
+	shift := len(client) - len(outMsgs)
+	at := make([]int, len(p))
+	for i, it := range p {
+		at[i] = it.anchor.At - shift
+		if shift != 0 && !(at[i] >= 1 && at[i] <= len(outMsgs) &&
+			(it.anchor.At == len(client) || (at[i] < len(outMsgs) && outMsgs[at[i]].Raw == client[it.anchor.At].Raw))) {
+			at[i] = len(outMsgs)
+		}
+	}
+	return at
+}
+
+// ops reports the insertions to the accountant, one operation per restored copy. The copy is the
+// LAST thing done to the request, after the pipeline, so its position is in the body the pipeline
+// produced and the library moves the pipeline's own operations past it (design 4.3). Inserting in
+// ascending order, the copy that ranks k-th lands at its position plus k, which is also where it
+// sits in the final body nb. The sizes are the wire bytes of that message. The ChangeID is the
+// marker id: the same on every request that restores it, so the library keeps the cost applied
+// once (accountant case rewrite/fixed-restore-cost/hot/5m, #481). dryRun is true in observe mode,
+// where the body is never forwarded, as for the pipeline's own operations (opsFromRun). ok is false
+// when a copy cannot be found in nb.
+func (p restorePlan) ops(at []int, nb []gjson.Result, dryRun bool) ([]accountant.Operation, bool) {
+	order := make([]int, len(p))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return at[order[a]] < at[order[b]] })
+	ops := make([]accountant.Operation, 0, len(p))
+	for rank, i := range order {
+		pos := at[i] + rank
+		if pos < 0 || pos >= len(nb) {
+			return nil, false
+		}
+		ops = append(ops, accountant.Operation{
+			Kind:          accountant.KindRewrite,
+			Operator:      "context-guru.expand_restore",
+			DryRun:        dryRun,
+			At:            accountant.Position{Section: accountant.SectionMessages, Index: pos},
+			SizeBefore:    accountant.Size{Bytes: 0},
+			SizeAfter:     accountant.Size{Bytes: len(nb[pos].Raw)},
+			ChangeID:      "cg:restore:" + p[i].anchor.ID,
+			MessageSplice: &accountant.MessageSplice{At: pos, Removed: 0, Inserted: 1},
+		})
+	}
+	return ops, true
 }

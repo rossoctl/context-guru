@@ -118,14 +118,15 @@ func TestPlansAllDropsOnlyTheTenantFilter(t *testing.T) {
 	}
 }
 
-// TestASummarySubstituteThatReadNothingIsNotARefresh is TestAPingThatReadNothingIsNotARefresh for
-// the cache_aware_summarizer path, which books its own refresh (recordSummarySubstitute). A
-// substitute that read nothing from the cache refreshed nothing that was there, so refreshedAt
-// must stay on the real request; one that read the cache moves it to the substitute's start.
+// TestASummarySubstituteMovesTheRefreshOnlyWhenItTouchedTheCache is the substitute twin of
+// TestAPingMovesTheRefreshClockOnlyWhenItTouchedTheEntry, for the cache_aware_summarizer path,
+// which books its own refresh (recordSummarySubstitute). A substitute that read the cache
+// refreshed it. One that wrote re-created the entry and started a fresh lifetime (#580). One that
+// billed neither touched nothing, so refreshedAt stays on the real request.
 //
 // Port of main's TestASummarySubstituteThatReadNothingIsNotARefresh
-// (git show 67c5f758:proxy/keepaliveplan_test.go).
-func TestASummarySubstituteThatReadNothingIsNotARefresh(t *testing.T) {
+// (git show 67c5f758:proxy/keepaliveplan_test.go), with the write case changed by #580.
+func TestASummarySubstituteMovesTheRefreshOnlyWhenItTouchedTheCache(t *testing.T) {
 	start := time.Now()
 	now := start
 	fd := newFake(okPing)
@@ -144,11 +145,16 @@ func TestASummarySubstituteThatReadNothingIsNotARefresh(t *testing.T) {
 	}
 
 	now = start.Add(time.Minute)
-	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{FreshInput: 10, CacheWrite: 48576, Output: 1}, 1, now)
+	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{FreshInput: 48586, Output: 1}, 1, now)
 	if got := refreshedAt(); !got.Equal(start) {
-		t.Errorf("refreshedAt = %v after a substitute that read nothing, want the real request's start %v", got, start)
+		t.Errorf("refreshedAt = %v after a substitute that billed no cache, want the real request's start %v", got, start)
 	}
 	now = start.Add(2 * time.Minute)
+	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{FreshInput: 10, CacheWrite: 48576, Output: 1}, 1, now)
+	if got := refreshedAt(); !got.Equal(now) {
+		t.Errorf("refreshedAt = %v after a substitute that re-wrote the entry, want its start %v", got, now)
+	}
+	now = start.Add(3 * time.Minute)
 	k.recordSummarySubstitute(j, offload.KeepAliveSummaryResult{CacheRead: 48576, Output: 1}, 1, now)
 	if got := refreshedAt(); !got.Equal(now) {
 		t.Errorf("refreshedAt = %v after a substitute that read the cache, want its start %v", got, now)

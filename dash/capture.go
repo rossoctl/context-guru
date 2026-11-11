@@ -369,14 +369,14 @@ func (r *Recorder) Record(e *Event) {
 	if e.TS == 0 {
 		e.TS = time.Now().UnixMilli()
 	}
-	// A keep-alive ping that READ the cache refreshed the provider's entry, so it counts on
-	// the restart grace's clock (#766) — this is the one dash write a ping produces, since
-	// pings never run ObserveThread. A ping that did not read the cache is not counted, the
-	// same rule the keeper's own refresh bookkeeping uses: such a ping re-created the entry
-	// rather than refreshing it, and the keeper counts those writes as a bug to fix, not as
-	// warmth. Recorded here, before the queue, so ThreadRefreshedAt answers at once even if
-	// the row is still in flight (the row is the restart's recovery path).
-	if e.KeepAlive && e.CacheRead > 0 && e.SessionID != "" {
+	// A keep-alive ping that READ or WROTE the cache touched the provider's entry, so it counts
+	// on the restart grace's clock (#766) — this is the one dash write a ping produces, since
+	// pings never run ObserveThread. A write re-created the entry and started a fresh lifetime
+	// (#580). A ping that billed neither, or that the upstream rejected, is not counted: the same
+	// rules the keeper's refresh bookkeeping and SeedGraceSessions use. Status 0 is an event
+	// that carries none. Recorded here, before the queue, so ThreadRefreshedAt answers at once even
+	// if the row is still in flight (the row is the restart's recovery path).
+	if e.KeepAlive && (e.CacheRead > 0 || e.CacheWrite > 0) && (e.Status == 0 || (e.Status >= 200 && e.Status < 300)) && e.SessionID != "" {
 		key := thread.Key(e.SessionID, e.ThreadID)
 		r.mu.Lock()
 		r.touchGraceLocked(key, e.TS)
@@ -933,8 +933,9 @@ func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 // SeedGraceSessions primes the restart grace's clock (graceSeen) from the database, the same
 // startup recovery SeedSessions gives cache attribution (#766). One grouped query: per thread,
 // the newest row that refreshed the provider's cache entry — a real request (keepalive = 0,
-// whatever it read, because it wrote the entry) or a keep-alive ping that READ the cache
-// (keepalive = 1 AND cache_read > 0, the only ping that keeps the entry warm). Only rows the
+// whatever it read, because it wrote the entry) or a keep-alive ping that READ or WROTE the
+// cache (keepalive = 1 AND cache_read + cache_write > 0: a read kept the entry warm, a write
+// re-created it, #580). Only rows the
 // upstream accepted (2xx): a failed request wrote no cache entry, and counting it would
 // protect a prefix nothing kept warm.
 //
@@ -962,7 +963,7 @@ func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
 	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.session_alias, MAX(r.ts) FROM requests r
 		WHERE r.ts >= ? AND r.session_id != ''
 			AND r.status >= 200 AND r.status < 300
-			AND (r.keepalive = 0 OR (r.keepalive = 1 AND r.cache_read > 0))
+			AND (r.keepalive = 0 OR (r.keepalive = 1 AND (r.cache_read > 0 OR r.cache_write > 0)))
 		GROUP BY r.tenant_id, r.session_id, r.thread_id, r.session_alias`,
 		now-staleSession)
 	if err != nil {

@@ -36,3 +36,22 @@ func TestParse(t *testing.T) {
 		})
 	}
 }
+
+func TestPresentIsTrueOnlyForAnObjectWithAField(t *testing.T) {
+	for in, want := range map[string]bool{
+		`{"prompt_tokens":1}`: true,
+		`{"x":null}`:          true,
+		`{}`:                  false,
+		`null`:                false,
+		`[1]`:                 false,
+		`3`:                   false,
+		`"usage"`:             false,
+	} {
+		if got := Present(gjson.Parse(in)); got != want {
+			t.Errorf("Present(%s) = %v, want %v", in, got, want)
+		}
+	}
+	if Present(gjson.Get(`{}`, "usage")) {
+		t.Error("Present(missing path) = true, want false")
+	}
+}
