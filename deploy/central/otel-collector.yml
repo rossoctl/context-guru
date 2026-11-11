@@ -15,7 +15,7 @@
 # TLS is terminated in front of this (the receivers listen on plain HTTP inside the private
 # network). See README.md.
 #
-# Revoking a token: edit the token file and restart the collector (`install.sh central-reload`).
+# Revoking a token: run `sudo ./install.sh token revoke <proxy> <name>`. It edits the token file and restarts the collector.
 # The collector reads the file once, at start. The restart takes about 1.5 seconds. A push that lands
 # in that gap fails and the next push repairs it, because proxies send cumulative totals.
 

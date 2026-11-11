@@ -31,6 +31,15 @@ No machine opens a port. Each proxy pushes out. Prometheus scrapes no proxy.
 | `install.sh` | Installs the stack on a server. Also makes and revokes tokens. |
 | `nginx.example.conf` | The TLS front end. |
 
+## What is stored
+
+Prometheus keeps metadata only, for 30 days by default: counters and histograms with the labels
+`proxy`, `machine`, `preset`, `service_version`, `model`, `provider`, `tier`, `component` and a few
+reason codes. It keeps no prompt, no response, no session ID and no host name. `machine` is a random
+install ID. Anyone with Grafana access can read it. To stop the storage, remove the stack
+(`install.sh remove`) and delete `/var/lib/central-metrics`. To stop one install from sending, revoke
+its token or turn its push off.
+
 ## Install on a server
 
 1. Copy this repository to the server. Install `podman` or `docker`.
@@ -40,7 +49,7 @@ No machine opens a port. Each proxy pushes out. Prometheus scrapes no proxy.
 4. Put TLS in front (see below).
 5. Run `sudo ./install.sh status`.
 
-Each proxy needs a collector URL and its token. The URL has no default. A proxy with no URL logs one
+Each proxy needs a collector URL and its token. The proxy side arrives with #974; the flags below are its flags. The URL has no default. A proxy with no URL logs one
 warning and sends nothing.
 
 | Proxy | URL | Settings |
@@ -111,7 +120,7 @@ exists.
 | Rule syntax | `promtool check rules prometheus/rules/*.yml` | The rules parse. |
 | Alert and rule logic | `promtool test rules prometheus/tests/alerts_test.yml` | Each alert fires when it should and stays quiet when it should not. |
 | Collector config | `otelcol-contrib validate --config=otel-collector.yml` | The config is valid. |
-| Names, labels, tokens | `internal/metricspush` end-to-end tests (see `central_e2e_test.go`) | A real push arrives under the names and labels of the spec. |
+| Names, labels, tokens | `internal/metricspush` end-to-end tests (see `central_e2e_test.go`). They arrive with #974, not with this folder. | A real push arrives under the names and labels of the spec. |
 | Recording rules | the same package, with `CENTRAL_SLOW=1` (about 6 minutes) | The rules compute the right number from traffic at a known rate. |
 
 Start the stack for the end-to-end tests with `docker compose -f compose.yaml up -d`. If port 3001 is

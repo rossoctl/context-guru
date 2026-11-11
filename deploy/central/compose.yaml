@@ -5,8 +5,8 @@
 # Production uses install.sh (see README.md): the same images and the same config files. This file
 # differs in two ways. It has no TLS, and it mounts the example token files. Do not expose it.
 #
-# Only the collector's two receiver ports and Grafana are published, and all three on loopback.
-# Prometheus and Alertmanager stay on the private network.
+# Only the collector's two receiver ports, Prometheus and Grafana are published, all on loopback.
+# Alertmanager stays on the private network.
 
 name: central-metrics
 
