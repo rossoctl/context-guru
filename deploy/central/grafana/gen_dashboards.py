@@ -263,13 +263,14 @@ def machines():
                     0, 0, 10, 12, unit=USD, kind="bargauge", instant=True, desc="Every machine, best first."))
     P.append(table(2, "By preset", [
         f'count by (preset) (count by (preset, machine) (llm_proxy_info{{{f}}}))',
-        net("preset"), per1k("preset"),
+        net("preset"), f'{net("preset")} / clamp_min({inc("llm_inference_cost_usd_total", "preset")} + {net("preset")}, 1e-9)', per1k("preset"),
         f'{inc("llm_savings_estimated_total", "preset")} / clamp_min({inc("llm_savings_requests_total", "preset")}, 1)'],
         10, 0, 14, 12, "preset", [
             {"id": "organize", "options": {"excludeByName": {"Time": True}, "renameByName": {
-                "Value #A": "machines", "Value #B": "net saved", "Value #C": "net per 1,000 requests", "Value #D": "estimated"}}}],
-        desc="Saving rate (net divided by the cost with no change) needs the baseline counter, which is not built. Net per 1,000 requests compares a busy machine with a quiet one.",
-        unit_by_col={"net saved": USD, "net per 1,000 requests": USD, "estimated": "percentunit"}))
+                "Value #A": "machines", "Value #B": "net saved", "Value #C": "saving rate", "Value #D": "net per 1,000 requests",
+                "Value #E": "estimated"}}}],
+        desc="Saving rate is net saved divided by spend plus net saved (the exact baseline counter is not built). Net per 1,000 requests compares a busy machine with a quiet one.",
+        unit_by_col={"net saved": USD, "saving rate": "percentunit", "net per 1,000 requests": USD, "estimated": "percentunit"}))
     P.append(series(3, "Net saved by proxy (USD, selected range)", [(net("proxy"), "{{proxy}}")], 0, 12, 10, 9,
                     unit=USD, kind="bargauge", vertical=True, instant=True,
                     desc="Each proxy prices with its own rate table, so compare these by tokens, not by money, when the tables differ."))
