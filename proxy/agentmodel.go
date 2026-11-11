@@ -11,16 +11,21 @@ import (
 
 // agentModelTarget is a.ModelTarget, fail open: a panic gives the zero target (the host default),
 // and a field the host cannot use safely is dropped, so that field keeps the host default.
-func agentModelTarget(ctx context.Context, a agent.Agent) (t agent.ModelTarget) {
+//
+// owned reports whether the agent owns its route's auth: it named a target, even one the host
+// dropped, or its ModelTarget panicked. The host gives an owned route no server-held key, so a
+// misbehaving agent fails closed for the key.
+func agentModelTarget(ctx context.Context, a agent.Agent) (t agent.ModelTarget, owned bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			// The panic's type only: its message could hold a header value.
 			logging.From(ctx).Error("context-guru: recovered from panic in the agent's model target; using the host default",
 				"agent", fmt.Sprintf("%T", a), "panic", fmt.Sprintf("%T", rec))
-			t = agent.ModelTarget{}
+			t, owned = agent.ModelTarget{}, true
 		}
 	}()
 	t = a.ModelTarget()
+	owned = t != agent.ModelTarget{}
 	if t.Path != "" && !safeTargetPath(t.Path) {
 		dropTargetField(ctx, a, "path")
 		t.Path = ""
@@ -29,7 +34,7 @@ func agentModelTarget(ctx context.Context, a agent.Agent) (t agent.ModelTarget) 
 		dropTargetField(ctx, a, "auth_scheme")
 		t.AuthScheme = ""
 	}
-	return t
+	return t, owned
 }
 
 // dropTargetField logs a target field the host drops. The field's name only, never its value.

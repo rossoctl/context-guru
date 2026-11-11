@@ -273,3 +273,35 @@ func TestOpenAIRouteStillFallsBackToTheOperatorsKey(t *testing.T) {
 		t.Fatalf("summary calls = %d, want 1 with the operator's key as Bearer", len(got))
 	}
 }
+
+// The key rule must hold when the agent misbehaves, not only when its target is valid: an agent
+// that names a target, even one the host drops, or whose ModelTarget panics, owns its route's auth.
+// Its route never falls back to the operator's OpenAI key.
+func TestAMisbehavingAgentRouteNeverSendsTheOperatorsOpenAIKey(t *testing.T) {
+	const operatorKey = "sk-operator-openai-CANARY"
+	for name, a := range map[string]agent.Agent{
+		"panics":          targeted{panics: true},
+		"every field bad": targeted{target: agent.ModelTarget{Path: "relative", AuthScheme: "Api key"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			up, calls := summaryUpstream(t)
+			h := summaryHandler(t, "incoming", Options{OpenAIUpstream: up.URL, OpenAIKey: operatorKey})
+			reg := agent.NewRegistry()
+			if err := reg.Register(a); err != nil {
+				t.Fatal(err)
+			}
+			h.agentFor = reg.ForPath
+
+			got := postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "", calls)
+
+			for _, c := range got {
+				if strings.Contains(c.auth, operatorKey) {
+					t.Fatalf("a summary call on the agent's route carries the operator's OpenAI key")
+				}
+			}
+			if len(got) != 0 {
+				t.Errorf("summary calls = %d without a caller key, want 0", len(got))
+			}
+		})
+	}
+}
