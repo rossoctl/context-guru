@@ -329,6 +329,9 @@ export const register: Register = on => {
     const price = nextPrice(m, figures?.fiveHour !== undefined)
     const warm = price.kind === 'usd' ? price.warm : m.isWarm ? price.now : undefined
     const cold = price.kind === 'usd' ? price.cold : m.isWarm ? undefined : price.now
+    // The colors come from the model on a subscription, so a later kind (#1095 point 1) sets them in one place.
+    const warmColor = price.kind === 'tokens' ? price.color : 'success'
+    const coldColor = price.kind === 'tokens' ? price.color : 'warning'
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -340,10 +343,11 @@ export const register: Register = on => {
       <Box flexDirection="column" paddingX={1} marginTop={1}>
         <Box flexWrap="wrap">
           <Text bold color="claude">{'◆'} </Text>
-          {m.isWarm && (
+          {m.isWarm && (warm !== undefined || cold !== undefined) && (
+            // No figure, no label: a bare `next message` says nothing.
             <Text>
               <Text dimColor>{narrow ? 'next ' : 'next message '}</Text>
-              {warm !== undefined && <Text color="success">{warm}</Text>}
+              {warm !== undefined && <Text color={warmColor}>{warm}</Text>}
               {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
@@ -351,7 +355,7 @@ export const register: Register = on => {
             <Text>
               <Text dimColor>○ cache cold</Text>
               {cold !== undefined && <Text dimColor> · next message </Text>}
-              {cold !== undefined && <Text color="warning">{cold}</Text>}
+              {cold !== undefined && <Text color={coldColor}>{cold}</Text>}
             </Text>
           )}
           {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}

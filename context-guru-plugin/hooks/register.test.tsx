@@ -338,6 +338,34 @@ test('on a subscription a cold band shows one figure, the write, in the warning 
   await ui.unmount()
 })
 
+test('on a subscription a cold band at 60 columns shows the write in the warning color', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+  const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+  expect((fig as any)?.props?.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('on a subscription a warm band with no warm price shows no bare next-message label', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, ...rest } = t; return rest }
+  docOverride = d => ({ ...drop(d), threads: d.threads?.map((t: any) => (t.main ? drop(t) : t)) })
+  await boot($, on, true)
+  usage = docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(band)).split('\n')[0]
+  expect(row1).not.toMatch(/next message/)
+  expect(row1).not.toMatch(/\b(rd|wr)\b/)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await dump(pane)).toMatch(/NEXT MESSAGE\nnext message unknown\n/)
+  await pane.unmount()
+})
+
 for (const warm of [true, false]) {
   test(`on a subscription the pane shows one next-message figure for a ${warm ? 'warm' : 'cold'} cache`, async ($, on) => {
     usage = FIVE_HOUR
