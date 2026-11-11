@@ -263,6 +263,49 @@ function kaTokenLines(o, fmt) {
   };
 }
 
+// One row of the Cache strategy tab's session tables in tokens, on a subscription (#1048), from
+// /api/keepalive/sessions or /api/keepalive/live. The fields are the Sessions tab's own (#1023).
+//   expiry  what the session's expiries billed, by tier (expiry_tokens): the token form of the
+//           "cost of running out". '' on a row with none (a live row has none).
+//   rescue  the rescue (keepalive_tokens) through the shared rule for zero (tokenFigure), scoped to
+//           the row: all zero with any unpriced request of the session, or no `keepalive_tokens`
+//           (a server from before #1048), reads "not measured". `measured` is that rule's answer.
+//   pings   what the pings paid (pingLine), never added into the rescue's cost. A row with pings
+//           and no ping tokens reads `cost 0 tokens`, as kaTokenLines does. '' with no pings.
+//   ran     the strategy ran on the session: it sent a ping, or the rescue has tokens. The caller
+//           shows `—` when it did not, as the dollar cells do.
+function kaSessionTokenCells(s, fmt) {
+  const ka = s && s.keepalive_tokens;
+  const rescue = tokenFigure(ka, ka ? { tokens: ka, tokens_unmeasured_requests: s.tokens_unmeasured_requests } : null, fmt);
+  const ping = pingLine(s, fmt);
+  const pinged = !!(s && s.pings > 0) || ping !== '';
+  return {
+    expiry: tierText(s && s.expiry_tokens, fmt),
+    rescue: rescue.text,
+    measured: rescue.measured,
+    pings: ping || (pinged ? 'cost 0 tokens' : ''),
+    ran: pinged || hasTokens(ka),
+  };
+}
+
+// The expiries' billed tokens in a band of the behaviour panel (#1048): `1.2M wr · 30.0k rd`. A band
+// with no expiries reads `0 tokens`; a band from a server before #1048 (no `tokens`) `not measured`.
+function bandTokens(b, fmt) {
+  if (!b || !b.tokens) return 'not measured';
+  return tierText(b.tokens, fmt) || '0 tokens';
+}
+
+// The behaviour panel's daily chart in tokens (#1048): one series per tier that is not 0 on any day,
+// in the display order. The tiers are never added into one line. `rows` is /api/keepalive/behaviour
+// `daily`; each point is [ts, tokens of that tier].
+const TIER_NAMES = { wr: 'Cache write (wr)', wr1h: '1-hour cache write (wr1h)', rd: 'Cache read (rd)', in: 'Fresh input (in)' };
+function tierSeries(rows) {
+  const rs = rows || [];
+  return TOKEN_TIERS.filter(([k]) => rs.some((r) => r.tokens && r.tokens[k]))
+    .map(([k, l]) => ({ tier: l, name: TIER_NAMES[l], points: rs.map((r) => [r.ts, (r.tokens && r.tokens[k]) || 0]) }));
+}
+
 if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells, kaTokenLines };
+  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells, kaTokenLines,
+  kaSessionTokenCells, bandTokens, tierSeries };

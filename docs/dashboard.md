@@ -487,7 +487,9 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   - Cache: `keepalive` (the rescue), `cachesplit` and `ttl`, with one row each, and the pings line.
     A row with no tokens does not show; with no rows, the list does not show. Manual pings have no
     token figure, so they do not show.
-  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
+  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`. The Tool deferral card says
+    "Net of the names list." The dollar card says "Net of the names list and the searches": the
+    searches are requests of their own and have no token figure here.
   - Preset: every other entry (the preset's components and `ended_change`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
   weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
@@ -559,7 +561,34 @@ or a local proxy on a subscription. Managers, API-key users and hosted mode keep
   saved writes and paid reads in dollars. A yes or no in tokens needs a rule that weighs one tier
   against another, so the forecast keeps dollars, with the line `Forecast at API-price weights`.
   "Ahead" or "Behind", the winner and loser split, and the "costs more than it saves" banner use
-  the dollar net too, and say "at API-price weights". The tables below the ledger stay in dollars.
+  the dollar net too, and say "at API-price weights". The tables below the ledger follow the same
+  rule (#1048): see below.
+
+#### The tables below the ledger
+
+Each session's keep-alive figures come from the Sessions tab's own query (`sessionTokens`, #1023).
+The two tabs cannot disagree about a session. `GET /api/keepalive/sessions` and
+`GET /api/keepalive/live` add these fields to each row, for every caller:
+
+- `keepalive_tokens`: the rescue, as `{saved, caused}` by tier (the accountant's `tok_ka_*`).
+- `keepalive_ping_tokens`: what the session's pings paid, by tier.
+- `tokens_unmeasured_requests`: the session's agent requests with no token figure.
+- `expiry_tokens` (sessions only): the billed input tokens of the session's expiries, by tier. It
+  is the token form of `expiry_usd`.
+
+`GET /api/keepalive/behaviour` adds `tokens` (the expiries' billed input tokens, by tier) to each
+day of `daily` and to each band of `gap_bands`, `prefix_bands` and `hour_bins`. It is the token
+form of `usd`. These are the requests' own usage columns, so every expiry has a figure.
+
+| Table | On a subscription | Stays in dollars, labelled "at API-price weights" |
+|---|---|---|
+| Which sessions gained and which lost (the session table) | **Tokens at running out**: `expiry_tokens`. **Their tokens**: the pings, in a column of their own, never added into the rescue. **Avoided (upper bound)**: the rescue, with the shared rule for zero (`saved 0 tokens` against `not measured`). **Ahead or behind**: a word, not a net. The kinds of token have no common unit. The note under the table counts expiries, not dollars. | Ahead or behind, and the row order, use the dollar net and the dollar cost of the expiries. |
+| Sessions with a warm cache right now (the live table) | **Realised (tokens)**: the rescue on one line, and `Keep-alive pings (not in the total): cost …` on a line of its own. The hint under the table shows the ledger's rescue and pings lines. | One warm-up, If it lapses, Requests per rewrite, the expiry warning's total and the "still open" total. Each is a price what-if on the session's prefix. |
+| How often your cache ran out (the behaviour panel) | The daily chart shows one line per kind of token, on one token scale. The kinds are never added. Each band and the table view show `count · tokens`. | Nothing. |
+| What would other settings have earned? (the calculator) | Nothing. A line above the ladder says `Dollars at API-price weights. A subscription does not bill per token.` | The whole ladder and the note above it. It is a replay priced at one prefix: a price what-if. Tokens come later with #1047. |
+
+The tables reuse the tab's one subscription test, so managers, API-key users and hosted mode keep
+dollars. Only a session on the page is read (`session_id IN (…)`, on a session index).
 
 ## KV-cache panel
 
