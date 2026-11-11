@@ -491,9 +491,6 @@ func manyToolResultsRequest(model string, results int) []byte {
 // cost ~53 ms/request, ~25% of a real request, while the documented figure was
 // ~0.000002%. A benchmark that calls Record directly can never catch that.
 //
-// So this drives the REAL handler over ONE keep-alive connection with content capture
-// ON — the path a client actually pays for — and compares against the same handler
-// with the dashboard off. It fails if the dashboard adds a perceptible cost.
 //
 // HOW IT MEASURES (#1013, #1031). It times the dashboard's OWN calls on the request goroutine
 // (newCapture, the note* methods, the accountant's accBegin and accEnd, finish) through spendHook, a
@@ -516,8 +513,15 @@ func manyToolResultsRequest(model string, results int) []byte {
 //     accountant (accBegin, accEnd) included, on a small body (2 tool results). The growth of the
 //     accountant's cost with body size is tracked in #1059 and is NOT covered by this test.
 //   - TestDashboardCaptureAddsNoRequestLatencyAtMaxContent runs content capture at its maximum
-//     (24 tool results) and leaves the accountant out, because on that body the accountant costs
-//     about 24 ms per request under -race and 150 ms under load (#1059). It covers the capture work.
+//     (24 tool results) and leaves the accountant out (accBegin, accEnd, accBilledTTL and accCompute),
+//     because on that body the accountant costs about 24 ms per request under -race and 150 ms under
+//     load (#1059). It covers the capture work.
+//
+// A span that sits inside another (accBilledTTL in accCompute in finish) is counted once: the hook
+// takes a nested span's time out of its parent.
+//
+// MAINTENANCE RULE: new dashboard work on the request path must carry timed(), or this test cannot
+// see it. It sees only the calls that carry timed().
 
 // dashboardSpends sends n requests with a body of the given number of tool results through a
 // dashboard with content capture on. It returns, sorted, the time each request's dashboard calls
@@ -550,40 +554,55 @@ func dashboardSpends(t *testing.T, n, results int, skip ...string) []time.Durati
 		}
 	}
 
-	for i := 0; i < 3; i++ { // warm up, before the hook is set
-		one()
-	}
 	var mu sync.Mutex
-	var spent time.Duration
-	done := make(chan struct{}, n+1)
+	own := map[string]time.Duration{} // time per call name, a nested span taken out of its parent
+	done := make(chan struct{}, 1000)
+	parent := map[string]string{"accBilledTTL": "accCompute", "accCompute": "finish"}
 	hook := func(call string, d time.Duration) {
-		if slices.Contains(skip, call) {
-			return
-		}
 		mu.Lock()
-		spent += d
+		own[call] += d
+		if p, ok := parent[call]; ok {
+			own[p] -= d
+		}
 		mu.Unlock()
 		if call == "finish" {
 			done <- struct{}{}
 		}
 	}
+	// The hook is set BEFORE the warmup, and each request waits for its own finish. finish runs in
+	// the handler's defer, so the client can have the response before it runs. A finish still in
+	// flight across the hook's Store would shift every sample by one.
 	spendHook.Store(&hook)
 	defer spendHook.Store(nil)
-	out := make([]time.Duration, 0, n)
-	for i := 0; i < n; i++ {
-		mu.Lock()
-		spent = 0
-		mu.Unlock()
+	request := func() {
 		one()
-		// finish runs in the handler's defer, so it may still run when the client has the response.
 		select {
 		case <-done:
 		case <-time.After(30 * time.Second):
-			t.Fatalf("finish did not run for request %d", i)
+			t.Fatal("finish did not run")
 		}
+	}
+	for i := 0; i < 3; i++ { // warm up
+		request()
+	}
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
 		mu.Lock()
-		out = append(out, spent)
+		clear(own)
 		mu.Unlock()
+		request()
+		mu.Lock()
+		var sum time.Duration
+		for call, d := range own {
+			if !slices.Contains(skip, call) {
+				sum += d
+			}
+		}
+		out = append(out, sum)
+		mu.Unlock()
+	}
+	if len(done) != 0 {
+		t.Fatalf("%d finish signals left over: the samples are shifted", len(done))
 	}
 	spendHook.Store(nil)
 	slices.Sort(out)
@@ -621,7 +640,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 const maxMaxContentSpend = 25 * time.Millisecond
 
 func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
-	checkSpend(t, dashboardSpends(t, 10, 24, "accBegin", "accEnd", "accBilledTTL"), maxMaxContentSpend)
+	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accBilledTTL", "accCompute"), maxMaxContentSpend)
 }
 
 // TestDashboardUnderConcurrentTraffic drives the whole path (pipeline, capture,

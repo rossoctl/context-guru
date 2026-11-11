@@ -816,6 +816,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Whatever way the request ended, the client hash begin kept for end is not needed past here. end removes it
 	// on the normal path and accDrop on a recovered panic; this covers any path that reached neither.
 	defer c.savings.drop(c.accReq)
+	// accCompute is its own span: the accountant's compute is not the dashboard's capture work (#1059).
+	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
 		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
@@ -840,6 +842,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
 		}
 	}
+	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accUnsupportedWire {
 		e.SetAccountantUnsupportedWire()
