@@ -920,7 +920,7 @@ func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 			// The key carries no tenant: the session id already does, as `tenant:base`
 			// (session.Scoped). The ranking above is per tenant all the same (#1071), so one
 			// tenant's later write cannot hide another's; on a key two rows still share, the
-			// newer write stands.
+			// newer qualifying write stands.
 			k := thread.Key(sid, tid) + "\x00" + model
 			if ts > out[k] {
 				out[k] = ts

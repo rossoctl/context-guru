@@ -276,13 +276,15 @@ type KeepAliveLedger struct {
 	// The winner/loser split over the sessions the mechanism TOUCHED. 85 of 119 lose about a
 	// third of a cent service-wide, funding a large rebate on 34 — the panel states that in
 	// words, unconditionally, above the fold.
-	Sessions       int64   `json:"sessions_touched"`
-	Winners        int64   `json:"winners"`
-	Losers         int64   `json:"losers"`
-	WorstSession   string  `json:"worst_session"`
-	WorstNetUSD    float64 `json:"worst_net_usd"`
-	Addressable    int64   `json:"addressable_misses"`
-	AddressableUSD float64 `json:"addressable_usd"`
+	Sessions     int64  `json:"sessions_touched"`
+	Winners      int64  `json:"winners"`
+	Losers       int64  `json:"losers"`
+	WorstSession string `json:"worst_session"`
+	// WorstSessionTenant says whose WorstSession it is: two tenants can hold the same session id.
+	WorstSessionTenant string  `json:"worst_session_tenant,omitempty"`
+	WorstNetUSD        float64 `json:"worst_net_usd"`
+	Addressable        int64   `json:"addressable_misses"`
+	AddressableUSD     float64 `json:"addressable_usd"`
 	// PingsThatReadNothing is the operator's check on SavedUSD: a ping that read nothing
 	// refreshed nothing. PingsThatWrote is worse — it CREATED an entry, which costs 12.5x a
 	// read, and the keeper stops pinging that session.
@@ -416,7 +418,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 			o.Losers++
 		}
 		if net < o.WorstNetUSD {
-			o.WorstNetUSD, o.WorstSession = net, s.session
+			o.WorstNetUSD, o.WorstSession, o.WorstSessionTenant = net, s.session, s.tenant
 		}
 	}
 	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
