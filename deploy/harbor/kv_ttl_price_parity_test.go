@@ -35,11 +35,14 @@ func TestPythonPriceReaderMatchesGoTable(t *testing.T) {
   - {match: "aws/ambig-model", in: 1.0, out: 5.0, window: 200000}
   - {match: "vertex/ambig-model", in: 1.0, out: 5.0, window: 1000000}
   - {match: "ambig*", in: 3.0, out: 15.0}
+  - {match: "aws/famsib-model", in: 1.0, out: 5.0, window: 200000}
+  - {match: "aws/famsib-model*", in: 2.0, out: 9.0}
+  - {match: "vertex/famsib-model", in: 1.0, out: 5.0, window: 200000}
 `
 	ids := []string{
 		"claude-opus-5-5", "claude-opus-5", "claude-opus-5-5[1m]", "claude-opus-5-50",
 		"aws/claude-sonnet-5", "claude-sonnet-5", "claude-sonnet-5[1m]", "vertex/claude-sonnet-5",
-		"gemini-3-flash-preview[1m]", "ambig-model", "aws/ambig-model", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
+		"gemini-3-flash-preview[1m]", "ambig-model", "aws/ambig-model", "famsib-model", "aws/famsib-model", "aws/famsib-model-2", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
 		"aws/claude-fable-5-1[1m]", "claude-haiku-4-5", "claude-mythos-5-1", "gemini-3-flash-preview",
 		"azure/gpt-5.5", "premium", "claude-sonnet-4-6", "nobody-knows-this-one", "",
 	}

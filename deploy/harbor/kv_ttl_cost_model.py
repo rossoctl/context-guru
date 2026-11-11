@@ -534,14 +534,22 @@ class PriceBook:
         # Each entry's window and compaction point. Nothing here prices with them; the
         # bare-tail ambiguity rule compares them, as table.go's does.
         meta: dict[str, tuple[int, int]] = {}
+        seen: set[str] = set()  # the match as written, `*` included, as Go's seen map keys it
         for i, m in enumerate(raw.get("models") or ()):
             match = str(m.get("match", "")).strip().lower()
             if not match:
                 raise ValueError(f"{path}: entry {i} has no match")
-            if match in meta:
+            if match in seen:
                 raise ValueError(f"{path}: {match!r} appears more than once")
+            seen.add(match)
             prefix = match.endswith("*")
-            match = match.rstrip("*")
+            match = match[:-1] if prefix else match  # one `*`, as Go's TrimSuffix
+            window, compaction = int(m.get("window") or 0), int(m.get("compaction_point") or 0)
+            if window < 0 or compaction < 0:
+                raise ValueError(f"{path}: {match!r} has a negative window or compaction_point")
+            if window > 0 and compaction > window:
+                raise ValueError(f"{path}: {match!r} states compaction_point {compaction} "
+                                 f"above its window {window}")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
             cr, cw = float(m.get("cache_read") or 0.0), float(m.get("cache_write") or 0.0)
             # The entry's 1-hour write as a multiple of `in` (table.go cache_write_1h_frac).
@@ -564,7 +572,8 @@ class PriceBook:
             price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
-            meta[match] = (int(m.get("window") or 0), int(m.get("compaction_point") or 0))
+            if not prefix:  # a family shares its trimmed match with an exact entry; it must not overwrite it
+                meta[match] = (window, compaction)
         # Longest match first: specificity is a property of the match, not of the file's
         # ordering or of the KIND of match.
         entries.sort(key=lambda e: len(e[0]), reverse=True)
