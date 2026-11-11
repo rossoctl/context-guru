@@ -598,7 +598,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		if next, ok := rebuildResponsesCountChanged(o.Body, norm, slots, chat.Input); ok {
 			res.Body, res.Changed = next, true
-			res = finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array())
+			res = finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
 		}
 		return res
 	}
@@ -622,5 +622,5 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		body, res.Changed = next, true
 	}
 	res.Body = body
-	return finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array())
+	return finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
 }

@@ -2,21 +2,33 @@
  "sessions": [
   {
    "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 201590,
+    "input": 200
+   },
    "expiry_usd": 0.028,
-   "last": 1767883100000,
-   "last_prefix": 56925,
-   "model": "m-opus",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t2:sess-25",
-   "tenant_id": "t2",
-   "turns": 13
-  },
-  {
-   "expiries": 5,
-   "expiry_usd": 0.028,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "last": 1767761740000,
    "last_prefix": 50518,
    "model": "m-unpriced",
@@ -26,25 +38,79 @@
    "saved_usd": 0,
    "session_id": "t1:sess-14",
    "tenant_id": "t1",
+   "tokens_unmeasured_requests": 11,
    "turns": 11
   },
   {
-   "expiries": 6,
-   "expiry_usd": 0.026000000000000002,
-   "last": 1768186000000,
-   "last_prefix": 60961,
-   "model": "m-unpriced",
+   "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 203625,
+    "input": 200
+   },
+   "expiry_usd": 0.028,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767883100000,
+   "last_prefix": 56925,
+   "model": "m-opus",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-53",
+   "session_id": "t2:sess-25",
    "tenant_id": "t2",
-   "turns": 14
+   "tokens_unmeasured_requests": 13,
+   "turns": 13
   },
   {
    "expiries": 6,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 222546,
+    "input": 240
+   },
    "expiry_usd": 0.026000000000000002,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "last": 1768075860000,
    "last_prefix": 57591,
    "model": "m-opus",
@@ -54,39 +120,79 @@
    "saved_usd": 0,
    "session_id": "t2:sess-43",
    "tenant_id": "t2",
+   "tokens_unmeasured_requests": 13,
    "turns": 13
   },
   {
-   "expiries": 5,
-   "expiry_usd": 0.024,
-   "last": 1767947000000,
-   "last_prefix": 48147,
-   "model": "m-opus",
+   "expiries": 6,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 248766,
+    "input": 240
+   },
+   "expiry_usd": 0.026000000000000002,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768186000000,
+   "last_prefix": 60961,
+   "model": "m-unpriced",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-31",
+   "session_id": "t2:sess-53",
    "tenant_id": "t2",
-   "turns": 10
+   "tokens_unmeasured_requests": 14,
+   "turns": 14
   },
   {
    "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 162920,
+    "input": 200
+   },
    "expiry_usd": 0.024,
-   "last": 1768064120000,
-   "last_prefix": 54554,
-   "model": "m-sonnet",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t1:sess-42",
-   "tenant_id": "t1",
-   "turns": 12
-  },
-  {
-   "expiries": 5,
-   "expiry_usd": 0.024,
+   "keepalive_ping_tokens": {
+    "cache_read": 51184,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "last": 1767958420000,
    "last_prefix": 51184,
    "model": "m-unpriced",
@@ -96,25 +202,120 @@
    "saved_usd": 0,
    "session_id": "t1:sess-32",
    "tenant_id": "t1",
+   "tokens_unmeasured_requests": 11,
    "turns": 11
   },
   {
-   "expiries": 4,
-   "expiry_usd": 0.022,
-   "last": 1768237800000,
-   "last_prefix": 49146,
+   "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 188770,
+    "input": 200
+   },
+   "expiry_usd": 0.024,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768064120000,
+   "last_prefix": 54554,
+   "model": "m-sonnet",
+   "net_usd": 0,
+   "ping_usd": 0,
+   "pings": 0,
+   "saved_usd": 0,
+   "session_id": "t1:sess-42",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 12,
+   "turns": 12
+  },
+  {
+   "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 186735,
+    "input": 200
+   },
+   "expiry_usd": 0.024,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767947000000,
+   "last_prefix": 48147,
    "model": "m-opus",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t1:sess-58",
-   "tenant_id": "t1",
+   "session_id": "t2:sess-31",
+   "tenant_id": "t2",
+   "tokens_unmeasured_requests": 10,
    "turns": 10
   },
   {
    "expiries": 6,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 248772,
+    "input": 240
+   },
    "expiry_usd": 0.022,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "last": 1767894800000,
    "last_prefix": 59962,
    "model": "m-unpriced",
@@ -124,95 +325,79 @@
    "saved_usd": 0,
    "session_id": "t1:sess-26",
    "tenant_id": "t1",
+   "tokens_unmeasured_requests": 14,
    "turns": 14
   },
   {
    "expiries": 4,
-   "expiry_usd": 0.02,
-   "last": 1768162240000,
-   "last_prefix": 54887,
-   "model": "m-sonnet",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t2:sess-51",
-   "tenant_id": "t2",
-   "turns": 12
-  },
-  {
-   "expiries": 4,
-   "expiry_usd": 0.02,
-   "last": 1767834760000,
-   "last_prefix": 44777,
-   "model": "m-sonnet",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t2:sess-21",
-   "tenant_id": "t2",
-   "turns": 9
-  },
-  {
-   "expiries": 4,
-   "expiry_usd": 0.02,
-   "last": 1767686140000,
-   "last_prefix": 56259,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 157584,
+    "input": 160
+   },
+   "expiry_usd": 0.022,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768237800000,
+   "last_prefix": 49146,
    "model": "m-opus",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-07",
-   "tenant_id": "t2",
-   "turns": 13
-  },
-  {
-   "expiries": 4,
-   "expiry_usd": 0.02,
-   "last": 1768193620000,
-   "last_prefix": 36998,
-   "model": "m-sonnet",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t1:sess-54",
+   "session_id": "t1:sess-58",
    "tenant_id": "t1",
-   "turns": 6
-  },
-  {
-   "expiries": 4,
-   "expiry_usd": 0.02,
-   "last": 1768045040000,
-   "last_prefix": 48480,
-   "model": "m-opus",
-   "net_usd": -0.0004,
-   "ping_usd": 0.0004,
-   "pings": 1,
-   "saved_usd": 0,
-   "session_id": "t1:sess-40",
-   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 10,
    "turns": 10
   },
   {
    "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 111480,
+    "input": 160
+   },
    "expiry_usd": 0.02,
-   "last": 1767827340000,
-   "last_prefix": 41740,
-   "model": "m-unpriced",
-   "net_usd": -0.0004,
-   "ping_usd": 0.0004,
-   "pings": 1,
-   "saved_usd": 0,
-   "session_id": "t1:sess-20",
-   "tenant_id": "t1",
-   "turns": 8
-  },
-  {
-   "expiries": 4,
-   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
    "last": 1767717440000,
    "last_prefix": 38370,
    "model": "m-opus",
@@ -222,63 +407,418 @@
    "saved_usd": 0,
    "session_id": "t1:sess-10",
    "tenant_id": "t1",
+   "tokens_unmeasured_requests": 7,
    "turns": 7
   },
   {
-   "expiries": 5,
-   "expiry_usd": 0.018000000000000002,
-   "last": 1768249460000,
-   "last_prefix": 52183,
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 136960,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 41740,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767827340000,
+   "last_prefix": 41740,
    "model": "m-unpriced",
+   "net_usd": -0.0004,
+   "ping_usd": 0.0004,
+   "pings": 1,
+   "saved_usd": 0,
+   "session_id": "t1:sess-20",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 8,
+   "turns": 8
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 151920,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 48480,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768045040000,
+   "last_prefix": 48480,
+   "model": "m-opus",
+   "net_usd": -0.0004,
+   "ping_usd": 0.0004,
+   "pings": 1,
+   "saved_usd": 0,
+   "session_id": "t1:sess-40",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 10,
+   "turns": 10
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 117992,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768193620000,
+   "last_prefix": 36998,
+   "model": "m-sonnet",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-59",
-   "tenant_id": "t2",
-   "turns": 11
+   "session_id": "t1:sess-54",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 6,
+   "turns": 6
   },
   {
    "expiries": 4,
-   "expiry_usd": 0.018000000000000002,
-   "last": 1768139320000,
-   "last_prefix": 48813,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 147036,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767686140000,
+   "last_prefix": 56259,
    "model": "m-opus",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-49",
+   "session_id": "t2:sess-07",
    "tenant_id": "t2",
-   "turns": 10
-  },
-  {
-   "expiries": 3,
-   "expiry_usd": 0.018000000000000002,
-   "last": 1768118300000,
-   "last_prefix": 42739,
-   "model": "m-unpriced",
-   "net_usd": 0,
-   "ping_usd": 0,
-   "pings": 0,
-   "saved_usd": 0,
-   "session_id": "t2:sess-47",
-   "tenant_id": "t2",
-   "turns": 8
+   "tokens_unmeasured_requests": 13,
+   "turns": 13
   },
   {
    "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 113108,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767834760000,
+   "last_prefix": 44777,
+   "model": "m-sonnet",
+   "net_usd": 0,
+   "ping_usd": 0,
+   "pings": 0,
+   "saved_usd": 0,
+   "session_id": "t2:sess-21",
+   "tenant_id": "t2",
+   "tokens_unmeasured_requests": 9,
+   "turns": 9
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 153548,
+    "input": 160
+   },
+   "expiry_usd": 0.02,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768162240000,
+   "last_prefix": 54887,
+   "model": "m-sonnet",
+   "net_usd": 0,
+   "ping_usd": 0,
+   "pings": 0,
+   "saved_usd": 0,
+   "session_id": "t2:sess-51",
+   "tenant_id": "t2",
+   "tokens_unmeasured_requests": 12,
+   "turns": 12
+  },
+  {
+   "expiries": 5,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 184740,
+    "input": 200
+   },
    "expiry_usd": 0.018000000000000002,
-   "last": 1767796040000,
-   "last_prefix": 59629,
+   "keepalive_ping_tokens": {
+    "cache_read": 47148,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767655760000,
+   "last_prefix": 47148,
+   "model": "m-opus",
+   "net_usd": -0.0004,
+   "ping_usd": 0.0004,
+   "pings": 1,
+   "saved_usd": 0,
+   "session_id": "t1:sess-04",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 10,
+   "turns": 10
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 155888,
+    "input": 160
+   },
+   "expiry_usd": 0.018000000000000002,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767678720000,
+   "last_prefix": 53222,
+   "model": "m-sonnet",
+   "net_usd": 0,
+   "ping_usd": 0,
+   "pings": 0,
+   "saved_usd": 0,
+   "session_id": "t1:sess-06",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 12,
+   "turns": 12
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 145368,
+    "input": 160
+   },
+   "expiry_usd": 0.018000000000000002,
+   "keepalive_ping_tokens": {
+    "cache_read": 56592,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 10
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1767784620000,
+   "last_prefix": 56592,
+   "model": "m-opus",
+   "net_usd": -0.0004,
+   "ping_usd": 0.0004,
+   "pings": 1,
+   "saved_usd": 0,
+   "session_id": "t1:sess-16",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 13,
+   "turns": 13
+  },
+  {
+   "expiries": 4,
+   "expiry_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 162400,
+    "input": 160
+   },
+   "expiry_usd": 0.018000000000000002,
+   "keepalive_ping_tokens": {
+    "cache_read": 0,
+    "cache_write_1h": 0,
+    "cache_write_5m": 0,
+    "input": 0
+   },
+   "keepalive_tokens": {
+    "caused": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    },
+    "saved": {
+     "cache_read": 0,
+     "cache_write_1h": 0,
+     "cache_write_5m": 0,
+     "input": 0
+    }
+   },
+   "last": 1768150900000,
+   "last_prefix": 51850,
    "model": "m-unpriced",
    "net_usd": 0,
    "ping_usd": 0,
    "pings": 0,
    "saved_usd": 0,
-   "session_id": "t2:sess-17",
-   "tenant_id": "t2",
-   "turns": 14
+   "session_id": "t1:sess-50",
+   "tenant_id": "t1",
+   "tokens_unmeasured_requests": 11,
+   "turns": 11
   }
  ]
 }

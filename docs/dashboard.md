@@ -487,7 +487,9 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   - Cache: `keepalive` (the rescue), `cachesplit` and `ttl`, with one row each, and the pings line.
     A row with no tokens does not show; with no rows, the list does not show. Manual pings have no
     token figure, so they do not show.
-  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`.
+  - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`. The Tool deferral card says
+    "Net of the names list." The dollar card says "Net of the names list and the searches": the
+    searches are requests of their own and have no token figure here.
   - Preset: every other entry (the preset's components and `ended_change`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
   weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
@@ -495,6 +497,9 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   100%, so the share saved is never more than the room that was left. At the cap the line says that
   without context-guru the limit would have been hit. The estimate is for the whole account, so it
   is hidden while a page filter (a session, a time range, a model, ...) narrows the Overview.
+  With learned 5-hour weights (see [Learned 5-hour weights](#learned-5-hour-weights)), the estimate
+  is `100 × Σ (saved − caused − pings) × weight`, tier by tier, with the same floors and cap. The
+  label then says `(estimate at learned 5-hour weights (from N requests))`.
 - **Not measured.** When `tokens_unmeasured_requests` is more than 0, a note under the total says
   how many requests have no token figure.
 
@@ -558,8 +563,96 @@ or a local proxy on a subscription. Managers, API-key users and hosted mode keep
 - **What stays in dollars.** The forecast ("Forecast for all your traffic") is a replay that adds
   saved writes and paid reads in dollars. A yes or no in tokens needs a rule that weighs one tier
   against another, so the forecast keeps dollars, with the line `Forecast at API-price weights`.
+  With learned 5-hour weights, the forecast uses them: the line says `Forecast at learned 5-hour
+  weights (from N requests), in API dollars`, and the yes or no and the range come from
+  `learned` in `/api/keepalive/recommend`. Both panels that show the forecast use it: the decision
+  row and "Which setting should I use?" (the suggested setting, its range, or its refusal), each
+  with the same line. The fixed-count comparison and the 3-ping offer are API-price figures, so that
+  panel leaves them out when it shows the learned forecast.
   "Ahead" or "Behind", the winner and loser split, and the "costs more than it saves" banner use
-  the dollar net too, and say "at API-price weights". The tables below the ledger stay in dollars.
+  the dollar net too, and say "at API-price weights". The tables below the ledger follow the same
+  rule (#1048): see below.
+
+#### The tables below the ledger
+
+Each session's keep-alive figures come from the Sessions tab's own query (`sessionTokens`, #1023).
+The two tabs cannot disagree about a session. `GET /api/keepalive/sessions` and
+`GET /api/keepalive/live` add these fields to each row, for every caller:
+
+- `keepalive_tokens`: the rescue, as `{saved, caused}` by tier (the accountant's `tok_ka_*`).
+- `keepalive_ping_tokens`: what the session's pings paid, by tier.
+- `tokens_unmeasured_requests`: the session's agent requests with no token figure.
+- `expiry_tokens` (sessions only): the billed input tokens of the session's expiries, by tier. It
+  is the token form of `expiry_usd`.
+
+`GET /api/keepalive/behaviour` adds `tokens` (the expiries' billed input tokens, by tier) to each
+day of `daily` and to each band of `gap_bands`, `prefix_bands` and `hour_bins`. It is the token
+form of `usd`. These are the requests' own usage columns, so every expiry has a figure.
+
+| Table | On a subscription | Stays in dollars, labelled "at API-price weights" |
+|---|---|---|
+| Which sessions gained and which lost (the session table) | **Tokens at running out**: `expiry_tokens`. **Their tokens**: the pings, in a column of their own, never added into the rescue. **Avoided (upper bound)**: the rescue, with the shared rule for zero (`saved 0 tokens` against `not measured`). **Ahead or behind**: a word, not a net. The kinds of token have no common unit. The note under the table counts expiries, not dollars. | Ahead or behind, and the row order, use the dollar net and the dollar cost of the expiries. |
+| Sessions with a warm cache right now (the live table) | **Realised (tokens)**: the rescue on one line, and `Keep-alive pings (not in the total): cost …` on a line of its own. The hint under the table shows the ledger's rescue and pings lines. | One warm-up, If it lapses, Requests per rewrite, the expiry warning's total and the "still open" total. Each is a price what-if on the session's prefix. |
+| How often your cache ran out (the behaviour panel) | The daily chart shows one line per kind of token, on one token scale. The kinds are never added. Each band and the table view show `count · tokens`. | Nothing. |
+| What would other settings have earned? (the calculator) | Nothing. A line above the ladder says `Dollars at API-price weights. A subscription does not bill per token.` | The whole ladder and the note above it. It is a replay priced at one prefix: a price what-if. Tokens come later with #1047. |
+
+The tables reuse the tab's one subscription test, so managers, API-key users and hosted mode keep
+dollars. Only a session on the page is read (`session_id IN (…)`, on a session index).
+
+### Learned 5-hour weights
+
+The provider does not publish how the 5-hour limit weighs each token kind. With enough history,
+the dashboard learns it from the stored 5-hour share and token counts (#1047).
+`GET /api/me/fivehour-weights` returns the weights for your own account.
+
+- **Who gets it.** The caller's own account on a Claude subscription. `{}` otherwise, the same test
+  as `/api/me/limits`. A manager gets their own account, never the service-wide view.
+- **The data.** The last 14 days of rows that carry a 5-hour share (at most 100,000 rows): the
+  time, the share, the reset time, the billed tokens by tier and the model. Pings count too: they
+  used the limit. Only rows sent with your own credential carry a share.
+- **The method.**
+  1. Rows with the same reset time are one 5-hour window, in time order.
+  2. The provider reports whole percents. A row where the share changes is a change point: the true
+     usage crossed that percent within one request.
+  3. A span runs from one change point to the next one at least 2 percents higher. Its change comes
+     from the tokens billed between them.
+  4. Non-negative least squares fits one weight per tier (input, cache read, 5-minute write, 1-hour
+     write, output) over all spans.
+  5. Traffic that does not go through the proxy (claude.ai, another machine) moves the share with no
+     tokens on our rows. It can only push a span up. The fit drops spans far above the rest (3.5
+     robust standard deviations, at most 20% of spans) and fits again.
+  6. The fit runs twice: with each row's header counting the row itself, and without. It keeps the
+     one with the smaller error.
+- **The gate.** At least 200 requests, 3 windows and 30 spans. The fit error (the root mean square
+  of the span errors over the mean span change) is at most 0.25. The cache-read weight and one
+  cache-write weight are learned: present in at least 10 spans (and 10% of them), with a relative
+  standard error of at most 0.5. Below the gate the answer is `ok: false` with a `reason`, and every
+  screen keeps its API-price figures and labels.
+- **A tier it cannot learn** (for example no 1-hour writes, or input tokens too few to matter)
+  takes its API price, scaled to the account's own spend. `learned` says which tiers came from the fit.
+- **The forecast scale.** `forecast_scale` turns the cache strategy forecast's dollars into dollars at
+  the learned weights: `save_5m` and `save_1h` scale a rescued expiry (a write less a read),
+  `ping` scales a ping (a read). The total scale of the account's spend does not change.
+- **`window_ping`.** With `since` (the open window's start, unix ms) and `ok: true`: the tokens the
+  cache strategy's pings billed since then, for the Overview estimate.
+- **Cache.** One fit per account for 15 minutes. A page load never fits again.
+- **Fail open.** An error in the read or the fit gives `ok: false`. The pages then show the
+  API-price figures.
+
+```json
+{
+  "ok": true,
+  "weights": {"input": 3e-7, "cache_read": 1.1e-8, "cache_write_5m": 3.5e-7, "cache_write_1h": 4.8e-7, "output": 1.5e-6},
+  "learned": {"input": false, "cache_read": true, "cache_write_5m": true, "cache_write_1h": false, "output": true},
+  "rel_se": {"cache_read": 0.11, "cache_write_5m": 0.01, "output": 0.06},
+  "requests": 1079, "windows": 8, "spans": 286, "dropped_spans": 0,
+  "fit_error": 0.12, "header_after_row": true,
+  "forecast_scale": {"save_5m": 1.23, "save_1h": 1.03, "ping": 0.45},
+  "window_ping": {"input": 0, "cache_read": 90000, "cache_write_5m": 0, "cache_write_1h": 0, "output": 1}
+}
+```
+
+A weight is the share of the limit (0 to 1) that one token of that tier uses.
 
 ## KV-cache panel
 

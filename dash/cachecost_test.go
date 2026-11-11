@@ -537,6 +537,8 @@ func TestHistoricalSplitValuationByTenantMatchesPerTenant(t *testing.T) {
 	}
 	evs := []*Event{
 		mk("t-x", "s-new", 5000, 54_304, 1_000, stable), // teaches the stable half
+		// #501: the stable half is learned per tenant, so t-y must have measured its own.
+		mk("t-y", "s-new-y", 5100, 54_304, 1_000, stable),
 		// t-x: session-first qualifies, second request in the same session must not.
 		mk("t-x", "s-a", 1000, 54_304, 1_000, 0),
 		mk("t-x", "s-a", 1100, 55_000, 900, 0),

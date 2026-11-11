@@ -124,7 +124,7 @@ func TestLiveBoxArchiveCycle(t *testing.T) {
 		t.Errorf("%d rows survived locally after a verified archive", got)
 	}
 
-	evs, err := rec.FetchArchived(context.Background(), session)
+	evs, err := rec.FetchArchived(context.Background(), "t-live", session)
 	if err != nil {
 		t.Fatalf("FetchArchived: %v", err)
 	}

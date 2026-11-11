@@ -1,0 +1,20 @@
+# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker
+# Do not hand-edit: the picker refuses to touch a file whose first line is not this one,
+# so an edit that removes the marker also removes your ability to switch back with a name.
+#
+# `preset:` is stated explicitly because --config REPLACES --preset entirely rather than
+# layering over it. A config that omitted it would silently turn compaction off at the
+# moment a cache strategy was armed - the exact opposite of the intent.
+#
+# It is NOT the source of truth for the preset. `strategy sync` re-renders this line from
+# the plugin option every time a proxy starts, because the file owning it meant a user who
+# changed the option saw it stick in the config UI and kept running the preset that was
+# recorded here when the strategy was first armed - indefinitely, and with no way to tell.
+preset: off
+cache:
+  keepalive: true
+  keepalive_idle_seconds: 240
+  keepalive_max_pings: 2
+  keepalive_max_usd_per_ping: 0.5
+  keepalive_min_prefix_tokens: 80000
+  keepalive_max_pings_1h: 2

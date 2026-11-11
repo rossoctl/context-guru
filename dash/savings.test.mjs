@@ -358,3 +358,122 @@ test('the headline uses the same rule, and a page filter hides the account-wide 
   assert.equal(subscriptionHeadline(lim, { tokens: { saved: {} }, tokens_unmeasured_requests: 4 }, null, now, String).main, 'not measured');
   assert.equal(subscriptionHeadline(lim, {}, null, now, String).main, 'not measured'); // a server from before #999
 });
+
+// The learned 5-hour weights (#1047): GET /api/me/fivehour-weights, mocked as data.
+const fit = { ok: true, requests: 1234, windows: 5,
+  weights: { input: 3e-7, cache_read: 1e-8, cache_write_5m: 4e-7, cache_write_1h: 6e-7, output: 1.5e-6 },
+  window_ping: { input: 0, cache_read: 200000, cache_write_5m: 0, cache_write_1h: 0, output: 1000 } };
+
+test('with learned weights, the 5-hour estimate is the weighted tokens, and the label names them', () => {
+  const { subscriptionHeadline, fiveHourLearnedPct } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.4, reset_s: 2000 } };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  // saved 100k wr (0.04) less 500k rd caused (0.005), less the pings: 200k rd (0.002) and 1,000 out (0.0015).
+  const win = { cost_usd: 9, total_saved_usd: 1, tokens: { saved: { cache_write_5m: 100000 }, caused: { cache_read: 500000 } } };
+  const p = fiveHourLearnedPct(lim.five_hour, win, fit);
+  assert.ok(Math.abs(p.pct - 3.15) < 1e-9, String(p.pct)); assert.equal(p.hit, false);
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, false, fit).estimate,
+    '≈ 3% of the 5-hour limit (estimate at learned 5-hour weights (from 1,234 requests))');
+  // The cap holds the same: used 99%, so 1% is the most that can be saved.
+  assert.equal(subscriptionHeadline({ five_hour: { utilization: 0.99, reset_s: 2000 } }, o, win, now, String, false, fit).estimate,
+    '≈ without context-guru you would have hit the 5-hour limit (estimate at learned 5-hour weights (from 1,234 requests))');
+});
+
+test('without a fit that passed the gate, the estimate and its label stay at API prices', () => {
+  const { subscriptionHeadline } = createRequire(import.meta.url)('./ui/savings.js');
+  const now = 1000 * 1000;
+  const lim = { five_hour: { utilization: 0.54, reset_s: 2000 } };
+  const o = { tokens: { saved: { cache_write_5m: 2 } } };
+  const win = { cost_usd: 90, total_saved_usd: 5, tokens: { saved: { cache_write_5m: 100000 } } };
+  const api = '≈ 3% of the 5-hour limit (estimate at API-price weights)';
+  for (const f of [undefined, null, {}, { ok: false, reason: 'too few 5-hour windows', requests: 80 },
+    Object.assign({}, fit, { window_ping: undefined }), // the pings could not be read
+    Object.assign({}, fit, { weights: Object.assign({}, fit.weights, { cache_read: null }) })]) {
+    assert.equal(subscriptionHeadline(lim, o, win, now, String, false, f).estimate, api, JSON.stringify(f));
+  }
+  // A server from before #999 has no window tokens: API prices.
+  assert.equal(subscriptionHeadline(lim, o, { cost_usd: 90, total_saved_usd: 5 }, now, String, false, fit).estimate, api);
+  // A filter hides the estimate either way.
+  assert.equal(subscriptionHeadline(lim, o, win, now, String, true, fit).estimate, '');
+  // A learned figure at or below zero shows nothing, as the dollar one does.
+  const loss = { cost_usd: 90, total_saved_usd: 5, tokens: { saved: {}, caused: { cache_write_5m: 100000 } } };
+  assert.equal(subscriptionHeadline(lim, o, loss, now, String, false, fit).estimate, api);
+});
+
+test('the Cache strategy forecast uses the learned range and label on a subscription only', () => {
+  const { forecastView } = createRequire(import.meta.url)('./ui/savings.js');
+  const rec = { refused: 'your own history cannot tell this apart from zero', n: 40, sessions: 9,
+    plan: 'wait_plan', fixed_k: { lo_usd: -1, hi_usd: 2 }, alt_max_pings: 3,
+    learned: { idle_seconds: 240, max_pings: 2, lo_usd: 1.5, hi_usd: 4, requests: 1234, windows: 5 } };
+  // A manager or an API key: the payload as it is, no label.
+  assert.deepEqual(forecastView(rec, false), { rec, label: null });
+  // A subscription with learned weights: the learned yes and range, and the dollar refusal is gone.
+  const v = forecastView(rec, true);
+  assert.equal(v.rec.refused, undefined);
+  assert.equal(v.rec.lo_usd, 1.5); assert.equal(v.rec.hi_usd, 4); assert.equal(v.rec.max_pings, 2);
+  assert.equal(v.rec.n, 40);
+  // The API-price comparisons do not show beside a learned range.
+  assert.equal(v.rec.fixed_k, undefined); assert.equal(v.rec.alt_max_pings, undefined);
+  assert.equal(v.label, 'Forecast at learned 5-hour weights (from 1,234 requests), in API dollars. A subscription does not bill per token.');
+  // A learned refusal wins over a dollar yes.
+  const r2 = forecastView({ lo_usd: 1, hi_usd: 2, idle_seconds: 240, max_pings: 2,
+    learned: { refused: 'your own history says this would COST you money', requests: 300 } }, true).rec;
+  assert.equal(r2.refused, 'your own history says this would COST you money');
+  // No learned forecast: today's label exactly, and today's payload.
+  const plain = { lo_usd: 1, hi_usd: 2 };
+  assert.deepEqual(forecastView(plain, true), { rec: plain, label: 'Forecast at API-price weights. A subscription does not bill per token.' });
+});
+
+// The Cache strategy tab's tables on a subscription (#1048): one session row in tokens.
+test('a Cache strategy table row in tokens: the rescue, the pings apart, the expiries by tier', () => {
+  const { kaSessionTokenCells } = createRequire(import.meta.url)('./ui/savings.js');
+  const s = {
+    pings: 3,
+    expiry_tokens: { input: 70, cache_read: 0, cache_write_5m: 5000, cache_write_1h: 1000 },
+    keepalive_tokens: { saved: { cache_write_5m: 4000 }, caused: { cache_read: 4000 } },
+    keepalive_ping_tokens: { input: 3, cache_read: 9000, cache_write_5m: 20, cache_write_1h: 10 },
+    tokens_unmeasured_requests: 2,
+  };
+  assert.deepEqual(kaSessionTokenCells(s, String), {
+    expiry: '5000 wr · 1000 wr1h · 70 in',
+    rescue: 'saved 4000 wr · cost 4000 rd',
+    measured: true,
+    // Never added into the rescue's cost.
+    pings: 'cost 20 wr · 10 wr1h · 9000 rd · 3 in',
+    ran: true,
+  });
+  // The shared rule for zero, scoped to the row: all zero and every request priced is a zero.
+  const zero = { pings: 1, keepalive_tokens: { saved: {}, caused: {} }, keepalive_ping_tokens: { cache_read: 10 } };
+  assert.equal(kaSessionTokenCells(zero, String).rescue, 'saved 0 tokens');
+  // All zero with an unpriced request: not measured, not "saved 0".
+  const unpriced = kaSessionTokenCells({ ...zero, tokens_unmeasured_requests: 1 }, String);
+  assert.equal(unpriced.rescue, 'not measured');
+  assert.equal(unpriced.measured, false);
+  // A server from before #1048 (no token fields): not measured, and pings counted but no ping tokens
+  // read `cost 0 tokens`, as the ledger's line does. No NaN, no "undefined".
+  assert.deepEqual(kaSessionTokenCells({ pings: 2 }, String),
+    { expiry: '', rescue: 'not measured', measured: false, pings: 'cost 0 tokens', ran: true });
+  // The strategy did not run: no pings, no rescue. The caller shows a dash.
+  assert.deepEqual(kaSessionTokenCells({ pings: 0, keepalive_tokens: { saved: {}, caused: {} } }, String),
+    { expiry: '', rescue: 'saved 0 tokens', measured: true, pings: '', ran: false });
+});
+
+test('the behaviour bands and the daily chart in tokens: by tier, never added (#1048)', () => {
+  const { bandTokens, tierSeries } = createRequire(import.meta.url)('./ui/savings.js');
+  assert.equal(bandTokens({ n: 2, tokens: { cache_write_5m: 5000, input: 70 } }, String), '5000 wr · 70 in');
+  assert.equal(bandTokens({ n: 0, tokens: { input: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 } }, String), '0 tokens');
+  assert.equal(bandTokens({ n: 2, usd: 1.5 }, String), 'not measured');
+  const days = [
+    { ts: 1, tokens: { input: 0, cache_read: 0, cache_write_5m: 5000, cache_write_1h: 0 } },
+    { ts: 2, tokens: { input: 70, cache_read: 0, cache_write_5m: 0, cache_write_1h: 1000 } },
+    { ts: 3 },
+  ];
+  // One series per tier that is not 0 on some day, in display order; a day with no figure is 0.
+  assert.deepEqual(tierSeries(days), [
+    { tier: 'wr', name: 'Cache write (wr)', points: [[1, 5000], [2, 0], [3, 0]] },
+    { tier: 'wr1h', name: '1-hour cache write (wr1h)', points: [[1, 0], [2, 1000], [3, 0]] },
+    { tier: 'in', name: 'Fresh input (in)', points: [[1, 0], [2, 70], [3, 0]] },
+  ]);
+  assert.deepEqual(tierSeries(undefined), []);
+});

@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,20 +144,23 @@ func TestNoResultWhyNamesTheBranch(t *testing.T) {
 	}
 }
 
-// A panic between accBegin and accEnd makes the proxy forward the original body and call accDrop. The client hash
-// begin kept for end must go with it: it holds the whole body (review of #893, finding 1).
+// A panic between accBegin and accEnd makes the proxy forward the original body and call accDrop. accBegin opens no
+// record and keeps no client hash (issue #1059), so nothing is left held, and an accEnd that follows the drop does
+// nothing (review of #893, finding 1).
 func TestAccDropForgetsTheClientHash(t *testing.T) {
 	s := newSavingsTracker()
 	held := func() (n int) { s.clients.Range(func(any, any) bool { n++; return true }); return }
 	meta := accountant.RequestMeta{RequestID: "r1", Session: "s", At: time.Unix(1000, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}
 	c := &capture{savings: s}
 	c.accBegin(meta, benchBody())
-	if held() != 1 {
-		t.Fatalf("accBegin kept %d client hashes, want 1", held())
+	if held() != 0 {
+		t.Fatalf("accBegin kept %d client hashes, want 0: it must do no work", held())
 	}
 	c.accDrop()
-	if held() != 0 || c.accReq != nil {
-		t.Fatalf("accDrop left %d client hashes and accReq %v", held(), c.accReq)
+	c.accEnd(thread.Result{ID: thread.Primary}, benchBody(), nil)
+	c.accWait()
+	if held() != 0 || c.accReq != nil || c.accJob != nil {
+		t.Fatalf("after accDrop, accEnd left %d client hashes, accReq %v, accJob %v", held(), c.accReq, c.accJob)
 	}
 	(*capture)(nil).accDrop() // nil-safe, as before
 }
