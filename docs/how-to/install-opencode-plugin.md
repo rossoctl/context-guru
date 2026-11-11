@@ -5,7 +5,19 @@
 The OpenCode plugin routes Anthropic and OpenAI model requests through a local context-guru proxy.
 It is project-safe, reversible, and does not add an API key.
 
+## You need
+
+- OpenCode 1.19.5. Other versions are not tested.
+- Proxy v0.7.1 or later. The plugin downloads v0.7.2, or uses the `context-guru-proxy` on your `PATH`.
+- macOS or Linux.
+
 ## Install
+
+Clone this repository:
+
+```sh
+git clone https://github.com/rossoctl/context-guru.git
+```
 
 Add the local plugin file to the global OpenCode config for every project:
 
