@@ -684,7 +684,7 @@ type Ctx struct {
 	// 199,184 — the same event in a different ruler. See internal/compactionpoint.
 	CompactionPoint int
 	// CompactionPointSource says where CompactionPoint came from: observed on real traffic, assumed
-	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), or fallen back to the window. Carried so a decision made on a guess
+	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), stated by the operator per model ("operator"), or fallen back to the window. Carried so a decision made on a guess
 	// is distinguishable from one made on a measurement — the discipline CtxWindowExact keeps.
 	CompactionPointSource string
 	// MaxCachedIdx is the highest req.Input index considered already committed to the

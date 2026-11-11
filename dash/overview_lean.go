@@ -15,7 +15,7 @@ import (
 // scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
 // upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
 // waterfall rows keyed "compaction", "cachesplit_saved", "keepalive_saved", "keepalive_ping",
-// "decl_filter_saved", "self_removed", "cg_llm", plus the saved token counts saved_unique,
+// "decl_filter_saved", "cg_llm", plus the saved token counts saved_unique,
 // saved_gross and replay_tokens (the status line's `rd / wr`, #990) — every one a plain SUM/AVG of a
 // `requests` column or arithmetic on them, bounded by the session or the time window, same index Overview()'s own main
 // aggregate already uses. The 7 goroutines Overview() runs beyond that aggregate (the replay
@@ -80,7 +80,6 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
-	o.TotalReducedUSD = o.TotalSavedUSD
 	// The same arithmetic as the full Overview(), from the same agent-only columns, so a lean read gives the status
 	// line's `rd` (replay_tokens) and not 0 (#990).
 	o.SavedGross = o.TokensBefore - o.TokensAfter

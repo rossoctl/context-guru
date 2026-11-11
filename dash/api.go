@@ -1424,8 +1424,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// The four calls below are independent of each other — none reads another's result, only
 		// this handler's own fields afterward do — so they run concurrently rather than one after
 		// another. Sequentially, on a production-sized DB, Overview() alone measured ~5-10s (see its
-		// own errgroup for why) and DeclCreditFor another ~4-16s (see SelfRemovals' own comment for
-		// why it was rewritten), which summed past this handler's 10s caller-facing timeout on every
+		// own errgroup for why) and DeclCreditFor another ~4-16s (measured while it still scanned for
+		// the self-removal credit, removed in #584), which summed past this handler's 10s caller-facing timeout on every
 		// call. Run concurrently, wall time drops to roughly the slowest of the four rather than
 		// their sum.
 		var (
@@ -1461,12 +1461,12 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 				return nil
 			})
 		}
-		// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
+		// The declarations the filter stopped sending. Needs no pricer for the token counts, so it
 		// runs outside the block above; best-effort and non-fatal, because it is an addition to the
 		// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
 		// error swallowed here returns zeros, and a zero in a savings figure is a claim.
 		g.Go(func() error {
-			c, err := db.DeclCreditFor(f, a.priceFn(r), a.toolFilterStateForScope(f).Removed)
+			c, err := db.DeclCreditFor(f, a.priceFn(r))
 			if err != nil {
 				slog.Warn("dash: declaration-removal credit unavailable", "err", err)
 				return nil

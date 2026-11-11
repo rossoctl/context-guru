@@ -90,3 +90,31 @@ func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
 		t.Errorf("index.html has %d Sessions headers with a token label, want 3", n)
 	}
 }
+
+// On a Claude subscription the Cache strategy tab shows the measured figures in tokens (#1022). The
+// lines themselves are tested in savings.test.mjs (kaTokenLines). This checks the wiring: the tab
+// asks for the limits, a manager keeps dollars, the token tiles replace the dollar ones, and the
+// forecast keeps dollars with its API-price label.
+func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
+	app := stripComments(readUI(t, "ui/app.js"))
+	for _, want := range []string{
+		"if (!readsLimits(account && account.tenant)) return false;", // a manager keeps dollars
+		"try { return isSubscription(await ctl('/api/me/limits'), Date.now()); } catch (e) { return false; }",
+		"const [l, sub] = await Promise.all([ledger, subP]);",
+		"const tk = kaState.sub ? kaTokenLines(o, compact) : null;",
+		"tk ? tile('ka-net-tok'",
+		"'data-testid': 'ka-measured-tokens'",
+		"'data-testid': 'ka-forecast-weights'",
+		"'data-testid': 'ka-split-tokens'",
+		"tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd)", // the dollar view stays for everyone else
+		"o.tokens_unmeasured_requests > 0",
+		"el('strong', {}, tk.measuredText)", // an absence never reads as a figure (#1042)
+		"tk ? tk.avoidedText : 'up to ' + usd(o.saved_usd)",
+		"'. ' + tk.rescuesText",
+		"tk && o.pings ? 'Ahead or behind at API-price weights · ' : ''", // no prefix beside "No pings yet"
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js no longer contains %q", want)
+		}
+	}
+}
