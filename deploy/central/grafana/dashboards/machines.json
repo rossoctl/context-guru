@@ -135,7 +135,7 @@
       "id": 2,
       "type": "table",
       "title": "By preset",
-      "description": "Saving rate (net divided by the cost with no change) needs the baseline counter, which is not built. Net per 1,000 requests compares a busy machine with a quiet one.",
+      "description": "Saving rate is net saved divided by spend plus net saved (the exact baseline counter is not built). Net per 1,000 requests compares a busy machine with a quiet one.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -168,7 +168,7 @@
           "format": "table"
         },
         {
-          "expr": "1000 * (((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)) / clamp_min(sum by (preset)(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "expr": "(((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)) / clamp_min(sum by (preset)(increase(llm_inference_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) + (((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)), 1e-9)",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -178,8 +178,18 @@
           "format": "table"
         },
         {
-          "expr": "sum by (preset)(increase(llm_savings_estimated_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) / clamp_min(sum by (preset)(increase(llm_savings_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "expr": "1000 * (((sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (preset)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (preset)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0)) / clamp_min(sum by (preset)(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
           "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "sum by (preset)(increase(llm_savings_estimated_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) / clamp_min(sum by (preset)(increase(llm_savings_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "E",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
@@ -205,8 +215,9 @@
             "renameByName": {
               "Value #A": "machines",
               "Value #B": "net saved",
-              "Value #C": "net per 1,000 requests",
-              "Value #D": "estimated"
+              "Value #C": "saving rate",
+              "Value #D": "net per 1,000 requests",
+              "Value #E": "estimated"
             }
           }
         }
@@ -223,6 +234,22 @@
               {
                 "id": "unit",
                 "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "saving rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
               },
               {
                 "id": "decimals",
