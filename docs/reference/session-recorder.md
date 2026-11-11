@@ -29,6 +29,18 @@ CGO_ENABLED=0 go build -tags cg_record -o bin/context-guru-proxy ./cmd/context-g
   An account's opt-in survives a switch between builds.
 - The request-path code that checks for a recorder. It sees none and does nothing.
 
+## Leaving one session out
+
+An account that opted in is recorded in every session. To leave one session out, send
+`x-context-guru-record: off` on its requests (`false`, `no` and `0` work too, in any case).
+The proxy then writes nothing for that request.
+
+- It can only narrow consent. It never turns recording on for an account that did not opt
+  in, and the operator's `--record` stays the outer switch.
+- Any other value, including a typo, is ignored, so a mistake never stops a recording
+  that was wanted.
+- The header is not forwarded upstream, like every `x-context-guru-*` header.
+
 ## Tests
 
 - `go test -tags cg_record ./proxy/... ./internal/record/...` tests the recorder.
