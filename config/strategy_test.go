@@ -2,78 +2,46 @@ package config
 
 import (
 	"encoding/json"
-	"os/exec"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
 
-// pyDump reads STRATEGIES, DEFAULT_STRATEGY and STRATEGY_ALIASES from the plugin's settings.py and
-// prints them as JSON. It evaluates only those assignments, with ast, so the file's other code
-// never runs. The test fails when python3 is missing: a skip would prove nothing.
-const pyDump = `
-import ast, json, sys
-src = open(sys.argv[1]).read()
-ns = {}
-for n in ast.parse(src).body:
-    t = n.targets[0] if isinstance(n, ast.Assign) else getattr(n, "target", None)
-    if getattr(t, "id", "") in ("DEFAULT_STRATEGY", "STRATEGY_ALIASES", "STRATEGIES"):
-        exec(compile(ast.Module([n], []), "x", "exec"), ns)
-print(json.dumps({"default": ns["DEFAULT_STRATEGY"], "aliases": ns["STRATEGY_ALIASES"],
-                  "strategies": [dict(name=k, **v) for k, v in ns["STRATEGIES"].items()]}))
-`
-
-// TestStrategyTableMatchesPlugin pins the Go table to settings.py, name by name and key by key.
-// It stays until the Claude Code plugin reads the table from the proxy.
-func TestStrategyTableMatchesPlugin(t *testing.T) {
-	out, err := exec.Command("python3", "-I", "-c", pyDump, "../context-guru-plugin/scripts/settings.py").Output()
-	if err != nil {
-		t.Fatalf("python3 could not read settings.py: %v", err)
-	}
-	var py struct {
-		Default    string            `json:"default"`
-		Aliases    map[string]string `json:"aliases"`
-		Strategies []struct {
-			Name   string         `json:"name"`
-			Spends bool           `json:"spends"`
-			Desc   string         `json:"desc"`
-			Cache  map[string]any `json:"cache"`
-		} `json:"strategies"`
-	}
-	if err := json.Unmarshal(out, &py); err != nil {
-		t.Fatal(err)
-	}
-	if py.Default != DefaultStrategy {
-		t.Errorf("default: py %q, go %q", py.Default, DefaultStrategy)
-	}
-	if !reflect.DeepEqual(py.Aliases, StrategyAliases) {
-		t.Errorf("aliases: py %v, go %v", py.Aliases, StrategyAliases)
-	}
-	// The Python table has the Anthropic and "any" rows. The Go table adds the Codex rows after
-	// them. strategy_codex_test.go checks the offered set and that the Codex forms
-	// (`strategy: <name>` and `keepalive: true|false`) give the same effective config.
-	if len(py.Strategies)+1 != len(Strategies) {
-		t.Fatalf("py has %d strategies, go has %d (expect py + the Codex row)", len(py.Strategies), len(Strategies))
-	}
-	for i, p := range py.Strategies {
-		g := Strategies[i]
-		if g.Name != p.Name || g.Spends != p.Spends || g.Desc != p.Desc {
-			t.Errorf("row %d (%s): name/spends/desc differ from py", i, p.Name)
-		}
-		got := map[string]any{}
-		for _, k := range g.Cache {
-			got[k.Key] = k.Value
-		}
-		if len(got) != len(p.Cache) {
-			t.Errorf("%s: py has %d keys, go has %d", p.Name, len(p.Cache), len(got))
-		}
-		for k, pv := range p.Cache {
-			gb, _ := json.Marshal(got[k])
-			pb, _ := json.Marshal(pv)
-			if string(gb) != string(pb) {
-				t.Errorf("%s.%s: py %s, go %s", p.Name, k, pb, gb)
+// TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys. The Claude Code plugin used to write the
+// `cache:` keys of a strategy into the per-port file. It now writes `cache.strategy: <name>`. The
+// files in testdata/cc-old-strategy-files are what the old plugin wrote (rendered by the plugin at
+// the commit before the change, with preset off). For each one, the Resolved() cache block that the
+// proxy runs must be the same for the old file and for the new form. Old files stay valid for users
+// who armed a strategy before this change.
+func TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys(t *testing.T) {
+	for _, name := range []string{"auto", "1-ping", "2-ping", "1-hour-head"} {
+		t.Run(name, func(t *testing.T) {
+			old, err := os.ReadFile("testdata/cc-old-strategy-files/" + name + ".yaml")
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			if !strings.Contains(string(old), "strategy="+name) || strings.Contains(string(old), "strategy:") {
+				t.Fatalf("%s: the fixture is not an old-form file", name)
+			}
+			co, err := LoadBytes(old)
+			if err != nil {
+				t.Fatalf("old file: %v", err)
+			}
+			cn, err := LoadBytes([]byte("preset: off\ncache:\n  strategy: " + name + "\n"))
+			if err != nil {
+				t.Fatalf("new form: %v", err)
+			}
+			// Resolved() is what the proxy runs on. Strategy is only the name it was filled from.
+			ro, rn := co.Cache.Resolved(), cn.Cache.Resolved()
+			rn.Strategy = ""
+			if !reflect.DeepEqual(ro, rn) {
+				t.Errorf("%s: effective config differs\n old: %+v\n new: %+v", name, ro, rn)
+			}
+			if co.Preset != cn.Preset {
+				t.Errorf("%s: preset old %q, new %q", name, co.Preset, cn.Preset)
+			}
+		})
 	}
 }
 

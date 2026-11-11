@@ -42,7 +42,7 @@ function writesPrevented(o) {
   return { requests: o.keepalive_misses_avoided || 0, manual: (o.manual_pings && o.manual_pings.writes_avoided) || 0 };
 }
 
-// The cache strategy's plugin name (context-guru-plugin/scripts/settings.py STRATEGIES), read back from
+// The cache strategy's plugin name (the proxy's strategy table, config/strategy.go), read back from
 // the account's cache settings: they hold numbers, not the name. '' when the settings match no named
 // strategy, so a hand-tuned account is never given a name it did not pick. Missing fields take the
 // proxy defaults (240 s; 2 pings; 1 ping on a 1-hour cache). The hosted settings form has no 1-hour

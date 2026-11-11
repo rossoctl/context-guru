@@ -39,7 +39,7 @@ test("the table comes only from the proxy binary, and a binary without it is an 
   for (const [name, body] of [["fails", "#!/bin/sh\nexit 2\n"], ["junk", "#!/bin/sh\necho serving\n"], ["empty", "#!/bin/sh\necho '{}'\n"]]) {
     const path = join(dir, name)
     writeFileSync(path, body, { mode: 0o755 })
-    assert.throws(() => loadStrategyTable(path), /cannot list cache strategies; update the proxy to v0\.7\.1/, name)
+    assert.throws(() => loadStrategyTable(path), /cannot list cache strategies; update the proxy to v0\.7\.2/, name)
   }
 })
 

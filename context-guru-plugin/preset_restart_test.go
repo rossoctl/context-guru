@@ -53,7 +53,8 @@ func routedProject(t *testing.T, url string) (state, home, proj string) {
 func presetIn(t *testing.T, state, home, proj, url string, args ...string) (map[string]string, int) {
 	t.Helper()
 	cmd := exec.Command(requireTool(t, "python3"), append([]string{filepath.Join(scriptsDir(t), "settings.py"), "preset"}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url+"/anthropic")
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url+"/anthropic",
+		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 	cmd.Dir = proj
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -111,7 +112,7 @@ func TestPresetRestartReplacesTheProxyThroughTheStarterAndProbesTheNewOne(t *tes
 	port := freePort(t)
 	asksFile := filepath.Join(dir, "asks")
 	bin := filepath.Join(dir, "fake-proxy")
-	body := "#!/usr/bin/env bash\nexec python3 -c '\n" +
+	body := "#!/usr/bin/env bash\n" + strategiesStubSnippet(t) + "exec python3 -c '\n" +
 		"import sys, os, http.server\n" +
 		"class H(http.server.BaseHTTPRequestHandler):\n" +
 		"    def do_GET(self):\n" +
