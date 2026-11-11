@@ -150,7 +150,7 @@ cmd_install() {
   ok "$STATE/{prometheus,alertmanager,grafana}"
 
   say "Network"
-  $OCI network exists "$NET" 2>/dev/null || $OCI network create "$NET" >/dev/null
+  $OCI network inspect "$NET" >/dev/null 2>&1 || $OCI network create "$NET" >/dev/null
   ok "$NET (private)"
 
   say "Prometheus"
