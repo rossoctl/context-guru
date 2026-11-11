@@ -117,10 +117,11 @@ A review without this block does not count toward the 2.
   1. The integrator starts a subagent with its own worktree.
   2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on the box).
   3. The subagent pushes without force.
-  4. The integrator runs `scripts/release/approval-still-valid.sh <pr> <approved-sha>` and posts the output on the PR.
-  5. If the merge needed a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
-  6. A resolution that needs a design choice goes back to the PR owner.
-  7. Code fixes stay with the PR owner.
+  4. The integrator runs `scripts/release/approval-still-valid.sh <pr> <approved-sha>` and `git show --remerge-diff <merge-commit>`. It posts both outputs on the PR.
+  5. The script may print `CHANGED` after a clean merge, because `main` can change lines near the PR's hunks. Then the remerge-diff decides. **Empty output** means nobody resolved a conflict by hand, so both approvals stay valid.
+  6. If the remerge-diff shows a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
+  7. A resolution that needs a design choice goes back to the PR owner.
+  8. Code fixes stay with the PR owner.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
