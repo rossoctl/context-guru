@@ -459,10 +459,28 @@ func sigmoid(z float64) float64 {
 // business and is already checked there; duplicating it here would put the same policy in two
 // places and let them disagree.
 func (m *ReuseModel) ReuseProbability(o Observation, horizon time.Duration) (float64, bool) {
-	if m == nil || (len(m.Numeric) == 0 && len(m.Categorical) == 0) {
+	curve, ok := m.reuseCurve(o)
+	if !ok {
 		return 0, false
 	}
-	seconds := horizon.Seconds()
+	return curve(horizon), true
+}
+
+// reuseCurve builds the cumulative curve for one observation ONCE and returns a function that
+// reads it at any horizon.
+//
+// BudgetPolicy.Windows asks for the same observation's curve at 4 horizons per sweep and 8 sweeps,
+// and each ReuseProbability call used to rebuild the whole grid (sin/cos/exp per knot) to read a
+// single point from it: 32 grid builds per decision, which was 25 of the 29 seconds of an
+// all-history /api/kvcache/simulate. The grid does not depend on the horizon except through the
+// early exit below, and the exit cannot change a read: every knot it skips is larger than the
+// last one kept, which is already above the horizon, so the bracketing pair interp selects (the
+// largest knot at or below the horizon and the smallest above it) is the same one with or
+// without them. So the grid is built to its full width here and read many times.
+func (m *ReuseModel) reuseCurve(o Observation) (func(time.Duration) float64, bool) {
+	if m == nil || (len(m.Numeric) == 0 && len(m.Categorical) == 0) {
+		return nil, false
+	}
 	sp := m.spanOf(o)
 	zSpan := m.zSpanOf(sp)
 	iv, life, mk := m.interval(), m.life(), m.maxK()
@@ -479,13 +497,6 @@ func (m *ReuseModel) ReuseProbability(o Observation, horizon time.Duration) (flo
 		cum[tj] = 1.0 - surv
 		surv *= m.survival(sp, zSpan, j)
 		cum[tj+life] = 1.0 - surv
-		// Early exit once the grid brackets the horizon. Every later knot is larger, so it
-		// could only ever be selected by the upper clamp — which cannot fire now that a knot
-		// above the horizon exists. Same answer, up to 8x less work per call, and `Windows`
-		// makes four calls per sweep.
-		if tj > seconds {
-			break
-		}
 	}
 	xs := make([]float64, 0, len(cum))
 	for at := range cum {
@@ -496,17 +507,19 @@ func (m *ReuseModel) ReuseProbability(o Observation, horizon time.Duration) (flo
 	for i, at := range xs {
 		ys[i] = cum[at]
 	}
-	p := interp(seconds, xs, ys)
-	// Clamped, not trusted. A non-monotone composition cannot arise from a product of
-	// probabilities, but the interpolation is floating point and BudgetPolicy divides by
-	// 1-F: a p of 1+1e-16 there is a negative survivor share and a budget with no meaning.
-	if p < 0 {
-		p = 0
-	}
-	if p > 1 {
-		p = 1
-	}
-	return p, true
+	return func(horizon time.Duration) float64 {
+		p := interp(horizon.Seconds(), xs, ys)
+		// Clamped, not trusted. A non-monotone composition cannot arise from a product of
+		// probabilities, but the interpolation is floating point and BudgetPolicy divides by
+		// 1-F: a p of 1+1e-16 there is a negative survivor share and a budget with no meaning.
+		if p < 0 {
+			p = 0
+		}
+		if p > 1 {
+			p = 1
+		}
+		return p
+	}, true
 }
 
 // interp is numpy.interp for a sorted grid: linear inside, CLAMPED to the endpoints outside.

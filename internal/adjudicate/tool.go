@@ -42,7 +42,7 @@
 // them cost a measured 946 bytes at the head of the cacheable prefix of every preset including `off`,
 // the control arm of every published comparison here, and including presets with no sweep at all.
 //
-// This does not replace the text path. extract.ParseVerdicts and extract.BuildFallbackAsk are still
+// This does not replace the text path. extract.ParseVerdicts is still
 // the fallback, and a model that answers in prose anyway is still read exactly as before; the tool
 // only changes which reply shape is PREFERRED.
 package adjudicate
@@ -53,6 +53,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // strayAnswered counts tool_results rewritten because the AGENT called this tool. Surfaced in /stats
@@ -116,10 +118,16 @@ const anthropicDef = `{"name":"` + ToolName + `","description":"` + toolDesc + `
 const openAIDef = `{"type":"function","function":{"name":"` + ToolName + `","description":"` + toolDesc +
 	`","parameters":` + schemaJSON + `}}`
 
+const responsesDef = `{"type":"function","name":"` + ToolName + `","description":"` + toolDesc +
+	`","parameters":` + schemaJSON + `}`
+
 // ToolDefRaw returns the provider-shaped tool definition.
 func ToolDefRaw(provider string) []byte {
-	if provider == "anthropic" {
+	if provider == schema.WireAnthropic {
 		return []byte(anthropicDef)
+	}
+	if schema.IsResponses(provider) {
+		return []byte(responsesDef)
 	}
 	return []byte(openAIDef)
 }
@@ -128,7 +136,7 @@ func ToolDefRaw(provider string) []byte {
 // answer stray calls exactly when it is true.
 func HasTool(provider string, body []byte) bool {
 	field := "function.name"
-	if provider == "anthropic" {
+	if provider == schema.WireAnthropic || schema.IsResponses(provider) {
 		field = "name"
 	}
 	for _, t := range gjson.GetBytes(body, "tools").Array() {
@@ -191,7 +199,18 @@ func toolChoiceIsAuto(tc gjson.Result) bool {
 // leaves the next request's repair to fix it. On that path the repair is the ONLY defence and the agent
 // does pay one turn.
 func ResponseCallIDs(provider string, resp []byte) (ids []string) {
-	if provider == "anthropic" {
+	if schema.IsResponses(provider) {
+		gjson.GetBytes(resp, "output").ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "function_call" && item.Get("name").String() == ToolName {
+				if id := item.Get("call_id").String(); id != "" {
+					ids = append(ids, id)
+				}
+			}
+			return true
+		})
+		return ids
+	}
+	if provider == schema.WireAnthropic {
 		gjson.GetBytes(resp, "content").ForEach(func(_, blk gjson.Result) bool {
 			if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
 				if id := blk.Get("id").String(); id != "" {
@@ -232,6 +251,9 @@ func ResponseCallIDs(provider string, resp []byte) (ids []string) {
 // that calls this tool alongside a CLIENT tool is handed to the client whole, so for that turn this
 // repair is the only defence rather than a second one. See the co-call note in the response loop.
 func AnswerStrayCalls(provider string, body []byte) (out []byte, answered int) {
+	if schema.IsResponses(provider) {
+		return answerResponsesStrayCalls(body)
+	}
 	msgs := gjson.GetBytes(body, "messages")
 	if !msgs.IsArray() {
 		return body, 0
@@ -240,7 +262,7 @@ func AnswerStrayCalls(provider string, body []byte) (out []byte, answered int) {
 	// someone else's block -- would match it and be overwritten. Both halves of the pair must name an id.
 	ours := map[string]bool{}
 	for _, m := range msgs.Array() {
-		if provider == "anthropic" {
+		if provider == schema.WireAnthropic {
 			for _, blk := range m.Get("content").Array() {
 				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
 					if id := blk.Get("id").String(); id != "" {
@@ -264,7 +286,7 @@ func AnswerStrayCalls(provider string, body []byte) (out []byte, answered int) {
 	out = body
 	for mi, m := range msgs.Array() {
 		base := "messages." + strconv.Itoa(mi)
-		if provider != "anthropic" {
+		if provider != schema.WireAnthropic {
 			if m.Get("role").String() != "tool" || !ours[m.Get("tool_call_id").String()] {
 				continue
 			}
@@ -290,6 +312,37 @@ func AnswerStrayCalls(provider string, body []byte) (out []byte, answered int) {
 					out = nb
 				}
 			}
+		}
+	}
+	if answered > 0 {
+		strayAnswered.Add(int64(answered))
+	}
+	return out, answered
+}
+
+func answerResponsesStrayCalls(body []byte) ([]byte, int) {
+	items := gjson.GetBytes(body, "input")
+	if !items.IsArray() {
+		return body, 0
+	}
+	ours := map[string]bool{}
+	for _, item := range items.Array() {
+		if item.Get("type").String() == "function_call" && item.Get("name").String() == ToolName {
+			if id := item.Get("call_id").String(); id != "" {
+				ours[id] = true
+			}
+		}
+	}
+	if len(ours) == 0 {
+		return body, 0
+	}
+	out, answered := body, 0
+	for i, item := range items.Array() {
+		if item.Get("type").String() != "function_call_output" || !ours[item.Get("call_id").String()] {
+			continue
+		}
+		if next, err := sjson.SetBytes(out, "input."+strconv.Itoa(i)+".output", StrayAnswer); err == nil {
+			out, answered = next, answered+1
 		}
 	}
 	if answered > 0 {

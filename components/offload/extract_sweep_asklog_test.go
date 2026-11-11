@@ -32,7 +32,7 @@ func TestSweepAskLogCarriesAJoinKey(t *testing.T) {
 	c.Ctx = logging.With(context.Background(), lg)
 
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReqCoref(), rep, c); err != nil {
+	if _, err := askOffload(e, sweepReqCoref(), rep, c); err != nil {
 		t.Fatal(err)
 	}
 	line := buf.String()

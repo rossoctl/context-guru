@@ -80,14 +80,19 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	// later must appear here or the rewrite total will not add up.
 	runtimeRefs := []struct{ asset, ref string }{
 		{"tools.js", "tools.css"},
+		{"insights.js", "insights.css"},
 		{"kvcache.js", "kvcache.css"},
 		// campaigns.js is manager-only and not <script>-tagged in index.html at all — see
 		// maybeLoadManagerScript — so app.js fetches it itself once a hosted manager signs in.
 		{"app.js", "campaigns.js"},
+		// The diagnostics plots are fetched when the fold opens.
+		{"app.js", "charts.js"},
+		// The bundled serif face, named in the stylesheet's @font-face.
+		{"style.css", "fonts/source-serif-4-latin-wght-normal.woff2"},
 	}
 	for _, rr := range runtimeRefs {
 		js := get("/dashboard/" + rr.asset).Body.String()
-		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") {
+		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") && !strings.Contains(js, `"`+rr.ref+"?v="+assetVersion+`"`) {
 			t.Errorf("%s still asks for an unversioned %s", rr.asset, rr.ref)
 		}
 	}

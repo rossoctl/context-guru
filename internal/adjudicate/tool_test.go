@@ -56,6 +56,25 @@ func TestInjectIsByteStableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestResponsesToolAndStrayRepair(t *testing.T) {
+	body := []byte(`{"input":[{"role":"user","content":"go"}],"tools":[{"type":"function","name":"Read","parameters":{"type":"object"}}]}`)
+	injected, ok := Inject("responses", body)
+	if !ok || !HasTool("responses", injected) || gjson.GetBytes(injected, "tools.1.name").String() != ToolName ||
+		gjson.GetBytes(injected, "tools.1.parameters.type").String() != "object" {
+		t.Fatalf("native Responses declaration was not injected: %s", injected)
+	}
+	resp := []byte(`{"output":[{"type":"function_call","name":"context_guru_adjudicate","call_id":"c1"}]}`)
+	if ids := ResponseCallIDs("responses", resp); len(ids) != 1 || ids[0] != "c1" {
+		t.Fatalf("Responses call IDs = %v", ids)
+	}
+	broken := []byte(`{"input":[{"type":"function_call","name":"context_guru_adjudicate","call_id":"c1"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"not found"}]}`)
+	repaired, n := AnswerStrayCalls("responses", broken)
+	if n != 1 || gjson.GetBytes(repaired, "input.1.output").String() != StrayAnswer {
+		t.Fatalf("Responses stray repair failed: %s", repaired)
+	}
+}
+
 // Two cases where injecting would change what the model believes it can do, or which tool it is
 // compelled to call. Both must be refused.
 func TestInjectRefusesWhenItWouldPerturbSelection(t *testing.T) {

@@ -76,10 +76,6 @@ type AdjudicationItem struct {
 	// Not a sample of it: the model reads the output in full from cache, and an excerpt would be a
 	// worse version of something it already has.
 	Head string
-	// Sample is a bounded excerpt used ONLY by BuildFallbackAsk, on the path where the cache read did
-	// not happen and the model therefore cannot read the output from anywhere. Empty on the prefix-ask
-	// path, which is what keeps the content off the wire there.
-	Sample string
 	// Evidence is a rendered reference-tracking record for this output. It goes into the inventory line
 	// when non-empty and is omitted entirely when not.
 	//
@@ -236,6 +232,9 @@ func BuildPrefixAsk(items []AdjudicationItem) string {
 	if anyEvidence(items) {
 		b.WriteString(adjudicationEvidence)
 	}
+	if anyFileEvidence(items) {
+		b.WriteString(adjudicationFileEvidence)
+	}
 	b.WriteString("\n\nThe conversation above is your own. Read the tool outputs from it directly.\n")
 	b.WriteString("\nTOOL OUTPUTS UNDER CONSIDERATION. Refer to them by these labels only:\n")
 	for _, it := range items {
@@ -257,62 +256,6 @@ func BuildPrefixAsk(items []AdjudicationItem) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// FallbackSampleChars bounds each output shown in the FALLBACK prompt. The whole point of that path
-// is comparative judgement across every candidate, so the per-output budget must stay small enough
-// that a long list plus the contract still fits a window.
-const FallbackSampleChars = 2000
-
-// BuildFallbackAsk renders the question as a SELF-CONTAINED prompt: the contract, the goal, and a
-// bounded sample of each output.
-//
-// THIS IS THE EXPENSIVE PATH AND IT EXISTS ON PURPOSE. It is used only when the prefix ask could not
-// read the cache — a first turn with nothing stashed yet, a diverged prefix, an expired entry, a route
-// with no asker. `a9d666f` chose to fall back rather than skip, and the reason is worth restating:
-// treating "no prefix" as "no verdicts" would disable the component on every session's FIRST turn and
-// read, in the counters, as a model that declined to act.
-//
-// What it costs is what the prefix ask exists to avoid: fresh tokens for content the cached path would
-// have read for a tenth of the price, and a TRUNCATED view of each output rather than the whole thing.
-// So it is counted every time it happens, and an operator who would rather forgo the yield than pay
-// for it can switch it off with `block_fallback`.
-func BuildFallbackAsk(goal string, items []AdjudicationItem) string {
-	var b strings.Builder
-	b.WriteString(adjudicationContract)
-	if anyEvidence(items) {
-		b.WriteString(adjudicationEvidence)
-	}
-	b.WriteString("\n\nWHAT YOU ARE DOING NOW (judge relevance toward this):\n")
-	g := strings.TrimSpace(goal)
-	if g == "" {
-		g = "(no explicit goal stated)"
-	}
-	if len(g) > 4000 {
-		g = g[:4000]
-	}
-	b.WriteString(g)
-	b.WriteString("\n\n")
-	for _, it := range items {
-		b.WriteString("=== OUTPUT ")
-		b.WriteString(strconv.Itoa(it.Label))
-		b.WriteString(" (")
-		b.WriteString(strconv.Itoa(it.SizeTokens))
-		b.WriteString(" tokens)\ncontent:\n")
-		b.WriteString(it.Sample)
-		b.WriteString("\n\n")
-	}
-	return b.String()
-}
-
-// ClipSample bounds one output for the fallback prompt and MARKS the cut, so the model knows it is
-// judging an excerpt of something larger and does not reason as though it had seen the end.
-func ClipSample(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "\n…[excerpt truncated; the output continues for " +
-		strconv.Itoa(len(s)-max) + " more characters]"
 }
 
 // HeadLine returns a single-line, bounded opening of s, for locating an output in the transcript
@@ -573,6 +516,27 @@ func transcriptHasQuote(transcript, q string) bool {
 func anyEvidence(items []AdjudicationItem) bool {
 	for _, it := range items {
 		if it.Evidence != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// adjudicationFileEvidence teaches the model to read the file clause the warm path adds (#491). It is
+// written only when an item carries the clause, so the question the ping asks is unchanged.
+const adjudicationFileEvidence = `
+FILE READS. An output that read a file also carries "file_read=yes" and two counts from the tool calls
+that came after it: "later_edits" (calls that edited the same file) and "later_rereads" (calls that read
+it again). A file the agent went on to edit is usually still needed to know what the edit must match. A
+later re-read means the agent chose to fetch the content again. These counts come from tool names and
+tool input paths only. They are a hint, like the index, and your own reading of the conversation decides.`
+
+// FileEvidenceMarker is the text that marks a file clause in an item's Evidence.
+const FileEvidenceMarker = "file_read=yes"
+
+func anyFileEvidence(items []AdjudicationItem) bool {
+	for _, it := range items {
+		if strings.Contains(it.Evidence, FileEvidenceMarker) {
 			return true
 		}
 	}

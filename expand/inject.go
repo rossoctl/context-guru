@@ -3,6 +3,8 @@ package expand
 import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // InjectMode controls whether the expand tool is advertised on outgoing requests.
@@ -106,7 +108,7 @@ func Inject(provider, mode string, body []byte, storePersists bool) (out []byte,
 // such tool) or pays to inspect responses that cannot contain one.
 func HasTool(provider string, body []byte) bool {
 	nameField := "function.name"
-	if provider == "anthropic" {
+	if provider == schema.WireAnthropic || schema.IsResponses(provider) {
 		nameField = "name"
 	}
 	for _, t := range gjson.GetBytes(body, "tools").Array() {

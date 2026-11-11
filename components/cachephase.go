@@ -19,17 +19,18 @@ import "time"
 // Both are cheap in the window where the entry still exists but has little life left: the ask
 // still reads it, and what the rewrite invalidates is nearly worthless.
 //
-// THE TTL IS DERIVED, NOT ASSUMED. Ctx.CacheTTLMs is the same figure apply's cold decision uses,
-// read out of the request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"`
-// is an hour, widened to the longest lifetime this prefix has ever asked for. Zero means the
-// cache-aware path did not run, which is Unknown — NOT Warm and not Cold.
+// THE LIFETIME'S PROVENANCE MATTERS. Anthropic's explicit cache tier provides an expiry
+// for apply's cold decision. GPT-5.6+ instead guarantees at least 30 minutes after the
+// last write or reuse and may retain the entry longer: before that boundary it is
+// Warm, but afterward it is Unknown. A minimum can prove neither PreExpiry nor Cold.
+// Zero CacheTTLMs means no reliable lifetime was available.
 //
 // WHAT CALLERS DO WITH Unknown IS THEIR POLICY, NOT THIS FUNCTION'S, and the two shipped
 // callers answer it oppositely on purpose. extract_llm_sweep must not fire on Unknown: it would
 // invalidate live prefixes on exactly the deployments whose TTL could not be read. A size-gated
 // compactor must fire on Unknown, because Unknown is not rare or exotic: CacheTTLMs is zero
-// whenever the cache-aware path is off entirely (a non-Anthropic-family provider with no
-// cache_control breakpoint, `cache_mode: off`, a bypassed turn), and declining there would
+// whenever the cache-aware path is off entirely (`cache_mode: off`, a bypassed turn) or
+// the provider has an unknown lifetime, and declining there would
 // disable the component on those deployments.
 //
 // UNKNOWN DOES NOT IMPLY THERE IS NO LIVE PREFIX, and this comment used to claim it did — that
@@ -48,8 +49,8 @@ import "time"
 type CachePhase int
 
 const (
-	// CachePhaseUnknown means the cache-aware path did not run, so nothing is known about a
-	// cached prefix — not that there isn't one.
+	// CachePhaseUnknown means the lifetime or idle clock is not reliable enough
+	// to classify a cached prefix — not that there isn't one.
 	CachePhaseUnknown CachePhase = iota
 	// CachePhaseWarm means the entry is believed live with meaningful lifetime left.
 	CachePhaseWarm
@@ -74,9 +75,9 @@ func (p CachePhase) String() string {
 	}
 }
 
-// CacheRemaining is the cache entry's believed remaining lifetime: the TTL this request asked
-// for minus this session's idle time. ok=false means unknown, and a caller must not treat that
-// as zero — zero is a positive claim that the entry has expired.
+// CacheRemaining is the known expiry or guaranteed minimum minus this session's idle time.
+// ok=false means unknown, and a caller must not treat that as zero. For a
+// minimum, zero is only the end of the guarantee, not proof of expiry.
 //
 // Exported separately from CachePhase because the arithmetic is one subtraction over two Ctx
 // fields, and anything else that wants it (a dashboard row, a keep-alive deadline) must read it
@@ -113,6 +114,12 @@ func (c *Ctx) CachePhase(preExpiry time.Duration) CachePhase {
 	}
 	remaining, ok := c.CacheRemaining()
 	if !ok {
+		return CachePhaseUnknown
+	}
+	if c.CacheTTLMinimum {
+		if remaining > 0 {
+			return CachePhaseWarm
+		}
 		return CachePhaseUnknown
 	}
 	if remaining <= 0 {

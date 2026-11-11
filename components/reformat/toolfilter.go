@@ -13,10 +13,10 @@ import (
 func init() { components.Register("toolfilter", newToolfilter) }
 
 // toolfilterConfig is the account's opt-in list, and it is the WHOLE of the component's
-// authority: nothing is ever removed that is not named here. There is deliberately no
-// `auto`, no threshold and no "remove what looked unused" mode — the inventory can only ever
-// show that a declaration was not used in the sessions it captured, and an unused tool is
-// not the same thing as an unwanted one.
+// authority to REMOVE: nothing is ever removed that is not named here. There is deliberately no
+// "remove what looked unused" mode — the inventory can only ever show that a declaration was not
+// used in the sessions it captured, and an unused tool is not the same thing as an unwanted one.
+// `defer: auto` is not removal: a deferred tool stays declared and the model can load it.
 type toolfilterConfig struct {
 	// Remove names the declarations to stop sending, in three shapes, all of them exact and
 	// none of them a pattern:
@@ -27,6 +27,17 @@ type toolfilterConfig struct {
 	//
 	// An empty list is a no-op, which is what the shipped default is.
 	Remove []string `yaml:"remove"`
+	// Defer turns on tool deferral (#485, package tooldefer): `auto` defers the tools the user's
+	// own history says are unused, with `defer_loading` and the API's search tool, so none is
+	// removed. On a model that ignores `defer_loading` (GPT, GLM, Kimi; #825) the tool is removed
+	// and comes back through our own search tool. `off` (the default, and the account opt-out)
+	// defers nothing. Only the `ultrahigh` preset sets `auto`.
+	Defer string `yaml:"defer"`
+	// Keep names tools deferral must never touch (the account keep list).
+	Keep []string `yaml:"keep"`
+	// AlwaysDefer names tools `defer: auto` defers in every new thread, whatever the history says
+	// (#878): a tool name, or `mcp__<server>` for a whole server. The keep list wins over it.
+	AlwaysDefer []string `yaml:"always_defer"`
 }
 
 // Toolfilter is a marker component holding the opt-in list: `tools` is a top-level body
@@ -37,7 +48,12 @@ type toolfilterConfig struct {
 // The skills half lives there too, for a different reason: the listing IS in `messages`, but it
 // sits in the cached prefix, and every rewrite of the prefix has to happen before any byte offset
 // into the body is taken. Same place, same list, same counters. See apply.filterSkillListing.
-type Toolfilter struct{ remove []string }
+type Toolfilter struct {
+	remove []string
+	defers bool
+	keep   []string
+	always []string
+}
 
 func newToolfilter(raw []byte) (components.Component, error) {
 	var cfg toolfilterConfig
@@ -66,7 +82,35 @@ func newToolfilter(raw []byte) (components.Component, error) {
 	// Sorted so the stored list, the audit entry and the settings page agree on an order,
 	// and so no map iteration can leak into anything a reader compares.
 	sort.Strings(out)
-	return Toolfilter{remove: out}, nil
+	tf := Toolfilter{remove: out}
+	switch cfg.Defer {
+	case "", "off":
+	case "auto":
+		tf.defers = true
+	default:
+		return nil, fmt.Errorf("toolfilter: defer is %q; want auto or off", cfg.Defer)
+	}
+	for _, n := range cfg.Keep {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		if !validDeclName(n) {
+			return nil, fmt.Errorf("toolfilter: keep %q is not a tool name", n)
+		}
+		tf.keep = append(tf.keep, n)
+	}
+	sort.Strings(tf.keep)
+	for _, n := range cfg.AlwaysDefer {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		if !validDeclName(n) || strings.HasPrefix(n, skills.RemovePrefix) {
+			return nil, fmt.Errorf("toolfilter: always_defer %q is not a tool name", n)
+		}
+		tf.always = append(tf.always, n)
+	}
+	sort.Strings(tf.always)
+	return tf, nil
 }
 
 // validDeclName accepts the charset a tool, MCP or skill name is drawn from, plus the two
@@ -98,6 +142,15 @@ func (Toolfilter) Enabled(*components.Ctx) bool { return true }
 // Removed is the opt-in list, sorted. apply calls it; nothing else should.
 func (t Toolfilter) Removed() []string { return t.remove }
 
+// Defers reports whether tool deferral is on (`defer: auto`). The host reads it.
+func (t Toolfilter) Defers() bool { return t.defers }
+
+// Keep is the account keep list for deferral, sorted.
+func (t Toolfilter) Keep() []string { return t.keep }
+
+// AlwaysDefer is the account always-defer list for deferral, sorted (#878).
+func (t Toolfilter) AlwaysDefer() []string { return t.always }
+
 // Reformat is a no-op: the rewrite already happened in apply, which reports it here through
 // Ctx.FilteredDecls so this component does not read "declined" on the requests where it just
 // acted — the mistake cachesplit's doc records.
@@ -118,6 +171,16 @@ func (Toolfilter) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report
 
 func init() {
 	components.RegisterFields("toolfilter", toolfilterConfig{}, []components.Field{
+		{Key: "defer", Type: components.FieldEnum, Options: []string{"off", "auto"}, Default: "off",
+			Hint: "auto defers the tools your own history shows you do not use: each stays in the request with " +
+				"defer_loading and loads through the API's search tool when the model needs it; on other models (GPT, GLM, " +
+				"Kimi) the tool is removed and loads through Context Guru's own search tool, then stays for the thread; " +
+				"off is the account opt-out"},
+		{Key: "keep", Type: components.FieldStrings,
+			Hint: "tool names deferral never touches"},
+		{Key: "always_defer", Type: components.FieldStrings,
+			Hint: "tool names, or `mcp__<server>` for a whole MCP server, that defer: auto defers in every new " +
+				"thread whatever your history says; a name on the keep list stays loaded"},
 		{Key: "remove", Type: components.FieldStrings,
 			Hint: "declaration names to stop sending: a tool name, `mcp__<server>` for a whole MCP " +
 				"server, or `skill__<skill>` for one skill's listing entry; a name still described " +

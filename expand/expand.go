@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -87,7 +88,7 @@ var rawMarkerRe = regexp.MustCompile(`(?:<|(?i:\\u003c)){2}cg:([A-Za-z0-9_-]{1,6
 // shape is not sufficient on its own — the tool description contains the full shape
 // too. Scoping to model-visible content is what fixes it.
 func HasMarkersInMessages(body []byte) bool {
-	for _, field := range [...]string{"messages", "system"} {
+	for _, field := range [...]string{"messages", "system", "input", "instructions"} {
 		if r := gjson.GetBytes(body, field); r.Exists() &&
 			(rawMarkerRe.MatchString(r.Raw) || strings.Contains(r.Raw, SummaryMarker)) {
 			return true
@@ -165,13 +166,21 @@ type anthropicToolDef struct {
 	Description string     `json:"description"`
 	InputSchema toolSchema `json:"input_schema"`
 }
+type responsesToolDef struct {
+	Type        string     `json:"type"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Parameters  toolSchema `json:"parameters"`
+}
 
 // ToolDefRaw returns the expand tool definition for a provider as deterministic
 // JSON bytes (stable key order). Inject appends these to the request's tools array.
 func ToolDefRaw(provider string) json.RawMessage {
 	var v any
-	if provider == "anthropic" {
+	if provider == schema.WireAnthropic {
 		v = anthropicToolDef{Name: ToolName, Description: toolDesc, InputSchema: schemaLiteral()}
+	} else if schema.IsResponses(provider) {
+		v = responsesToolDef{Type: "function", Name: ToolName, Description: toolDesc, Parameters: schemaLiteral()}
 	} else {
 		v = openAIToolDef{Type: "function", Function: openAIFn{Name: ToolName, Description: toolDesc, Parameters: schemaLiteral()}}
 	}

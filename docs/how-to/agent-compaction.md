@@ -12,12 +12,31 @@ smaller request, so the reported usage is smaller and the threshold arrives late
 figures themselves are never touched — the response is replayed to the agent byte for
 byte, so `/cost`, the statusline and your provider bill all still agree.
 
-**It never compacts the compaction request.** The agent's summarization request demands
-verbatim fidelity over the whole transcript, so the pipeline steps aside for it and
-forwards it untouched. Detection is a match on the opening of the agent's own
-summarization prompt in the last message of the request, and it covers Claude Code and Bob
-Shell (`proxy/agentcompaction.go`). Nothing else the agent sends to the same endpoint is
-treated specially.
+**It treats the compaction request like any other request.** The pipeline runs on it, so the
+request keeps the same tool list and the same rewritten history as the turns before it. This
+keeps the provider cache warm. Measured on production traffic, a request that bypassed the
+pipeline missed the cache 31% of the time. A request that did not bypass missed 1.6% of the time.
+The trade-off: the summary model sees the rewritten history (shortened tool outputs and
+`<<cg:HASH>>` markers), not the full original. Detection is a match on the opening of the
+agent's own summarization prompt in the last message of the request, and it covers Claude Code
+and Bob Shell (`proxy/agentcompaction.go`). Detection only feeds thread identification, the
+larger size limit below, the dashboard row, and the `agent_compaction` counter in `/stats`. To
+skip the pipeline for one request, send `x-context-guru-bypass: true`. A compaction body over
+32 MiB is bypassed without the header, because the pipeline costs about 0.35 s per MiB.
+
+**The summary request carries the expand tool, and two cases can leak a tool call.** The request
+keeps the same tool list as the turns before it, so the cache stays warm. The prompt tells the
+model to call no tool. If the model calls `context_guru_expand` anyway:
+
+- Claude Code uses the Anthropic dialect. The proxy answers the call and the client gets the
+  summary text, for JSON and for streaming.
+- **OpenAI dialect with `stream:true`:** the proxy does not inspect that stream. The client
+  receives the raw tool call and no summary.
+- **Any dialect:** if the model calls expand on every round, the client receives the raw tool call
+  after 3 continuation rounds, with no summary. That needs the model to ignore the "Do NOT call any
+  tools" instruction 4 times in a row.
+
+`proxy/compactionexpand_test.go` pins all of these.
 
 **It also lets that request through when it's the one thing that's already too large.** A
 session whose transcript grew past the [request-size ceiling](../reference/reference.md#request-size-ceiling-32-mib-by-default-128-mib-for-compaction)
@@ -39,6 +58,60 @@ its dedup memory, frozen offload decisions and cache boundary across the compact
 |---|---|
 | **Bob** | Yes. Set `model.compressionThreshold` in `~/.bob/settings.json` (restart required) — `0.9` compacts at 90% instead of the default 50%, a large value disables it in practice. `/compress` still forces it on demand. |
 | **Claude Code** | No. Every threshold knob is clamped to at most the model's window, so it can only compact *earlier*. `DISABLE_AUTO_COMPACT` turns it off entirely, but then a long session walks into the provider's hard context limit with no summary to fall back on. |
+
+## When you change the compaction point
+
+If you move Claude Code's compaction point, Context Guru reads it and uses it. The savings figures
+and the summarize trigger then follow your setting, not the built-in table.
+
+- **What it reads** (Claude Code 2.1.319, checked in the shipped client): the env vars
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_AUTO_COMPACT` and
+  `DISABLE_COMPACT`, and the settings keys `autoCompactWindow`, `autoCompactEnabled` and
+  `modelSettings.<model>.autoCompactWindow` (what `/autocompact` writes). Files: `settings.json`
+  and `.claude.json` in `$CLAUDE_CONFIG_DIR` (default `~/.claude` and `~`). Project settings files
+  are not read.
+- **When:** once, when the local proxy starts. A setting changed while the proxy runs takes effect at
+  the next proxy restart. The plugin starts the proxy from a session hook, so the proxy inherits the
+  env of the session that started it.
+- **If auto-compact is off,** C is the model window.
+- **If a value is odd or missing,** the built-in table value is used. A settings file larger than
+  4 MiB is skipped (a long-lived `.claude.json` can be), and C then falls back to the table for what
+  that file would have set.
+- **Which requests:** each client's setting applies only to requests with that client's User-Agent.
+  Other requests use the table.
+- **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
+  provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
+- **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.
+- A hosted proxy reads nothing.
+
+### Bob and Codex
+
+The same rules hold: read once at start, local mode only, `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off`
+turns it off. Checked in the shipped clients (Bob Shell 1.0.3, Codex CLI 0.160.0). A request counts
+as Bob when its User-Agent starts with `bobshell/`. It counts as Codex when it starts with `codex`.
+
+- **Bob.** Key `model.compressionThreshold` in `~/.bob/settings.json` (the system file wins). It is
+  a fraction of the model window. Default **0.5**. Bob compacts when the prompt tokens the provider
+  reported for the last response reach `fraction x window`. So C is `fraction x window`, also when
+  you changed nothing.
+  - **Which window.** Bob uses the window from its own model list (`max_input_tokens` in
+    `/inference/v1/model/info`), or 200,000 when the list has none. Our window can be larger.
+    So C uses `min(our window, Bob's window)`. The proxy reads Bob's window from the model list
+    when Bob fetches it through the proxy, and keeps one number for each model in memory. If the
+    proxy has not seen it, it uses `min(our window, 200,000)`. A lower C is the safe side: the
+    savings figure is never too high.
+  - **Example.** A 1,000,000 window in our table, Bob list not seen: default C is 100,000.
+    A 200,000 window, Bob list says 200,000: default C is 100,000. The table gave about 199,000.
+  - **A bad value** (not a number, zero, negative) gives **Bob's own default 0.5**, not the table.
+  - **Not read:** the project `.bob/settings.json`, and a server-side Bob experiment that can
+    override the default.
+- **Codex.** Key `model_auto_compact_token_limit` in `$CODEX_HOME/config.toml` (default
+  `~/.codex`). It is a token count, and Codex caps it at 0.9 of its own window. C is that count.
+  **Codex has no default here.** Its default depends on a per-model catalog that changes with each
+  release, and its window differs from ours. With no key set, Codex uses the table.
+  - **A bad value** gives the table.
+  - If you set `model_auto_compact_token_limit_scope` to anything but `total`, or
+    `model_post_turn_compact_threshold_percent` above 0, Context Guru does not derive C and uses the table.
 
 ## Bob: prefer lossless components
 
@@ -62,10 +135,10 @@ usage for the *reduced* request. Any OpenAI- or Anthropic-compatible backend doe
 gateway that pre-counts or re-expands the body before billing would not. Compare the
 `input_tokens` in the response against what your agent sent to check.
 
-**One request stopped being compacted for no reason.** The compaction-detection phrase can
-appear in ordinary content — for example if the agent reads a file that quotes it. When
-that happens the request is forwarded untouched and the next turn resumes normally. The
-cost is that request's savings, nothing else.
+**The `agent_compaction` count is too high.** The compaction-detection phrase can appear in
+ordinary content — for example if the agent reads a file that quotes it. The request is still
+handled like any other. The only effects are one extra count and, for an oversized body, the
+higher size limit.
 
 **A conversation appears twice in the dashboard.** Send an explicit
 `x-context-guru-session` header. Without any agent-supplied id the fallback is a hash of

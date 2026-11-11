@@ -86,6 +86,7 @@ var notExportedWhy = map[string]string{
 	// plugin's default preset, so the empty case is now the common one and has to be legible.
 	"Pipeline":    "configured component order, not a measurement; label data, not a series",
 	"PipelineLen": "static for the process lifetime; a gauge would restate the command line",
+	"Preset":      "the preset the proxy started with; a name, not a measurement, and fixed for the process lifetime",
 
 	// Derived: PromQL computes these from series that ARE exported, and a second series
 	// would be a number that can disagree with its own inputs.
@@ -136,6 +137,7 @@ var notExportedWhy = map[string]string{
 	"TopDiscarded":     `component NAMES; the count is cg_component_runs_total{outcome="discarded"}`,
 	"KeepAlive":        "typed `any`; the host fills it with a ledger this package cannot name",
 	"Savings":          "typed `any`; already cg_tenant_net_saved_usd et al. via promexport's own dash-backed rows",
+	"ToolDefer":        "typed `any`; the host fills it with tool deferral's ledger (#485), /stats only until the feature leaves opt-in",
 
 	// Configured budgets, not measurements: constant for the process's life, so a series
 	// would only ever restate a flag. Read them off /stats when a *_timeouts is non-zero.
@@ -184,6 +186,28 @@ var notExportedWhy = map[string]string{
 	"CacheAwareSummarizerProfileFallbacks": "NOT EXPORTED YET — the profiles_path override could not be read and the embedded registry was used instead, so the roles this arm resolved are not the ones the deployment pinned",
 	"CacheAwareSummarizerAsyncStarted":     "NOT EXPORTED YET — detached summaries commissioned",
 	"CacheAwareSummarizerAsyncCommitted":   "NOT EXPORTED YET — detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost",
+	"CacheAwareSummarizerNoPrefix":         "NOT EXPORTED YET — a session's first turn through PrefixAsk (components.ErrNoPrefix), not a failure",
+	"CacheAwareSummarizerStalePrefix":      "NOT EXPORTED YET — the PrefixAsk stash did not cover the span this turn would have claimed as summarized; a real alert candidate once it has a dashboard home",
+	"CacheAwareSummarizerCoordsShifted":    "NOT EXPORTED YET — an earlier component changed the message count so the span could not be located; expected on compacted `high`/`xhigh` turns, not a stash defect (#452)",
+	"PrefixStashOversized":                 "NOT EXPORTED YET — request bodies the prefix stash refused as over its per-body cap; same family as CacheAwareSummarizerNoPrefix, exported with it",
+	"CacheAnchorWritten":                   "NOT EXPORTED YET — splice anchors written (#723); same family as the cache_aware_summarizer counters, exported with them",
+	"CacheAnchorNoSlot":                    "NOT EXPORTED YET — splice anchors skipped for want of a free breakpoint slot (#723)",
+	"CacheAnchorNotFound":                  "NOT EXPORTED YET — splice anchors whose tool_result the rebuilt body did not contain (#723)",
+	"CacheInBandBPMoved":                   "NOT EXPORTED YET — in-band follow-ups whose client breakpoint was moved to their end (#784); same family as the cache_anchor counters, exported with them",
+	"CacheInBandBPNoMark":                  "NOT EXPORTED YET — in-band follow-ups whose client request had no message breakpoint to move (#784)",
+	"CacheInBandBPNotFound":                "NOT EXPORTED YET — in-band follow-ups whose last block cannot take a breakpoint (#784)",
+	"CacheInBandBPTooFar":                  "NOT EXPORTED YET — in-band follow-ups whose new content is past the provider's 20-block lookback (#784)",
+	"CacheTailBPAdded":                     "NOT EXPORTED YET — breakpoints added at the end of a request whose client mark sat far from the end (#795); same family as the cache_anchor counters, exported with them",
+	"CacheTailBPNoSlot":                    "NOT EXPORTED YET — tail breakpoints skipped for want of a free slot (#795)",
+	"CacheTailBPNotNeeded":                 "NOT EXPORTED YET — requests whose client mark already sat near the end (#795): the sum of at_end and short_tail",
+	"CacheTailBPAtEnd":                     "NOT EXPORTED YET — requests whose client mark already sat at the very end, or whose last block already held a mark (#795)",
+	"CacheTailBPShortTail":                 "NOT EXPORTED YET — requests whose client mark was followed by a short tail only (#795)",
+	"CacheTailBPNoMark":                    "NOT EXPORTED YET — requests whose client put no breakpoint in messages (#795)",
+	"CacheTailBPNotFound":                  "NOT EXPORTED YET — requests whose last block cannot take a breakpoint (#795)",
+	"CacheAwareSummarizerPrefixAskUsed":    "NOT EXPORTED YET — the direct signal that this component is actually activating on Anthropic incoming-model traffic (#275) rather than measuring `off`",
+	"CacheAwareSummarizerCacheReadTokens":  "NOT EXPORTED YET — the direct answer to 'is the commission call actually reading warm', this component's whole argument",
+	"CacheAwareSummarizerCacheWriteTokens": "NOT EXPORTED YET — paired with CacheReadTokens; a call that only ever writes is the mechanism failing, not merely being expensive",
+	"CacheAwareSummarizerTruncated":        "NOT EXPORTED YET — a paid-for call whose reply looked cut off and was refused rather than committed; non-zero is lost compaction, never a wrong checkpoint",
 	"SummarizeTimeouts":                    "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
 	"SummarizeErrors":                      "NOT EXPORTED YET — as above",
 	// The detached summarizer path's health. Listed here rather than exported, following this
@@ -208,20 +232,24 @@ var notExportedWhy = map[string]string{
 	// off `s` for the reason this map's preamble gives: the /stats handler fills the field AFTER
 	// renderMetrics takes its snapshot, so a promLine off `s` would export a permanent 0 while
 	// passing this test.
-	"ExpandPrefixFlips":     "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
-	"UpstreamMsAvgBypassed": "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
-	"SSETTFBMsAvgBuf":       "NOT EXPORTED YET — buffered responses' time-to-last-byte",
-	"SSEExpandAfterStream":  "NOT EXPORTED YET — the SSE peek's price; alert candidate",
-	"AttemptedTokens":       "NOT EXPORTED YET — the honest savings denominator",
-	"FrozenTokens":          "NOT EXPORTED YET — what cache-awareness left alone",
-	"SavingsPctAttempted":   "NOT EXPORTED YET — saved/attempted, the ratio that does not trend to 0",
-	"SavingsPctNewInput":    "NOT EXPORTED YET — saved/(fresh+cache_write+saved)",
+	"ExpandPrefixFlips":        "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
+	"UpstreamMsAvgBypassed":    "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
+	"SSETTFBMsAvgBuf":          "NOT EXPORTED YET — buffered responses' time-to-last-byte",
+	"SSEExpandAfterStream":     "NOT EXPORTED YET — the SSE peek's price; alert candidate",
+	"SSEAdjudicateAfterStream": "NOT EXPORTED YET — the other half of the peek's price, split from SSEExpandAfterStream (#174); export the pair together or the alert cannot say which tool leaked",
+	"AttemptedTokens":          "NOT EXPORTED YET — the honest savings denominator",
+	"FrozenTokens":             "NOT EXPORTED YET — what cache-awareness left alone",
+	"SavingsPctAttempted":      "NOT EXPORTED YET — saved/attempted, the ratio that does not trend to 0",
+	"SavingsPctNewInput":       "NOT EXPORTED YET — saved/(fresh+cache_write+saved)",
 }
 
 // TestExpandUnresolvedSeriesRender: both reasons are present with a value even at zero (a
 // family that appears only once something breaks renders "No data" in Grafana, which reads
 // as healthy — the same argument as refusalReasons), and both track the real counter.
 func TestExpandUnresolvedSeriesRender(t *testing.T) {
+	// These two counters are process-global and this test records into them on purpose, so
+	// reset first: without that, a -count>1 run fails here on its second iteration (#192).
+	expand.ResetUnresolvedForTest()
 	h := New(nil, nil, metrics.NewAggregator(), Options{})
 	zero := []string{
 		`cg_expand_unresolved_total{reason="malformed"} 0`,

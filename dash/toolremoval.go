@@ -59,8 +59,8 @@ import "strings"
 // CLAUDE CODE itself declares, checked against a live session rather than harvested from
 // captured traffic. That distinction is the whole discipline of this list. A dashboard's
 // tool_declarations table also holds the tools of every OTHER agent that has been through the
-// proxy, and a name that merely looks built-in (DesignSync, Workflow, ScheduleWakeup on this
-// deployment) belongs to one of those — filing it here would hide a genuinely removable
+// proxy, and a name that merely looks built-in (Workflow, ScheduleWakeup on this deployment)
+// belongs to one of those — filing it here would hide a genuinely removable
 // declaration behind the danger warning and defeat the page.
 //
 // So the list errs toward EXCLUDING an unrecognised name. The cost of a false negative is that
@@ -68,14 +68,24 @@ import "strings"
 // that the page stops finding the savings it exists to find. When a new Claude Code tool
 // appears, add it here — a name absent from this list is reported as `client_tool`, which says
 // "check what declares this" rather than either "safe to remove" or "do not touch".
+//
+// DesignSync was this list's own example of a name that merely LOOKS built-in, and that belief
+// was wrong: it is Claude Code's own claude.ai/design bridge (verified by reading its declared
+// schema off a live captured request), and on the snapshot this page was measured against it was
+// the single largest misclassified item — declared, never invoked, by 1,592 of 1,959
+// tool-bearing sessions. Workflow and ScheduleWakeup below stay excluded: on this deployment
+// those names belong to other agents' own tools, and filing them here would hide a genuinely
+// removable declaration behind the danger warning.
 var builtinTools = map[string]bool{
-	"Agent": true, "Artifact": true, "AskUserQuestion": true, "Bash": true,
+	"Agent": true, "Artifact": true, "ArtifactCheck": true, "ArtifactComments": true,
+	"ArtifactData": true, "AskUserQuestion": true, "Bash": true,
 	"BashOutput": true, "CronCreate": true, "CronDelete": true, "CronList": true,
-	"Edit": true, "EndConversation": true, "EnterWorktree": true, "ExitPlanMode": true,
-	"ExitWorktree": true, "Glob": true, "Grep": true, "KillShell": true,
-	"ListAgents": true, "LSP": true,
+	"DesignSync": true, "Edit": true, "EndConversation": true, "EnterWorktree": true,
+	"ExitPlanMode": true, "ExitWorktree": true, "Glob": true, "Grep": true,
+	"KillShell": true, "ListAgents": true, "ListMcpResourcesTool": true, "LSP": true,
 	"Monitor": true, "NotebookEdit": true, "PowerShell": true, "Read": true,
-	"SendMessage": true, "Skill": true, "SlashCommand": true, "TaskCreate": true,
+	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true, "SendMessage": true,
+	"SendFeedback": true, "Skill": true, "SlashCommand": true, "TaskCreate": true,
 	"TaskGet": true, "TaskList": true, "TaskOutput": true, "TaskStop": true,
 	"TaskUpdate": true, "TodoWrite": true, "WebFetch": true, "WebSearch": true, "Write": true,
 }

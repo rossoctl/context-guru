@@ -1,6 +1,6 @@
 # How it saves money
 
-context-guru saves **5–15% of your API cost in four ways** — two from carrying less
+context-guru saves **15–35% of your API cost in four ways** — two from carrying less
 context, two from paying less for what you still carry. Each is independent: none of
 them need the others, and none of them touch what the model sees or does.
 
@@ -23,32 +23,36 @@ them need the others, and none of them touch what the model sees or does.
     would act on is ever touched — file paths, stack frames, and diffs always survive
     a cap intact.
 
-    **Measured:** −0.5% of tool-output tokens, fleet-wide. Small per request, and it
+    **Measured:** ~1% lower cost (`conservative` and up). Small per request, and it
     compounds — it runs first, so every later component sees an honestly-smaller number.
 
-=== "Unused MCP tools & skills"
+=== "Tool search for MCP & skills"
 
     **Carry less context.** An agent declares its whole toolbox — every MCP tool,
     every skill — on **every** request, whether or not it ever calls them. Those
     declarations sit in the cached prefix and get re-read on every turn of the
-    session. `toolfilter` drops the ones you tell it are dead weight.
+    session. With tool search (the `ultrahigh` preset, experimental), the tools your
+    own history shows you do not use are sent as names only. The model loads one
+    through search when it needs it.
 
     ```mermaid
     flowchart LR
-      A["Session tools array<br/>21,889 tokens declared"] --> B{toolfilter<br/>remove: [...]}
-      B --> C["Sent to model<br/>only what gets called"]
+      A["Session tools array<br/>21,889 tokens declared"] --> B{toolfilter<br/>defer: auto}
+      B --> C["Sent to model<br/>used tools + names of the rest"]
+      C -. search .-> D["Tool loaded<br/>when needed"]
     ```
 
     **Example:** measured across real Claude Code sessions, **82.7%** of a declared
-    tool catalogue is never invoked in that session — 27 tools carried by every
-    session and called by none. Naming those in `remove:` drops them from every
-    request of that session, not just one.
+    tool catalogue is never invoked in that session. Deferral sends the same set on
+    every turn of a thread, so the cached prefix stays valid.
 
-    **Measured:** 2–4% fewer system-prompt tokens, depending on how tool-heavy your
-    setup is. `toolfilter` never removes a name you didn't list, and keeps anything
-    still described in your system prompt's own prose.
+    **Expected:** 2–5% lower cost, depending on how many MCP tools and skills you
+    declare. A replay of live sessions measured 5.9% ([#485](https://github.com/rossoctl/context-guru/issues/485)).
+    See [Experimental: ultrahigh](https://github.com/rossoctl/context-guru#experimental-ultrahigh)
+    for accuracy and limits. To drop a fixed list of tools instead, use
+    `toolfilter: {remove: [...]}`.
 
-=== "Compaction when it matters (experimental)"
+=== "Compaction when it matters"
 
     **Pay less for what you still carry.** Left alone, a long session gets
     compacted only when it hits the context limit — a forced, disruptive cut, done
@@ -68,9 +72,15 @@ them need the others, and none of them touch what the model sees or does.
     once, then reused byte-for-byte on every later turn instead of re-summarizing
     each time.
 
-    **Measured:** ~2% lower input cost. Marked experimental because *when* to
-    compact for the best cache behavior is still being tuned — see
-    [`summarize`](../components/summarize.md).
+    It works in two parts:
+
+    - **Summarize early** (`medium`/`high`): fold older turns before the context
+      limit, while the cache is still warm. See [`summarize`](../components/summarize.md).
+    - **Sweep cold turns** (`xhigh`): after a turn's cache has expired, drop the old
+      tool outputs that the task no longer needs.
+
+    **Expected:** 5–10% lower cost. On `xhigh` we measured about 5% (live, 2026-11).
+    Most of it comes from the sweep, so `medium`/`high` save less.
 
 === "Smart cache management"
 
@@ -97,12 +107,13 @@ them need the others, and none of them touch what the model sees or does.
     cache-read rate. A ping costing a few cents keeps that prefix warm instead of
     triggering a rebuild that costs dollars.
 
-    **Measured:** 5–10% lower input cost — the largest single lever of the four,
-    and it needs no configuration to try: [Keep an idle prompt cache
-    warm](../how-to/cache-keepalive.md).
+    **Expected:** 15–20% lower cost — the largest single lever of the four. It is on
+    by default in the plugin. On the proxy binary, keep-alive is off until you turn it
+    on: [Keep an idle prompt cache warm](../how-to/cache-keepalive.md).
 
 ---
 
-*These are separate baselines measured independently — the four don't simply add
-up, and your own mix will vary with how you use tools, how long your sessions run,
+*Together: ~1% + 2–5% + 5–10% + 15–20% ≈ 15–35% with all four on. Some numbers are
+measured and some are expected. The savings overlap, so the total is less than the
+plain sum. Your own mix will vary with how you use tools, how long your sessions run,
 and how often they sit idle.*

@@ -1,0 +1,21 @@
+╭─ Settings that cost you money ──────────────────────────────────────────────────────────────────╮
+│ CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 turns off the free server-side check in auto mode, so  │
+│ Claude Code sends its own classifier requests and you pay for them.                             │
+│   Set in: your user settings, ~/.claude/settings.json                                           │
+│   Cost: not measured yet                                                                        │
+│   Fix: remove it. Do not add CLAUDE_CODE_AUTO_MODE_SERVER: the default already asks the server. │
+│   Takes effect at the next Claude Code session.                                                 │
+│   Risk: A gateway that rejects beta fields may return 400 errors. Claude Code 2.1.304 and later │
+│   retries some of them itself. If errors start, undo this and run /context-guru:doctor.         │
+│   Also changes: Tool search halves the tools field (58.5 KB to 28.6 KB), and context_management │
+│   turns on.                                                                                     │
+│                                                                                                 │
+│ Session recap (awaySummaryEnabled) makes a model call for a one-line summary each time you come │
+│ back after a few minutes away.                                                                  │
+│   Set in: not set anywhere (on by default)                                                      │
+│   Saves: one small model call each time you come back after a few minutes away.                 │
+│   Fix: set "awaySummaryEnabled": false. Takes effect at the next Claude Code session.           │
+│   Risk: You no longer see the recap line when you come back.                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+Apply it? Say yes, or run: /context-guru:save-more apply settings disable-experimental-betas
+Apply it? Say yes, or run: /context-guru:save-more apply settings session-recap

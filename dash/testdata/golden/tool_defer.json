@@ -1,0 +1,18 @@
+{
+ "days": [],
+ "total": {
+  "cost_usd": 0,
+  "day": 0,
+  "dropped_searches": 0,
+  "gross_usd": 0,
+  "list_tokens": 0,
+  "loaded": 0,
+  "net_usd": 0,
+  "requests": 0,
+  "searches": 0,
+  "tenant": "",
+  "tokens_deferred": 0,
+  "unpriced_requests": 0,
+  "wrong_guesses": 0
+ }
+}

@@ -13,13 +13,15 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -118,9 +120,10 @@ func init() { components.Register("extract_llm", newExtractLLM) }
 // that are still medium/large AFTER the deterministic components ran. Prior
 // compactions are reused byte-for-byte from state so the request prefix stays stable.
 type ExtractLLM struct {
-	minTokens     int
-	strategy      string
-	modelSource   string
+	minTokens   int
+	strategy    string
+	modelSource string
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
 	modelClient   components.Model
 	trigger       components.Trigger
 	mode          markerMode
@@ -155,7 +158,9 @@ type ExtractLLM struct {
 	pricing cheapmodel.Pricing
 	// ratios learns this workload's real compression ratio instead of assuming one.
 	ratios ratioTracker
-	// prevTokens tracks per-session request size so growth rate is measurable (#28 E).
+	// prevTokens tracks each thread's request size so growth rate is measurable (#28 E).
+	// Keyed by thread.Key, not the session: the threads of one session interleave, and each
+	// would read the other's size as growth or shrink (#484).
 	prevTokens map[string]int
 	// modelName identifies the extraction model in the global cache key, so switching
 	// models misses rather than serving another model's extraction (#28 C).
@@ -243,10 +248,11 @@ var staticWindows = modelinfo.DefaultStatic()
 // A CONFIG-PINNED client needs no correction and never reaches the effSource branch, which is worth
 // stating because it looks like a second path that could resurrect the mismatch: Offload threads
 // effSource only through the `model == nil` branch, so a client resolved from e.modelClient keeps
-// the configured source. It is safe because modelConfig.Client() requires model.model to be
-// non-empty, so e.modelName is always set whenever e.modelClient is, and the e.modelName != ""
-// branch below (the static-table lookup) short-circuits before effSource or CtxWindow is consulted.
-// Raised in review on #110; recorded here so the next reader need not re-derive it.
+// the configured source. e.modelClient is a TEST-INJECTION SEAM ONLY now — the model: block names a
+// source, never a credential (components/offload/modelcfg.go), so production never sets it. A test
+// that sets e.modelClient directly is responsible for also giving the config a non-empty model.model
+// if it wants e.modelName set to match, since nothing else enforces that pairing once Client() is
+// gone. Raised in review on #110; recorded here so the next reader need not re-derive it.
 func (e *ExtractLLM) inputLimit(c *components.Ctx, effSource string) int {
 	if effSource == "" {
 		effSource = e.modelSource
@@ -421,7 +427,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 			}
 		}
 	}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("extract_llm", raw, &cfg); err != nil {
 		return nil, err
 	}
 	rewrite := true
@@ -474,8 +480,8 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
+		modelSource: cfg.Model.Source,
+		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
 		ctxMode: ctxMode, ctxMessages: cfg.ContextMessages, maxChars: cfg.MaxChars,
@@ -488,13 +494,23 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	}, nil
 }
 
-// noteRequestSize records this request's size for the session and returns the previous
-// one, so the trigger can measure context growth rate (#28 E).
-func (e *ExtractLLM) noteRequestSize(session string, tokens int) int {
+// noteRequestSize records this request's size for the request's thread and returns the
+// previous one, so the trigger can measure context growth rate (#28 E).
+func (e *ExtractLLM) noteRequestSize(c *components.Ctx, tokens int) int {
+	key := thread.Key(c.Session, c.Thread)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	prev := e.prevTokens[session]
-	e.prevTokens[session] = tokens
+	prev, ok := e.prevTokens[key]
+	if !ok && len(e.prevTokens) >= modes.DefaultMaxKeys {
+		// Bounded like the tracker, because there is one entry per thread and side request.
+		// ponytail: arbitrary eviction. A lost entry reads as no previous size, so growth is 0
+		// and the growth trigger does not fire: one missed model call, never a wrong rewrite.
+		for k := range e.prevTokens {
+			delete(e.prevTokens, k)
+			break
+		}
+	}
+	e.prevTokens[key] = tokens
 	return prev
 }
 
@@ -654,6 +670,16 @@ var extractInflight singleflight.Group
 // inflightDeduped counts calls avoided because an identical extraction was already running.
 var inflightDeduped atomic.Int64
 
+// beforeInflightJoinForTest, set only by tests, runs immediately before a candidate joins
+// extractInflight — past the concurrency semaphore, one statement before the Do call.
+// Which candidates become followers is otherwise a scheduling race the test can only hope
+// to win: the model replies in microseconds, so the leader can drop the key before the
+// other goroutines reach Do, and under load (or -cpu 1) they often do. Parking the model
+// keeps the key held, and this line is the last point a test can observe before
+// singleflight parks a waiter — a test that waits for every candidate here, then releases
+// the leader, arranges the followers rather than hoping for them.
+var beforeInflightJoinForTest func()
+
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
@@ -678,7 +704,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		rep.Skipped = true
 		return nil, nil
 	}
-	model := e.modelClient
+	model := e.modelClient // test-injection seam; nil in production
 	// The source the model is ACTUALLY resolved from, which the prompt budget below must be
 	// sized against rather than the configured one — see inputLimit.
 	effSource := e.modelSource
@@ -709,7 +735,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// Derived trigger (#28 E): context pressure + growth rate replace a hand-tuned
 	// threshold. When min_tokens/trigger is set explicitly the operator's value governs.
 	reqTokens := schema.MessagesTokens(req)
-	prevTokens := e.noteRequestSize(c.Session, reqTokens)
+	prevTokens := e.noteRequestSize(c, reqTokens)
 	pressure := contextPressure(reqTokens, c.CtxWindow)
 	growth := growthRate(reqTokens, prevTokens)
 	pressureFires, triggerReason := shouldFire(pressure, growth, e.minTokensSet, e.fireOnSize)
@@ -832,6 +858,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			commitRefresh(c, rep, eff, key, content)
 			recordOwner(c, key)
 		} else if !commitMark(c, rep, eff, key, content) {
+			if eff == markerFull {
+				e.ratios.noteRefused() // the reserve is full: see ratioTracker.exploring (#214)
+			}
 			return false // the store cannot back the marker; leave this output verbatim
 		}
 		schema.SetMessageText(&req.Input[i], newText)
@@ -1006,6 +1035,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				if !apply(i, content, cached.Projected, cached.Summary, false) {
 					continue
 				}
+				// commitMark took the payload, so the reserve is not full (#214). The same-session
+				// replay above is left out on purpose: commitRefresh never refuses, so a replay
+				// says nothing about whether the reserve has room.
+				e.ratios.noteSpliced()
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
@@ -1080,8 +1113,14 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
 			// clock as well as money, and an agent on a task deadline feels the former more.
-			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs(rep.Component)) &&
-				e.ratios.exploring(c.Session)
+			explore := false
+			if !tooSlowToExplore(metrics.ExtractionP50LatencyMs(rep.Component)) {
+				var skippedFull bool
+				explore, skippedFull = e.ratios.exploringWhy(c.Session)
+				if skippedFull {
+					rep.Gate("explore_skipped_reserve_full")
+				}
+			}
 			// goalOverhead, not promptOverhead: the gate needs the VARIABLE part of the
 			// prompt, because callCost adds the static preamble itself. promptOverhead is
 			// the window-fitting figure and bundles extractPromptOverheadTokens = 2000,
@@ -1290,6 +1329,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				res, sum, strategy, why string
 				executed                bool
 			)
+			if beforeInflightJoinForTest != nil {
+				beforeInflightJoinForTest()
+			}
 			sfv, _, _ := extractInflight.Do(extract.ResultKey(cands[k].id, e.modelName, extCfg),
 				func() (any, error) {
 					executed = true
@@ -1504,6 +1546,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
+			e.ratios.noteSpliced() // in full mode a payload fit, so the reserve is not full (#214)
 			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what this request's message actually
 			// shrank by, and the basis extract_llm_sweep already books on. Carrying
 			// `before - TextTokens(projection)` out of runCall instead omitted the summary, the
@@ -1553,12 +1596,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// exploration, and a reader reasoning from a "bounded per session" claim would
 			// under-count this by the number of concurrent sessions.
 			//
-			// The option that gets both properties is to gate exploring() on RESERVE HEALTH rather
-			// than on r.total — stash_refused already distinguishes "cannot learn because we are
-			// refusing" from "no evidence yet", which is the distinction r.total cannot express.
-			// Deliberately not done here: it is the same question as #190 (what a component should
-			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
-			// issue's candidate list rather than guessed at in this diff.
+			// That is now closed (#214): ratioTracker.exploring grants no slot while the reserve is
+			// refusing (a refusal inside reserveRefuseWindow with no splice since), and the skip is
+			// counted as the explore_skipped_reserve_full gate. So the spend above falls to about
+			// one trial call per window while saturation lasts, not maxExploreCalls per session.
+			// The "observe nothing while refusing" rule stays: it is correct.
 			//
 			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
 			// an explicit flag rather than a proxy.

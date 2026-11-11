@@ -4,6 +4,25 @@ Two components touch the provider's prompt cache: **cachesplit** (in every cachi
 **cacheinject** (in none). Both are Reformat components whose real work happens body-level in
 `apply`, not in the pipeline's per-message rewrite.
 
+## OpenAI's implicit cache
+
+OpenAI requests are cache-aware in `cache_mode: auto` even without `cache_control`:
+the provider caches eligible prefixes implicitly. Context-guru protects the
+previous turn's prefix while rewriting a new tail. It does not add
+`prompt_cache_options.ttl` to requests. For GPT-5.6 and later, OpenAI's
+documented default is `30m` after the latest write or reuse; that is a
+**minimum**, not proof that the entry expires at 30 minutes. The
+entry is classified **warm** throughout that guarantee: its actual expiry
+cannot be inferred, so `pre_expiry` is not claimed. Past 30 minutes the cache
+phase is **unknown**, not cold. Earlier
+OpenAI models have different retention rules, so their phase remains unknown
+unless a reliable lifetime can be established. GPT-5.6+ Responses sessions
+can opt into a separate 28-minute keep-alive schedule; earlier OpenAI models
+are not pinged.
+
+See the [OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for the model-specific retention rules.
+
 ## Split is measured, placement isn't
 
 Claude Code appends a live environment snapshot to the **end** of its main system block:
@@ -35,7 +54,7 @@ measurement is n=1 and mildly negative, with no mechanism established. `cachespl
 them apart is what stops disabling placement from silently disabling the split too. Every preset
 that touches caching carries `cachesplit`, never `cacheinject`.
 
-**Explicit-breakpoint providers only** (Anthropic, Bedrock, Vertex). Under an implicit
+**Explicit-breakpoint providers only** (Anthropic, Bedrock, Bedrock Mantle and Vertex). The −34.1% figure was measured on Anthropic only. The split also handles the Bedrock Converse shape, where `cachePoint` is its own array entry, but that path has no cost measurement. Under an implicit
 longest-prefix cache (OpenAI, Gemini) the match already ends at the divergence, so neither
 component buys anything there.
 
@@ -87,7 +106,7 @@ snapshot, a timestamp, a git status) in front of a cache breakpoint.
 
 ### When it's inert
 
-**Explicit-breakpoint providers only** (Anthropic, Bedrock, Vertex). Under an implicit
+**Explicit-breakpoint providers only** (Anthropic, Bedrock, Bedrock Mantle and Vertex). Under an implicit
 longest-prefix cache (OpenAI, Gemini) the match already ends at the divergence, so a block
 boundary buys nothing. It is also inert when the system block has no separable volatile
 tail.

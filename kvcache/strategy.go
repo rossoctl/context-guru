@@ -393,9 +393,9 @@ func (f Fixed) Decide(Observation) Action {
 }
 func (f Fixed) Describe() string {
 	if f.TTL == TTL1h {
-		return "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read)."
+		return "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier)."
 	}
-	return "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read)."
+	return "Always write the prefix at the 5-minute tier (1.25x input to create, 0.1x to read; less on a model with a lower read tier)."
 }
 
 // Observed replays THE POLICY THAT ACTUALLY RAN, reconstructed from each row's own recorded
@@ -503,6 +503,9 @@ const (
 	DefaultP5m       = 0.5
 	DefaultP1h       = 0.5
 	DefaultMinPrefix = 20000
+	// NOTE (#435, #719): the shipped config default is now 240 s / 80k floor (20k except for a main thread that waits for a person or for an unknown cause), but this simulator (and the
+	// suggester built on it) still scores at 280 s / 20k: its hazard windows are fixed at the W1
+	// clock and cannot represent the W3 cliff. Moving it needs a re-fit, not a constant edit.
 	// DefaultPingIdle and DefaultMaxPings are the shipped keep-alive schedule for a
 	// FIVE-MINUTE entry: a ping every 280 s, at most 2 per idle span. 280 rather than 300 so
 	// the refresh lands before the lifetime, not on it.

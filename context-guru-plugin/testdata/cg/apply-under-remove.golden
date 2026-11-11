@@ -1,0 +1,1 @@
+Run this instead (a change is its own command): python3 "scripts/cg.py" apply tools remove-sufficient@8c21e0d4

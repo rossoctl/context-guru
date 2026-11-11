@@ -102,3 +102,13 @@
    it, and the two that matter (total cost, vs baseline) have to be visible without scrolling
    sideways. The strategy's description lives on the picker above and on this cell's title. */
 .kv-sim-name { font-weight: 600; white-space: nowrap; }
+
+/* First screen: verdict sentence plus one large number. */
+.kv-verdict { font-family: var(--serif); font-size: 24px; line-height: 1.25; margin: var(--sp-2) 0 var(--sp-3); max-width: 40ch; }
+.kv-bignum { display: flex; align-items: baseline; gap: var(--sp-4); flex-wrap: wrap; }
+.kv-bignum strong { font-family: var(--serif); font-size: 56px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; color: var(--accent); }
+.kv-bignum span { color: var(--fg-muted); max-width: 52ch; font-size: 14px; }
+details.kv-more { margin: 0; border-top: 1px solid var(--border-soft); padding: var(--sp-3) 0; font-size: var(--t-body, 14px); }
+details.kv-more > summary { font-family: var(--serif); font-size: 17px; color: var(--fg); }
+details.kv-more > :not(summary) { max-width: none; }
+details.kv-more > p:first-of-type { max-width: 78ch; }

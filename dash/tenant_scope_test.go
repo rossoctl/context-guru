@@ -37,21 +37,31 @@ func newScopeFixture(t *testing.T, principal func(*http.Request) (Principal, boo
 			Content:         []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
 		})
 	}
-	// Drain the writer so the rows exist before any query.
+	// Drain the writer so the rows exist before any query. The database alone is not
+	// enough: the writer publishes to the SSE hub only AFTER the insert commits, so a row
+	// /api/requests can see is not yet a row /api/events can replay — waiting on the
+	// database alone left a window where the live feed read empty (#91). Same package, so
+	// the hub's ring is reachable directly.
+	hubEvents := func() int {
+		rec.hub.mu.Lock()
+		defer rec.hub.mu.Unlock()
+		return len(rec.hub.ring)
+	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(p.Requests) == 3 {
+		if len(p.Requests) == 3 && hubEvents() == 3 {
 			for _, e := range p.Requests {
 				f.ids[e.TenantID] = e.ID
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 3 rows (got %d)", len(p.Requests))
+			t.Fatalf("writer did not persist 3 rows and publish them (got %d rows, %d hub events)",
+				len(p.Requests), hubEvents())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -96,8 +106,7 @@ func asTenant(id string, manager bool) func(*http.Request) (Principal, bool) {
 // Every MOUNTED route is checked against the scoping decision it declared, by walking
 // the route table Mount itself uses.
 //
-// The list used to be hand-written here, which is why /api/benchmarks,
-// /api/benchmarks/{id}/tasks and /api/capture shipped with no auth and no scoping at
+// The list used to be hand-written here, which is why /api/capture shipped with no auth and no scoping at
 // all: they were never in the list, so nothing noticed. Iterating the real table means
 // a new route either declares a class and is checked, or fails here.
 func TestAPIScopesEveryRouteToTheCaller(t *testing.T) {
@@ -329,8 +338,7 @@ func TestSingleTenantAPIUnchanged(t *testing.T) {
 	// The routes that grew a manager gate in hosted mode must be exactly as open as they
 	// always were here: there is nobody to authenticate on a developer's laptop, and the
 	// full capture counters are the local operator's own numbers.
-	for _, path := range []string{"/api/benchmarks", "/api/benchmarks/1/tasks",
-		"/api/benchmarks?refresh=1", "/api/capture"} {
+	for _, path := range []string{"/api/capture"} {
 		if code, body := f.get(t, path); code != http.StatusOK {
 			t.Errorf("single-tenant %s = %d, want 200: %s", path, code, body)
 		}

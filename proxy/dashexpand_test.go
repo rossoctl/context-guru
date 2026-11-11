@@ -8,7 +8,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // TestDashboardRecordsExpands: the expand loop recorded restorations only to the
@@ -206,5 +210,136 @@ func TestADistinctOriginalIsStillCharged(t *testing.T) {
 			"and must both be charged; only C, which repeats A's content, may be suppressed. "+
 			"Suppressing on the call id rather than the content would give 1 here and still "+
 			"pass TestTheRepairChargesTheRestoredTokensOnce", charged)
+	}
+}
+
+// ⭐ #404 point 7, through the real proxy. An expand of a marker the SWEEP made is charged to the sweep on
+// the row (sweep_expands, sweep_expand_tokens, sweep_false_expands), in addition to the totals; an expand
+// of any other marker is not. Both host call sites feed it (the in-band loop here, and the request-path
+// repair), so the first test drives the loop and the second the repair.
+func TestAnExpandOfASweepMarkerIsChargedToTheSweepOnTheDashboardRow(t *testing.T) {
+	offload.ResetSweepLedgerForTest()
+	t.Cleanup(offload.ResetSweepLedgerForTest)
+	for _, tc := range []struct {
+		name   string
+		sweeps bool
+	}{{"a sweep marker", true}, {"another component's marker", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				if calls.Add(1) == 1 {
+					w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
+						`{"id":"call_1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}` +
+						`]},"finish_reason":"tool_calls"}]}`))
+					return
+				}
+				w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],` +
+					`"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+			}))
+			defer up.Close()
+			h, rec := dashHandler(t, up.URL, dash.Options{})
+			original := strings.Repeat("the original content the sweep dropped\n", 20)
+			h.store.Put("HASH", []byte(original))
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+			body := `{"model":"gpt-x","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[` +
+				`{"role":"user","content":"go"},` +
+				`{"role":"tool","tool_call_id":"a","content":"` + strings.Repeat("a verbose repeated tool output line\\n", 60) + `"}]}`
+			if tc.sweeps {
+				// The expand is credited to the thread that made it, so the drop is seeded on THAT
+				// thread: the session the proxy derives for this body, primary thread.
+				sid := apply.SessionIDFor("", "", bschemas.OpenAI, []byte(body))
+				offload.SeedSweepDropForTest(h.store, thread.Key(sid, ""), original, "HASH")
+			}
+			resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if n := calls.Load(); n != 2 {
+				t.Fatalf("expected the expand continuation (2 upstream calls), got %d", n)
+			}
+			waitForRows(t, rec, 1)
+			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := page.Requests[0]
+			if e.Expands != 1 || e.ExpandTokens <= 0 {
+				t.Fatalf("the totals lost the expand: %d expands, %d tokens", e.Expands, e.ExpandTokens)
+			}
+			if tc.sweeps {
+				if e.SweepExpands != 1 || e.SweepExpandTokens != e.ExpandTokens || e.SweepFalseExpands != 1 {
+					t.Errorf("sweep columns = %d expands, %d tokens, %d false; want 1, %d, 1",
+						e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.ExpandTokens)
+				}
+			} else if e.SweepExpands != 0 || e.SweepExpandTokens != 0 || e.SweepFalseExpands != 0 {
+				t.Errorf("an expand of another marker was charged to the sweep: %d, %d, %d",
+					e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands)
+			}
+			// The headline still subtracts EVERY expand, as before: the split changes nothing there.
+			o, err := rec.DB().Overview(dash.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.ExpandTokens != int64(e.ExpandTokens) {
+				t.Errorf("overview expand_tokens = %d, want the row's %d", o.ExpandTokens, e.ExpandTokens)
+			}
+		})
+	}
+}
+
+// The request-path REPAIR is the second host call site. The client answered our expand tool_use with an
+// error, so the transcript carries the stale error on every later turn and the repair puts the original
+// back each time. The expand is ONE false drop, not one per turn: only the first turn charges the sweep.
+func TestTheRepairPathChargesASweepMarkerOnceNotOnEveryTurn(t *testing.T) {
+	offload.ResetSweepLedgerForTest()
+	t.Cleanup(offload.ResetSweepLedgerForTest)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],` +
+			`"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	original := strings.Repeat("the original tool output line that had to come back\n", 200)
+	// The marker id is the content's own hash by construction (expand.Marker(hashKey(original))), and the
+	// repair derives it from the restored text, so the fixture must use the real id, not a stand-in.
+	id := offload.SweepMarkerID(original)
+	h.store.Put(id, []byte(original))
+	offload.SeedSweepDropForTest(h.store, "sess-sweep", original, id)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	body := `{"model":"gpt-x","messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"tool","tool_call_id":"call_0","content":` + jsonStr(original) + `},` +
+		`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{` +
+		`"name":"context_guru_expand","arguments":"{\"id\":\"` + id + `\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"Error: No such tool available: context_guru_expand"}]}`
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	waitForRows(t, rec, 3)
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sweepRows, falseTotal int
+	for _, e := range page.Requests {
+		if e.SweepExpands > 0 {
+			sweepRows++
+		}
+		falseTotal += e.SweepFalseExpands
+	}
+	if sweepRows != 1 || falseTotal != 1 {
+		t.Errorf("%d rows charged the sweep and %d false expands over 3 turns of one stale error; want 1 and 1",
+			sweepRows, falseTotal)
 	}
 }

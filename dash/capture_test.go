@@ -133,8 +133,8 @@ func TestAttributeCacheBuckets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := &Event{CacheRead: tc.read}
-			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, tc.prefixChanged)
+			e := &Event{CacheRead: tc.read, CacheWrite: 1000}
+			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, causeIf(tc.prefixChanged), 0)
 			if e.CacheMissReason != tc.want {
 				t.Errorf("got %q, want %q", e.CacheMissReason, tc.want)
 			}
@@ -279,10 +279,8 @@ func TestUncompressedReasonBuckets(t *testing.T) {
 func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	p := modelinfo.Price{Input: 2e-06, Output: 1e-05, CacheRead: 2e-07, CacheWrite: 2.5e-06}
 
-	// Complete accounting: cost, plus a baseline that prices the UNIQUE removed
-	// tokens at the cache-WRITE rate they would have entered as and the re-sent
-	// remainder at the cache-READ rate the provider would have served it from. Here
-	// every removed token is unique, so the whole 200 gets the write rate.
+	// Complete accounting: the cost. Price books no saving of ours (the accountant library does, in
+	// PriceMode), so the baseline is the cost.
 	e := &Event{TokensBefore: 1000, TokensAfter: 800, SavedUnique: 200, FreshInput: 10,
 		CacheRead: 5000, CacheWrite: 500, OutputTokens: 100}
 	e.Price(p, true)
@@ -303,11 +301,8 @@ func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	if math.Abs(e.CostUSD-wantCost) > eps {
 		t.Errorf("cost = %v; want %v", e.CostUSD, wantCost)
 	}
-	if math.Abs(e.BaselineCostUSD-(wantCost+200*p.CacheWrite)) > eps {
-		t.Errorf("baseline = %v; want cost + 200 unique removed tokens at the cache-write rate", e.BaselineCostUSD)
-	}
-	if e.BaselineCostUSD <= e.CostUSD {
-		t.Error("baseline must exceed actual when tokens were removed")
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("baseline = %v; want the cost %v: Price books no saving", e.BaselineCostUSD, e.CostUSD)
 	}
 
 	// No usage data: partial, and NOT priced — a cost we cannot compute must read as
@@ -329,97 +324,6 @@ func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	}
 }
 
-// TestDollarsDeriveFromUniqueNotGrossSavings is the regression test for the defect
-// this dashboard shipped with: `net_dollars_saved` was priced off GROSS savings, so a
-// single compaction re-sent on every later turn was paid for once per turn. The tile
-// read $7.00 beside an `overcount_ratio` of 13.1x — the dashboard displayed the
-// correction factor for its own headline and did not apply it.
-//
-// The fixture is DELIBERATELY overcounted: one 1,000-token compaction, unique on turn
-// 1, re-sent unchanged on nine further turns. Gross savings are 10,000 tokens;
-// genuinely-never-sent content is 1,000. Both pricing bugs are pinned:
-//
-//   - the denominator (unique, not gross), and
-//   - the tier (the re-sent remainder is a cache READ, not a cache WRITE; on this
-//     price table a write is 12.5x a read, so mispricing it inflates on top of the
-//     overcount).
-//
-// A gross+write implementation reports ~11.4x the correct figure here and fails.
-func TestDollarsDeriveFromUniqueNotGrossSavings(t *testing.T) {
-	p := modelinfo.Price{Input: 2e-06, Output: 1e-05, CacheRead: 2e-07, CacheWrite: 2.5e-06}
-	const turns, saved, uniqueTurn = 10, 1000, 0
-
-	db := openTestDB(t)
-	var events []*Event
-	for i := range turns {
-		e := &Event{
-			TS: int64(1000 + i), SessionID: "s1", Model: "m",
-			TokensBefore: 50_000, TokensAfter: 50_000 - saved,
-			// Unique only on the first turn: every later turn re-sends the same content,
-			// which is exactly what MarkUnique's dedup reports.
-			FreshInput: 10, CacheRead: 49_000, CacheWrite: 100, OutputTokens: 50,
-		}
-		if i == uniqueTurn {
-			e.SavedUnique = saved
-		}
-		e.Price(p, true)
-		events = append(events, e)
-	}
-	if err := db.insertBatch(events); err != nil {
-		t.Fatal(err)
-	}
-
-	o, err := db.Overview(Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The fixture's own overcount factor, as the dashboard computes and displays it.
-	if o.SavedGross != turns*saved || o.SavedUnique != saved {
-		t.Fatalf("fixture: gross=%d unique=%d; want %d/%d", o.SavedGross, o.SavedUnique, turns*saved, saved)
-	}
-	if o.OvercountRatio != float64(turns) {
-		t.Fatalf("overcount_ratio = %v; want %v", o.OvercountRatio, float64(turns))
-	}
-
-	// The dollar figure the tile renders, from first principles: the unique 1,000
-	// tokens would have been new input (cache-write), the 9,000 re-sent ones would
-	// have been served as cache reads.
-	wantDelta := float64(saved)*p.CacheWrite + float64((turns-1)*saved)*p.CacheRead
-	if got := o.BaselineCostUSD - o.CostUSD; math.Abs(got-wantDelta) > 1e-12 {
-		t.Errorf("baseline − actual = %.10f; want %.10f", got, wantDelta)
-	}
-	if math.Abs(o.NetSavedUSD-wantDelta) > 1e-12 {
-		t.Errorf("net_saved_usd = %.10f; want %.10f", o.NetSavedUSD, wantDelta)
-	}
-
-	// And the explicit anti-regression: the figure the old code produced. Pricing all
-	// 10,000 gross tokens at the cache-write rate is 11.36x the honest number, so a
-	// reversion cannot slip through as a rounding difference.
-	grossWritePriced := float64(turns*saved) * p.CacheWrite
-	if math.Abs(o.NetSavedUSD-grossWritePriced) < 1e-9 {
-		t.Fatal("net_saved_usd still prices GROSS savings at the cache-write rate")
-	}
-	if o.NetSavedUSD >= grossWritePriced {
-		t.Errorf("net_saved_usd %.10f should be far below the gross-priced %.10f",
-			o.NetSavedUSD, grossWritePriced)
-	}
-}
-
-// TestBaselineNeverPricesMoreThanTheRequestSaved guards the clamp: SavedUnique is
-// attributed per component and can exceed a single request's own gross saving when
-// several components stash the same content key. Without the clamp the "re-sent
-// remainder" term goes negative and the baseline inflates.
-func TestBaselineNeverPricesMoreThanTheRequestSaved(t *testing.T) {
-	p := modelinfo.Price{CacheRead: 2e-07, CacheWrite: 2.5e-06}
-	e := &Event{TokensBefore: 1000, TokensAfter: 900, SavedUnique: 5000}
-	e.Price(p, true)
-	if want := 100 * p.CacheWrite; math.Abs(e.BaselineCostUSD-e.CostUSD-want) > 1e-12 {
-		t.Errorf("baseline delta = %.12f; want %.12f (clamped to the 100 tokens actually removed)",
-			e.BaselineCostUSD-e.CostUSD, want)
-	}
-}
-
 func TestAgentClassification(t *testing.T) {
 	cases := map[string]string{
 		"claude-cli/2.0.14 (external, cli)": "claude-cli",
@@ -428,6 +332,11 @@ func TestAgentClassification(t *testing.T) {
 		"Gemini-CLI/1.0":                    "gemini-cli",
 		"":                                  "unknown",
 		"curl/8.5.0":                        "curl",
+		"codex_exec/0.160.1":                "codex",
+		// Bob's real User-Agents, seen live 2026-11-02 (IDE 2.3.0, Bob Shell 2.2.1).
+		"IBM Bob/2.3.0": "bob",
+		"ai-sdk/openai-compatible/3.0.36 ai-sdk/provider-utils/5.0.29 runtime/node.js/v24.15.0 IBM Bob/2.3.0": "bob",
+		"bob-shell/2.2.1": "bob",
 		"SomeVeryLongUnknownAgentNameWithNoDelimiterAtAllThatKeepsGoingForever": "someverylongunknownagentnamewith",
 	}
 	for ua, want := range cases {

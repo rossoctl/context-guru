@@ -137,6 +137,57 @@ prompts:
 system_models: []
 
 # ─────────────────────────────────────────────────────────────────────────────────────
+# thinking_last_turn_models — an ALLOW-LIST, same spirit as system_models above: a model this
+# list has not positively identified defaults to "keep all", never gated on a guess.
+#
+# This component APPENDS its instruction as a non-tool-result message after the whole
+# conversation — exactly the shape that, on a LAST-TURN-ONLY model, strips every earlier
+# thinking block from the backend's own cached context the moment it is sent. Per Anthropic's
+# own "Thinking block preservation by model"
+# (https://platform.claude.com/docs/en/build-with-claude/thinking#thinking-block-preservation-by-model,
+# read 2026-10-08):
+#
+#   "Keep the last turn only: earlier Opus and Sonnet models, and all Haiku models through
+#   Claude Haiku 4.5. When you pass older thinking blocks back, the API strips them
+#   automatically."
+#
+#   "Keep all prior turns: Claude Opus 4.5 and later Opus models, Claude Sonnet 4.6 and later
+#   Sonnet models, Claude Haiku 5.5, Claude Fable 5.1, Claude Mythos 5.1, Claude Fable 5, Claude
+#   Mythos 5, and Claude Mythos Preview."
+#
+# The doc page's keep-all cutoffs are "Opus 4.5 and later Opus models" and "Sonnet 4.6 and
+# later Sonnet models" — so last-turn-only, for the models reachable here, is: Claude 3.7
+# Sonnet, bare Opus 4 and Opus 4.1, bare Sonnet 4 and Sonnet 4.5, and every Haiku through
+# Haiku 4.5. (claude-opus-4-6/4-7/4-8 and claude-sonnet-4-6, already in `profiles` below as
+# past their family's keep-all cutoff, deliberately do NOT appear here.)
+#
+# ⛔ MATCHING THE BARE (no sub-version) Opus-4/Sonnet-4 generation is the one that bites: a
+# plain `claude-opus-4` or `claude-sonnet-4` substring also matches claude-opus-4-5/-6/-7/-8 and
+# claude-sonnet-4-5/-6, because the family name is a PREFIX of every one of those ids — the
+# exact collision this list exists to avoid. So the bare generation is named by its two actual
+# wire forms instead of its family prefix: the alias id (no date suffix: `claude-opus-4-0`,
+# `claude-sonnet-4-0` — Anthropic's own "no version pinned" alias) and the dated id's year
+# prefix (`claude-opus-4-2025`, `claude-sonnet-4-2025` — the generation's only release year;
+# claude-opus-4-1's dated id reads `claude-opus-4-1-2025...`, which contains neither of those
+# two strings, so it cannot collide here even though "4-1" and bare "4" sort next to each
+# other). claude-opus-4-1 and claude-sonnet-4-5 both get an exact match on their own full
+# sub-version instead, which is unambiguous: no OTHER current id contains "4-1" or "4-5" as a
+# substring once the bare generation is excluded this way.
+#
+# ⛔ NO BROAD `claude-haiku` FALLBACK. Haiku 5.5 is keep-all; a bare substring would catch it.
+# Name the specific pre-5.5 Haiku version(s) this deployment actually runs, verified against
+# the doc page above, when promoting another one.
+thinking_last_turn_models:
+  - claude-haiku-4-5
+  - claude-opus-4-0
+  - claude-opus-4-2025
+  - claude-opus-4-1
+  - claude-sonnet-4-0
+  - claude-sonnet-4-2025
+  - claude-sonnet-4-5
+  - claude-3-7-sonnet
+
+# ─────────────────────────────────────────────────────────────────────────────────────
 # Profiles — A PROVENANCE RECORD, NOT A GRANT. Each entry says what was established about
 # a model's own template or provider rules, and how. Nothing here changes the resolved
 # role: with system_models empty, every model resolves to `user`. These are kept because

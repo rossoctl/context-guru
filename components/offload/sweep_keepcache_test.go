@@ -95,13 +95,14 @@ func TestAnUnreadableKeepRecordAsksAgain(t *testing.T) {
 // Mutation that must fail this: drop the recordSweepKeep call beside rep.Gate("sweep_kept").
 func TestAKeptCandidateIsNotReOfferedNextTurn(t *testing.T) {
 	asker := &labelAsker{verdict: "keep", needed: "a", quote: "Find the auth timeout"}
-	e := newSweep(t, "econ_trigger: true\nkeep_recheck_turns: 4\nmin_later_turns: 0\n")
+	asker.cacheRead = 19595
+	e := newSweep(t, "keep_recheck_turns: 4\nmin_later_turns: 0\n")
 	st := store.NewMemory(store.Options{})
 
 	req := sweepReqStocked()
 	c := preExpiryCtx("s", asker, st)
 	first := &components.Report{}
-	if _, err := e.Offload(req, first, c); err != nil {
+	if _, err := askOffload(e, req, first, c); err != nil {
 		t.Fatal(err)
 	}
 	if first.Gates["sweep_kept"] == 0 {
@@ -111,11 +112,12 @@ func TestAKeptCandidateIsNotReOfferedNextTurn(t *testing.T) {
 		t.Fatalf("suppressed an offer on the FIRST turn, before any keep existed (gates %v)", first.Gates)
 	}
 	// Second turn, same content, same session, no turns added.
+	heldBefore := SweepPingCounters().Gates["sweep_keep_still_held"]
 	second := &components.Report{}
-	if _, err := e.Offload(sweepReqStocked(), second, preExpiryCtx("s", asker, st)); err != nil {
+	if _, err := askOffload(e, sweepReqStocked(), second, preExpiryCtx("s", asker, st)); err != nil {
 		t.Fatal(err)
 	}
-	if second.Gates["sweep_keep_still_held"] == 0 {
+	if SweepPingCounters().Gates["sweep_keep_still_held"]-heldBefore == 0 {
 		t.Fatalf("re-offered every candidate the adjudicator had just kept: the keep was counted and "+
 			"not remembered, which is the seven-identical-asks defect (gates %v)", second.Gates)
 	}

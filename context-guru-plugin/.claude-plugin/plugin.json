@@ -2,7 +2,7 @@
   "name": "context-guru",
   "displayName": "context-guru",
   "description": "Installs a local context-guru proxy, routes this project's Claude Code sessions through it, and reports what it saved. Reversible: /context-guru:uninstall removes the one settings key it adds and stops the proxy.",
-  "version": "0.4.0",
+  "version": "0.6.7",
   "author": {
     "name": "rossoctl",
     "url": "https://github.com/rossoctl/context-guru"
@@ -29,14 +29,14 @@
     "preset": {
       "type": "string",
       "title": "Preset",
-      "description": "What happens to the request body. `off` (the default) forwards it untouched. `house` trims obvious waste and is the safe first step; `codesmart` adds a cheap-model relevance pass; `housellm` goes furthest and spends on its own. Separate from Cache strategy below, which pings the cache by default regardless of this setting. Easier to pick from `/context-guru:preset-picker`, which explains each one.",
+      "description": "What happens to the request body. `off` (the default) forwards it untouched. `conservative` trims obvious waste and is the safe first step; `medium` adds a cheap-model relevance pass, and prepares a summary that is used only if you come back after the cache expired; `high` uses that summary as soon as the context window is nearly full; `xhigh` adds a cold-cache adjudication sweep; `ultrahigh` (experimental, opt-in) also defers tools your own history never used, so the model loads them through search. Separate from Cache strategy below, which pings the cache by default regardless of this setting. Easier to pick from `/context-guru:preset-picker`, which explains each one.",
       "default": "off"
     },
     "cache_strategy": {
       "type": "string",
       "title": "Cache strategy",
-      "description": "Which cache mechanism runs, by name. `5-min-ping` (the default) pings your idle session so the cache doesn't go cold — it SPENDS your own credential to do it. `none` turns that off. `1-hour-head` asks the provider for a longer-lived cache instead of pinging, only on prefixes >=50k tokens, and usually buys nothing on today's models. `/context-guru:cache-strategy-picker` explains each one and whether it's paying for itself.",
-      "default": "5-min-ping"
+      "description": "Which cache mechanism runs, by name. `auto` (the default) pings your idle session so the cache doesn't go cold, on the schedule of the cache lifetime each session was billed at (5 minutes: up to 2 pings; 1 hour: 1 ping at 59 minutes) — it SPENDS your own credential to do it. `1-ping` and `2-ping` fix the ping count. `none` turns that off. The old name `5-min-ping` still works and means `auto`. `1-hour-head` asks the provider for a longer-lived cache instead of pinging, only on prefixes >=50k tokens, and usually buys nothing on today's models. `/context-guru:cache-strategy-picker` explains each one and whether it's paying for itself.",
+      "default": "auto"
     },
     "idle_exit": {
       "type": "string",
@@ -49,6 +49,19 @@
       "type": "string",
       "default": "",
       "description": "Forward to this Anthropic-compatible base URL instead of api.anthropic.com. Set it when something else is already the gateway — a hosted agent pod, a corporate gateway — so the proxy CHAINS behind it rather than replacing it. That gateway keeps holding the credential and, on at least one pod, rewriting model names: bypassing it sends model ids the real API has never heard of and every request fails. Empty means go straight to Anthropic."
+    },
+    "client_signals": {
+      "type": "string",
+      "title": "Client signals",
+      "description": "Sends the proxy a content-free event (session id, event name, reason) when you exit a session (/exit, Ctrl-C, Ctrl-D, closing the terminal, /clear, logout), compact it or resume it, so the keep-alive stops spending on a cache you will not come back to. `auto` (the default) sends only to a context-guru proxy: this plugin's local one, or a hosted service you reach with an x-context-guru-token header. `on` sends to any base URL; `off` sends nothing. The proxy acts on it whenever its keep-alive runs (CONTEXT_GURU_CLIENT_SIGNALS=off turns that off).",
+      "default": "auto"
+    },
+    "beep": {
+      "type": "string",
+      "title": "Beep",
+      "description": "Plays a short sound when Claude finishes a turn or waits for you (macOS: afplay; Linux: paplay or aplay; else a terminal bell). `on` (the default) plays it. `off` is silent. Local only: nothing is sent anywhere. CONTEXT_GURU_BEEP=off turns it off for one shell.",
+      "default": "on"
     }
-  }
+  },
+  "types": "./types/index.d.ts"
 }

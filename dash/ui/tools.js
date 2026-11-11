@@ -45,7 +45,7 @@ document.head.appendChild(el('link', { rel: 'stylesheet', href: 'tools.css' }));
 // section is still built from JS rather than markup because every part of it is conditional
 // on what the report says can be answered.
 const toolsView = mountTab({
-  group: 'behaviour', after: 'components', view: 'tools', label: 'Inventory',
+  group: 'savings', after: 'keepalive', view: 'tools', label: 'Inventory',
 });
 
 // ── local state ────────────────────────────────────────────────────────────
@@ -63,6 +63,8 @@ const tools = {
   // that vanishes with no explanation is a page with no opinion; the reason is the whole
   // difference between "this proxy cannot do it" and "pick an account first".
   controlDoc: null,
+  // deferDoc is GET /api/tool-defer: tool deferral's net saving per account and day, or null.
+  deferDoc: null,
   sort: 'unused_reads',
   dir: 'desc',
   busy: '',
@@ -247,6 +249,27 @@ Object.assign(TILE_INFO, {
       + 'It is normally much smaller than the projected figure above, and the two are not '
       + 'comparable: one is what happened, the other is what could have.',
   },
+  'inv-defer-net-usd': {
+    what: 'What tool deferral saved after its own costs, over the selected window.',
+    how: 'Gross is the deferred definitions\' weight on every request, priced at the tier that '
+      + 'request paid. The names list and every search are taken off: the search call\'s output, '
+      + 'and the loaded definitions read once without the cache.',
+    catch: 'The same net figure as the tool_defer block of /stats. Our tokenizer\'s counts, '
+      + 'corrected by the measured factor, so it is not a figure off an invoice.',
+  },
+  'inv-defer-tokens': {
+    what: 'The weight of the tool definitions tool deferral held back, summed over every request it changed.',
+    how: 'Each deferred definition\'s own tokens on the original request, less the ones a search had '
+      + 'already loaded in that thread, added up per request.',
+    catch: 'A local tokenizer\'s count before the billed-token correction, so it is not a figure off an invoice.',
+  },
+  'inv-defer-loads': {
+    what: 'Deferred tools the model loaded back through search, and the wrong guesses among them.',
+    how: 'A wrong guess is a tool the request deferred that a search then loaded for the first '
+      + 'time: the user\'s history said it was unused, and it was needed. A dropped search is one sent '
+      + 'beside another tool call: it gets no result, and the model searches again.',
+    catch: 'A load counts as a use, so the next sessions keep that tool loaded from the start.',
+  },
   'inv-real-reads': {
     what: 'Tokens the provider never had to read, because they were no longer in the prompt.',
     how: 'The weight of each removed declaration, times the requests that would otherwise '
@@ -326,13 +349,12 @@ function renderHeadline(host, rep) {
   const used = Math.max(0, t.declared_tokens - t.unused_tokens);
   // The population a dollar figure on this page actually covers.
   const pricedSessions = Math.max(0, c.sessions - (c.unpriced_sessions || 0));
-  host.appendChild(tileGroup('What you carry that you can change, and what you use',
-    'per session, averaged over the ' + num(c.captured) + ' session'
-    + (c.captured === 1 ? '' : 's') + ' whose inventory was captured — MCP tools and skills only, '
-    + 'which are the things you can actually turn off', [
-    tile('inv-declared', 'Declared per session', num(t.declared_tokens),
+  host.appendChild(tileGroup('How much do you send that nothing ever uses?',
+    'Your add-on tools and skills are described to the model in every request. Averages per session, over the '
+    + num(c.captured) + ' session' + (c.captured === 1 ? '' : 's') + ' we could see.', [
+    tile('inv-declared', 'Sent per session', num(t.declared_tokens),
       'your MCP tool schemas and the skills listing'),
-    tile('inv-used', 'Invoked at least once', num(used),
+    tile('inv-used', 'Used at least once', num(used),
       pct(100 - t.unused_pct) + ' of what you declare', used ? 'good' : ''),
     // The number this page exists for. Deliberately the only 'bad' tile: three red tiles
     // in a row is a page shouting, and shouting is what gets a dashboard ignored.
@@ -348,7 +370,7 @@ function renderHeadline(host, rep) {
     // not of the prompt. It read "of every prompt" while the prefix panel below says in as
     // many words that the system prompt is not in that denominator — the same page naming two
     // different wholes for one ratio, and erring in the direction that inflates it.
-    tile('inv-unused', 'Never invoked', num(t.unused_tokens),
+    tile('inv-unused', 'Never used', num(t.unused_tokens),
       pct(t.unused_pct) + ' of every declaration you carry, re-read '
       + t.requests_per_session.toFixed(1)
       + '× per session — the plain mean over all ' + num(c.sessions) + ' sessions here',
@@ -373,6 +395,15 @@ function renderHeadline(host, rep) {
         ? 'if none of it had been carried' + (c.unpriced_sessions
           ? ' — over the ' + num(pricedSessions) + ' of ' + num(c.sessions)
             + ' sessions that ran on a priced model' : '')
+          // Older requests recorded no declaration set, so the set is inferred; say how far
+          // the figure could be off instead of presenting the guess as exact.
+          + (t.unused_usd_high - t.unused_usd_low >= 0.005
+            ? ' — between ' + usd(t.unused_usd_low) + ' and ' + usd(t.unused_usd_high)
+              + ' (older requests did not record which tools they carried)' : '')
+          // Requests matched to no stored set are in neither figure; say how many.
+          + (rep.carried && rep.carried.requests > rep.carried.requests_mapped
+            ? ' — ' + num(rep.carried.requests - rep.carried.requests_mapped) + ' requests not matched to a declaration set, not counted'
+            : '')
         : 'no dollar: no model in this window has known rates'),
   ], 'headline'));
   host.appendChild(gauge(t));
@@ -416,11 +447,10 @@ function gauge(t) {
   // averaged over instead of only its unit.
   const box = el('div', { class: 'panel cg-gauge', 'data-testid': 'inv-gauge' },
     el('div', { class: 'cg-gauge-head' },
-      el('h2', {}, 'What every request carries that you could stop carrying'),
-      el('span', { class: 'section-note', text: num(t.declared_tokens)
-        + ' tokens of YOUR MCP tool and skill declarations, per request, averaged over the '
-        + 'sessions whose inventory was captured — the agent\'s own tools are excluded and are '
-        + 'shown separately' })),
+      el('h2', {}, 'How much of what you send is never used?'),
+      el('span', { class: 'section-note' }, num(t.declared_tokens) + ' tokens per request go to describing your add-on tools and skills (',
+        term('declarations', 'The short description of each tool or skill that is sent to the model on every request so it knows the tool exists.'),
+        '). The agent\'s own tools are left out and shown at the end.')),
     el('div', { class: 'cg-gauge-track' },
       el('span', {
         class: 'cg-seg cg-used', style: 'width:' + (100 - unusedPct).toFixed(2) + '%',
@@ -431,9 +461,9 @@ function gauge(t) {
       })));
   box.appendChild(el('div', { class: 'cg-gauge-legend' },
     el('span', {}, el('i', { class: 'cg-sw cg-used' }),
-      'invoked ' + num(t.declared_tokens - t.unused_tokens) + ' tok'),
+      'used ' + num(t.declared_tokens - t.unused_tokens) + ' tok'),
     el('span', {}, el('i', { class: 'cg-sw cg-unused' }),
-      'never invoked ' + num(t.unused_tokens) + ' tok (' + pct(t.unused_pct) + ')')));
+      'never used ' + num(t.unused_tokens) + ' tok (' + pct(t.unused_pct) + ')')));
   // Two different zeroes, and they must not read the same. An account that declared MCP tools and
   // skills and used all of them has nothing to remove; an account that declared NONE has nothing
   // to remove FROM, which on a plain Claude Code session is the normal state — and saying "nothing
@@ -466,7 +496,7 @@ function renderCoverage(host, rep) {
     num(c.sessions) + ' session' + (c.sessions === 1 ? '' : 's') + ' in scope, '
     + num(c.requests) + ' requests. ');
   const box = el('div', { class: 'panel cg-coverage', 'data-testid': 'inv-coverage' },
-    el('h2', {}, 'What these numbers are computed over'), p);
+    el('h2', {}, 'How many sessions are these numbers based on?'), p);
   host.appendChild(box);
   if (c.captured) {
     p.appendChild(document.createTextNode(num(c.captured) + ' carried a captured inventory '
@@ -565,19 +595,18 @@ function shortSessionsDominate(rep) {
  */
 function renderUnused(host, rep) {
   const rows = rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0
       && !t.builtin && t.kind !== 'server_tool');
   const groups = groupRemovable(rows);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
     el('div', { class: 'section' },
-      el('h2', {}, 'Carried by every request, never once called'),
+      el('h2', {}, 'Every removable group, with its evidence'),
       el('span', { class: 'section-note' }, rows.length
         ? num(groups.length) + ' thing' + (groups.length === 1 ? '' : 's') + ' to remove, '
           + num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's') + ' between them'
         : 'nothing')),
     el('p', { class: 'note' }, rows.length
-      ? 'Grouped by what ONE action removes, heaviest first. The command under each group is '
-        + 'the whole fix — copy it, run it, and that group stops being sent.'
+      ? 'One card per group, costliest first: what it costs, the sessions that carried it, and the evidence.'
       : 'Nothing here was carried without being called.'));
   host.appendChild(panel);
   if (!rows.length) {
@@ -594,34 +623,6 @@ function renderUnused(host, rep) {
       + (rep.coverage.captured === 1 ? '' : 's') + ' have been captured so far, so this is a '
       + 'small sample: a row below is evidence that nothing has called that item YET, not '
       + 'proof that nothing will. Every row states its own denominator.'));
-  }
-  // ONE block about the switches, covering both reasons they may be inert. They were two
-  // stacked `.state` panels saying overlapping things in 200 px of the reader's first screen, and
-  // both end in the same sentence: use the command or the snippet, which is the better fix anyway.
-  const gated = !SKILL_SWITCH_SAFE && rows.some((t) => t.kind === 'skill');
-  const why = (tools.controlDoc && tools.controlDoc.reason) || '';
-  if (!tools.control || gated) {
-    const box = el('div', { class: 'state', 'data-testid': 'inv-control-absent' },
-      el('div', { class: 'state-body' },
-        el('strong', {}, !tools.control
-          ? (why ? 'The one-click switches are not live in this view'
-            : 'One-click opt-out is not enabled on this proxy')
-          : 'The per-skill switches are off on purpose'),
-        !tools.control && why ? el('span', {}, why) : null,
-        // Kept on the SAME block rather than a second one, and kept visible rather than folded:
-        // a disabled control whose reason is only in a title attribute reads as a broken build,
-        // and a title does not exist on a phone, in a screen reader or in a screenshot.
-        gated ? el('span', { 'data-testid': 'inv-skill-switch-gated' }, SKILL_SWITCH_REASON) : null,
-        // No third sentence. It used to end "use the command instead, which is the better fix
-        // anyway" — which is now the block directly ABOVE this one, in full, with the snippets in
-        // it. Saying it twice cost 50 px of the reader's first screen.
-        el('span', {}, 'Nothing about the ordered list below changes.')));
-    panel.appendChild(ctaBlock(groups, rep));
-    panel.appendChild(box);
-    panel.appendChild(reversibilityNote());
-  } else {
-    panel.appendChild(ctaBlock(groups, rep));
-    panel.appendChild(reversibilityNote());
   }
   const list = el('div', { class: 'inv-groups' });
   for (const g of groups.slice(0, EXPANDED_GROUPS)) list.appendChild(removalGroup(g, rep));
@@ -859,7 +860,7 @@ function ctaBlock(groups, rep) {
   // skills listing against its own entries in `totals` (dash/toolapi.go), so a sum of rows and
   // the headline disagree by that amount. Two totals under one heading is the defect this tab
   // already has once, between its tile and its bar; the fix is the server's, not a third number.
-  wrap.appendChild(el('div', { class: 'inv-cta-head' },
+  if (false) wrap.appendChild(el('div', { class: 'inv-cta-head' },
     el('strong', { text: 'Do this' }),
     el('span', { class: 'section-note', text: num(groups.length) + ' thing'
       + (groups.length === 1 ? '' : 's') + ' to remove · ' + num(tok)
@@ -880,7 +881,7 @@ function ctaBlock(groups, rep) {
       el('span', { class: 'section-note', text: 'and ' + num(rest) + ' more below, in the same '
         + 'order — each card carries its own figure, its evidence and its command' })));
   }
-  wrap.appendChild(idx);
+  if (false) wrap.appendChild(idx);
   if (Object.keys(over).length) {
     // "all N" would be false whenever a plugin-bundled skill is removed by a `claude plugin
     // disable` command instead of a skillOverrides entry — and a reader who pastes this and finds
@@ -951,8 +952,10 @@ function removalGroup(g, rep) {
   // TOOL only: a reader who had decided to drop a nineteen-tool server had to tick nineteen
   // boxes, each one a separate write, each one its own prefix rebuild — which is the one thing
   // the reversibility note tells them not to do.
+  // deferred: one deferred tool makes the server unfilterable, as on the server side.
   const srv = many && g.sub === 'MCP server'
-    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens } : null;
+    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens,
+      deferred: g.items.some((t) => t.deferred) } : null;
   const head = el('div', { class: 'inv-group-head' },
     el('div', { class: 'inv-group-id' },
       srv ? excludeToggle(srv) : null,
@@ -1147,8 +1150,8 @@ function reversibilityNote() {
 function renderRealized(host) {
   const r = tools.control && tools.control.realized;
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-realized' },
-    el('div', { class: 'section' }, el('h2', {}, 'Realized by your removals'),
-      el('span', { class: 'section-note' }, 'measured on requests actually sent — not a projection')));
+    el('div', { class: 'section' }, el('h2', {}, 'What did my removals actually save?'),
+      el('span', { class: 'section-note' }, 'measured on real requests, not a forecast')));
   host.appendChild(panel);
   if (!r) {
     // A sentence, not a panel-sized empty state. The absence IS the answer here, and its only
@@ -1167,6 +1170,55 @@ function renderRealized(host) {
       num(r.requests || 0) + ' requests sent without them'),
     tile('inv-real-items', 'Items opted out', num((tools.control.excluded || []).length),
       'reversible, one prefix rebuild each')));
+}
+
+/**
+ * renderDeferNet is tool deferral's net saving (#485, #869): per account and per UTC day, what the
+ * deferred definitions did not cost, the searches that loaded them back, the wrong guesses (a
+ * deferred tool the model then needed), and the net saving. The net is the deferral lever the Overview
+ * card shows: on a request the accountant priced it is the library's figure less the search cost, and
+ * otherwise the ledger's net. Gross and cost are the proxy's own ledger, stored per request, so on a
+ * priced request net is NOT gross less cost, and the tile does not say it is. Nothing is
+ * drawn when deferral never changed a request in the window: it is off unless the ultrahigh preset
+ * is on, and an empty panel would read as "deferral saved nothing".
+ */
+function renderDeferNet(host) {
+  const doc = tools.deferDoc;
+  if (!doc || !doc.days || !doc.days.length) return;
+  const t = doc.total;
+  const priced = t.requests > t.unpriced_requests;
+  const panel = el('div', { class: 'panel', 'data-testid': 'inv-defer-net' },
+    el('div', { class: 'section' }, el('h2', {}, 'What did tool deferral save?'),
+      el('span', { class: 'section-note' }, 'the same figure as the Overview card; gross and cost are the proxy ledger')));
+  host.appendChild(panel);
+  panel.appendChild(el('div', { class: 'tiles' },
+    tile('inv-defer-net-usd', 'Net saving', priced ? usd(t.net_usd) : compact(t.tokens_deferred) + ' tok',
+      priced ? 'ledger: ' + usd(t.gross_usd) + ' of definitions kept out; ' + usd(t.cost_usd) + ' for the names list and searches' : 'unpriced model; tokens only',
+      t.net_usd > 0 ? 'good' : ''),
+    tile('inv-defer-tokens', 'Tokens not carried', compact(t.tokens_deferred),
+      num(t.requests) + ' requests with deferred tools'),
+    tile('inv-defer-loads', 'Loaded through search', num(t.loaded),
+      num(t.searches) + ' searches (' + num(t.dropped_searches || 0) + ' dropped); ' + num(t.wrong_guesses)
+        + ' wrong guess' + (t.wrong_guesses === 1 ? '' : 'es'))));
+  const many = new Set(doc.days.map((d) => d.tenant)).size > 1;
+  const table = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Day (UTC)'), many ? el('th', {}, 'Account') : null,
+      el('th', { class: 'num' }, 'Tokens deferred'), el('th', { class: 'num' }, 'Loaded'),
+      el('th', { class: 'num' }, 'Wrong guesses'), el('th', { class: 'num' }, 'Gross'),
+      el('th', { class: 'num' }, 'Net'))));
+  const body = el('tbody');
+  for (const d of doc.days) {
+    const p = d.requests > d.unpriced_requests;
+    body.appendChild(el('tr', {},
+      el('td', { text: new Date(d.day).toISOString().slice(0, 10) }),
+      many ? el('td', {}, el('code', { text: d.tenant || '(default)' })) : null,
+      numTd(d.tokens_deferred), numTd(d.loaded), numTd(d.wrong_guesses),
+      el('td', { class: 'num' }, money(d.gross_usd, p)),
+      el('td', { class: 'num' }, money(d.net_usd, p))));
+  }
+  table.appendChild(body);
+  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
 }
 
 /** toggleExcluded posts one change and repaints from the server's answer, not from the DOM. */
@@ -1246,15 +1298,11 @@ function tsortable(table, keys, onSort) {
  * same reason app.js sorts Components and refuses to sort Sessions.)
  */
 function toolTable(host, rep) {
-  const panel = foldPanel('inv-tools-fold', 'Every declaration you control, one flat row each',
+  const panel = foldPanel('inv-tools-fold', 'All your tools in one table',
     num((rep.tools || []).length) + ' rows, sortable by any column');
   panel.appendChild(el('div', {},
-    el('p', { class: 'note' }, 'Your MCP tools, sorted by what it cost to carry them unused. '
-      + '"Read for nothing" is this item\'s size times the requests that re-read it in the '
-      + "sessions that never called it. Claude Code's own tools and the provider's are in their "
-      + 'own section at the end of this page, and in none of the figures above. Skills have their '
-      + 'own table below, because a skills listing can be unreadable in a way a tools array '
-      + 'cannot.')));
+    el('p', { class: 'note' }, 'Your add-on tools, costliest unused first. "Read for nothing" is how many tokens were re-sent in sessions that never called the tool. '
+      + 'Skills have their own table below; the agent\'s own tools are at the end of the page.')));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-tools-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Kind'),
@@ -1277,13 +1325,13 @@ function toolTable(host, rep) {
     return;
   }
   for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used)
-        : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never')
+        : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       // Every row, used or not. The actionable list above covers the never-invoked ones; a reader
@@ -1299,11 +1347,9 @@ function toolTable(host, rep) {
  */
 function serverTable(host, rep) {
   if (!rep.servers.length) return;
-  const panel = foldPanel('inv-servers-fold', 'The same rows rolled up per MCP server',
+  const panel = foldPanel('inv-servers-fold', 'The same tools, grouped by server',
     num(rep.servers.length) + ' server' + (rep.servers.length === 1 ? '' : 's'));
-  panel.appendChild(el('p', { class: 'note' }, 'One row per server, because that is what you add '
-    + 'or remove. A server whose tools are all unused is one decision, not many — which is the '
-    + 'unit the list at the top of the page already groups by.'));
+  panel.appendChild(el('p', { class: 'note' }, 'One row per server, because you add or remove a whole server at a time.'));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-servers-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Server'), el('th', { class: 'num' }, 'Tools'),
@@ -1338,7 +1384,7 @@ function serverTable(host, rep) {
 function skillsPanel(host, rep) {
   const s = rep.skills;
   const skillPriced = Math.max(0, rep.coverage.sessions - (rep.coverage.unpriced_sessions || 0));
-  const panel = foldPanel('inv-skills', 'Skills, one row each, with the listing’s own figures',
+  const panel = foldPanel('inv-skills', 'All your skills in one table',
     num((s.skills || []).length) + ' skill' + ((s.skills || []).length === 1 ? '' : 's')
     + ' · listing ' + num(s.listing_tokens) + ' tok/request');
   host.appendChild(panel.closest('details'));
@@ -1351,9 +1397,7 @@ function skillsPanel(host, rep) {
     // NOT "in the system prompt". The listing arrives as prose in an injected system-ROLE
     // message, which is a different region of the prefix — and now that the panel above shows
     // the two as separate regions, saying otherwise here makes the page contradict itself.
-    'Skills are declared as prose in an injected system message — a separate region of the '
-    + 'prefix from your system prompt — and the listing is ONE indivisible '
-    + 'block: it is waste only in a session that invoked no skill at all.'));
+    'Skills are described in one block that cannot be split, so it only counts as waste in a session that used no skill at all.'));
   if (s.state === 'unknown') {
     panel.appendChild(el('div', { class: 'state blocked', 'data-testid': 'inv-skills-unknown' },
       el('div', { class: 'state-body' },
@@ -1403,15 +1447,15 @@ function skillsPanel(host, rep) {
   const body = el('tbody');
   table.appendChild(body);
   for (const t of s.skills) {
-    body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+    body.appendChild(el('tr', { class: neverCalled(t) ? 'cg-row-unused' : '' },
       // The switch, on EVERY skill and not only the never-invoked ones. A skill the reader used
       // once and does not want to keep paying for is exactly the case the actionable list above
       // cannot reach, and editing a config file by hand was the only route to it.
       el('td', {}, excludeToggle(t)),
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       numTd(t.tokens), numTd(t.sessions_declared),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       numTd(t.calls), readTd(t.unused_reads),
       el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
       el('td', {}, removalDetails(t, 'Command'))));
@@ -1453,6 +1497,10 @@ const SKILL_SWITCH_REASON = 'This switch is inert on a skill row for now. The se
   + 'than the one skill it names. The listing\'s totals are unaffected. Use the settings snippet '
   + 'at the top of the page, or the command on this row — both edit your own configuration and '
   + 'neither goes through that parser.';
+// A deferred MCP tool is a name in a message, not a `tools` element, and the proxy filter removes
+// only elements: switching it off would save nothing.
+const DEFERRED_SWITCH_REASON = 'Claude Code sends this tool as a deferred name, which the proxy '
+  + 'filter cannot remove. Use the command on this row instead.';
 
 /**
  * excludeToggle is the one-click opt-out, extracted so a table row and a card row share it.
@@ -1468,10 +1516,11 @@ function excludeToggle(t) {
   // and a built-in cannot be dropped from here at all, and a skill cannot be dropped SAFELY until
   // the parser can name one (SKILL_SWITCH_SAFE).
   const gated = t.kind === 'skill' && !SKILL_SWITCH_SAFE;
-  const fixed = t.kind === 'server_tool' || t.builtin || gated;
+  const fixed = t.kind === 'server_tool' || t.builtin || gated || t.deferred;
   const cb = el('input', {
     type: 'checkbox', 'data-testid': 'inv-toggle-' + key, id: 'inv-cb-' + key,
     title: gated ? SKILL_SWITCH_REASON
+      : t.deferred ? DEFERRED_SWITCH_REASON
       : fixed ? 'This one is not yours to drop from here.'
         : (tools.control ? 'Stop sending this declaration' : 'One-click opt-out is not enabled on '
           + 'this proxy — use the command beside this row'),
@@ -1513,11 +1562,10 @@ function isExcluded(t) {
  */
 function renderRemovalValue(host, rep) {
   const models = (rep.models || []).filter((m) => m.priced);
-  const panel = foldPanel('inv-removal-value', 'The per-token rates behind those figures',
-    'per 1,000 tokens dropped, per model — the derivation of the per-session numbers above');
+  const panel = foldPanel('inv-removal-value', 'How the dollar figures are worked out',
+    'price per 1,000 tokens dropped, for each model');
   host.appendChild(panel.closest('details'));
-  panel.appendChild(el('p', { class: 'note' }, 'Per 1,000 tokens of declarations dropped. Prices '
-    + 'differ per model, so this is per model rather than blended.'));
+  panel.appendChild(el('p', { class: 'note' }, 'What dropping 1,000 tokens of tool descriptions is worth. Each model has its own price.'));
   if (!models.length) {
     emptyState(panel.appendChild(el('div')), 'No priced models in this window',
       'These sessions ran on models with no known rates, so a token weight cannot be turned '
@@ -1664,8 +1712,8 @@ function renderBuiltins(host, rep) {
       el('td', {}, kindPill(t)),
       numTd(t.tokens),
       el('td', { class: 'num', text: pct(t.share_pct, 1) }),
-      el('td', { class: 'num' }, t.sessions_used
-        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', { class: 'num' }, neverCalled(t)
+        ? el('span', { class: 'pill missing' }, 'never') : num(t.sessions_used)),
       // FOLDED, unlike every other command on this page, and that asymmetry is the point. The
       // requirement for this section is that it be visible and deliberately not easy to act on;
       // twenty-two open copy-boxes reading `claude --disallowedTools "Bash"` is the opposite of
@@ -1901,9 +1949,9 @@ function renderPromptPanel(host, rep) {
   const prefix = (p.tokens || 0) + (rep.totals.declared_set_tokens || 0);
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-prompt-panel' },
     el('div', { class: 'section' },
-      el('h2', {}, 'What every request actually carries, region by region'),
+      el('h2', {}, 'What is in the start of every request?'),
       el('span', { class: 'section-note' },
-        num(prefix) + ' tokens of standing text and declarations, ahead of your conversation')));
+        num(prefix) + ' tokens of fixed text and tool descriptions sit ahead of your conversation')));
   host.appendChild(panel);
   // The third tile is rendered only when there IS a system prompt. Without one the prefix and
   // the declaration total are the same number, and two identical figures side by side under
@@ -1998,9 +2046,7 @@ function promptShareBar(host, rep, prefix) {
   const declared = rep.totals.declared_set_tokens || (mcp + provider + builtin + client + skills);
   const whole = prefix || declared + system;
 
-  host.appendChild(el('p', { class: 'note' }, 'Grouped by whether it is yours to remove. '
-    + 'Coloured groups are choices you can change; the grey one is the agent’s own equipment, '
-    + 'and removing any of it breaks the agent rather than slimming it.'));
+  host.appendChild(el('p', { class: 'note' }, 'Coloured groups are choices you can change. The grey group is the agent\'s own equipment; removing it breaks the agent.'));
   // Actionable groups first and in the fixed categorical order, so a filter that empties one does
   // not repaint the survivors — the colour of a group follows the GROUP, never its rank.
   const groups = [
@@ -2232,78 +2278,6 @@ function promptParts(r) {
   return wrap;
 }
 
-/**
- * renderSelfRemoved credits the reductions the USER made themselves.
- *
- * Every other measurement here is about content context-guru removed. When somebody reads this
- * page, removes an MCP server and stops carrying 4,000 tokens a request, no component ran and
- * no filter fired — so the saving registered nowhere at all, and the product got no credit for
- * the one outcome it most wants to cause. This finds it by treating the inventory as the time
- * series it is: present in the early sessions, absent from the later ones.
- *
- * It is never added into the filter's realized savings, because an account that removed a
- * server locally AND has it on the server-side filter list would be credited twice for one
- * reduction. Overlapping rows are marked and left for the reader.
- */
-function renderSelfRemoved(host, rep) {
-  const rows = rep.self_removed || [];
-  if (!rows.length) return;
-  const panel = foldPanel('inv-self-removed', 'You removed these yourself',
-    num(rows.length) + ' declaration' + (rows.length === 1 ? '' : 's')
-    + ' stopped appearing partway through this window — modelled, not measured');
-  panel.appendChild(el('p', { class: 'note' }, num(rows.length) + ' declaration'
-      + (rows.length === 1 ? '' : 's') + ' stopped appearing partway through this window. The '
-      + 'tokens genuinely stopped being billed, no component of ours was involved, and the '
-      + 'reduction is credited to YOU — on the Overview tab it is the "Removed by you, not by us" '
-      + 'line, and it is inside "Total the bill came down" and deliberately outside "Total cost '
-      + 'avoided", which is the figure this product claims for itself.'));
-  host.appendChild(panel.closest('details'));
-  // The honest limit of the method, up front rather than as a footnote under the weakest row.
-  // This is the finding that decided where the figure is allowed to appear: the inference is
-  // right about the facts and can be wrong about the cause, and no threshold fixes that.
-  panel.appendChild(el('details', { class: 'why', 'data-testid': 'inv-self-removed-basis' },
-    el('summary', {}, 'How this is worked out, and when it is wrong'),
-    el('p', {}, 'The inventory is a time series. A name that appears in the early sessions of '
-      + 'this window and in none of the later ones stopped being declared, and the strength of '
-      + 'the claim is the number of COMPARABLE sessions that ran afterwards without it — a '
-      + 'session that declared no MCP tool at all cannot testify about a missing MCP tool, so '
-      + 'those are not counted. Every row shows its own count and anything under a dozen is '
-      + 'marked weak.'),
-    el('p', {}, 'What it cannot tell you is WHY the name went. On this deployment\'s own history '
-      + 'the largest candidate was the editor integration, which is declared only when a session '
-      + 'runs inside the IDE — so "you removed it" and "you worked in a terminal that day" look '
-      + 'identical here, and no threshold separates them. The reduction is real either way; the '
-      + 'attribution is a guess, which is why this figure is labelled as modelled everywhere it '
-      + 'appears and is kept out of the total that claims our credit.'),
-    el('p', {}, 'A row the server-side filter is already credited for is marked, and excluded '
-      + 'from the Overview figure rather than counted twice.')));
-  const table = el('table', { class: 'tbl' },
-    el('thead', {}, el('tr', {},
-      el('th', {}, 'Item'), el('th', { class: 'num' }, 'Was costing'),
-      el('th', { class: 'num' }, 'Sessions since'), el('th', { class: 'num' }, 'Avoided since'),
-      el('th', {}, 'Evidence'))));
-  const body = el('tbody');
-  for (const r of rows) {
-    body.appendChild(el('tr', {},
-      el('td', {}, el('code', { text: r.name })),
-      el('td', { class: 'num', text: num(r.tokens) + ' tok/req' }),
-      numTd(r.sessions_after),
-      el('td', { class: 'num' }, money(r.avoided_usd, r.priced)),
-      // 12, not 3: the server already drops everything below 3, so a 3-threshold here never
-      // rendered. A dozen comparable sessions is what the copy has always claimed.
-      el('td', {}, r.sessions_after < 12
-        ? el('span', { class: 'pill missing', title: 'Only ' + num(r.sessions_after)
-          + ' comparable sessions have run since it was last seen, so this may simply be a run '
-          + 'of sessions that did not need it rather than a removal.' }, 'weak — few sessions')
-        : el('span', { title: 'Declared in ' + num(r.sessions_before) + ' sessions, then absent '
-          + 'from the ' + num(r.sessions_after) + ' that followed.' },
-        num(r.sessions_before) + ' → 0')),
-      r.overlap ? el('td', {}, el('span', { class: 'pill warn' }, 'also server-side filtered')) : null));
-  }
-  table.appendChild(body);
-  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
-}
-
 // ── load + render ──────────────────────────────────────────────────────────
 
 function renderTools() {
@@ -2314,38 +2288,125 @@ function renderTools() {
   // than trusted to garbage collection, because the list would otherwise grow by forty
   // entries on every tab switch and repaint detached nodes forever.
   promptWaiters = [];
-  renderHeadline(host, rep);
-  if (rep.coverage.captured) {
-    // The projection's OUTCOME, immediately beside the projection. Honesty rule 2 — a
-    // projection is not a saving — was right, and was executed as SIZE: 155 px at 66% page
-    // depth against a $2.16 projection in 100 pt type in the first screen. Size does not
-    // distinguish two claims, it just hides one of them, and a reader who never meets the pair
-    // cannot tell them apart at all. ADJACENCY distinguishes them. Nothing else about the rule
-    // changes: the projection is still never copied down here, and an absent realized figure
-    // still prints as absent.
-    renderRealized(host);
-    // Then the decision, which is the only thing on this page a reader can act in: the named
-    // groups, what each is worth per session and across every session, in that order, with the
-    // command that removes it and the one-time cost of running it.
-    renderUnused(host, rep);
-    // Then the evidence for it — the prefix drawn to scale and broken into the regions that own
-    // it, with no click required. This panel used to be 254 px of tiles above a closed
-    // disclosure while the panel that merely SUMMARISED the same prefix into five legend
-    // numbers had 1,005 px to itself. Those two are now one panel, and this is it.
-    renderPromptPanel(host, rep);
-    // Everything below re-answers the rows above at a different granularity — grouped, flat,
-    // per-server, per-skill — so it is derivation and it is folded (DESIGN §3.3 level 2). It
-    // was 5,436 px of four tables and 31 columns answering the same 39 declarations.
-    renderRemovalValue(host, rep);
-    toolTable(host, rep);
-    serverTable(host, rep);
-    skillsPanel(host, rep);
-    renderSelfRemoved(host, rep);
+  if (!rep.coverage.captured) {
+    renderHeadline(host, rep);
+    renderCoverage(host, rep);
+    return;
   }
-  renderCoverage(host, rep);
-  // Built-ins LAST, collapsed, behind the danger warning. Deliberately after the coverage
-  // panel: nothing above it should invite reading these as a saving.
-  if (rep.coverage.captured) renderBuiltins(host, rep);
+  const rows = removableRows(rep);
+  const groups = groupRemovable(rows);
+  renderInvTop(host, rep, rows, groups);
+  renderDeferNet(host);
+  invSection(host, 'Every tool server', 'Each MCP server you have added, what it declares, and how much of it was ever called.',
+    (d) => serverTable(d, rep));
+  invSection(host, 'Every tool', 'All of your add-on tools and skills, sortable, including the ones you did use.',
+    (d) => { toolTable(d, rep); skillsPanel(d, rep); });
+  invSection(host, 'Configuration snippets', 'The same removals as one paste-able block, plus the per-group evidence behind the ranked list.',
+    (d) => {
+      if (rows.length) d.appendChild(ctaBlock(groups, rep));
+      renderUnused(d, rep);
+    });
+  invSection(host, 'Technical details', 'How these figures are measured, what removing costs once, and the parts left out on purpose.',
+    (d) => {
+      renderHeadline(d, rep);
+      if (rows.length) controlNotes(d, rows);
+      renderRealized(d);
+      renderPromptPanel(d, rep);
+      renderRemovalValue(d, rep);
+      renderCoverage(d, rep);
+      renderBuiltins(d, rep);
+    });
+}
+
+/** removableRows are the never-called, removable MCP tools and skills: the one ranking this tab and the Overview share. */
+function removableRows(rep) {
+  return rep.tools.concat(rep.skills.skills || [])
+    .filter((t) => neverCalled(t) && t.sessions_declared > 0 && !t.builtin && t.kind !== 'server_tool');
+}
+
+/** invSection is a collapsed `Details` block: one sentence of what it is, then the content. */
+function invSection(host, title, intro, build) {
+  const body = el('div', { class: 'inv-sec-body' }, el('p', { class: 'note', text: intro }));
+  const d = el('details', { class: 'why inv-details', 'data-testid': 'inv-sec-' + title.toLowerCase().replace(/\W+/g, '-') },
+    el('summary', {}, title), body);
+  host.appendChild(d);
+  build(body);
+  body.querySelectorAll('details.inv-fold').forEach((f) => { f.open = true; });
+}
+
+/** controlNotes keeps the explanation of why one-click switches may be inert, off the first screen. */
+function controlNotes(host, rows) {
+  const gated = !SKILL_SWITCH_SAFE && rows.some((t) => t.kind === 'skill');
+  const why = (tools.controlDoc && tools.controlDoc.reason) || '';
+  if (!tools.control || gated) {
+    host.appendChild(el('div', { class: 'state', 'data-testid': 'inv-control-absent' },
+      el('div', { class: 'state-body' },
+        el('strong', {}, !tools.control
+          ? (why ? 'The one-click switches are not live in this view'
+            : 'One-click opt-out is not enabled on this proxy')
+          : 'The per-skill switches are off on purpose'),
+        !tools.control && why ? el('span', {}, why) : null,
+        gated ? el('span', { 'data-testid': 'inv-skill-switch-gated' }, SKILL_SWITCH_REASON) : null)));
+  }
+  host.appendChild(reversibilityNote());
+}
+
+/**
+ * renderInvTop is the first screen: one sentence, one number, one ranked list of what to
+ * remove with its command. Every figure is summed from the same rows the list shows.
+ */
+function renderInvTop(host, rep, rows, groups) {
+  const tok = groups.reduce((n, g) => n + g.tokens, 0);
+  const priced = groups.filter((g) => g.priced);
+  const cost = priced.reduce((n, g) => n + g.usd, 0);
+  const sec = el('section', { class: 'inv-top', 'data-testid': 'inv-unused-panel' });
+  if (!groups.length) {
+    sec.appendChild(el('p', { class: 'inv-sentence' },
+      'Every tool and skill you carry was called at least once in this window. Nothing to remove.'));
+    host.appendChild(sec);
+    return;
+  }
+  const costTxt = priced.length ? usd(cost) : 'an unknown amount (no model here has known rates)';
+  sec.appendChild(el('p', { class: 'inv-sentence' },
+    'You carry ', el('strong', { class: 'inv-big', text: compact(tok) }),
+    ' tokens of ', term('tools and skills', 'MCP tool servers and skills you added. They are described to the model in every request.'),
+    ' that were never called; that cost about ',
+    el('strong', { class: 'inv-big bad', text: costTxt }), ' in this window.'));
+  sec.appendChild(el('p', { class: 'inv-scope', 'data-testid': 'inv-scope' },
+    'This covers all ' + num(rows.length) + ' never-called item' + (rows.length === 1 ? '' : 's')
+    + ', in ' + num(groups.length) + ' removable group' + (groups.length === 1 ? '' : 's') + '. '
+    + (groups.length > 5 && priced.length
+      ? 'The Overview shows the 5 costliest of them. ' : '')
+    + 'Cost is per-request carrying cost across the sessions that carried each one.'));
+  if (rep.coverage.captured < 5) {
+    sec.appendChild(el('p', { class: 'hint', 'data-testid': 'inv-small-sample' },
+      'Only ' + num(rep.coverage.captured) + ' session' + (rep.coverage.captured === 1 ? '' : 's')
+      + ' captured so far: "never called" means not called yet.'));
+  }
+  const list = el('ol', { class: 'inv-rank', 'data-testid': 'inv-lead' });
+  for (const g of groups) {
+    const r = g.items[0].removal || {};
+    const n = gSessions(g);
+    const kind = g.sub || ({ skill: 'Skill', mcp_tool: 'MCP tool' }[g.items[0].kind] || 'Tool');
+    // No direct removal command (a hand-added skill, a risky one): the plugin command walks through it.
+    const cmd = r.command && !r.danger ? r.command : '/context-guru:remove-mcp-and-skills';
+    const btn = el('button', { class: 'btn small', type: 'button' }, 'Copy');
+    if (cmd) btn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(cmd); btn.textContent = 'Copied'; }
+      catch (_) { btn.textContent = 'Select it manually'; }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+    list.appendChild(el('li', { class: 'inv-rank-row' },
+      el('span', { class: 'reco-kind', text: kind }),
+      el('span', { class: 'reco-name', title: g.label, text: g.label }),
+      el('span', { class: 'reco-note', text: (g.items.length > 1 ? num(g.items.length) + ' items, ' : '')
+        + compact(g.tokens) + ' tokens, never called in ' + num(n) + ' session' + (n === 1 ? '' : 's') }),
+      el('span', { class: 'reco-usd' }, money(g.usd, g.priced)),
+      cmd ? el('div', { class: 'cmd-line inv-rank-cmd' }, el('code', { text: cmd }), btn)
+        : el('span', { class: 'hint inv-rank-cmd', text: r.effect || 'No known removal command; see Details.' })));
+  }
+  sec.appendChild(list);
+  host.appendChild(sec);
 }
 
 /**
@@ -2373,10 +2434,19 @@ async function loadTools() {
     control = null; // 404 on an older proxy, or the feature is not built yet
     controlDoc = null;
   }
+  // Tool deferral's net saving, best-effort like the control: an older proxy has no route.
+  let deferDoc = null;
+  try {
+    deferDoc = await api('tool-defer');
+  } catch (err) {
+    if (aborted(err)) return;
+    deferDoc = null;
+  }
   try {
     tools.report = await api('tools');
     tools.control = control;
     tools.controlDoc = controlDoc;
+    tools.deferDoc = deferDoc;
   } catch (err) {
     if (aborted(err)) return;
     errorState(toolsView, 'Could not read the tool inventory', err);

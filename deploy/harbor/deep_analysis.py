@@ -14,7 +14,7 @@ from pathlib import Path
 from statistics import mean
 
 IN, OUT, CREAD, CWRITE = 2e-6, 10e-6, 0.2e-6, 2.5e-6
-CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
+CG = Path(__file__).resolve().parents[2]   # this checkout
 
 SRC = {
     "baseline":     ("/tmp/cg-runs/final50/rows-off.json",            None),

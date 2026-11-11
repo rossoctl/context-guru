@@ -52,7 +52,7 @@ provider credential of its own: the key is read off the request and dropped.
 (`cache.keepalive`, off by default) sends a request *between* your requests, when none is
 in flight — so for opted-in accounts it must retain your key, and the last request's body,
 for the length of the idle gap. Held in memory only, masked at rest, overwritten on
-release, never logged or persisted, and bounded by a hard deadline of about 14 minutes.
+release, never logged or persisted, and bounded by a hard deadline of about 12 minutes.
 Every use is a dashboard row you can audit. See
 [Keep an idle prompt cache warm](how-to/cache-keepalive.md).
 
@@ -489,7 +489,7 @@ certificate, which `install.sh nginx` will print a one-liner for and which is a 
 convenience, not a deployment. Whatever you pick, `fullchain.pem` must still carry the
 intermediate, and `tls-smoke.sh` with `CG_HOST` and `CG_CA` set is still the check.
 
-**The firewall exception.** The IBM deployment is reachable from `9.0.0.0/8` only, with an
+**The firewall exception.** The IBM deployment is reachable from the corporate network only, with an
 inbound exception for **TCP/443 and nothing else**. Port 80 is not requested and
 [not served](#2b-tls-front-end). Reproduce both properties: a public deployment that opens 80
 "for the redirect" leaks a token per mistyped URL. Keep `LISTEN_ADDR` on loopback so the only
@@ -801,7 +801,7 @@ is what `per_output: false` used to mean.
 
 **Then check what it did**, before turning on anything else. Requests tab → open a request →
 **Compaction model calls**: one row per call with its cost, its saving, its latency, whether
-the result was accepted, and why not when it was not. The Components tab now carries an
+the result was accepted, and why not when it was not. The Preset steps tab (Components) now carries an
 `LLM cost` column and states the verdict in dollars. What to look for:
 
 | reading | meaning |

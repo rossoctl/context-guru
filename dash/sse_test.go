@@ -233,3 +233,24 @@ func TestHubConcurrent(t *testing.T) {
 	wg.Wait()
 	h.Close()
 }
+
+// THE RING DOES NOT KEEP AN EVENT'S CLOSURES. Each one captures its request's whole body, and the
+// ring holds the last 256 events for late subscribers: kept closures pinned 256 bodies.
+func TestPublishDropsTheBodyHoldingClosures(t *testing.T) {
+	h := NewHub()
+	body := make([]byte, 1<<20)
+	e := &Event{ID: 1, TenantID: "t",
+		WaitCause:   func() WaitCauseResult { _ = body; return WaitCauseResult{} },
+		LifecycleFn: func() *LifecycleRow { _ = body; return nil },
+		BypassCount: func() (int, int) { _ = body; return 0, 0 }}
+	h.Publish(e)
+	h.mu.Lock()
+	kept := h.ring[len(h.ring)-1]
+	h.mu.Unlock()
+	if kept.WaitCause != nil || kept.LifecycleFn != nil || kept.BypassCount != nil {
+		t.Errorf("the ring kept a closure that captures the request body: %+v", kept)
+	}
+	if e.WaitCause == nil || e.LifecycleFn == nil || e.BypassCount == nil {
+		t.Error("Publish cleared the CALLER's closures; it must only strip its own copy")
+	}
+}

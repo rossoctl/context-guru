@@ -1,6 +1,11 @@
 package expand
 
 import (
+	"bytes"
+	"strings"
+
+	"github.com/rossoctl/context-guru/schema"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -32,31 +37,13 @@ func ResponseCalls(provider string, resp []byte, otherProxyTools ...string) (cal
 		}
 		return false
 	}
-	switch provider {
-	case "anthropic":
-		gjson.GetBytes(resp, "content").ForEach(func(_, blk gjson.Result) bool {
-			if blk.Get("type").String() != "tool_use" {
-				return true
-			}
-			switch name := blk.Get("name").String(); {
-			case name == ToolName:
-				calls = append(calls, Call{CallID: blk.Get("id").String(), HashID: blk.Get("input.id").String()})
-			case !ours(name):
-				otherTools = true
-			}
-			return true
-		})
-	default: // openai and compatibles
-		gjson.GetBytes(resp, "choices.0.message.tool_calls").ForEach(func(_, tc gjson.Result) bool {
-			switch name := tc.Get("function.name").String(); {
-			case name == ToolName:
-				hash := gjson.Get(tc.Get("function.arguments").String(), "id").String()
-				calls = append(calls, Call{CallID: tc.Get("id").String(), HashID: hash})
-			case !ours(name):
-				otherTools = true
-			}
-			return true
-		})
+	for _, c := range schema.OutputCalls(provider, resp) {
+		switch {
+		case c.Name == ToolName:
+			calls = append(calls, Call{CallID: c.ID, HashID: gjson.Get(c.Args, "id").String()})
+		case !ours(c.Name):
+			otherTools = true
+		}
 	}
 	return calls, otherTools
 }
@@ -92,6 +79,121 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 			return nil, false
 		}
 		return out, true
+	case "responses":
+		items := gjson.GetBytes(reqBody, "input")
+		output := gjson.GetBytes(resp, "output")
+		if !items.IsArray() || !output.IsArray() {
+			return nil, false
+		}
+		// A Responses summary stash is an array of the exact input items it
+		// replaced. Restore those items at their original point before the
+		// continuation, so images/audio retain their modality rather than being
+		// flattened into a function-output string. Ordinary text stashes still
+		// travel as the tool output below.
+		replacements := map[int][]gjson.Result{}
+		restoredInPlace := map[string]bool{}
+		for _, call := range output.Array() {
+			id := call.Get("call_id").String()
+			orig, ok := resolved[id]
+			if !ok || call.Get("name").String() != ToolName {
+				continue
+			}
+			var rawArgs string
+			if call.Get("type").String() == "custom_tool_call" {
+				rawArgs = call.Get("input").String()
+			} else {
+				rawArgs = call.Get("arguments").String()
+			}
+			hash := gjson.Get(rawArgs, "id").String()
+			span := gjson.Parse(orig)
+			if hash == "" || !span.IsArray() || len(span.Array()) == 0 {
+				continue
+			}
+			valid := true
+			for _, original := range span.Array() {
+				if !responsesInputItem(original) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				continue // not wire input items: answer with the flattened string instead
+			}
+			for i, item := range items.Array() {
+				content := schema.ContentText(item.Get("content"))
+				if role := item.Get("role").String(); (role == "user" || role == "assistant") && isSummaryText(content) &&
+					strings.Contains(content, Marker(hash)) {
+					if _, duplicate := replacements[i]; duplicate {
+						return nil, false
+					}
+					replacements[i] = span.Array()
+					restoredInPlace[id] = true
+					break
+				}
+			}
+		}
+		out := reqBody
+		if len(replacements) > 0 {
+			var b bytes.Buffer
+			b.WriteByte('[')
+			first := true
+			appendItem := func(raw string) {
+				if !first {
+					b.WriteByte(',')
+				}
+				first = false
+				b.WriteString(raw)
+			}
+			for i, item := range items.Array() {
+				if span, ok := replacements[i]; ok {
+					for _, original := range span {
+						appendItem(original.Raw)
+					}
+				} else {
+					appendItem(item.Raw)
+				}
+			}
+			b.WriteByte(']')
+			var err error
+			out, err = sjson.SetRawBytes(out, "input", b.Bytes())
+			if err != nil {
+				return nil, false
+			}
+		}
+		for _, item := range output.Array() {
+			var err error
+			out, err = sjson.SetRawBytes(out, "input.-1", []byte(item.Raw))
+			if err != nil {
+				return nil, false
+			}
+		}
+		for _, item := range output.Array() {
+			id := item.Get("call_id").String()
+			orig, ok := resolved[id]
+			if !ok {
+				continue
+			}
+			typ := item.Get("type").String()
+			if typ != "function_call" && typ != "custom_tool_call" {
+				return nil, false
+			}
+			answerType := "function_call_output"
+			if typ == "custom_tool_call" {
+				answerType = "custom_tool_call_output"
+			}
+			answer := `{"type":"` + answerType + `"}`
+			answer, _ = sjson.Set(answer, "call_id", id)
+			if restoredInPlace[id] {
+				orig = "[expand: original history restored in place above]"
+			}
+			answer, _ = sjson.Set(answer, "output", orig)
+			var err error
+			out, err = sjson.SetRawBytes(out, "input.-1", []byte(answer))
+			if err != nil {
+				return nil, false
+			}
+		}
+		return out, true
 
 	default: // openai
 		msg := gjson.GetBytes(resp, "choices.0.message")
@@ -111,5 +213,36 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 			}
 		}
 		return out, true
+	}
+}
+
+// The summary headers, mirrored from schema.SummaryHeader and schema.CacheAwareSummaryHeader (this
+// leaf package imports no context-guru package); TestSummaryHeadersMatchSchema pins them equal.
+const (
+	summaryHeader           = "=== History Summary ==="
+	cacheAwareSummaryHeader = "=== Compacted Context (cache-aware summary) ==="
+)
+
+// isSummaryText reports whether content is a summarizer's spliced summary, from either summarizer.
+func isSummaryText(content string) bool {
+	return strings.HasPrefix(content, summaryHeader) || strings.HasPrefix(content, cacheAwareSummaryHeader)
+}
+
+// responsesInputItem reports whether a stashed element can go back into a Responses `input` array
+// as it is. summarize stashes the wire items it replaced, which always can. cache_aware_summarizer
+// stashes NORMALIZED chat messages, whose tool exchanges are a role=tool message and an assistant
+// message carrying tool_calls: spliced into `input` those make the Responses API return 400, so such
+// a stash is answered as a flattened string instead (#727 review, round 3).
+func responsesInputItem(v gjson.Result) bool {
+	if !v.IsObject() {
+		return false
+	}
+	switch role := v.Get("role").String(); role {
+	case "":
+		return v.Get("type").String() != ""
+	case "user", "assistant", "system", "developer":
+		return !v.Get("tool_calls").Exists() && !v.Get("tool_call_id").Exists()
+	default:
+		return false
 	}
 }

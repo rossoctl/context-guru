@@ -202,6 +202,54 @@ func TestValidateShapeReportsBothPairingDirections(t *testing.T) {
 	}
 }
 
+// TestValidateShapeGroupedReadsWireAdjacency pins the #460 shape: a wire message holding a
+// sibling text block BESIDE a tool_result normalizes to [sibling(user), result(tool)] in body
+// order, so the literal-adjacency answered-tool-use check reports a violation the provider
+// would not — the exchange is answered correctly on the wire. With groups, the run that may
+// answer a call is the ONE wire group that follows it, which is the adjacency the provider
+// enforces.
+//
+// The second assertion keeps the ungrouped rule honest: the same list without groups still
+// reports, because the grouping removes the false positive rather than weakening the check.
+func TestValidateShapeGroupedReadsWireAdjacency(t *testing.T) {
+	siblingFirst := []bschemas.ChatMessage{
+		vuser("go"), vcall("t1"), vuser("mid-turn user text"), vresult("t1")}
+	if vs := ValidateShapeGrouped(bschemas.Anthropic, siblingFirst, []int{0, 1, 2, 2}); len(vs) != 0 {
+		t.Errorf("a sibling-first group was not read as answering the call:\n%s",
+			FormatShapeViolations(vs, siblingFirst))
+	}
+	if vs := ValidateShapeFor(bschemas.Anthropic, siblingFirst); rules(vs) != RuleAnsweredToolUse {
+		t.Errorf("without groups the sibling-first shape must still report answered-tool-use, got [%s]",
+			rules(vs))
+	}
+
+	// A parallel exchange answered by one sibling-carrying wire message.
+	parallel := []bschemas.ChatMessage{
+		vuser("go"), vcall("pa", "pb"), vuser("a sibling beside the results"),
+		vresult("pa"), vresult("pb")}
+	if vs := ValidateShapeGrouped(bschemas.Anthropic, parallel, []int{0, 1, 2, 2, 2}); len(vs) != 0 {
+		t.Errorf("a parallel exchange inside one wire group was not read as answered:\n%s",
+			FormatShapeViolations(vs, parallel))
+	}
+
+	// The grouping does not EXCUSE a missing answer: the sibling is read past, and the call is
+	// still unanswered.
+	unanswered := []bschemas.ChatMessage{
+		vuser("go"), vcall("t1"), vuser("sibling with no result behind it"), vuser("next turn")}
+	if vs := ValidateShapeGrouped(bschemas.Anthropic, unanswered, []int{0, 1, 2, 3}); rules(vs) != RuleAnsweredToolUse {
+		t.Errorf("a genuinely unanswered call in grouped coordinates must still report, got [%s]",
+			rules(vs))
+	}
+
+	// Nor does it reach into a LATER group: the answer must be in the one wire group that
+	// follows the call.
+	later := []bschemas.ChatMessage{vuser("go"), vcall("t1"), vuser("unrelated"), vresult("t1")}
+	if vs := ValidateShapeGrouped(bschemas.Anthropic, later, []int{0, 1, 2, 3}); rules(vs) != RuleAnsweredToolUse {
+		t.Errorf("an answer in a later wire group must still report as unanswered, got [%s]",
+			rules(vs))
+	}
+}
+
 func TestShapeViolationString(t *testing.T) {
 	if s := (ShapeViolation{Index: 3, Rule: "r", Msg: "m"}).String(); s != "messages.3 [r] m" {
 		t.Errorf("indexed violation rendered %q", s)

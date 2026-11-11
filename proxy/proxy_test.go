@@ -2,6 +2,7 @@ package proxy_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,6 +144,36 @@ const offloadCapablePipeline = "pipeline: [linecap]\n"
 func openAIBody(msgs ...map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"model": "gpt-x", "temperature": 0.2, "messages": msgs})
 	return b
+}
+
+func TestResponsesRouteAppliesSharedEnvelopeTransforms(t *testing.T) {
+	var up upstreamCapture
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_test","object":"response","output":[],"usage":{"input_tokens":10,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	h, _ := buildHandler(t, "pipeline: [toolschema, toolfilter]\ncomponents:\n  toolfilter: {remove: [unused]}\n", upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	body := `{"model":"gpt-5.6","instructions":"stable","input":[{"role":"user","content":"task"},{"type":"reasoning","id":"r1","encrypted_content":"opaque"}],` +
+		`"tools":[{"type":"function","name":"Keep","parameters":{"type":"object","title":"drop"}},` +
+		`{"type":"function","name":"unused","parameters":{"type":"object"}}]}`
+	resp, err := http.Post(srv.URL+"/openai/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d", resp.StatusCode)
+	}
+	got := up.last()
+	if got.path != "/v1/responses" || gjson.GetBytes(got.body, "tools.#").Int() != 1 ||
+		gjson.GetBytes(got.body, "tools.0.parameters.title").Exists() ||
+		gjson.GetBytes(got.body, "input.1").Raw != gjson.Get(body, "input.1").Raw {
+		t.Fatalf("Responses transforms or opaque pass-through failed: %s", got.String())
+	}
 }
 
 // expandableBody is a realistic post-offload request: the client declares its own tools
@@ -426,6 +457,95 @@ func TestExpandToolLoop(t *testing.T) {
 	}
 	if gjson.GetBytes(secondBody, "messages.#").Int() != 4 {
 		t.Fatalf("continuation should append assistant + tool turns to the 2 original ones: %s", secondBody)
+	}
+}
+
+func TestResponsesExpandLoopJSONAndSSE(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", streaming), func(t *testing.T) {
+			var up upstreamCapture
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				round := up.record(r)
+				if round == 1 {
+					response := `{"id":"resp_1","output":[{"type":"reasoning","encrypted_content":"opaque"},` +
+						`{"type":"function_call","call_id":"call_1","name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}]}`
+					if streaming {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", response)
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(response))
+					}
+					return
+				}
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+			}))
+			defer upstream.Close()
+			h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
+			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+			body := fmt.Sprintf(`{"model":"gpt-5.6","stream":%t,"input":[{"role":"user","content":"find <<cg:HASH>>"}],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}]}`, streaming)
+			resp, err := http.Post(srv.URL+"/openai/v1/responses", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if up.hits() != 2 || !strings.Contains(string(final), "done") {
+				t.Fatalf("Responses expansion did not complete: rounds=%d final=%s", up.hits(), final)
+			}
+			first, second := up.body(1), up.body(2)
+			if gjson.GetBytes(first, "tools.1.name").String() != "context_guru_expand" ||
+				gjson.GetBytes(second, "input.2.type").String() != "function_call" ||
+				gjson.GetBytes(second, "input.3.type").String() != "function_call_output" ||
+				gjson.GetBytes(second, "input.3.output").String() != "THE ORIGINAL CONTENT" ||
+				gjson.GetBytes(second, "input.1.encrypted_content").String() != "opaque" {
+				t.Fatalf("Responses continuation was not lossless: %s", second)
+			}
+		})
+	}
+}
+
+func TestResponsesExpandLoopRestoresStashedImage(t *testing.T) {
+	var up upstreamCapture
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if up.record(r) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"output":[{"type":"function_call","call_id":"call_1","name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer upstream.Close()
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
+	st.Put("HASH", []byte(`[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]},`+
+		`{"role":"assistant","content":"I saw a diagram"}]`))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	body := `{"model":"gpt-5.6","input":[{"role":"user","content":"=== History Summary === old image <<cg:HASH>>"},` +
+		`{"role":"user","content":"what was in it?"}],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}]}`
+	resp, err := http.Post(srv.URL+"/openai/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if up.hits() != 2 {
+		t.Fatalf("expected an in-band continuation, got %d rounds", up.hits())
+	}
+	second := up.body(2)
+	if gjson.GetBytes(second, "input.0.content.0.type").String() != "input_image" ||
+		gjson.GetBytes(second, "input.1.content").String() != "I saw a diagram" ||
+		gjson.GetBytes(second, "input.2.content").String() != "what was in it?" ||
+		gjson.GetBytes(second, "input.4.output").String() != "[expand: original history restored in place above]" {
+		t.Fatalf("native image was not restored in the proxy continuation: %s", second)
 	}
 }
 
@@ -1086,5 +1206,114 @@ func TestOpenAISSEStreamsThrough(t *testing.T) {
 	stresp.Body.Close()
 	if snap.SSEStreamed != 1 || snap.SSEBuffered != 0 {
 		t.Fatalf("want one streamed, zero buffered: %+v", snap)
+	}
+}
+
+// gzipSSE compresses an Anthropic-shaped SSE stream the way api.anthropic.com actually
+// does on a direct (no-gateway) upstream — real byte-for-byte gzip, not a header-only
+// fixture, so a fix that merely strips the response header rather than fixing the
+// request would still fail this test.
+func gzipSSE(t *testing.T, plain string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(plain)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestGzipUpstreamResponseIsDecompressedAndUsageParsed is the regression test for #391: a
+// direct-to-api.anthropic.com upstream (the documented no-API-key / subscription-login
+// setup) gzips its streaming /v1/messages responses. Forwarding the client's own
+// Accept-Encoding header upstream verbatim (the bug) means Go's http.Transport never
+// auto-decompresses, so resp.Body is raw gzip for BOTH the client-forward path and the
+// usage sniffer — usage silently reports usageMissAbsent (classified benign, so nothing
+// alerts) on every request against that upstream, which in turn means keep-alive's
+// pingable() gate (keyed off CacheRead+CacheWrite) never passes either.
+//
+// Before the fix (doUpstream forwarding Accept-Encoding as-is) this test fails on BOTH
+// assertions: the client reads raw gzip bytes instead of the SSE text, and usage reports
+// zero. The fix — stripping Accept-Encoding before the upstream call, letting Transport
+// add its own and auto-decompress transparently — fixes both at once because h.stream
+// reads resp.Body once, into both sinks, with no tee and no separate buffer.
+func TestGzipUpstreamResponseIsDecompressedAndUsageParsed(t *testing.T) {
+	const wantText = "the upstream said this, compressed"
+	plain := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"," +
+		"\"usage\":{\"input_tokens\":11,\"output_tokens\":1,\"cache_read_input_tokens\":9000," +
+		"\"cache_creation_input_tokens\":1500}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0," +
+		"\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0," +
+		"\"delta\":{\"type\":\"text_delta\",\"text\":\"" + wantText + "\"}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	gzipped := gzipSSE(t, plain)
+
+	var sawAcceptEncoding string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Anthropic itself decides to gzip based on what WE sent it — recording this is
+		// what makes the test fail honestly if the fix regresses rather than passing by
+		// coincidence (an upstream that only gzips when asked).
+		sawAcceptEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(gzipped)
+	}))
+	defer upstream.Close()
+
+	h, _ := buildHandler(t, "pipeline: []\n", upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	body := anthropicSSEBody(t, "no markers in this request at all")
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sawAcceptEncoding == "" {
+		t.Fatal("fixture bug: the upstream never saw an Accept-Encoding header at all, so " +
+			"this test cannot distinguish 'the proxy stripped it' from 'nobody ever sent one'")
+	}
+
+	// The client-visible symptom: readable SSE text, not raw gzip bytes relayed verbatim.
+	if !strings.Contains(string(got), wantText) {
+		t.Fatalf("client did not receive readable, decompressed content; got %q", got)
+	}
+	if bytes.HasPrefix(got, []byte{0x1f, 0x8b}) {
+		t.Fatalf("client received raw gzip bytes (magic number 0x1f8b) instead of decompressed "+
+			"SSE text: %q", got)
+	}
+
+	// The silent symptom: usage parsed correctly off the SAME byte stream.
+	var snap metrics.Snapshot
+	stresp, err := http.Get(srv.URL + "/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(stresp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	stresp.Body.Close()
+	if snap.CacheReadTokens != 9000 {
+		t.Errorf("cache_read_tokens = %d, want 9000 — usage parsing against a gzip-compressed "+
+			"stream silently reports usageMissAbsent (classified benign, no alert) rather than "+
+			"failing loudly, which is exactly the bug #391 was filed for", snap.CacheReadTokens)
+	}
+	if snap.CacheWriteTokens != 1500 {
+		t.Errorf("cache_write_tokens = %d, want 1500", snap.CacheWriteTokens)
+	}
+	if snap.OutputTokens != 42 {
+		t.Errorf("output_tokens = %d, want 42 (the message_delta figure, not message_start's "+
+			"initial 1)", snap.OutputTokens)
 	}
 }

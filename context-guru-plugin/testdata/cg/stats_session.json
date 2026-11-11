@@ -1,0 +1,21 @@
+{
+ "total_saved_usd": 2.15,
+ "cost_usd": 48.3,
+ "baseline_cost_usd": 50.45,
+ "cache_saved_usd": 120.0,
+ "waterfall": [
+  {
+   "key": "baseline",
+   "delta_usd": 50.45,
+   "total": true
+  },
+  {
+   "key": "compaction",
+   "delta_usd": -2.05
+  },
+  {
+   "key": "cg_llm",
+   "delta_usd": 0.2
+  }
+ ]
+}

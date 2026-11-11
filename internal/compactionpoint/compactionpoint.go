@@ -111,6 +111,17 @@ const (
 	Measured Source = "measured"
 	// Assumed: reported behaviour or a reasoned bound, not observed.
 	Assumed Source = "assumed"
+	// Configured: the user changed the client's own auto-compact setting, and the local proxy read it at start-up
+	// (see ClaudeCode, Codex, Bob). The number is the client's own threshold, taken as billed tokens by
+	// ClientToBilled. It beats the table.
+	Configured Source = "configured"
+	// ClientDefault: the user changed nothing, and the client's own VERIFIED default threshold is
+	// used (see Bob, #963). Like Configured it is an absolute number in billed tokens and it is
+	// stored on the request row.
+	ClientDefault Source = "client_default"
+	// Operator: the operator stated it per model in the MODEL_PRICES table (compaction_point, billed
+	// tokens). It beats the bootstrap table. It is a statement, not an observation: the operator owns it.
+	Operator Source = "operator"
 	// WindowFallback: case 3 and case 4 together -- C == W, because either nothing compacts here
 	// (a fact) or we have never seen this client compact (a guess). This package cannot yet tell
 	// those apart, which is itself worth reporting rather than smoothing over.
@@ -120,7 +131,11 @@ const (
 // Point is one resolved C.
 type Point struct {
 	// Frac is C as a fraction of the model's context window, in provider-billed tokens.
-	Frac   float64
+	Frac float64
+	// Abs, when > 0, is C in absolute billed tokens and wins over Frac in Tokens. It is set by a Configured,
+	// ClientDefault or Operator point: the client's or operator's own number does not scale with OUR window,
+	// and a round trip through a fraction of the window could lose a token to the float. 0 = use Frac.
+	Abs    int
 	Source Source
 	// Note is why this value, in enough detail to tell whether it still holds.
 	Note string
@@ -128,10 +143,25 @@ type Point struct {
 
 // Tokens is C in absolute billed tokens for a given window. 0 when the window is unknown.
 func (p Point) Tokens(window int) int {
+	if p.Abs > 0 {
+		return p.Abs
+	}
 	if window <= 0 || p.Frac <= 0 {
 		return 0
 	}
 	return int(p.Frac * float64(window))
+}
+
+// FromClient reports whether the point came from the client itself (a user setting or the client's
+// own default) and so carries an absolute C that a request row must store (#948, #963).
+func (p Point) FromClient() bool {
+	return IsClientSource(string(p.Source)) && p.Abs > 0
+}
+
+// IsClientSource is the ONE rule for "this source carries an absolute C that a row stores". The
+// request-row writer and the dash walks use it.
+func IsClientSource(src string) bool {
+	return Source(src) == Configured || Source(src) == ClientDefault
 }
 
 // table is matched by SUBSTRING against the normalized model id, LONGEST pattern first, so
@@ -195,4 +225,47 @@ func For(model string) Point {
 		}
 	}
 	return best
+}
+
+// Recorded rebuilds the Point a request row carries: the absolute C in billed tokens and the
+// source it had when the row was written (#948, #963). A row with no recorded client value gets the
+// table's answer for its model, so an old row reads as before. Only a Configured or ClientDefault
+// row has an absolute C; the table value scales with the window and is better re-read from the table.
+func Recorded(model string, abs int, src string) Point {
+	switch Source(src) {
+	case Configured:
+		if abs > 0 {
+			return Point{Abs: abs, Source: Configured,
+				Note: "the user's own client auto-compact setting, recorded on the request row"}
+		}
+	case ClientDefault:
+		if abs > 0 {
+			return Point{Abs: abs, Source: ClientDefault,
+				Note: "the client's own default auto-compact threshold, recorded on the request row"}
+		}
+	}
+	return For(model)
+}
+
+// Resolve is For with the operator's table in front. tokens is the operator's compaction_point for this model
+// in billed input tokens (0 = none stated), window the model's context window (0 = unknown).
+//
+// A stated value is used as it is, whatever the window: the window is the model's limit and this is where the
+// CLIENT acts, and the two are not derived from each other. Frac is filled in when the window is known, for
+// the callers (the dashboard span) that think in fractions; it is capped at 1.
+func Resolve(model string, tokens, window int) Point {
+	if tokens <= 0 {
+		return For(model)
+	}
+	p := Point{Abs: tokens, Source: Operator,
+		Note: "stated by the operator in the MODEL_PRICES table (compaction_point), in billed input tokens."}
+	if window > 0 {
+		p.Frac = float64(tokens) / float64(window)
+		if p.Frac > 1 {
+			p.Frac = 1
+		}
+	} else {
+		p.Frac = 1
+	}
+	return p
 }

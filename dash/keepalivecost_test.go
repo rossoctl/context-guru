@@ -19,64 +19,6 @@ func keepaliveEvent(gapMs int64, pings int, refreshed, read, write int64) *Event
 	return e
 }
 
-// The credit exists at all: a request that came back after twenty minutes and was served from
-// cache anyway did not pay the 11.35x re-creation penalty, and a ping is why.
-func TestKeepAliveCreditsARescuedRequest(t *testing.T) {
-	e := keepaliveEvent(20*60*1000, 1, 48_576, 48_576, 0)
-	// Priced against a cache MISS, not fresh input: these tokens carry cache_control, so a
-	// miss bills them as creation at 1.25x rather than at 1x.
-	want := 48_576 * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
-	if got := e.KeepAliveSavedUSD; got < want*0.999 || got > want*1.001 {
-		t.Errorf("keepalive_saved_usd = %.6f, want %.6f (cache_read x (write - read))", got, want)
-	}
-}
-
-// Each gate, and the specific over-claim it prevents. Every one of these would otherwise
-// credit this mechanism with money it did not earn.
-func TestKeepAliveCreditGates(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		e    *Event
-		why  string
-	}{
-		{"no ping was sent", keepaliveEvent(20*60*1000, 0, 0, 48_576, 0),
-			"every long-gap hit in the deployment would be credited to a mechanism that was off"},
-		{"the gap was inside the provider lifetime", keepaliveEvent(120*1000, 2, 48_576, 48_576, 0),
-			"the entry would have survived on its own; those pings are the measured waste, not a saving"},
-		{"the request missed anyway", keepaliveEvent(20*60*1000, 1, 48_576, 0, 48_576),
-			"nothing was rescued, so there is nothing to credit"},
-		{"it re-created more than it read", keepaliveEvent(20*60*1000, 1, 48_576, 1_000, 48_576),
-			"a request that re-wrote most of its prefix was not kept warm"},
-		{"the row IS a ping", func() *Event {
-			e := keepaliveEvent(20*60*1000, 1, 48_576, 48_576, 0)
-			e.KeepAlive, e.KeepAliveSavedUSD = true, 0
-			e.Price(ibmSonnet, true)
-			return e
-		}(), "a ping crediting itself is circular"},
-	} {
-		if got := tc.e.KeepAliveSavedUSD; got != 0 {
-			t.Errorf("%s: credited $%.6f — %s", tc.name, got, tc.why)
-		}
-	}
-}
-
-// The credit is capped by what the ping actually refreshed. The ping's own response says how
-// many tokens were in the entry it touched, and claiming more than that would claim tokens our
-// ping never kept alive — for instance a prefix that grew between the ping and the next turn.
-func TestKeepAliveCreditIsCappedByWhatThePingRefreshed(t *testing.T) {
-	e := keepaliveEvent(20*60*1000, 1, 10_000, 48_576, 0)
-	want := 10_000 * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
-	if got := e.KeepAliveSavedUSD; got < want*0.999 || got > want*1.001 {
-		t.Errorf("keepalive_saved_usd = %.6f, want %.6f (capped at the ping's own cache_read)",
-			got, want)
-	}
-	// And a ping that read nothing (the entry was already gone) caps at nothing extra: the
-	// request's own read is then the only evidence, which is the pre-cap behaviour.
-	if e2 := keepaliveEvent(20*60*1000, 1, 0, 48_576, 0); e2.KeepAliveSavedUSD <= 0 {
-		t.Error("a ping with no recorded refresh blocked the credit entirely")
-	}
-}
-
 // A ping row must be priced like any other request — its cost is the whole point of the
 // audit trail — while contributing nothing to the saving side of the ledger.
 func TestKeepAlivePingRowIsPricedAndNotCredited(t *testing.T) {

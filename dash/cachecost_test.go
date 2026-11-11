@@ -13,54 +13,9 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// ibmSonnet is the rate ete-litellm actually bills for aws/claude-sonnet-5 — half the
+// ibmSonnet is the rate litellm-gateway actually bills for aws/claude-sonnet-5 — half the
 // public API's, which is why the operator price list exists at all.
 var ibmSonnet = modelinfo.Price{Input: 1.52e-6, Output: 7.6e-6, CacheRead: 1.52e-7, CacheWrite: 1.9e-6}
-
-// The re-sent part of a removal is worth the cache-READ rate on a turn whose cache hit,
-// and the cache-WRITE rate on a turn whose cache missed — because on a miss the provider
-// re-billed the whole prompt, so the removed content would have been re-billed too.
-//
-// This is the correction with the largest effect on the real service: TTL-expired turns
-// were 4% of production requests and 31% of spend, every token of it cache_creation, and
-// their savings were being valued at a rate 12.5x too low.
-func TestRepeatSavingsAreValuedByTheCacheOutcome(t *testing.T) {
-	const removed, unique = 10_000, 0 // all of it re-sent history, none of it new
-
-	mk := func(read, write int64) *Event {
-		e := &Event{
-			TS: 1000, SessionID: "s", Model: "aws/claude-sonnet-5",
-			TokensBefore: 90_000, TokensAfter: 90_000 - removed,
-			SavedUnique: unique,
-			FreshInput:  10, CacheRead: read, CacheWrite: write, OutputTokens: 50,
-		}
-		e.Price(ibmSonnet, true)
-		return e
-	}
-	hit, miss := mk(80_000, 0), mk(0, 80_000)
-
-	// Both scaled by the tokenizer correction (#240), taken from the event itself so the
-	// assertions stay about WHICH TIER is used — the thing this test exists to pin.
-	wantHit := float64(removed) * ibmSonnet.CacheRead * hit.BilledTokenFactor
-	wantMiss := float64(removed) * ibmSonnet.CacheWrite * miss.BilledTokenFactor
-	if got := hit.BaselineCostUSD - hit.CostUSD; math.Abs(got-wantHit) > 1e-12 {
-		t.Errorf("cache HIT: removal valued at %.10f, want the read rate %.10f", got, wantHit)
-	}
-	if got := miss.BaselineCostUSD - miss.CostUSD; math.Abs(got-wantMiss) > 1e-12 {
-		t.Errorf("cache MISS: removal valued at %.10f, want the write rate %.10f", got, wantMiss)
-	}
-	// The point of the change, stated as a ratio so a partial revert also fails.
-	ratio := (miss.BaselineCostUSD - miss.CostUSD) / (hit.BaselineCostUSD - hit.CostUSD)
-	if ratio < 10 {
-		t.Errorf("a cold turn's removal is only %.1fx a warm turn's; the write/read spread is 12.5x", ratio)
-	}
-	// A turn that neither read nor wrote cache (a provider with no cache at all) values
-	// the removal at the fresh rate, never at zero.
-	none := mk(0, 0)
-	if got := none.BaselineCostUSD - none.CostUSD; math.Abs(got-float64(removed)*ibmSonnet.Input*none.BilledTokenFactor) > 1e-12 {
-		t.Errorf("no cache at all: removal valued at %.10f, want the fresh rate", got)
-	}
-}
 
 // The prompt cache is a saving of its own, and the dashboard reported none of it.
 func TestCacheSavedIsCacheReadsAgainstTheFreshRate(t *testing.T) {
@@ -84,69 +39,6 @@ func TestCacheSavedIsCacheReadsAgainstTheFreshRate(t *testing.T) {
 	}
 }
 
-// The three conditions, one test each, because each one rules out a different way of
-// over-claiming — and the figure this replaces failed all three.
-func TestCachesplitSavingNeedsTheSplit_TheHit_AndAMovedTail(t *testing.T) {
-	const stable = 8_478 // what the split measured as the stable half on a real session
-	split := []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}}
-	mk := func(comps []CompRow, read int64, tailMoved bool, stableTok int) *Event {
-		e := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
-			TokensBefore: 50_000, TokensAfter: 50_000,
-			FreshInput: 10, CacheRead: read, OutputTokens: 20,
-			Components: comps, TailChanged: tailMoved, SplitStableTokens: stableTok}
-		e.Price(ibmSonnet, true)
-		return e
-	}
-	// The counterfactual is a MISS, which bills those tokens as cache creation, not as
-	// fresh input: they carry cache_control. So the spread is write minus read. And the
-	// amount is the STABLE HALF, not the request's whole cache_read — the control arm still
-	// hit on 45,805 tokens with cachesplit off, so the rest was never ours to claim.
-	want := float64(stable) * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
-	if got := mk(split, 54_304, true, stable).CachesplitSavedUSD; math.Abs(got-want) > 1e-12 {
-		t.Errorf("all three conditions met: %.10f, want %.10f", got, want)
-	}
-	for name, e := range map[string]*Event{
-		"nothing split":             mk(nil, 54_304, true, 0),
-		"component ran but skipped": mk([]CompRow{{Component: "cachesplit", Skipped: true}}, 54_304, true, 0),
-		"the split produced no hit": mk(split, 0, true, stable),
-		// A turn whose snapshot did NOT move: the stable half would have been served from
-		// cache either way, split or not, so there is nothing of ours in it.
-		"the tail did not change": mk(split, 54_304, false, stable),
-		// A read too small to have contained our half. Refused rather than clamped: a hit on
-		// some other, smaller prefix says nothing about ours.
-		"read smaller than the half we split": mk(split, 3_000, true, stable),
-	} {
-		if e.CachesplitSavedUSD != 0 {
-			t.Errorf("%s: claimed %.10f", name, e.CachesplitSavedUSD)
-		}
-	}
-	// The subtle over-claim, and the reason a hit alone is not enough: the session's first
-	// request AFTER the stable half itself changed (someone edited CLAUDE.md, the tool list
-	// moved). An earlier agent breakpoint still hits, so cache_read is large — but our half is
-	// being billed as CREATION on this very request, so there is nothing to credit.
-	changed := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
-		TokensBefore: 50_000, TokensAfter: 50_000, FreshInput: 10,
-		CacheRead: 20_000, CacheWrite: 12_000, OutputTokens: 20,
-		Components: split, TailChanged: true, SplitStableTokens: stable}
-	changed.Price(ibmSonnet, true)
-	if changed.CachesplitSavedUSD != 0 {
-		t.Errorf("credited a request that re-created the stable half: %.10f", changed.CachesplitSavedUSD)
-	}
-	// The provider's own cache saving is still measured on every one of them — it is a
-	// diagnostic, and losing it would hide a pipeline destroying a prefix.
-	if mk(nil, 54_304, false, 0).CacheSavedUSD <= 0 {
-		t.Error("the provider-cache diagnostic stopped being measured")
-	}
-	// And ours is a small fraction of it, which is the whole correction: 5,654 tokens at
-	// 1.15x versus 54,304 at 0.9x. Pinned as a bound so a revert to "credit the whole
-	// cache_read" fails here rather than in production.
-	e := mk(split, 54_304, true, stable)
-	if e.CachesplitSavedUSD > e.CacheSavedUSD/3 {
-		t.Errorf("ours %.10f is too large a share of the provider figure %.10f",
-			e.CachesplitSavedUSD, e.CacheSavedUSD)
-	}
-}
-
 // The aggregate: our two savings add, and the provider's does not join them.
 func TestOverviewClaimsOnlyTheTurnsWhoseTailMoved(t *testing.T) {
 	const stable = 8_478
@@ -166,6 +58,11 @@ func TestOverviewClaimsOnlyTheTurnsWhoseTailMoved(t *testing.T) {
 			TailChanged: i == 0,
 		}
 		e.Price(ibmSonnet, true)
+		// The split's credit is the accountant library's (a split effect, on the turn whose tail
+		// moved): stored as written. The Overview sums it.
+		if e.TailChanged {
+			e.CachesplitSavedUSD = float64(stable) * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
+		}
 		evs = append(evs, e)
 	}
 	if err := db.insertBatch(evs); err != nil {
@@ -233,7 +130,11 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens"}
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated"}
+	// An old database has no project index, and SQLite refuses to drop an indexed column.
+	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
+		t.Fatal(err)
+	}
 	for _, col := range added {
 		if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN ` + col); err != nil {
 			t.Fatal(err)
@@ -254,10 +155,27 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 		t.Fatalf("%d rows survived the migration, want 1", n)
 	}
 	for _, col := range added {
-		var sum float64
-		if err := db2.sql.QueryRow(`SELECT COALESCE(SUM(` + col + `),0) FROM requests`).Scan(&sum); err != nil {
+		// COUNT rather than SUM: `project` is TEXT, and a numeric aggregate over it would
+		// succeed by coercing rather than by the column existing.
+		var n2 int64
+		if err := db2.sql.QueryRow(`SELECT COUNT(` + col + `) FROM requests`).Scan(&n2); err != nil {
 			t.Fatalf("%s was not added back: %v", col, err)
 		}
+	}
+	// A pre-migration row reads as an exact figure: that is the claim every such row always made.
+	var est int
+	if err := db2.sql.QueryRow(`SELECT price_estimated FROM requests LIMIT 1`).Scan(&est); err != nil || est != 0 {
+		t.Errorf("a row written before price_estimated reads %d (err %v), want 0", est, err)
+	}
+	// A pre-migration row reads as the default, which for `project` means "unattributed" rather
+	// than any real folder — the distinction the whole dimension depends on.
+	var proj string
+	if err := db2.sql.QueryRow(`SELECT project FROM requests LIMIT 1`).Scan(&proj); err != nil {
+		t.Fatalf("reading project off a pre-migration row: %v", err)
+	}
+	if proj != "" {
+		t.Errorf("a row written before the column reads project=%q; want \"\", which is how an "+
+			"unattributed request is distinguished from one in a folder actually named that", proj)
 	}
 	// And the whole read path works over rows that predate the columns — a query naming a
 	// column the file has just gained is where a migration that "succeeded" still fails.
@@ -364,7 +282,7 @@ func TestSessionRecencySurvivesARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	const now = int64(1_700_000_000_000)
-	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10}
+	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200}
 	rec.Record(e)
 	// Drain, then stop: this is the restart.
 	deadline := time.Now().Add(3 * time.Second)
@@ -439,7 +357,7 @@ func TestARestartDoesNotRecoverRecencyFromAPing(t *testing.T) {
 	}
 	const now = int64(1_700_000_000_000)
 	// A real turn, then a ping 19 minutes later — the shape a keep-alive leaves behind.
-	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10})
+	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200})
 	rec.Record(&Event{TS: now + 1_140_000, TenantID: "t1", SessionID: "t1:live", Model: "m",
 		KeepAlive: true, CacheRead: 50_000, CostUSD: 0.01})
 	deadline := time.Now().Add(3 * time.Second)
@@ -507,7 +425,7 @@ func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 		t.Error("a request with no split reported a tail change")
 	}
 
-	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10,
+	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10, Status: 200,
 		SplitStableTokens: 5654, SplitTailHash: tailB}
 	rec.Record(e)
 	deadline := time.Now().Add(3 * time.Second)

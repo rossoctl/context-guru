@@ -113,8 +113,15 @@ func caCtx(session string) *components.Ctx {
 
 // marker_mode is FULL on purpose: "off" would leave the whole reversibility path — Marshal,
 // PutStash, hashKey, expand.Marker — uncovered, which is where the store-refusal defect lived.
+//
+// trigger.min_request_frac: 0 is deliberate, not a way of dodging the shipped 0.9 default
+// (applyCacheAwareTriggerDefaults) — it ISOLATES the behaviour each test in this file is actually
+// about from the fill-fraction and cache-state conjuncts, which have their own tests
+// (cache_aware_trigger_test.go). caCtx below builds a Ctx with no CtxWindow at all, so leaving the
+// fraction at its default here would make FracResolvable decline every one of these turns before
+// they ever reached the thing under test.
 const caBaseCfg = "keep_last_turns: 2\nmin_tokens: 10\nresummarize_tokens: 6000\n" +
-	"trigger:\n  min_messages: 4\n  min_request_tokens: 10\n"
+	"trigger:\n  min_messages: 4\n  min_request_tokens: 10\n  min_request_frac: 0\n"
 
 // caTurn runs ONE turn and returns the forwarded request.
 func caTurn(t *testing.T, s *CacheAwareSummarizer, c *components.Ctx, msgs []bschemas.ChatMessage) (*bschemas.BifrostChatRequest, *components.Report) {
@@ -533,5 +540,32 @@ func TestCacheAwareWritesNoCheckpointWhenTheStashIsRefused(t *testing.T) {
 		if strings.Contains(schema.MessageText(m), "<<cg:") {
 			t.Error("a marker reached the wire with no stash behind it")
 		}
+	}
+}
+
+// ⭐ THE REGISTRATION-ORDERING BUG, caught live: a turn that reaches the no_stash_room decline
+// still has real commission material (model resolved, instruction built) — a transient capacity
+// problem, not a reason the keep-alive candidate should go unregistered. Before this was fixed,
+// no_stash_room (and max_request_tokens, and an unverified role) returned BEFORE
+// registerKeepAliveCandidate ran, so a session whose EVERY turn happened to trip one of those
+// checks never got a candidate at all — indistinguishable from a session the component had never
+// touched, and silent, because KeepAliveSubstitute's old two-value return could not say why.
+func TestCacheAwareRegistersAKeepAliveCandidateEvenWhenTheStashIsRefused(t *testing.T) {
+	s := newCacheAware(t, caBaseCfg+"instruction_role: user\n")
+	s.modelClient = &capturingModel{out: "<summary>ok</summary>"}
+	refusing := &spyStore{Memory: store.NewMemory(store.Options{MaxEntries: 400})}
+	c := &components.Ctx{Ctx: context.Background(), Session: "ca-refused-ka",
+		Store: refusing, MaxCachedIdx: -1}
+
+	t1, rep := caTurn(t, s, c, caFixture())
+	if len(t1.Input) != len(caFixture()) {
+		t.Fatalf("turn 1 modified the transcript despite the stash refusal")
+	}
+	if rep.Gates["no_stash_room"] == 0 {
+		t.Fatalf("precondition: want no_stash_room (gates: %v)", rep.Gates)
+	}
+	if _, _, _, ok := KeepAliveSubstitute(c.Session); !ok {
+		t.Error("no keep-alive candidate was registered on a turn declined only by a transient " +
+			"stash-capacity check — the candidate should have survived it")
 	}
 }

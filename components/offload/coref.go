@@ -166,6 +166,8 @@ func (cf *Coref) Offload(req *bschemas.BifrostChatRequest, rep *components.Repor
 	// component gated on the window NEVER FIRES on that deployment and looks exactly like a gate that is
 	// working. Inert for a config that sets only min_messages / min_request_tokens.
 	fires := cf.trigger.Fires(req, c)
+	// Billed growth is measured on every turn, whether or not this turn cuts.
+	growth := noteThreadGrowth(c)
 
 	// Index the PRISTINE request, before any replay rewrites a message. Two reasons, and
 	// the second is the load-bearing one: the agent re-sends originals every turn, so the
@@ -243,7 +245,7 @@ func (cf *Coref) Offload(req *bschemas.BifrostChatRequest, rep *components.Repor
 		return keys, nil
 	}
 	if cf.breakEven {
-		if _, _, ok := cf.breakEvenTurns(req, plan, c); !ok {
+		if _, _, ok := cf.breakEvenTurns(req, plan, c, growth, rep); !ok {
 			rep.Gate("break_even")
 			if changed == 0 {
 				rep.Skipped = true
@@ -372,7 +374,7 @@ func (cf *Coref) planCuts(req *bschemas.BifrostChatRequest, rep *components.Repo
 // counted from the shallowest cut index to the CACHED boundary, because content past it
 // was never cached and would be written on this turn regardless; T is how many more
 // turns the session has to collect the saving on, which is the quantity nobody has, so
-// it is estimated from how fast the transcript has been growing.
+// it is estimated from the BILLED growth per turn on this thread (cacheRewriteHorizon).
 //
 // The consequence is counter-intuitive and worth stating: firing at 90% of the window
 // means T is nearly zero, i.e. paying a rewrite for a saving that will be collected
@@ -381,7 +383,7 @@ func (cf *Coref) planCuts(req *bschemas.BifrostChatRequest, rep *components.Repo
 // Returns (needed T, estimated T, whether it clears). Always clears when the context
 // window is unknown — same convention as every fraction-based threshold here: an
 // unresolvable threshold imposes no constraint rather than silently disabling the pass.
-func (cf *Coref) breakEvenTurns(req *bschemas.BifrostChatRequest, plan []plannedCut, c *components.Ctx) (need, have int, ok bool) {
+func (cf *Coref) breakEvenTurns(req *bschemas.BifrostChatRequest, plan []plannedCut, c *components.Ctx, g billedGrowth, rep *components.Report) (need, have int, ok bool) {
 	saved := 0
 	shallowest := len(req.Input)
 	for _, p := range plan {
@@ -393,7 +395,11 @@ func (cf *Coref) breakEvenTurns(req *bschemas.BifrostChatRequest, plan []planned
 	// The arithmetic itself lives in prefix_econ.go, shared with extract_llm's
 	// allow_cached_prefix path so the two components cannot price the same cache-write
 	// differently.
-	return prefixRewritePays(req, saved, shallowest, c)
+	need, have, ok, h := prefixRewritePaysWith(req, saved, shallowest, c, g)
+	if h.Model == horizonModelFallback {
+		rep.Event(horizonFallbackEventPrefix + h.Why)
+	}
+	return need, have, ok
 }
 
 // flattenForCoref projects a request onto the neutral message list internal/coref

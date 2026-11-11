@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -47,16 +48,7 @@ type sweepAskDump struct {
 	Seq     int64  `json:"seq"`
 	Model   string `json:"model"`
 
-	// Econ is the decision that authorised paying for this ask, carried alongside so a judgement can be
-	// read against the economics that bought it rather than in isolation.
-	//
-	// A POINTER, so it is ABSENT rather than zero-valued when there was no econ decision. The pre-expiry
-	// trigger fires on the clock and never evaluates the break-even, so on those asks there is no need,
-	// no have and no premium — and a zero-valued block would read as "the premium was 0", which is a
-	// different and wrong statement. Absent-versus-zero has produced three separate misreadings in this
-	// component's history; this is the cheap place to refuse the ambiguity.
-	Econ *sweepAskDumpEcon `json:"econ,omitempty"`
-	// Trigger names which one fired, so an absent Econ block is explained rather than merely empty.
+	// Trigger names which one fired, (the keep-alive ping).
 	Trigger string `json:"trigger"`
 
 	// AskPrompt is the text appended to the cached prefix — verbatim, as sent. The prompt under
@@ -80,17 +72,6 @@ type sweepAskDump struct {
 	// the component DID, which is not always what the model said — a self-contradictory drop leaves the
 	// output in place, and that divergence is the interesting row.
 	Verdicts []sweepAskDumpVerdict `json:"verdicts"`
-}
-
-type sweepAskDumpEcon struct {
-	NeedTurns int     `json:"need_turns"`
-	HaveTurns int     `json:"have_turns"`
-	Premium   float64 `json:"premium"`
-	Approval  float64 `json:"approval"`
-	AskUSD    float64 `json:"ask_usd"`
-	ReqTokens int     `json:"req_tokens"`
-	Pressure  float64 `json:"pressure"`
-	Offered   int     `json:"offered_tokens"`
 }
 
 type sweepAskDumpCand struct {
@@ -129,6 +110,21 @@ type sweepAskDumpVerdict struct {
 
 var sweepAskDumpSeq atomic.Int64
 
+// askDumpSafe keeps the characters a session id may hold (session.Scoped allows letters, digits and
+// . _ : -) and turns any other one into "_". The session is already checked upstream, so for every
+// real id this returns the id unchanged. It makes the file name safe on its own, without relying on
+// every caller of the component to have gone through session.Scoped.
+func askDumpSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == ':', r == '-':
+			return r
+		}
+		return '_'
+	}, s)
+}
+
 // sweepAskDumpDir returns the configured directory, or "" when dumping is off. Read per call rather
 // than cached, so switching it on does not require a restart on a bench box.
 func sweepAskDumpDir() string { return os.Getenv("CG_SWEEP_ASK_DUMP") }
@@ -145,7 +141,12 @@ func writeSweepAskDump(dir string, d *sweepAskDump) {
 			"dir", dir, "err", err)
 		return
 	}
-	name := fmt.Sprintf("ask-%s-%03d.json", d.Session, d.Seq)
+	name := fmt.Sprintf("ask-%s-%03d.json", askDumpSafe(d.Session), d.Seq)
+	// Defence in depth: the name is one local path element, so it cannot leave dir.
+	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+		slog.Warn("cg.sweep.ask_dump: unsafe file name, skipped", "file", name)
+		return
+	}
 	b, err := json.MarshalIndent(d, "", " ")
 	if err != nil {
 		slog.Warn("cg.sweep.ask_dump: could not encode", "err", err)

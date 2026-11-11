@@ -1,0 +1,51 @@
+{
+ "total_saved_usd": 5.1,
+ "cost_usd": 118.4,
+ "baseline_cost_usd": 123.5,
+ "cache_saved_usd": 350.1,
+ "waterfall": [
+  {
+   "key": "baseline",
+   "delta_usd": 123.5,
+   "total": true
+  },
+  {
+   "key": "compaction",
+   "delta_usd": -4.4
+  },
+  {
+   "key": "keepalive_saved",
+   "delta_usd": -1.0
+  },
+  {
+   "key": "keepalive_ping",
+   "delta_usd": 0.25
+  },
+  {
+   "key": "cg_llm",
+   "delta_usd": 0.35
+  }
+ ],
+ "tokens": {
+  "saved": {
+   "input": 0,
+   "cache_read": 190000,
+   "cache_write_5m": 26000,
+   "cache_write_1h": 0
+  },
+  "caused": {
+   "input": 0,
+   "cache_read": 0,
+   "cache_write_5m": 0,
+   "cache_write_1h": 0
+  }
+ },
+ "tokens_unmeasured_requests": 0,
+ "keepalive_ping_tokens": {
+  "input": 0,
+  "cache_read": 0,
+  "cache_write_5m": 0,
+  "cache_write_1h": 0
+ },
+ "keepalive_ping_output_tokens": 0
+}

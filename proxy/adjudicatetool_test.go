@@ -6,13 +6,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // sweepPipeline is a pipeline that CONTAINS extract_llm_sweep, i.e. one that can actually adjudicate.
@@ -140,12 +144,12 @@ func TestAdjudicateToolAdvertisedOnEveryTurn(t *testing.T) {
 	}
 }
 
-// A bypassed compaction request must not get it, for the same reason expand skips one: bypass promises
-// a byte-identical forward.
-func TestAdjudicateToolNotAdvertisedOnAnAgentCompaction(t *testing.T) {
+// A compaction request is not bypassed, so it carries the tool like every earlier turn of its thread.
+// Dropping it there would change the tools array, which hashes ahead of messages, and miss the cache.
+func TestAdjudicateToolAdvertisedOnAnAgentCompaction(t *testing.T) {
 	got := forwardedBody(t, toolsRequest(t, map[string]any{"role": "user", "content": ccCompactPrompt}))
-	if strings.Contains(string(got), adjudicate.ToolName) {
-		t.Errorf("injected into a bypassed compaction, which must forward byte-identically: %s", got)
+	if !strings.Contains(string(got), adjudicate.ToolName) {
+		t.Errorf("not injected into a compaction request, which is no longer bypassed: %s", got)
 	}
 }
 
@@ -192,17 +196,45 @@ func TestAdjudicateToolNotAdvertisedWhenThePipelineCannotAdjudicate(t *testing.T
 	}
 }
 
-// THE GATE, half two: the provider. prefixAskerFor returns nil for anything but Anthropic and
-// cheapmodel/openai.go has no CompletePrefixed at all, so on the OpenAI route the definition is
-// unreachable by construction — it was pure prefix cost, ~217 tokens per request.
-func TestAdjudicateToolNotAdvertisedOnANonAnthropicRoute(t *testing.T) {
-	got := forwardedOn(t, "/openai/v1/chat/completions", sweepPipeline,
+// THE GATE, half two: the provider. Anthropic, Responses and Chat Completions have a prefix asker
+// and get the tool; the tests below cover Chat.
+// Chat Completions (#1030): a sweep pipeline appends exactly the adjudicate tool, last. Nothing else
+// in the request moves.
+func TestAdjudicateToolAdvertisedOnChatCompletionsWithSweep(t *testing.T) {
+	req := toolsRequestOpenAI(t, map[string]any{"role": "user", "content": "go"})
+	got := forwardedOn(t, "/openai/v1/chat/completions", sweepPipeline, req)
+	if len(got) == 0 {
+		t.Fatal("nothing reached upstream")
+	}
+	tools := gjson.GetBytes(got, "tools").Array()
+	n := len(tools)
+	if n < 2 || tools[n-1].Get("function.name").String() != adjudicate.ToolName ||
+		tools[0].Get("function.name").String() != "read_file" {
+		t.Fatalf("tools are not [client tool, ..., adjudicate]: %s", gjson.GetBytes(got, "tools").Raw)
+	}
+	// Against the no-sweep request the diff is two tools: expand (already injected on a sweep
+	// pipeline before #1030) and the adjudicate tool. Strip both and the bytes match.
+	ctrl := forwardedOn(t, "/openai/v1/chat/completions", "pipeline: [format]\n", req)
+	stripped, _ := sjson.DeleteBytes(got, "tools."+strconv.Itoa(n-1))
+	stripped, _ = sjson.DeleteBytes(stripped, "tools."+strconv.Itoa(n-2))
+	if n != 3 || string(stripped) != string(ctrl) {
+		t.Errorf("more than the tool changed:\n got %s\nctrl %s", stripped, ctrl)
+	}
+	if !bytes.Contains(got, adjudicate.ToolDefRaw(schema.WireOpenAI)) {
+		t.Errorf("the tool is not the standard Chat definition")
+	}
+}
+
+// Chat Completions without a sweep in the pipeline: the request is byte-identical to what the
+// client sent (apart from the model rewrite the harness does not make), so `off` stays the control arm.
+func TestAdjudicateToolNotAdvertisedOnChatCompletionsWithoutSweep(t *testing.T) {
+	got := forwardedOn(t, "/openai/v1/chat/completions", "pipeline: []\n",
 		toolsRequestOpenAI(t, map[string]any{"role": "user", "content": "go"}))
 	if len(got) == 0 {
 		t.Fatal("nothing reached upstream")
 	}
-	if strings.Contains(string(got), adjudicate.ToolName) {
-		t.Errorf("advertised on a route that can never read it: %s", got)
+	if strings.Contains(string(got), adjudicate.ToolName) || gjson.GetBytes(got, "tools.#").Int() != 1 {
+		t.Errorf("tool added without a sweep: %s", got)
 	}
 }
 
@@ -423,5 +455,76 @@ func TestAdjudicateStrayCallDoesNotReachTheClientOnTheSSEPath(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "done") {
 		t.Errorf("the client did not receive the finished turn: %s", got)
+	}
+}
+
+// #174: the co-call deferral above leaks the adjudication tool_use on purpose, and that leak
+// used to be counted as an EXPAND leak — sse_expand_after_stream took every proxy tool_use the
+// peek handed back, because pass reported only a boolean `found`. pass reports the NAMES now,
+// so the leak lands in its own counter and the expand bucket stays at zero. The pair is what
+// the alert candidate notExportedWhy describes would read, and it cannot say which tool leaked
+// while the two share one bucket.
+func TestAnAdjudicateLeakOnTheSSEPathIsCountedAsItself(t *testing.T) {
+	var rounds atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		rounds.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// One assistant turn, co-called: the CLIENT's tool first, then ours.
+		for _, ev := range []string{
+			`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","model":"claude","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"cli1","name":"read_file","input":{"path":"a.go"}}}`,
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"stray1","name":"` + adjudicate.ToolName + `","input":{"verdicts":[]}}}`,
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}`,
+			`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}`,
+			`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+		} {
+			_, _ = w.Write([]byte(ev + "\n\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+	h, _ := buildHandler(t, sweepPipeline, upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		bytes.NewReader(streamingToolsRequest(t, map[string]any{"role": "user", "content": "go"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// PRECONDITION: exactly one upstream round and the leak happened — the deferral did not
+	// turn into an in-band answer, and the client holds the stray. Without these, the counter
+	// assertions below would pass on a turn that never leaked anything.
+	if rounds := rounds.Load(); rounds != 1 {
+		t.Fatalf("expected the loop to bail on otherTools after ONE round, got %d — the co-call "+
+			"path no longer defers, so this test's premise is gone: %s", rounds, out)
+	}
+	if !strings.Contains(string(out), adjudicate.ToolName) {
+		t.Fatalf("the stray did not reach the client, so there is no leak to count: %s", out)
+	}
+
+	var snap metrics.Snapshot
+	stx, err := http.Get(srv.URL + "/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(stx.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	stx.Body.Close()
+	if snap.SSEAdjudicateAfterStream != 1 {
+		t.Fatalf("the leaked adjudication tool_use was not counted as itself: "+
+			"sse_adjudicate_after_stream=%d, want 1 (%+v)", snap.SSEAdjudicateAfterStream, snap)
+	}
+	if snap.SSEExpandAfterStream != 0 {
+		t.Fatalf("the adjudicate leak was counted as an expand leak: sse_expand_after_stream=%d, "+
+			"want 0 — the split is the point of #174", snap.SSEExpandAfterStream)
 	}
 }

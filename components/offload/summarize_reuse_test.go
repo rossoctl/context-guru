@@ -239,8 +239,9 @@ func TestEveryFreshPathDeclineIsLabelled(t *testing.T) {
 		if !labelled {
 			for j := i; j >= i-30 && j > start; j-- {
 				// The gated-or-no-model fall-through: gates are below_request_trigger,
-				// window_not_exact, cache_state_declined_* and no_model, all raised above.
-				if strings.Contains(lines[j], "if !fires || model == nil {") {
+				// window_not_exact, cache_state_declined_*, no_model and side_request_read_only,
+				// all raised above.
+				if strings.Contains(lines[j], "if !fires || model == nil || side {") {
 					labelled = true
 					break
 				}

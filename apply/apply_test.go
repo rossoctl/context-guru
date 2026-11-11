@@ -275,6 +275,23 @@ func TestSummarizeCountChangeLossless(t *testing.T) {
 	}
 }
 
+func TestSummarizeOneMessageSpanStillRebuildsRole(t *testing.T) {
+	cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_first: 1, keep_last: 1, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n")
+	p, _ := cfg.Build(nil)
+	st := store.NewMemory(store.Options{})
+	body := []byte(`{"model":"gpt-x","messages":[{"role":"system","content":"stable"},{"role":"assistant","content":"` + strings.Repeat("old answer ", 50) + `"},{"role":"user","content":"latest question"}]}`)
+	models := components.ModelSpec{Incoming: stubModel{resp: "earlier facts"}}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("summary did not finish")
+	}
+	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
+	if !changed || gjson.GetBytes(out, "messages.1.role").String() != "user" ||
+		!strings.Contains(gjson.GetBytes(out, "messages.1.content").String(), "History Summary") {
+		t.Fatalf("one-message replacement kept the assistant role: %s", out)
+	}
+}
+
 func TestNoMessagesForwardsUnchanged(t *testing.T) {
 	cfg := pipe(t, "pipeline: [dedup]\n")
 	p, _ := cfg.Build(nil)

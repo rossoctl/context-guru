@@ -13,9 +13,23 @@ requirements) that the deterministic components in
 
 **Kind:** Offload. **Reversible:** yes (`marker_mode: full`, the default). **In presets:** `housellm`.
 
-On a turn whose prompt cache has expired, this component asks a cheap model — a batch of tool
-outputs at a time — which of them the agent still needs, and **removes** the ones it does not,
-leaving a short shape descriptor plus a resolvable `<<cg:HASH>>` marker. It never rewrites anything.
+When a thread goes idle, this component asks the request's own model — over the conversation that
+model has already cached, a batch of tool outputs at a time — which of them are spent. The question is
+sent **in place of the keep-alive ping**, and the answer is **held**. On the next request that arrives
+after the cache has expired, the held outputs are removed, leaving a short shape descriptor plus a
+resolvable `<<cg:HASH>>` marker. It never rewrites anything.
+
+> **It is on in `xhigh`** (#404). The sweep asks at the ping and applies on the next cold request
+> whenever it is enabled. `shadow: true` still turns it into a measurement that applies nothing.
+
+> **Which ping (#776).** After a turn that ends at a **tool_result**, the question may take a planned
+> ping, as before: it renews the turn's cache entry (#777). After a turn that ends at a **text** turn,
+> it cannot renew the entry, so it never takes a planned ping. Every ping the strategy plans goes out
+> plain, and the question goes out once as an extra request at the slot after the last planned ping,
+> 30 seconds before the hold ends. No ping follows it. A user back inside the strategy's warm period is
+> covered exactly as without the sweep. `/stats` counts it as `keepalive_sweep_extra_asked`. The
+> summarizer's keep-alive substitute follows the same rule; see docs/design.md, "Keep-alive: the cache
+> strategy comes first".
 
 ### Why it is separate from `extract_llm`
 
@@ -171,33 +185,81 @@ other `tool_use` only the client can execute, so it hands that round over whole 
 `adjudicate.AnswerStrayCalls` repairs it on the next request: the agent pays one turn, the session is
 fine. `/stats` publishes `adjudicate_stray` either way — measured 0 across all three passes of arm C.
 
-### The trigger: pre-expiry, not cold
+### The trigger: the keep-alive ping
 
 The two halves of this component want **opposite** cache states:
 
 - the **ask** needs a WARM cache — it reads an entry that must still exist, or the call pays fresh for
   the whole transcript;
-- the **removal** wants a COLD cache — rewriting deep history invalidates a live prefix and forces a
-  cache-write of the whole suffix at 1.25x fresh.
+- the **removal** wants a COLD cache — rewriting deep history on a live prefix forces a cache-write of
+  the whole suffix at 1.25x fresh, and a warm removal almost never repays it (#491: 3.6% of 1,144 warm
+  moments paid back, about −$900/week).
 
-Both are cheap in the window where the entry still exists but has little life left. The sweep therefore
-fires when `0 < remaining <= pre_expiry_seconds`, where `remaining` is the cache's believed lifetime
-minus this session's idle time.
+So the two halves happen at different moments:
 
-**The TTL is derived, never assumed.** It is the same figure the cold decision uses, read out of the
-request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour, widened to the
-longest lifetime this prefix has ever asked for. Unknown does not fire — a window computed from a
-guessed TTL would invalidate live prefixes on exactly the deployments whose TTL could not be read.
+1. **Ask at the keep-alive ping, in place of the ping.** The ping already reads the cached prefix to
+   refresh it; the question is the same read plus an answer, so the answer is the only extra cost. There
+   is no timer of its own. No keep-alive means no question, and a prompt under the keep-alive floor
+   (80k tokens, or 20k except for a main thread that waits for a person or for an unknown cause; #444, #858) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
+   it has material.
+2. **Ask whenever there is at least one candidate.** No economic gate and no minimum of ten
+   (`min_inventory` defaults to 1).
+3. **Hold the answer**, per thread, in the store (`cg:swh:` namespace, pinned). While the cache is warm a
+   held answer changes **no request**. Only `extract_llm` writes `cg:res:` now; the sweep keeps its own
+   records (`cg:swd:`), so nothing replays a verdict before a cold request applies it.
+4. **Recheck before use.** For each judged output the answer keeps its `tool_use_id` and a content hash of
+   the message as the agent sent it. A verdict is dropped when the conversation is shorter than when it
+   was judged (`conversation_shorter`), the output is gone (`output_gone`) or its bytes changed
+   (`content_changed`), a later turn referenced it (`referenced_later`, from the co-reference index), or
+   the agent expanded it (`expanded`).
+5. **Apply on the next cold request** of the thread. The valid drops are replaced by a shape descriptor and
+   a `<<cg:HASH>>` marker, and the original is stashed, so `expand` returns it byte for byte. Each drop
+   writes a record, and every later request of the thread **replays** the same bytes, so the prefix the
+   cold request wrote stays byte-stable. A warm request with an unchanged conversation never changes.
+6. **A changed prefix** (a rewind, an edited turn, a fork) is cold from the change point on. Only the held
+   drops **after** the first changed message are applied; the ones before it stay held. They are counted
+   apart (`sweep_applied_changed_prefix`).
+7. **Fail open.** A store that cannot hold an original refuses that drop and leaves the output in full. A
+   panic anywhere in the apply restores every message it touched, writes no record, and forwards the
+   request unchanged (`sweep_apply_panic`).
 
-**The window's WIDTH is the one unmeasured number in the design.** It defaults to one minute, which is
-the codebase's own clock-uncertainty margin for cache expiry. Wider fires more often and invalidates
-more remaining TTL; narrower fires rarely. Nothing measures either side.
+The old time window (`pre_expiry_seconds`: ask when `0 < remaining <= window`) is **removed** and the key
+is ignored with a warning. It fired on 7 of about 4,170 requests, and when it fired the cache was still
+alive: the removal forced a rewrite worth $0.57 and $0.45 against savings of cents.
 
-#### The second trigger, and what it has to pay for
+**Models where the question breaks the cache (#422) get a plain ping.** On Haiku 4.5 and the older Sonnet
+and Opus models, which keep only the last turn's thinking, the question strips earlier thinking blocks from
+the cached prefix. When the conversation carries one, the keeper sends an ordinary ping and counts
+`sweep_model_declined`.
 
-`econ_trigger` fires on **mass** rather than the clock, which is how the sweep reaches a session whose
-cache keeps being refreshed — the long agent run with the most to save, and the one the pre-expiry
-window can never reach. It pays a real cache-write to do it, so it has to clear a break-even first.
+#### Shadow mode
+
+`shadow: true` (off by default, in no preset) asks, holds and rechecks exactly as above, and **applies
+nothing, on any request**. On the first request after the ping it reports the ask; on the first **cold** request it runs
+the recheck and reports what it would drop:
+
+| event | meaning |
+|---|---|
+| `sweep_shadow_asked` / `sweep_shadow_proposed` / `sweep_shadow_proposed_tokens` | candidates asked about; drops the model voted for; tokens those drops would remove |
+| `sweep_shadow_valid` / `sweep_shadow_valid_tokens` | proposed drops still valid at the cold request |
+| `sweep_shadow_dropped_<reason>` | proposed drops the recheck turned down, by reason (above) |
+| `sweep_shadow_wait_<cause>` | the thread's wait cause (#453) when it was asked: `human`, `own_tool`, `background`, `teammate`, `unknown`. (`retry` cannot occur here: a failed response never establishes a keeper entry.) Stored, never used to decide. |
+
+They land in `request_components.events`, and a `cg.sweep.shadow` log line carries the same numbers.
+
+#### The economic trigger (REMOVED in #404; kept here as the record behind #491)
+
+> `econ_trigger`, `econ_ignore_ask_cost`, `reward_premium`, `min_pressure` and `block_fallback` are gone, and
+> writing one is ignored: the config still loads, one warning names the key and the reason, and
+> `SweepPingCounters().RetiredKeys` counts it. Every answer is now held for a cold request, so an
+> in-request ask would only cost money, and the ping-time question never falls back to a full-price
+> completion. The warm path is #491 and will design its own gate. The rest of this section describes
+> what the removed trigger did.
+
+`econ_trigger` was the warm-path experiment (#491): it asked **inside the request** when the economics
+cleared, even while the cache was live, so it paid a real cache-write and had to clear a break-even
+first. **No in-request ask remains.** A request only replays frozen decisions; the question is asked at
+the keep-alive ping.
 
 That break-even has three terms, and the third one is easy to forget because it is not a property of the
 transcript:
@@ -220,9 +282,6 @@ workload's average wearing a threshold's authority. Two guards keep a self-refer
 strangling itself — a short warm-up, because a single ask can only ever report 0% or 100% of its
 inventory, and a floor under the approval rate, without which one unlucky run of empty asks would
 decline every future one and destroy the evidence that could revise the estimate.
-
-Read `prefix_rewrite_repaid` against `econ_ask_not_repaid` and `prefix_rewrite_not_repaid`: the two
-declines name **different** costs and are raised exclusively, so they sum rather than overlap.
 
 #### The terms, and what the component knows about itself
 
@@ -417,20 +476,23 @@ optimises would invalidate those measurements rather than improve them.
 
 `PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
 **always counted** (`sweep_prefix_cache_read_ZERO`) — a silent miss looks identical to a working call
-except on the bill.
+except on the bill. A read **below the last real turn's read** is counted too
+(`sweep_prefix_cache_read_below_turn`): the question lost part of a prefix that turn could still read,
+as a model switch does. The owner chose the read rule only (2026-10-26), so a write alone is
+not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `sweep_prefix_cache_write`,
+exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
+question writes some tail; the read, not the write alone, shows the prefix held (#721).
 
-By default it then **falls back** to a self-contained completion carrying a bounded sample of each
-output. That keeps the component working on a session's first turn and whenever an entry has gone;
-treating "no prefix" as "no verdicts" would disable it there and read as a model that declined to act.
-The fallback is the expensive path by construction — it pays fresh for content the cached path reads for
-a tenth of the price, and shows a truncated view of each output — so it is counted every time
-(`sweep_fallback_used`). It still asks the **request's** model: the reason that model was chosen is
-faithful quoting, not caching.
+The question leaves every byte of the turn it reads as sent, the last message's breakpoint included,
+and copies that breakpoint onto its short "Understood." bridge only while the request stays at or under
+the provider's 4 breakpoints (#776). The breakpoint names the turn's cache entry. A question that moved it
+away refreshed only its own new entry, so the plain ping after it found the turn's entry expired and wrote
+the whole conversation again.
 
-`block_fallback: true` declines instead, forgoing the yield rather than paying for it.
-
-Note what neither mode can undo: the fresh read that already happened on the call that missed. The
-counter is what tells an operator the window is mistimed.
+It then **declines**: there is no fallback (#404). A question that reads nothing, or that writes the
+agent's prefix again, is not acted on and the ordinary ping goes out. A failed prefix ask is logged at
+WARN with the session and the gate it raised, so the reason is never visible only inside a rejection
+string.
 
 ### The model is not a free choice here
 
@@ -473,26 +535,293 @@ net; the model does not get to hear about it.
 | key | default | what it does |
 |---|---|---|
 | `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
-| `reward_premium` | 1 | How much a removed token is worth relative to the cache read it saves — the only term in the break-even that is a belief rather than a measurement. 1 is the unadjusted arithmetic. Values below 1 are refused (they assert a removal is worth less than the read it saves, tightening a gate that is already the restrictive term); above 100 is refused as a typo. See [What the break-even cannot price](#what-the-break-even-cannot-price) for the 28:1 measurement behind any value above 1, and read `premium` on `cg.sweep.econ` to re-price a run's declines without re-running it. |
-| `min_inventory` | 10 | Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it **compares**: shown one output it scored 6% live-kept, ~15 together reached 58% at the lowest cost per output. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. |
-| `pre_expiry_seconds` | 60 | Width of the pre-expiry window. The component's one unmeasured number. |
-| `evidence` | `false` | Add the co-reference index's record to each inventory line. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
-| `econ_trigger` | `false` | Add the **economic** trigger alongside the pre-expiry window, so a live cached prefix can be swept when the saving outruns the cache-write it forces. The two are OR'd and neither contains the other: pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed — the long run with the most to save — while econ fires on mass and cannot know how much time is left. |
-| `econ_ignore_ask_cost` | `false` | Restore the econ trigger's original break-even, which charged the cache-write and **not** the adjudication that reads it. Left out, that authorised 9 asks in 9 on iteration 025's pre-flight, six of which removed nothing: $0.4339 spent against $0.0017 of value. Set true only to attribute a run's difference to the change. |
-| `block_fallback` | `false` | Decline instead of falling back to a content-carrying completion when the cache read did not happen. |
+| `min_inventory` | 1 | Fewest candidates worth asking about; below it the sweep does not ask. It was 10, because the model's judgement is a function of how many candidates it **compares** (shown one output it scored 6% live-kept, ~15 together reached 58%). The question now replaces a ping, so a small inventory costs a small answer and a held answer is rechecked before use; `shadow` measures the real rates. Raise it to bring the old floor back. |
+| `max_ask_batches` | 4 | How many batches of 12 outputs one sweep asks (at most 8). A list longer than 12 is split into balanced batches asked one after the other, each one more question and one more answer; the smallest outputs beyond `12 x max_ask_batches` are not asked (`sweep_over_ask_cap`). See [Batches](#batches-how-a-long-list-of-outputs-is-asked-max_ask_batches). |
+| `shadow` | `false` | Ask, hold and recheck, report what *would* be dropped, change nothing. See [Shadow mode](#shadow-mode). Not in any preset. |
+| `evidence` | `true` | Add the co-reference index's record to each inventory line (about 500 input tokens per question, under $0.003). Write `false` for the old prompt. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
 | `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
 
 Every other key is a **config error naming its reason**, not an ignored one. `strategy`, `rewrite`,
 `aggressiveness` and `max_chars` because an adjudicator selects no strategy and produces no rewritten
 text — a silently accepted `rewrite: false` would read as "verified deletion-only is on" when nothing is
 being rewritten. `model` because only the request's model has the cache (above). `context` and
-`context_messages` because the conversation *is* the cached prefix. `max_calls` because one ask covers
-every candidate. `economic_gate` because it prices a per-output cheap-model call, which this is not.
+`context_messages` because the conversation *is* the cached prefix. `max_calls` because a list is asked
+in batches of 12, up to `max_ask_batches`, and not bounded by a call count. `economic_gate` because it prices a per-output cheap-model call, which this is not.
+
+### Batches: how a long list of outputs is asked (`max_ask_batches`)
+
+One question used to keep the 12 largest outputs and drop the rest (`sweep_over_ask_cap`, #132). On a long session that
+left most old outputs unasked. Now a list longer than 12 is **split into balanced batches** and asked **in sequence**:
+
+- The batch size is 12. `k = ceil(n / 12)` batches. 16 gives 8+8, 23 gives 12+11. The largest-first order is dealt
+  round-robin, so each batch mixes sizes. A list of 12 or fewer is **one question, as before**.
+- `max_ask_batches` (default 4, at most 8) bounds the sweep. Outputs beyond `12 x max_ask_batches` (the smallest) are not
+  asked and are counted as `sweep_over_ask_cap`.
+- The questions run over the same cached prefix, under the thread's one claim and one question slot, so concurrency does
+  not change. Each batch is one more question, so it costs one more answer.
+- Each answer is judged on its own, and by the shared cache-read rule (`prefixAskCacheOK`) on its own.
+- **A batch that fails fails open.** An error, a refused cache read, a truncated reply or an unparseable one: its outputs
+  are left out of the held answer (they were never judged), so the next question may offer them again. The other batches
+  still count. Counted as `sweep_batch_failed`, with the reason in `sweep_batch_failed_by`.
+- All verdicts are merged into **one held answer**, keyed by tool-use id, with no output judged twice. The next cold
+  request does **one recheck and one cut**.
+- The answer cost is the sum of every batch's usage. `sweep_ask_batches` counts the questions asked.
+- **The keep-alive cost ceiling prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
+  If the ceiling admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
+  (`sweep_batches_lowered`, `sweep_over_ask_cap`). If it admits none, the ordinary ping goes out.
+- **A batch never starts after the sweep's deadline.** The keeper's timeout (300 s) bounds the whole sweep and each
+  question has its own 90 s bound, so `k` slow questions could add up past it. The rest are skipped
+  (`sweep_batch_skipped`) and the ones already answered are kept.
+- **A panic in one batch is one failed batch** (`batch_panic`): the answers before it are kept. The thread stays
+  marked asked (the batch's model call may already have been paid for), so the next ping is plain and a repeating
+  panic does not pay again on every ping.
+- The ceiling's answer guess is 4,000 output tokens per question. A real 12-verdict reply is about 7,000, so the ceiling
+  **under-prices one answer by about 1.8x** (and the number is left as it was). Read the per-ping ceiling with that
+  tolerance, and remember it is now multiplied by the number of batches.
+- The keeper's second-line stop (a question that wrote more than it read) judges the usage **summed** over the batches.
+  A write-heavy batch can be masked by another batch's read. The per-batch cache rule still gates each batch.
+
+The reply budget stays at the flat 16,000 tokens per batch. 12 is the batch size because one reply carries a verdict (with a
+verbatim quote) for every output in it, and a reply cut off mid-array parses as nothing. A cut reply now loses its batch
+and not the whole sweep.
+
+### The warm path (#491, off by default, in no preset)
+
+The cold apply never fires for a session that never goes idle. `warm: true` adds a second way, behind an
+economic gate.
+
+1. **Trigger, a rule.** On a warm request of a thread, at most once every `warm_every_n` requests
+   (default 30). Only when old outputs could pay back a rewrite even if every one were dropped: each at
+   least `min_tokens` (1,000) and at least `warm_min_age_turns` (default 30) model turns old. The removable mass must also be at least `warm_min_mass_frac` (default 0.20) of the conversation. The expected turns at the trigger are the warm turns the thread has run so far, capped. Every refusal is counted by reason (`keepalive.sweep_warm.trigger_refusals`). Each applied sweep leaves a record in `keepalive.sweep_warm.recent_sweeps`: tokens removed, conversation before and after, the gate's numbers and the net it expected.
+2. **What to drop, the model.** The same question as at the ping, plus a file clause for a file read:
+   `file_read=yes later_edits=N later_rereads=N`. It comes from tool names and tool input paths only. No
+   path and no output text reaches the question.
+3. **In the background.** The question runs after the request is forwarded, under the thread's ping claim
+   and the shared question slots. A thread never has two questions at once. It reads the ping registry's
+   existing copy of the conversation and keeps none of its own, so it asks only on a thread the keep-alive
+   can ping (counted as `not_registered` otherwise).
+   **A list longer than 12 is asked in balanced batches, by the same function the cold sweep uses**
+   (see [Batches](#batches-how-a-long-list-of-outputs-is-asked-max_ask_batches)), up to `max_ask_batches`.
+   The answers merge into ONE waiting answer, so the gate below decides once over all of them. The same
+   rules apply as at the ping: each batch is judged on its own by the shared cache-read rule, a failed
+   batch is left out, a panic keeps the thread marked asked, and the outer bound is the keeper's 300 s.
+4. **Held in memory only.** The answer waits in a bounded per-thread map (256 threads, 30 minutes). It is
+   never written to the Store. A restart loses it, which drops nothing.
+5. **On a later warm request:** recheck as the cold apply does, then the gate, then apply. Apply only if
+   `removed x read rate x expected warm turns` is more than `rewritten x (write rate - read rate)`. The
+   rewrite is what comes after the last cache entry the provider can still reach. It looks back about 20
+   content blocks from the previous request's last breakpoint. A drop farther back than that reaches only
+   the fixed system prompt and tools, so the rewrite is the **whole conversation**. A drop inside it
+   rewrites only the tail from the drop. In 6,968 recorded Opus calls every large cache drop read back
+   exactly the fixed size, so a deep drop costs about ten times what it removes. Sizes
+   come from the provider's billed count of the previous turn: the rewrite scales by billed over local
+   size of the whole prompt, the removed content by the family factor (never more than that ratio). A
+   missing billed size refuses. Expected warm turns are the thread's own warm run, capped at
+   `warm_max_turns` (default 60, twice the question interval), times a wait-cause weight read off the
+   request (last message a tool result 1.0, a person's message 0.5, other 0.75).
+   **A refusal keeps the drops that passed the recheck, in memory only.** The next question's answer is
+   merged with them by tool-use id. Each output counts once, and the NEWER verdict wins, a newer keep
+   included. Every apply attempt rechecks the whole merged set, and a carried drop that fails the recheck
+   leaves for good. The gate decides once on the surviving set. Accept means one cut, then the set is
+   cleared. Refuse keeps the survivors. A carried set that was already refused is not retried on each warm
+   request: the trigger asks a new question, and the gate runs when its answer arrives. The set is bounded:
+   30 minutes from the OLDEST question that still contributes a verdict (a refusal does not make it
+   younger), at most 256 carried drops (the oldest go first), and a conversation that gets shorter clears
+   it. The trigger does not count carried drops. It prices every candidate as dropped, as before.
+   A carried drop survives only if the next question does not cover its output, or also drops it. A question
+   that covers it and keeps it overrides it.
+6. **Same apply as the cold path.** Same markers, stash, drop records and replay. A cold request, or a
+   changed prefix, that meets a waiting answer applies it as the cold apply does, with no gate.
+
+**Every decision is recorded, accepted or refused.** `keepalive.sweep_warm.recent_decisions` (last 50, thread as a hash
+label) lists each trigger and apply-gate decision with D (tokens removed, local and billed), R (tokens rewritten, local
+and billed), N (expected warm turns), the wait-cause weight, the full and content ratios, deep or not, the gate's saving
+and rewrite in USD, and the reason. Each decision also writes one INFO line (`cg.sweep.warm_decision`) with the same
+numbers and no content. A refused apply books the same numbers as events on the row
+(`sweep_warm_refused_removed_tokens`, `_rewrite_tokens`, `_expected_turns`, `_deep`).
+
+`warm_gate_price_model` (unset, in no preset) is a **diagnostic**: the gate prices its saving and rewrite with that
+model's rates (for example `claude-opus-5`), for a test run on a model the price table prices at $0. Only the gate's
+decision uses it. The dashboard and `/stats` price the real model. It is logged once at start and shown as
+`keepalive.sweep_warm.gate_price_model`, so such a run is never mistaken for a normal one. A model the rate card
+does not know falls back to the built-in rates and is counted (`price_model_unknown`).
+
+A decision also records `proposed`, the recheck's losses by reason (`dropped`), and the carried and new
+counts and tokens. The recheck's reasons are booked BEFORE the gate, as `sweep_apply_dropped_<reason>`, so
+a refusal shows them too. A held answer judged on a longer conversation than the request has is dropped
+and counted as `held_shrunk` (decision reason `conversation_shrunk`). An empty proposal is
+`no_drop_proposed`. `no_valid_drop` means the recheck threw out a whole proposal.
+Carried-set counters in `keepalive.sweep_warm`: `carried_merged`, `carried_overridden`, `carried_refused`,
+`carried_expired` (a carried set that aged out; an answer never refused that went stale is `held_expired`),
+`carried_capped` (carried drops the 256 cap evicted); event `sweep_warm_carried_drops`.
+
+Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_accept`,
+`sweep_warm_gate_refuse_<reason>`; in `/stats` under `keepalive.sweep_drops` (`applied_warm`,
+`false_drop_rate_warm`, `false_drop_rate_cold`) and `keepalive.sweep_warm` (trigger, question and gate
+counts with refusal reasons).
+
+### Sweep v3: rules and one big cut (`selector`, off by default)
+
+Sweep v3 is a **setting** of the warm path. It is not a new component. It needs `warm: true`. It is off unless you write one
+of its settings. With none written, the warm path runs exactly as described above.
+
+A cut is one big removal, made late, when the conversation is near the point where it would be compacted anyway.
+
+1. **Sweet spot.** The sweep tries a cut when `P >= fill(C) x C`.
+   - `P` is the billed prompt of this thread. `C` is the **effective context**: where the client compacts, not the window.
+     `C` is the summarizer's fraction of that point when a summarizer is in the pipeline (`c_source: cutfrac`), else the
+     compaction point when it is known (`compaction`), else the window (`window`). `C` needs an exact window.
+   - A compaction point comes from the operator (`compaction_point` in the `MODEL_PRICES` table), or from the built-in
+     table (measured or assumed). A model with no entry has none: the built-in table calls it `window_fallback`, and v3
+     treats that as the window.
+   - Claude Code compacts a GLM near 167k billed of a 200k window. Without the field the sweet spot is 0.70 x 200k = 140k,
+     which is a share of the window and not of where the client acts. State it and the sweet spot is 0.70 x 167k = 117k:
+     `- {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}`.
+     `compaction_point` is in billed tokens. It does not change `window`.
+   - The summarizer and the dashboard (the compact-episode span, the summarize ledger and the replay cap) read the same figure, so an operator value applies to them too. Nothing changes
+     unless the field is set.
+   - `fill(C)` is `fill_small` (0.70, a general rule of 70% of the effective context) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
+2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
+   A refused cut does not start this wait. The sweep asks the judge no question during the wait.
+3. **Meaningful drop.** `D >= min_drop_frac x P` (default 0.15). `D` is the rule drops and the judge drops that survive the recheck.
+4. **Payback.** The warm gate above. The saving is priced on **N only**: the turns until the compaction would have come
+   without the cut, `N = (C - P) / g`, where `g` is the billed growth per turn. It is capped by `warm_max_turns` and
+   weighted as before. The rule is: count until the compaction would have occurred, given the context growth. If the session
+   ends before N, the saving is not collected. The reason is that a cut only **delays** the compaction. Compaction at N
+   removes the dropped outputs anyway, so a saving counted past N would be paid for by a compaction that happens regardless.
+   The gate accepts when `saving > rewrite` (strictly), as #720's does. The decision log also shows `N'`
+   (`turns_after_cut`), the turns counted from the prompt after the cut, `(C - (P - D)) / g`, for reading only: nothing prices
+   on it. N and N' come from one function (`turnsUntilCut`), shared with the co-reference horizon.
+
+   **`compaction_premium_usd` (default 0, an experiment knob).** It exists to find out whether cutting as much as possible
+   improves quality at all, with cost as a constraint and not the goal. When a cut postpones the compaction (N' is more than
+   N, which is any cut that removes something in the `cut` turns model), the gate adds the premium to the saving side and
+   accepts when `saving_to_N + premium > rewrite`. With 0 the gate is the cost gate above: saving to N, no credit. A high
+   value (for example 10) effectively turns the cost gate off in a $0 test, while the Opus-priced cost is still logged
+   (`saving_usd`, `rewrite_usd`). Every apply-stage decision logs `premium_usd` and `passed_on_cost` (true when the saving to
+   N beat the rewrite by itself), so a run shows which cuts needed the premium. `/stats` counts the accepted cuts as
+   `v3.cuts_on_cost` and `v3.cuts_on_premium`. Do not leave a premium set in production.
+
+`selector` picks who chooses the drops:
+
+- `judge` (default): the model, as before. Protected outputs are not offered.
+- `rule`: rules only. **No model call.**
+- `hybrid`: the rules, then the judge on what the rules did not decide. It is **one** cut: nothing is applied while the
+  question is out. If the judge gives no answer, the rules go alone, through the same gates (`hybrid_rules_only`).
+
+The same rules cover the keep-alive ping question and the cold apply. With `selector: rule` the ping stays a plain ping (no
+model call, and no copy of the conversation is kept, so the ping counts as `sweep_no_candidate`; `ping_refused_rule` fires only for a
+candidate left from before a config change). With `judge` or `hybrid` the ping question never offers a protected output, and
+in `hybrid` it does not offer a rule-decided one. A stored answer applied on a cold request skips protected outputs
+(`cold_protected_filtered`), so an answer made before a config change cannot drop them. A cold or changed-prefix apply counts
+as a cut and starts the growth wait.
+
+The rules read tool names, input paths and commands from the request in flight. They store nothing.
+
+- `file_reread`: a file read whose same path was read again later, or edited or written later.
+- `build_rerun`: a build, test or lint run in a shell tool whose same command (white space collapsed) ran again later.
+- `unreferenced` (rule (c), off by default; `rule_unreferenced: true`): a tool output that nothing later references. It is the
+  recheck's `referenced_later` signal, from the same code (`coref.IndexNovel`), run over the whole later conversation: no
+  later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). An output that
+  introduced no identifier is never chosen. `rule_unreferenced_min_age` (default 30) is how many tool calls newer the output
+  must be. Setting `rule_unreferenced` switches v3 on. It needs `selector: rule` or `hybrid`.
+- An output that already has a `<<cg:...>>` marker, or that the agent expanded, is never chosen.
+
+Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), outputs whose call path matches `protect_paths`
+(globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
+expanded in this session.
+
+`not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
+
+**Dry run (`dry_run`, an experiment, off by default).** For a paired test of Context Guru in the path with no cut ever. With
+`dry_run: true` everything runs as a normal v3 run, but no drop is applied on any path: warm, cold (a Store or a memory
+answer), changed-prefix and the v3 cold branch. The gates run and their decision lines are written. Each cut the gate
+accepted is logged as `cg.sweep.dry_run_cut`, with a real cut's fields (`billed_prompt`, `cut_point`, `c_source`,
+`dropped_billed`, `d_share_of_p`, `p_share_of_c`, `rule_d`, `premium_usd`, `passed_on_cost`), and counted in
+`v3.dry_run_cuts` (the drops in them in `v3.dry_run_drops`, the last cuts in `v3.dry_run_recent_cuts`).
+- **No growth wait.** A would-be cut does not start the growth wait. The prompt never shrank, so a wait would make the run
+  ask less often than a run with cuts does before its first cut. The result is that a dry run attempts a cut at every paced
+  request in the sweet spot.
+- **The forwarded request is the request of a run whose sweep drops nothing:** no message changes, nothing is stashed, no
+  marker is made, and no drop record is written (`cg:swd:`, `cg:swx:`).
+- **What Context Guru still adds to the wire in a dry run.** These are not sweep drops and `dry_run` does not touch them:
+  the `context_guru_expand` tool (appended to `tools` when the pipeline can mint a marker and the store persists), the
+  `context_guru_adjudicate` tool (when `extract_llm_sweep` is in the pipeline, on Anthropic and Responses), the
+  cache-breakpoint work of `cachesplit` and `cacheinject` if they are in the pipeline (the split of the volatile system
+  tail, the placement of `cache_control`), the one-hour head TTL if it is switched on, and every other component in the
+  pipeline. The keep-alive pings and the judge's questions are separate requests to the provider; they are not in the
+  forwarded body. A pair test should hold these the same on both arms, or list them as the arm difference.
+
+**Did the agent go back?** With v3 on, the drop record also stores the tool name and a **hash** of the file path or command of the call that produced the output. The path is never stored. On each later request the sweep hashes the path or command of the later tool calls and matches them against those hashes. Each drop is counted once, as `reread_after_drop`, by source and by kind. With `dropped_by_kind` it gives a re-read rate.
+
+The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.
+
+Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
+`dropped_by_kind` (applied v3 drops by the class of the tool: `read`, `edit`, `command`, `other`) and `reread_after_drop` (later tool calls that went back to what a drop removed: the same file read or edited again, or the same command run again; `total`, `by_source` (a rule name or `judge`) and `by_kind`), `expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
+expand rate per rule), `recent_refusals` (the last refusals made before the gate, with D, D/P, P/C, C, `c_source` and D by rule; the gate's own refusals are in the decision log),
+`c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
+`no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
+P as a share of C).
+
+### How many warm turns are left (`warm_expected_turns`)
+
+The warm gate collects its saving over N more warm turns. N comes from one of three models, and the decision log says which
+(`turns_model`), with the raw N before the cap (`turns_raw`), the cut, and the growth per turn:
+
+1. **`expected`** when `warm_expected_turns` is set: N = max(expected - warm turns so far, 0).
+2. **`cut`** otherwise: the session is assumed to run until it is **cut**. The cut is the `cache_aware_summarizer` or
+   `summarize` trigger's fraction of the window when one is in the pipeline (`trigger.min_request_frac`), else the full window.
+   N = (cut - the current billed prompt) / (the average billed growth per turn on this thread). The growth restarts when the
+   billed prompt shrinks (a client compaction, our own sweep, a rewind). Billed sizes only.
+3. **`so_far_fallback`**: the warm turns so far. Used when the growth is unknown or not positive, there is no billed size, the
+   window is only a family guess (the summarizer's own trigger refuses to act on a guessed window too), or the session is
+   already past the cut. `turns_why` says which.
+
+`warm_max_turns` caps N in every model, and the wait-cause weight applies on top.
+
+The `cut` model needs an **exact** context window, as the summarizer's own trigger does. For a model the public map does
+not list (a GLM behind a gateway, a preview id), an agent builder supplies it with a `window:` in the `MODEL_PRICES` table
+(`MODEL_PRICES=<file>`); an operator's table is authoritative, so it counts as exact. See
+[`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml).
 
 ### Counters
 
-`sweep_offered`, `sweep_adjudicated`, `sweep_dropped`, `sweep_kept`,
-`sweep_drop_refused_obligation`, `sweep_quote_fabricated`, `sweep_criterion_missing`.
+At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
+`sweep_model_declined`, `sweep_no_inventory`, `sweep_already_asked`, `sweep_no_candidate`,
+`sweep_hold_no_tool_id`, `sweep_ask_batches`, `sweep_batch_failed` (with `sweep_batch_failed_by`, the reason),
+`sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
+`sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
+candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
+`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
+(`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
+
+In a request: `sweep_applied_cold`, `sweep_applied_changed_prefix`, `sweep_apply_declined`,
+`sweep_apply_panic`, `sweep_apply_dropped_<reason>` (the recheck's reasons), `sweep_false_ref`.
+
+### Is it dropping things the agent needs? (the false-drop rate)
+
+There is no production shadow phase before `xhigh`, so every drop is watched from day one. A drop is
+**false** when a later turn needed it:
+
+- the agent **expanded** the marker (`sweep_expands`, `sweep_expand_tokens`: charged to the sweep and taken
+  off its saving), or
+- a later turn **used something the dropped output introduced**, without expanding it
+  (`sweep_false_ref`, `referenced_later`).
+
+A drop that is both counts once. `false_drops / applied` is the **false-drop rate**, per thread and overall:
+in `/stats` under `keepalive.sweep_drops` (threads under a hash label, never a session id), and on the
+Components tab beside the sweep's row. If it is high, pull the sweep from `xhigh`. Everything behind it is
+ids, hashes and counts. No output text is stored to compute it.
+
+### The money
+
+- **On the cold request** the credit is the removed tokens at the cache-write rate (1.25 x the input price).
+- **On each later request** of the thread it is the removed tokens at the rate that request paid.
+- **The expands of sweep markers come off the credit**, at the write rate.
+- **The answer cost** (thinking tokens included) is booked **once**, on the ping row the question replaced,
+  as the summary's call is. It sits in its own column (`sweep_answer_usd`), beside the credit, and is not
+  taken off the credit a second time: the component's net already carries it as model spend.
 
 The two to **alert** on:
 
@@ -500,74 +829,55 @@ The two to **alert** on:
   reply, just said was still needed. The removal did not happen; that is the invariant. But a
   non-zero rate means the contract is not holding.
 - **`sweep_quote_fabricated`** — the model cited transcript text that is not in the transcript. It is
-  inventing evidence, and this is the only signal that says so.
+  inventing evidence, and this is the only signal that says so. The quote is checked against the body the
+  model READ (the stashed body the question was appended to), not the newest request: a quote from a message
+  newer than that body is real and is not counted. It changes only this counter, never a drop decision.
 
-Diagnostics, all visible at `/stats` under the component and as
+Diagnostics, visible at `/stats` under the component and as
 `cg_component_gate_declines_total{component="extract_llm_sweep",gate="…"}`:
-`sweep_batch_truncated`, `sweep_batch_of_one`, `sweep_kept_whole_batch` (a deliberate keep-all, which
-is **not** a failure), `sweep_unparseable`, `sweep_reply_truncated` (a different fix from
-unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
-`sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`, `sweep_verdict_missing`,
-`sweep_prefix_cache_read_ok`, `sweep_prefix_cache_read_ZERO`, `sweep_prefix_cache_write`, `sweep_fallback_used`,
-`sweep_fallback_blocked`, `sweep_fallback_failed`, `sweep_fallback_no_model`, `sweep_no_asker`,
-`sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
-`sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
-`sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,
-`not_in_pre_expiry_window`, `sweep_inventory_below_min`, `drop_unaffordable_pruned`,
-`prefix_rewrite_not_repaid`, `econ_ask_not_repaid`.
+`sweep_unparseable`, `sweep_reply_truncated` (a different fix from unparseable: raise the budget, not
+the prompt), `sweep_verdict_unusable`, `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`,
+`sweep_verdict_missing`, `sweep_prefix_cache_read_ok`, `sweep_prefix_cache_read_ZERO`,
+`sweep_prefix_cache_write`, `sweep_prefix_cache_read_below_turn`, `sweep_no_asker`, `sweep_no_prefix`, `sweep_stale_prefix`,
+`sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything` (a deliberate keep-all, which is
+**not** a failure) and `sweep_drop_would_not_shrink`.
 
-The last two are raised **exclusively**, and reading them as one number loses the finding:
-`prefix_rewrite_not_repaid` means the cache-write does not earn itself back, `econ_ask_not_repaid` means
-the batch cannot repay the price of *asking* about it. `prefix_rewrite_repaid` is the matching event when
-the trigger does fire — and it says the batch was worth asking about, never that a saving was banked.
+Counted at the ping (keep-alive block of `/stats`): `sweep_concurrency_full` (every question slot was
+busy, so the ping stayed plain), `sweep_ping_panics`, `sweep_model_declined` and
+`sweep_ask_needs_shadow`. `sweep_summary_owned_ping` (the summarizer had a candidate for the thread, so it
+owned the ping, and the sweep did not ask, also when the summary then declined) and
+`sweep_summary_in_flight` (a summary was already running for the thread, so the sweep did not ask) are
+counted there as well, and so is `sweep_ping_thread_busy` (an earlier substitute still held the thread,
+so the ping stayed plain). `sweep_not_registered` is counted at the **request**, not at a ping: the
+keep-alive cannot ping that thread, so the request kept no conversation copy. It is in the same
+`/stats` block.
+
+The removed economic trigger's names (`prefix_rewrite_repaid`, `prefix_rewrite_not_repaid`,
+`econ_ask_not_repaid`) and the fallback's (`sweep_fallback_*`) are no longer produced.
 
 ### Enabling it on real traffic
 
-This component has never been measured on a workload independent of the one its thresholds were tuned
-on. Every corpus behind `min_inventory`, `min_tokens`, `min_later_turns` and the 6%-vs-58% live-kept
-curve is LOCA-derived (see LOCA iteration 028),
-and on LOCA the cache arithmetic came out at 11.0 against a break-even of 11.5 — with `S` and `T` both
-structurally thin there. So the first real deployment is a **measurement**, not a rollout, and it should
-be configured to be readable rather than aggressive.
-
-#### The two keys that turn it on
+The sweep asks at the keep-alive ping and holds the answer. **Until the cold apply exists (PR C of
+#404) it asks only with `shadow: true`**, and the held answer changes no request. Turn shadow on for a
+subset of sessions first, with keep-alive on:
 
 ```yaml
-extract_llm_sweep:
-  econ_trigger: true    # without this it will almost never fire under load
-  evidence: true        # co-reference index into the inventory line
+components:
+  extract_llm_sweep:
+    shadow: true        # ask at the ping, hold, recheck, report what it WOULD drop
+    evidence: true      # the default
 ```
 
-`econ_trigger` is not optional in practice. The pre-expiry trigger fires on an idle clock, and any
-concurrently-served deployment keeps refreshing the cached prefix — `not_in_pre_expiry_window` was
-286/286 requests on LOCA, 378/378 on iteration 024 and 18/18 on iteration 022. Ship without
-`econ_trigger` and you will measure a component that never ran.
-
-Leave `reward_premium` at its default of 1 for a first deployment. Above 1 it asserts a removed token is
-worth more than the cache read it saves, which is a belief about headroom value — and the one instrument
-that could have priced it (the harness's own context clearing) has never fired, so nothing has tested it.
-
-#### Whether it *can* pay, before asking whether it did
-
-The gate is `S·T > 11.5·W`: mass removed, times turns remaining, against the cache-write it forces. Three
-properties of the traffic decide it, and all three are readable before enabling anything:
-
-| property | why it matters | what to look for |
-|---|---|---|
-| **candidates per request** | the model's judgement is a function of how many it compares; below `min_inventory` the component declines without asking | ≥10 settled, undecided tool outputs over `min_tokens`. LOCA supplied **1.5** and asked on 5% of requests |
-| **session length** | `T` is turns *remaining*; a short session has nothing for a removal to pay back over | long-running sessions. LOCA's 10–30 step tasks are close to the worst case |
-| **output size** | the rewrite cost is set by the **shallowest** removal, so mass per invalidation is what clears the break-even | large tool results, ideally several at similar depth. `min_tokens: 100` excluded 1,008 candidate-instances on LOCA |
-
-A deployment that cannot supply ~10 candidates per request will produce a component that declines
-correctly and teaches you nothing. Check that first.
+What to read, from `/stats` (keep-alive block) and the request events: `sweep_asked` and `sweep_held`
+(did it ask?), `sweep_shadow_proposed` against `sweep_shadow_valid` (how many proposed drops were still
+valid at the next cold request), and `sweep_shadow_dropped_<reason>` (why not). The drop share and the
+false-drop rate come from these.
 
 #### What to read, in order
 
 **1. Did it fire at all?** `acted`, `sweep_prefix_cache_read_ok`, `sweep_adjudicated`. If `acted` is 0,
-read the gates before touching a threshold — `not_in_pre_expiry_window` (needs `econ_trigger`),
-`sweep_below_min_pressure`, `sweep_inventory_below_min`. Note that `sweep_inventory_below_min` is raised
-with `GateN(len(cands))`, so it counts **candidates, not requests**; dividing it by request count is a
-misreading.
+read `sweep_no_inventory`, `sweep_already_asked`, `sweep_model_declined`, `sweep_ask_needs_shadow` and
+`sweep_concurrency_full` in the keep-alive block: each names a reason the ping stayed plain.
 
 **2. Did it lose anything?** This is the question that decides whether to continue.
 
@@ -591,10 +901,6 @@ ratio = saved_tokens / incremental_cache_creation
 11.5 is `(2.50 − 0.20) / 0.20` — the incremental price of writing a token to cache rather than reading
 it. LOCA realised **11.0**. Because the rewrite span is fixed by the shallowest removal, the lever is
 **drops per invalidation** (`sweep_dropped / acted`; LOCA managed 8.75), not the number of asks.
-
-**4. Is the ask worth its own price?** `econ_ask_not_repaid` and `prefix_rewrite_not_repaid` are raised
-**exclusively** and must not be summed: the first means the batch cannot repay the price of *asking*, the
-second that the cache-write does not earn itself back.
 
 #### A first deployment that answers the question
 
@@ -699,12 +1005,8 @@ recovered via `context_guru_expand` / `GET /expand`.
 | `min_step_tokens` | 500 | *θ* — a step below this is not worth a reflection call. |
 | `min_saved_tokens` | 400 | Apply the reduction if it saves at least this many tokens… |
 | `max_keep_ratio` | 0.8 | …or if it keeps less than this fraction of the step. |
-| `model.source` | `incoming` | LLM source: `incoming` or `config` (the cheap model). The preset uses `config`. |
+| `model.source` | `incoming` | LLM source: `incoming` or `config` (the cheap model). The preset uses `config`. The endpoint and credential for `config` are the host's own (`CHEAP_MODEL*` env vars on the standalone proxy); this block never names one. |
 | `model.model` | *the source's own model* | The reflection model, on that source's endpoint and credential. The method's economics depend on it being much cheaper than the agent's. |
-| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
-| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
-| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
-| `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
 | `marker_mode` | `full` | `full` (reversible) \| `summary` \| `off`. |
 | `cache_tail_only` | `false` | Restrict new reductions to the uncached tail. See the warning below. |
 
@@ -785,7 +1087,138 @@ Run it **alone**: it changes the message count, and `apply`'s count-change rebui
 retained message's original raw bytes by matching them exactly, so a message another component
 edited in place fails to match and is re-marshalled instead.
 
-### Why the call shape matters
+### Two ways to use `cache_state`
+
+`trigger.cache_state` has two values: `any` and `pre_expiry`. Pick one.
+
+**`any` — summarize now, use it now.** As soon as a turn crosses the size threshold, the
+component writes a summary and uses it on the very next request. This is the simple choice: use
+it to shrink an oversized conversation as soon as possible.
+
+**`pre_expiry` — prepare a summary, but hold it until the cache goes cold.** Writing a summary
+into a request the provider still has cached forces a full re-write of everything after it — the
+same cost as if the cache were cold already, paid early for no reason. `pre_expiry` avoids this:
+it writes the summary in the background, near the end of the cache's life, and holds it in
+**reserve**. Nothing changes about the request sent upstream until the cache actually goes cold.
+Only then does the reserve get used.
+
+**The summarizer never changes how long the cache stays warm.** That is set by the cache
+strategy (`keepalive_max_pings`). A summary call takes the place of one ping, counts the same way
+a ping does, and never adds an extra one.
+
+#### What happens, turn by turn
+
+| | `any` | `pre_expiry` |
+|---|---|---|
+| **The summary call happens** | On the turn that crosses the size threshold | On a turn landing in the last minute before the cache would expire — or, since real turns rarely land in so narrow a window, at a keep-alive ping inside that same window |
+| **The summary is used** | On the very next request | Only once a request actually arrives with the cache cold |
+| **A normal keep-alive ping** | Not affected | Replaced by the summary call once there is a threshold-crossing summary to write |
+| **Later keep-alive pings, before the cache goes cold** | Not affected | Stay plain pings, UNLESS the reserve has enough new material to be worth refreshing (see below) |
+| **A request before the cache goes cold** | Sends the summary, like any other request | Sends the full conversation, unchanged |
+| **A request once the cache goes cold** | Sends the summary, like any other request | Sends the summary for the first time |
+
+#### Refreshing the reserve costs money, so it has to earn it back
+
+A `pre_expiry` reserve can go stale: the conversation keeps growing while the reserve still only
+covers the point it was written at. A later keep-alive ping can refresh it — write a new summary
+covering the larger conversation — instead of sending a plain ping.
+
+**That refresh is not free, so it only happens when it pays for itself.** The rule: refresh only
+when the money a cold return will save is at least as much as the refresh itself costs.
+
+- The refresh's own cost is a cache **read** of the whole conversation plus a short reply.
+- The money it saves is the new material it folds in, priced at what writing it on a cold return
+  would have cost (the cache **write** rate).
+
+An earlier version of this used a fixed size instead — refresh once 6,000 new tokens had piled up.
+That number was borrowed from a different decision (`resummarize_tokens`, which still controls
+when a TURN re-derives its summary) and was far too small for a refresh: at Sonnet 5's prices,
+6,000 new tokens are worth about $0.015 on the eventual cold return, but the refresh itself costs
+about $0.20. Refreshing at 6,000 tokens meant paying $0.20 to save $0.015 — repeatedly, on an idle
+session, forever. The money rule fixes this: on Sonnet 5's prices it takes roughly **80,000** new
+tokens before a refresh earns itself back, and the number adjusts automatically for other models'
+prices.
+
+#### What it costs, at 900,000 tokens on Sonnet 5
+
+Sonnet 5 prices: $2 per million input tokens, $0.20 per million cache-read tokens, $2.50 per
+million cache-write tokens, $10 per million output tokens.
+
+| | Full history (900k) | Summary (80k) |
+|---|---|---|
+| **A warm turn** (cache read) | $0.18 | $0.016 |
+| **A cold return** (cache write) | $2.25 | $0.20 |
+
+So on a cold return, sending the summary instead of the full history saves about **$2.05**. On a
+warm turn it saves about **$0.16**. One summary call itself costs about **$0.20** (it reads the
+whole 900k conversation to write the new summary).
+
+#### Which to choose
+
+- **Use `any`** for a session that is being actively worked on. It saves money starting on the
+  very next turn — about $0.16 per turn at 900k tokens — and never pays the cold-return rewrite
+  twice.
+- **Use `pre_expiry`** when you want the agent to see the FULL conversation for as long as
+  possible, and sessions often sit idle past the cache's lifetime (a user steps away, keep-alive
+  pings run out, the proxy restarts). It keeps full detail in every warm turn and only pays the
+  summary's cost where a full rewrite was going to happen anyway.
+
+#### Why there is no "summarize on every turn, but only ever use it when cold"
+
+`cache_state` used to have two more values — `cold` and `pre_expiry_or_cold` — that waited for
+the cache to be free to invalidate before firing at all. Both were removed, for three reasons
+found on a real corpus:
+
+- **The downside they were avoiding was small.** Firing on a warm cache and getting it wrong
+  (summarizing something that should not have been summarized yet) cost about **$0.84 across the
+  whole corpus** — not nothing, but not the large risk the wait was priced to avoid.
+- **Firing on a warm cache and getting it right pays back fast.** 2-3 turns.
+- **Waiting does not even avoid the thing it was waiting for.** Committing a summary always
+  takes two turns — one turn writes it, the next turn uses it. By the time a cold-gated version
+  can use its summary, it has already paid the first full rewrite anyway.
+
+There is no config value left that fires on every turn but only ever applies when the cache goes
+cold — it was tried, and it cost more than it saved.
+
+#### Limits
+
+- **A proxy restart loses everything in progress.** Checkpoints and reserves are held in memory
+  only, so a restart clears every session's. On Anthropic traffic, the previous request this
+  component reuses is also held in memory only: the first request after a restart has nothing to
+  build on (`cache_aware_summarizer_no_prefix`) and goes through unchanged. That same request
+  becomes the new starting point, so the component can summarize again from the next turn — one
+  turn lost, not more.
+- **While keep-alive pings keep a session's cache warm, the cache never goes cold.** A
+  `pre_expiry` reserve is only used once the cache actually goes cold, so as long as pings keep
+  running, the reserve just sits there (refreshed only when it is worth it — see above). It gets
+  used only after pinging stops: the session's ping budget runs out, keep-alive is off, or the
+  session sits idle longer than keep-alive covers.
+- **On some models, an earlier thinking block costs the whole cache read.** `claude-haiku-4-5`
+  is the one measured, but the same documented behavior covers Claude 3.7 Sonnet, bare Opus 4
+  and Opus 4.1, and bare Sonnet 4 and Sonnet 4.5 (every one of them keeps only the LAST turn's
+  thinking block), and appending this component's own instruction strips every earlier one at
+  once, which also shrinks the cache the backend actually reads. On those models this component
+  declines rather than pay for a smaller read than expected.
+
+#### When to use `summarize` instead
+
+- **A much cheaper model should write the summary.** This component's whole saving depends on
+  reusing the SAME model's cache, so pointing it at a separate, cheaper model defeats the point.
+  `summarize` has no such restriction.
+- **There is no previous request to build on** — right after a restart, or on a session's very
+  first turn.
+- **Your gateway does not accept resending the previous request's exact bytes plus one more
+  message.**
+- **A very large thinking budget is in use.** The reply allowance this component's call gets can
+  shrink to almost nothing when a large thinking budget pushes past the model's own hidden output
+  limit.
+- **Tool output should be left out of the summary.** This component always sends the whole
+  conversation, tool output included. `summarize` can leave tool output out
+  (`include_tool_calls: false`).
+
+### Technical notes
+
+#### Why the call shape matters
 
 `summarize` builds a fresh prompt — a preamble plus the rendered transcript as one user message.
 That prompt shares no prefix with the conversation it describes, so the call is a cache miss on
@@ -795,7 +1228,7 @@ This component sends **`[the conversation, verbatim and in order] + [one appende
 The rendered prefix is the one the agent's own request produced, so a prefix-caching backend can
 charge prefill only on the appended suffix.
 
-### How far the reuse actually goes
+#### How far the reuse actually goes
 
 The prefix that gets hit is one the **backend** has seen, and the backend only ever receives what
 this proxy forwards. The agent keeps sending its full uncompacted history, but from the first
@@ -811,7 +1244,7 @@ Two consequences, both worth measuring rather than assuming:
 Judge this component on the backend's own telemetry — `vllm:prefix_cache_hits_total`, or
 `usage.cache_read_input_tokens`, which the OpenAI client records — never on a savings percentage.
 
-### Where the instruction goes, and why it is per model
+#### Where the instruction goes, and why it is per model
 
 The appended instruction is an **operator** instruction, so `role: system` is the correct channel
 where it exists: it is non-spoofable, and a trailing user turn on a long trajectory reads to the
@@ -851,7 +1284,7 @@ To promote a model, verify the **path** — probe through the same endpoint and 
 uses and confirm the instruction arrives last — then add its match string to `system_models`, or ship
 a `profiles_path` override so the promotion needs no rebuild.
 
-### The call is detached, so compaction takes two turns
+#### The call is detached, so compaction takes two turns
 
 A summary here covers most of the transcript, so the call is large by construction and its budget is
 300 s. Running that inline would stall the triggering turn by minutes, billed against the agent's own
@@ -867,7 +1300,7 @@ waiting for.
 Read the `async_started` / `async_committed` **pair**: started without committed is a summary that was
 paid for and lost, which no other counter would reveal.
 
-### Two gates, two different quantities
+#### Two gates, two different quantities
 
 `min_tokens` asks *is the span worth a call*. `max_request_tokens` asks *can we afford the call* — and
 they differ because the request carries the **whole conversation**, not the span.
@@ -877,7 +1310,7 @@ available: the appended-suffix shape is the entire mechanism, and a truncated co
 different prefix that matches nothing. An over-large session declines and says so
 (`cache_aware_summarizer_too_large`).
 
-### Reversibility and reuse
+#### Reversibility and reuse
 
 `marker_mode: full` (default) stashes the replaced span through `commitMark`, so a store that
 **refuses** the payload causes the compaction to be skipped rather than leaving a `<<cg:HASH>>`
@@ -895,7 +1328,7 @@ spellings), the summary sentinel and a premature `</summary>` before the text is
 trustworthy earlier context. The whole trajectory reaches the summarizer, so planted text in any
 tool output gets a long run at it.
 
-### Counters at `/stats`
+#### Counters at `/stats`
 
 | field | means |
 |---|---|
@@ -908,8 +1341,17 @@ tool output gets a long run at it.
 | `cache_aware_summarizer_too_large` | declined because the outbound request would exceed `max_request_tokens` |
 | `cache_aware_summarizer_async_started` / `_committed` | the **pair** is the signal — started without committed is a summary paid for and lost |
 | `cache_aware_summarizer_timeouts` / `_errors` | fail-open paths; a timeout means the budget is too small for this load, an error means the route is wrong |
+| `cache_aware_summarizer_no_prefix` | the Anthropic (`PrefixAsk`) path's first-turn case — nothing stashed yet to build on. Counted apart from `_errors`: this is routine, not a failure |
+| `prefix_stash_oversized` | the proxy did not keep a request body because it was over the per-body cap (8 MB). That thread then has nothing to build on, so its later `_no_prefix` is the cap, not a first turn. Before #703 the cap was 1.5 MB, and every thread near a 1M-token window was over it |
+| `cache_aware_summarizer_prefix_ask_used` | the call went through `PrefixAsk` rather than a `MessagesModel` — whether this component is actually reaching Anthropic traffic |
+| `cache_aware_summarizer_cache_read_tokens` / `_cache_write_tokens` | the summary call's own usage — the direct answer to "is the call actually reading warm", this component's whole argument |
+| `cache_aware_summarizer_truncated` | a reply cut off before its closing tag was rejected rather than spliced in as a looks-complete fragment |
 
-### Not yet measured
+Gates that explain a turn with no summary, in the order the component checks them: `summary_span_empty` (the transcript is shorter than `keep_last_turns`), `summary_span_empty_after_expand_trim` (content the agent expanded protects the whole span), `below_request_trigger`, `window_not_exact`, `cache_state_declined_<phase>`, `summary_span_below_min_tokens`, `request_over_max_tokens`, `no_model` / `no_messages_model`, then the role and stash checks. A turn that starts a summary records the event `summary_started`.
+
+Two more counters, on the keep-alive side (`proxy`'s `/stats`, not this component's own): `keepalive_summary_substitute_refresh_paid` and `_refresh_not_worth_it` are the `pre_expiry` refresh money gate's own decision, one per keep-alive ping that had a stale reserve to weigh.
+
+#### Not yet measured
 
 The prefix-cache-hit improvement this design predicts is **unverified** — there is no live run
 behind it yet. The counters and the backend telemetry above are how to establish it.

@@ -2,6 +2,7 @@ package dash
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +282,42 @@ func TestKVCacheSuggestRouteAnswersOnRealData(t *testing.T) {
 	}
 	if _, ok := body["cells"]; !ok {
 		t.Errorf("response has no \"cells\" key: %v", body)
+	}
+}
+
+// A NAMED CANDIDATE LIST IS THE WHOLE COMPARISON. With Strategies set, no other arm may win a cell —
+// an operator who rules out no-cache and the 1h tier must never be handed one — and every cell
+// still reports the baseline. An arm the sweep cannot pick fails the request.
+func TestKVCacheSuggestPicksOnlyFromTheNamedCandidates(t *testing.T) {
+	base := time.Date(2023, 1, 1, 9, 0, 0, 0, time.UTC).UnixMilli() // Sunday 09:00
+	var evs []*Event
+	for i := int64(0); i < 10; i++ {
+		evs = append(evs, kvEvent("u", "s1", "m", base+i*420_000, 0, 100_000)) // 7-minute gaps
+	}
+	db := seedKV(t, evs...)
+	allowed := []string{KVStrategyFixed5m, KVStrategyKeepAlive5mOnce, "keepalive-5m-x3"}
+	out, err := db.KVCacheSuggest(allTenants(), KVCacheOptions{}, staticPricer{ibmSonnet},
+		KVCacheSimConfig{Strategies: allowed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Cells) == 0 {
+		t.Fatal("no cells")
+	}
+	for _, c := range out.Cells {
+		if !slices.Contains(allowed, c.BestStrategy) {
+			t.Errorf("cell %s/%d chose %q, outside the named candidates %v", c.User, c.HourUTC, c.BestStrategy, allowed)
+		}
+		for _, cand := range c.Candidates {
+			if !slices.Contains(allowed, cand.Strategy) {
+				t.Errorf("cell %s/%d scored %q, outside the named candidates", c.User, c.HourUTC, cand.Strategy)
+			}
+		}
+	}
+	for _, bad := range []string{"optimal", "no-such-arm", KVStrategyCustom} {
+		if _, err := db.KVCacheSuggest(allTenants(), KVCacheOptions{}, staticPricer{ibmSonnet},
+			KVCacheSimConfig{Strategies: []string{bad}}); err == nil {
+			t.Errorf("Strategies=[%q] was accepted", bad)
+		}
 	}
 }

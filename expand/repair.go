@@ -5,6 +5,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Unavailable is what a caller substitutes for an id the store no longer holds. One string
@@ -57,6 +59,9 @@ func RestoredInPlace(hashID string) string {
 // so the same transcript arrives needing the same repair on every later turn, and repairing
 // it to the same bytes each time is what keeps the provider's prefix cache warm.
 func RepairToolResults(provider string, body []byte, resolve func(id string) (string, bool)) (out []byte, restored []string) {
+	if schema.IsResponses(provider) {
+		return repairResponsesToolResults(body, resolve)
+	}
 	msgs := gjson.GetBytes(body, "messages")
 	if !msgs.IsArray() {
 		return body, nil
@@ -67,7 +72,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	// assistant turn it answers called context_guru_expand.
 	ours := map[string]string{}
 	for _, m := range msgs.Array() {
-		if provider == "anthropic" {
+		if provider == schema.WireAnthropic {
 			for _, blk := range m.Get("content").Array() {
 				// An id-less tool_use would make "" a live key, and then a tool_result that
 				// carries no tool_use_id — someone else's block — matches it and is
@@ -93,7 +98,7 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	}
 	out = body
 	for mi, m := range msgs.Array() {
-		if provider != "anthropic" {
+		if provider != schema.WireAnthropic {
 			if m.Get("role").String() != "tool" {
 				continue
 			}
@@ -111,6 +116,111 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 		}
 	}
 	return out, restored
+}
+
+func repairResponsesToolResults(body []byte, resolve func(id string) (string, bool)) ([]byte, []string) {
+	return repairResponsesToolResultsWithSet(body, resolve, sjson.SetBytes)
+}
+
+func repairResponsesToolResultsWithSet(body []byte, resolve func(id string) (string, bool),
+	set func([]byte, string, interface{}) ([]byte, error)) ([]byte, []string) {
+	items := gjson.GetBytes(body, "input")
+	if !items.IsArray() {
+		return body, nil
+	}
+	ours := map[string]string{}
+	for _, item := range items.Array() {
+		typ := item.Get("type").String()
+		if typ != "function_call" && typ != "custom_tool_call" || item.Get("name").String() != ToolName {
+			continue
+		}
+		id := item.Get("call_id").String()
+		args := item.Get("arguments").String()
+		if typ == "custom_tool_call" {
+			args = item.Get("input").String()
+		}
+		if id != "" {
+			ours[id] = gjson.Get(args, "id").String()
+		}
+	}
+	if len(ours) == 0 {
+		return body, nil
+	}
+	out := body
+	var restored []string
+	for i, item := range items.Array() {
+		typ := item.Get("type").String()
+		if typ != "function_call_output" && typ != "custom_tool_call_output" {
+			continue
+		}
+		hash, ok := ours[item.Get("call_id").String()]
+		if !ok {
+			continue
+		}
+		orig, found := resolve(hash)
+		if !found {
+			noteUnresolved(hash)
+			orig = Unavailable(hash)
+		}
+		answer := orig
+		if found && responsesContentPresent(body, orig, i) {
+			answer = RestoredInPlace(hash)
+		}
+		next, err := set(out, "input."+strconv.Itoa(i)+".output", answer)
+		if err != nil {
+			continue // one malformed item must not discard earlier successful repairs
+		}
+		out = next
+		if found {
+			restored = append(restored, orig)
+		}
+	}
+	return out, restored
+}
+
+// A Responses result may point at a copy already present in the input, but
+// never at itself. A stashed summary can also be a contiguous array of native
+// input items (including images), which is checked as a span rather than text.
+func responsesContentPresent(body []byte, orig string, exceptIndex int) bool {
+	if orig == "" {
+		return false
+	}
+	items := gjson.GetBytes(body, "input").Array()
+	if span := gjson.Parse(orig); span.IsArray() && len(span.Array()) > 0 {
+		want := span.Array()
+		for i := 0; i+len(want) <= len(items); i++ {
+			match := true
+			for j := range want {
+				if i+j == exceptIndex || items[i+j].Raw != want[j].Raw {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	for i, item := range items {
+		if i == exceptIndex {
+			continue
+		}
+		for _, field := range []string{"content", "output"} {
+			value := item.Get(field)
+			if value.Type == gjson.String && value.String() == orig {
+				return true
+			}
+			for _, block := range value.Array() {
+				if text := block.Get("text"); text.Type == gjson.String && text.String() == orig {
+					return true
+				}
+			}
+			if value.IsArray() && schema.ContentText(value) == orig {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // repairOne rewrites the content of one tool_result at path, if it answers our tool. Every
@@ -194,6 +304,12 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 			}
 			return !found
 		}
+		// A message whose content is an array holding the original split over several text blocks
+		// (an OpenAI role=tool message, say) counts as present, as CallSites reads it.
+		if c := m.Get("content"); c.IsArray() && base+".content" != exceptPath && schema.ContentText(c) == orig {
+			found = true
+			return false
+		}
 		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
 			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)
 			return !found
@@ -251,6 +367,11 @@ func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
 				return true
 			})
 			if hit {
+				return true
+			}
+			// The joined text of the blocks counts too, as CallSites reads it: a client may split
+			// the original over several text blocks.
+			if schema.ContentText(v) == orig {
 				return true
 			}
 		}

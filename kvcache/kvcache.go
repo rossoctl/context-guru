@@ -38,6 +38,8 @@ package kvcache
 import (
 	"sort"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // TTL is a prompt-cache lifetime tier, spelled the way the provider's usage block spells
@@ -54,13 +56,15 @@ const (
 	TTL1h   TTL = "ephemeral_1h"
 )
 
-// Lifetime is how long an entry at this tier survives without being touched.
+// Lifetime is how long an entry at this tier survives without being touched. It is a function
+// of the TIER only: the simulator replays Anthropic-style tiers, and an OpenAI thread has no tier
+// (see modelinfo.CacheLifetime for the provider-aware rule).
 func (t TTL) Lifetime() time.Duration {
 	switch t {
 	case TTL5m:
-		return 5 * time.Minute
+		return Horizon5m
 	case TTL1h:
-		return time.Hour
+		return Horizon1h
 	}
 	return 0
 }
@@ -85,8 +89,8 @@ func (t TTL) Valid() bool { return t == TTLNone || t == TTL5m || t == TTL1h }
 // tier. Named constants because they appear in a histogram edge, a summary card, a
 // strategy threshold and a cost formula, and four literals would eventually disagree.
 const (
-	Horizon5m = 5 * time.Minute
-	Horizon1h = time.Hour
+	Horizon5m = modelinfo.AnthropicCacheTTL5m
+	Horizon1h = modelinfo.AnthropicCacheTTL1h
 )
 
 // Bucket is a coarse time-of-day label, in UTC.
@@ -212,6 +216,7 @@ type Request struct {
 	ID             int64  `json:"id"`
 	User           string `json:"user"`
 	ConversationID string `json:"conversation_id"`
+	ThreadID       string `json:"-"`  // the request's thread within its session ("" = the main thread, or recorded before threads)
 	TS             int64  `json:"ts"` // epoch ms, UTC
 	HourUTC        int    `json:"hour_utc"`
 	Bucket         Bucket `json:"bucket"`
@@ -276,6 +281,10 @@ type Request struct {
 	CostUSD   float64 `json:"cost_usd"`
 	CostKnown bool    `json:"cost_known"`
 
+	// Rejected marks a row whose upstream status was not 2xx (or never reached upstream). The
+	// provider read no prefix for it, so a replay leaves the cache entry untouched.
+	Rejected bool `json:"-"`
+
 	// KeepAlive marks a row that IS a ping context-guru sent on its own initiative. Such
 	// rows are excluded from the dataset by default (they are not the user's traffic and
 	// they would break every idle gap they sit inside); the field is here so a caller that
@@ -294,6 +303,12 @@ const (
 func (r *Request) Key() Conversation {
 	return Conversation{User: r.User, Conversation: r.ConversationID, Model: r.Model}
 }
+
+// noOp reports a row that is not a turn: the upstream rejected it, its cost is unknown, and it
+// carried no prefix, so the provider read nothing and the cache entry is untouched. Simulate skips
+// it and so must NewOptimal — one predicate, so the ceiling and the arms it bounds cannot be
+// computed over different trajectories.
+func (r *Request) noOp() bool { return r.Rejected && !r.CostKnown && r.CachedContext == 0 }
 
 // Idle is the idle duration and whether there is one at all. The only way to read it: a
 // caller that dereferences IdleMs without checking HasNext is the bug this returns two
@@ -373,4 +388,12 @@ func Derive(reqs []*Request) {
 		}
 		return a.ID < b.ID
 	})
+}
+
+// ForcedMiss says whether a recorded miss reason is one no TTL could have rescued: the content
+// moved (prefix_change), there was no entry (cold_start), or the dashboard could not explain the
+// miss (unknown). A miss we cannot explain is never counted as rescuable. Treating it as a live
+// entry would turn every unexplained miss into a simulated hit and raise every arm's hit rate.
+func ForcedMiss(reason string) bool {
+	return reason == "prefix_change" || reason == "cold_start" || reason == "unknown"
 }

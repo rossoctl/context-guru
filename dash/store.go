@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
+	"github.com/rossoctl/context-guru/store"
+	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
 // memSeq names in-memory databases uniquely. See Open.
@@ -28,6 +30,13 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// dropProbe, when set, runs inside DropOldestSessions between picking the victims and
+	// deleting them. Test seam for the window #772 closed: a request landing there must not
+	// change which sessions the delete removes.
+	dropProbe func()
+	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
+	// checks it; SQLite's mode=ro and query_only refuse any other.
+	readOnly bool
 	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
 	// costing the process. nil means context.Background().
 	//
@@ -36,6 +45,11 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
+	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
+	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
+	// pointer, sharing one cache across every handle this *DB produces rather than giving each
+	// shallow copy its own, independently-stale one.
+	sizeSpread *cachesplitSizeSpreadCache
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -165,6 +179,9 @@ var nonDerivedTables = map[string]string{
 	"archived_sessions": `session_id,tenant_id,first_ts,last_ts,requests,content_path,
 	                      content_bytes,full_path,full_bytes,archived_at,remote`,
 	"tenant_spend": `tenant_id,month,usd`,
+	// The session state (#769) is rebuilt from traffic, but only by paying for it again (a summary
+	// is a model call), so a schema bump carries it.
+	"session_state": `key,val,updated`,
 }
 
 // carryNonDerived copies the non-derived tables out of the database renamed aside by
@@ -231,8 +248,13 @@ func dsn(path string) string {
 	// SQLite can only set auto_vacuum on an EMPTY database, so this takes effect for
 	// files created from here on. An existing file keeps auto_vacuum=NONE and falls
 	// back to the full VACUUM path in Prune, which is what it did before.
-	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
+	//
+	// busy_timeout is FIRST. The driver runs these in order on every new connection, and the
+	// journal_mode statement needs a lock: with the timeout set after it, a connection opened while
+	// another held the WAL (a checkpoint, a commit) failed at once with SQLITE_BUSY instead of
+	// waiting, and a burst of concurrent reads opens a burst of connections.
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 func openDSN(d, path string) (*DB, error) {
@@ -267,7 +289,108 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
+// beside a live proxy, which owns the file.
+//
+// Open is not safe for that: it migrates the schema (additive DDL, new columns), stamps the
+// version, checkpoints the WAL, and on a version mismatch RENAMES the file aside. Any of those
+// against a database a serving process holds is a write the operator never asked for. This opens
+// with SQLite's mode=ro and query_only, runs none of them, and REFUSES a database whose schema
+// version is not this build's: a reader cannot migrate, and a query written for one schema read
+// against another returns wrong numbers rather than an error.
+//
+// mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" || path == ":memory:" {
+		return nil, errors.New("dash: OpenReadOnly needs a database file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&cg_ro=1")
+	if err != nil {
+		return nil, err
+	}
+	// A reader beside a live proxy: a handful of connections, never the 100 the writer's pool
+	// holds, so an analysis cannot crowd the serving process off its own file.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
+	var have string
+	if err := sdb.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("dash: read-only open: %w", err)
+	}
+	if have != fmt.Sprint(schemaVersion) {
+		sdb.Close()
+		return nil, &versionMismatch{have: have}
+	}
+	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
+// file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
+// query with "no such column" would break a reader (the cache-campaign tool opens live databases
+// this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
+// view named after each table with additive columns (`requests`, `request_components`) that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified table name resolves to the shim; the view is per connection and
+// writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
+// last, because it forbids creating even a temp object.
+//
+// The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "cg_ro=1") {
+			return nil
+		}
+		ctx := context.Background()
+		// One shim per table that has additive columns (requests, request_components, ...).
+		tables := map[string]bool{}
+		for _, c := range additiveColumns {
+			tables[c.table] = true
+		}
+		for table := range tables {
+			rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('`+table+`')`, nil)
+			if err != nil {
+				return err
+			}
+			have := map[string]bool{}
+			vals := make([]driver.Value, 1)
+			for rows.Next(vals) == nil {
+				if n, ok := vals[0].(string); ok {
+					have[n] = true
+				}
+			}
+			rows.Close()
+			var extra string
+			for _, c := range additiveColumns {
+				if c.table == table && !have[c.column] {
+					extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+				}
+			}
+			if extra != "" && len(have) > 0 {
+				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT rowid AS rowid, *`+extra+` FROM main.`+table, nil); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		return err
+	})
+}
+
+// additiveDefault is the literal a missing additive column reads as: its DEFAULT, else NULL (a
+// column declared without one, like keepalive_strategy_id, reads NULL on an old row).
+func additiveDefault(ddl string) string {
+	if _, def, ok := strings.Cut(ddl, "DEFAULT "); ok {
+		return strings.TrimSpace(def)
+	}
+	return "NULL"
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
@@ -295,11 +418,132 @@ func (d *DB) Close() error {
 	return d.sql.Close()
 }
 
+// SQL returns the underlying handle, for a host that keeps a table of its own in this database.
+// The session state store (package store) does: it shares this pool, so one pool serializes every
+// writer in the process. The caller must not close it.
+func (d *DB) SQL() *sql.DB { return d.sql }
+
+// deleteSessionState removes the state rows of sessions this dashboard just deleted: each
+// session's own id and its content-derived aliases (the session_alias column). A key another
+// live session still uses is kept, whatever half it uses it by: a session whose rows carry it
+// as their alias, or a headerless session whose own id IS it. Both read that state on every
+// turn (cg:seen:, cg:ttl:), so removing it under them makes a warm cache read cold. Call it
+// AFTER the sessions' request rows are gone — the in-use check counts what is left. Best
+// effort: the state is rebuilt from traffic, so a failure only logs. The retention prune does
+// NOT call it: state follows its own retention.
+func (d *DB) deleteSessionState(sessions, aliases []string) {
+	keys := make([]string, 0, len(sessions)+len(aliases))
+	keys = append(keys, sessions...)
+	keys = append(keys, aliases...)
+	inUse := d.inUseIDs(keys)
+	for _, k := range keys {
+		if k == "" || inUse[k] {
+			continue
+		}
+		if _, err := store.DeleteSessionState(d.sql, k); err != nil {
+			slog.Warn("dash: could not delete the session state of a removed session", "session", k, "err", err)
+		}
+	}
+}
+
+// inUseIDs tells which of the given keys a request row still uses, as a session's alias or as
+// a session's own id. TWO queries for the whole list, not one per key: this runs on the writer
+// goroutine during eviction passes, and requests holds millions of rows in production. An
+// answer that cannot be read — the query fails to open, a row fails to scan, or the scan ends
+// early — says every key is in use. Keeping rows is the safe side, and retention bounds them.
+func (d *DB) inUseIDs(keys []string) map[string]bool {
+	inUse := map[string]bool{}
+	if len(keys) == 0 {
+		return inUse
+	}
+	queries := []string{
+		`SELECT DISTINCT session_alias FROM requests WHERE session_alias IN (`,
+		`SELECT DISTINCT session_id FROM requests WHERE session_id IN (`,
+	}
+	// giveUp keeps the promise above however the answer breaks: every key counts as in use.
+	// Logged once per call, whatever the failure and however many queries it hits.
+	var warned bool
+	giveUp := func(err error) {
+		if !warned {
+			slog.Warn("dash: could not tell whether a removed session's state is still in use",
+				"err", err)
+			warned = true
+		}
+		for _, k := range keys {
+			inUse[k] = true
+		}
+	}
+	for _, q := range queries {
+		for _, chunk := range chunkStrings(keys) {
+			rows, err := d.sql.QueryContext(d.readCtx(), q+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+			if err != nil {
+				giveUp(err)
+				return inUse
+			}
+			for rows.Next() {
+				var k string
+				// A row that fails to scan says the same thing as a query that fails to open:
+				// the answer is not trustworthy, and a key it could not deliver must not read
+				// as unused.
+				if err := rows.Scan(&k); err != nil {
+					rows.Close()
+					giveUp(err)
+					return inUse
+				}
+				inUse[k] = true
+			}
+			// A scan that fails midway ends the loop early: the keys it did not reach would
+			// read as unused, and the caller would then delete state a live session still
+			// reads. That is the one unsafe direction this function must never fail in.
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				giveUp(err)
+				return inUse
+			}
+			rows.Close()
+		}
+	}
+	return inUse
+}
+
+// sessionAliases lists the distinct alias ids stored on the given sessions' rows, minus each
+// row's own session id (a headerless turn's id IS its alias, and its rows store none). Read
+// BEFORE the rows are deleted: the alias is a column, and the column goes with them.
+func (d *DB) sessionAliases(sessions ...string) ([]string, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for _, chunk := range chunkStrings(sessions) {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT DISTINCT session_alias FROM requests
+			WHERE session_alias <> '' AND session_alias <> session_id
+			AND session_id IN (`+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+		if err != nil {
+			return out, err
+		}
+		for rows.Next() {
+			var a string
+			if rows.Scan(&a) == nil {
+				out = append(out, a)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return out, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // Path returns the on-disk path ("" when in-memory).
 func (d *DB) Path() string { return d.path }
 
 // gzPair is one blob's before/after compression, precomputed outside the transaction.
 type gzPair struct{ before, after []byte }
+
+// InsertEvents writes events straight to the store in one transaction, without the recorder's queue. For test fixtures in other packages.
+func (d *DB) InsertEvents(evs []*Event) error { return d.insertBatch(evs) }
 
 // insertBatch writes a batch of captured events in ONE transaction — the whole
 // point of batching: a per-request fsync would make the writer the bottleneck
@@ -338,24 +582,34 @@ func (d *DB) insertBatch(evs []*Event) error {
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
 		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd, cachesplit_saved_usd,
-		split_stable_tokens, split_tail_hash, filtered_decl_tokens,
+		split_stable_tokens, split_tail_hash, filtered_decl_tokens, decl_digest,
 		cache_ttl, sse_buffered, ttfb_ms,
 		cache_write_1h, keepalive, keepalive_pings, keepalive_saved_usd, cg_latency_ms, upstream_ms,
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
 		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
-		keepalive_strategy_id, billed_token_factor
+		keepalive_strategy_id, billed_token_factor, thread_id,
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
+		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
+		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
+		price_estimated, acc_priced, estimated_saved_usd, estimate_held,
+		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
+		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
+		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, ` + strings.Join(requestStoredTokenColumns(), ", ") + `
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `)`)
 	if err != nil {
 		return err
 	}
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by,
+		` + strings.Join(compTokenColumns, ", ") + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
 	if err != nil {
 		return err
 	}
@@ -378,6 +632,14 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer xcallStmt.Close()
 
+	lifeStmt, err := tx.Prepare(`INSERT INTO request_lifecycle(
+		request_id, result_count, result_bytes, result_error, since_prev_end_ms, granted_ttl, ping_n)
+		VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer lifeStmt.Close()
+
 	spend := map[spendKey]float64{}
 	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
@@ -387,13 +649,13 @@ func (d *DB) insertBatch(evs []*Event) error {
 		if e.KeepAliveStrategyID != "" {
 			strategyID = e.KeepAliveStrategyID
 		}
-		res, err := reqStmt.Exec(
+		res, err := reqStmt.Exec(append([]any{
 			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
 			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CacheSavedUSD, e.CachesplitSavedUSD,
-			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens,
+			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens, e.DeclDigest,
 			e.CacheTTL, boolInt(e.SSEBuffered), e.TTFBMs,
 			e.CacheWrite1h, boolInt(e.KeepAlive), e.KeepAlivePings, e.KeepAliveSavedUSD,
 			e.CGLatencyMs, e.UpstreamMs,
@@ -401,8 +663,24 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
 			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
-			strategyID, e.BilledTokenFactor,
-		)
+			strategyID, e.BilledTokenFactor, e.ThreadID,
+			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
+			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,
+			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
+			// point before the value is on disk and on the SSE feed, and a path is a
+			// client-chosen string that could be named after a credential.
+			ProjectPath(e.Project),
+			/* Allow-listed rather than stored as given: this is the field every honesty rule
+			 * downstream keys off, so an unrecognised value must not quietly become a third
+			 * kind of row. Anything but the one known marker records as measured, which is the
+			 * safe direction — it claims LESS about the row. */
+			sourceOf(e.Source),
+			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
+			e.SessionAlias, boolInt(e.PriceEstimated), boolInt(e.AccountantPriced), e.EstimatedSavedUSD, boolInt(e.EstimateHeld),
+			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
+			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
+			e.CompactionPoint, e.CompactionPointSource, e.DeferCostUSD,
+		}, append(limitArgs(e.Limits), append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm}, requestStoredTokenArgs(e)...)...)...)...)
 		if err != nil {
 			return err
 		}
@@ -411,11 +689,18 @@ func (d *DB) insertBatch(evs []*Event) error {
 			return err
 		}
 		e.ID = id
+		if l := e.Lifecycle; l != nil {
+			if _, err := lifeStmt.Exec(id, l.ResultCount, l.ResultBytes, boolInt(l.ResultError),
+				l.SincePrevEndMs, l.GrantedTTL, l.PingN); err != nil {
+				return err
+			}
+		}
 		for _, c := range e.Components {
-			if _, err := compStmt.Exec(id, c.Component, c.Kind,
+			if _, err := compStmt.Exec(append([]any{id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events)); err != nil {
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy},
+				c.Tokens.args()...)...); err != nil {
 				return err
 			}
 		}
@@ -638,12 +923,35 @@ func (d *DB) reclaim() error {
 }
 
 // checkpoint folds the write-ahead log into the main database and truncates it.
-// Best-effort: a busy checkpoint is not a failure, only a deferral.
+//
+// wal_checkpoint(TRUNCATE) does not error when it cannot run: it returns a row,
+// busy/log/checkpointed, where busy=1 means another connection held a read lock and
+// the WAL was left untouched. d.sql is a pool shared with every dashboard and
+// /metrics reader, so a reader being active is the normal case on a busy deployment
+// — and correlated with the write traffic growing the WAL, which is exactly when the
+// bloat protection this call exists for is most needed.
+//
+// The retry is inside the call, not around it: the pool's busy_timeout(5000) makes
+// SQLite re-ask for the lock through the busy handler for up to 5 seconds, so an
+// outer backoff loop would stack full 5s waits on top of each other (measured: five
+// attempts, 25s). What the old code missed is the ROW — busy=1 after that whole
+// budget means the bloat protection did not run, and err != nil means the pragma
+// itself failed. A reader holding the lock is only the most COMMON cause of the
+// first, so the WARN names the fact (the checkpoint did not complete) rather than
+// one cause of it, and the attributes say which: a fact worth a log line rather
+// than silence — a WAL left to grow made one writer commit take 5.5s and blocked
+// /metrics for 5.2s, and nothing pointed here (#166).
 func (d *DB) checkpoint() {
-	if d.path == "" || d.path == ":memory:" {
+	if d.readOnly || d.path == "" || d.path == ":memory:" {
 		return
 	}
-	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	var busy, logFrames, checkpointed int
+	err := d.sql.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	if err == nil && busy == 0 {
+		return
+	}
+	slog.Warn("dash: WAL checkpoint did not complete",
+		"busy", busy, "wal_frames", logFrames, "checkpointed", checkpointed, "err", err)
 }
 
 // optimize refreshes the query planner's statistics for tables whose statistics are missing or
@@ -686,16 +994,94 @@ func (d *DB) optimize() {
 //
 // "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
 // that is still in use must not be evicted because it started a week ago.
+//
+// The victims are picked ONCE, and the delete removes exactly that set (#772). The
+// delete used to re-run the ordering subquery itself, so a request landing between the
+// pick and the delete could change the order: the rows it removed were then not the rows
+// the state cleanup acted on, and a session that stayed lost its state to one that went.
+// The delete runs in chunks of sqlChunk ids, each chunk one statement and so one
+// transaction. A failed chunk returns before the state cleanup, so victims the earlier
+// chunks already removed keep their state until retention — the safe direction. The pick
+// stays outside the deletes, like every other read
+// here (ArchiveSessionFull reads its events outside its delete too): a read-then-write
+// transaction on this shared pool can fail to upgrade its WAL snapshot when the
+// session-state flush commits in between.
 func (d *DB) DropOldestSessions(n int) (int64, error) {
 	if n <= 0 {
 		return 0, nil
 	}
-	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
-		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
+	// Before the delete: afterwards the victims cannot be found. A failed pick returns its
+	// error rather than reading as an empty table (#775 review).
+	victims, err := d.oldestSessionIDs(n)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	if len(victims) == 0 {
+		return 0, nil
+	}
+	if d.dropProbe != nil {
+		d.dropProbe()
+	}
+	// The aliases are columns of the rows about to go, so they are read before the delete.
+	aliases, err := d.sessionAliases(victims...)
+	if err != nil {
+		return 0, err
+	}
+	var affected int64
+	for _, chunk := range chunkStrings(victims) {
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (`+placeholders(len(chunk))+`)`,
+			anyArgs(chunk)...)
+		if err != nil {
+			return affected, err
+		}
+		n, _ := res.RowsAffected()
+		affected += n
+	}
+	d.deleteSessionState(victims, aliases)
+	return affected, nil
+}
+
+func (d *DB) oldestSessionIDs(n int) ([]string, error) {
+	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out, rows.Err()
+}
+
+func anyArgs(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// sqlChunk caps how many ids one IN (...) list binds. SQLite caps a statement's variables
+// (32,766 in this driver), and the disk rule can ask for a tenth of all sessions at once, so
+// the lists go in batches instead. A var, not a const, so a test can shrink it and exercise
+// the batch boundaries.
+var sqlChunk = 500
+
+// chunkStrings splits ss into sqlChunk-sized batches, keeping every element and its order.
+func chunkStrings(ss []string) [][]string {
+	var out [][]string
+	for len(ss) > sqlChunk {
+		out = append(out, ss[:sqlChunk])
+		ss = ss[sqlChunk:]
+	}
+	if len(ss) > 0 {
+		out = append(out, ss)
+	}
+	return out
 }
 
 // TenantRowCounts reports how many request rows each tenant holds. The caller
@@ -734,7 +1120,8 @@ func (d *DB) tenantRowCount(tenant string) (int64, error) {
 
 // DropOldestSessionsOfTenant trims one tenant back toward its quota, oldest session
 // first, and returns the rows deleted. DESTRUCTIVE, and only correct when there is no
-// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two.
+// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two. The
+// dropped sessions' state rows go with them, exactly as in DropOldestSessions (#772).
 func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64, error) {
 	var deleted int64
 	// Bounded: each pass drops one session, and a tenant with a pathological number
@@ -747,9 +1134,22 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if n <= targetRows {
 			return deleted, nil
 		}
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = (
-			SELECT session_id FROM requests WHERE tenant_id = ?
-			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1)`, tenant, tenant)
+		// The victim is picked first and deleted by id, so the state cleanup below acts on
+		// the session that actually went (#772) — the delete no longer re-picks it itself.
+		var id string
+		err = d.sql.QueryRowContext(d.readCtx(), `SELECT session_id FROM requests WHERE tenant_id = ?
+			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1`, tenant).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return deleted, nil
+		}
+		if err != nil {
+			return deleted, err
+		}
+		aliases, err := d.sessionAliases(id)
+		if err != nil {
+			return deleted, err
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = ?`, tenant, id)
 		if err != nil {
 			return deleted, err
 		}
@@ -757,7 +1157,19 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if got == 0 {
 			return deleted, nil // nothing left to drop; avoid spinning
 		}
+		d.deleteSessionState([]string{id}, aliases)
 		deleted += got
 	}
 	return deleted, nil
+}
+
+// setBypassTokens stores the token count of a bypassed request after the fact. A bypassed row
+// is forwarded untouched, so after equals before. Priced with the count still unknown, such a
+// row is labelled "missing"; with a count it is "partial", exactly as when it was counted inline.
+func (d *DB) setBypassTokens(id int64, before, attempted, frozen int) error {
+	_, err := d.sql.Exec(`UPDATE requests SET tokens_before = ?, tokens_after = ?, attempted_tokens = ?,
+		frozen_tokens = ?,
+		token_accounting = CASE WHEN token_accounting = ? AND ? > 0 THEN ? ELSE token_accounting END
+		WHERE id = ?`, before, before, attempted, frozen, AccountingMissing, before, AccountingPartial, id)
+	return err
 }

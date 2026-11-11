@@ -1,0 +1,20 @@
+{
+  "name": "context-guru",
+  "interface": {
+    "displayName": "context-guru"
+  },
+  "plugins": [
+    {
+      "name": "context-guru",
+      "source": {
+        "source": "local",
+        "path": "./codex-marketplace/plugins/context-guru"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

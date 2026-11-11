@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -14,6 +16,14 @@ import (
 // provider told us nothing, in which case a caller must report the request as
 // partially accounted rather than pricing it as free.
 type Usage struct {
+	// Searches and SearchLoaded are the server-side tool searches a streamed response ran and the
+	// tools they loaded, read off the sniffer window for tool deferral's ledger (#485).
+	// SearchDropped is how many of those searches have no result (sent with another tool call).
+	Searches      int
+	SearchLoaded  []string
+	SearchDropped int
+	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
+	Live       *LiveFacts
 	FreshInput int64
 	CacheRead  int64
 	CacheWrite int64
@@ -42,6 +52,20 @@ type Usage struct {
 	// still reports finish_reason, and "we could not price this, and it stopped because it
 	// hit max_tokens" is exactly the pair worth having.
 	StopReason string
+	// ToolUseNames is every tool_use (Anthropic) / function call (OpenAI chat, Responses)
+	// block name this response carried, in the order they appeared — read off the same
+	// bytes StopReason comes from (see responseToolUseNames), for issue #424's
+	// waitcause.ClassifyWaitingFor: a response that calls a tool is a thread about to wait
+	// on ITS OWN tool call, not on a human or a background task, and the LAST name here is
+	// what the dashboard keeps for it. nil when the response carried none, or when it was
+	// never buffered/sniffed far enough to see one (a long streamed response's tool_use
+	// block can fall outside the sniffer's bounded head window — see newSniffer — in which
+	// case this is best-effort, not exhaustive, and the row reads a weaker signal
+	// (background/teammate/human from open state) rather than own_tool, never a guess).
+	ToolUseNames []string
+	// ToolUseIncomplete is true when ToolUseNames may miss the true last call, because the bytes
+	// read were a spliced head+tail sniff window. The terminal-tool rule never applies then (#857).
+	ToolUseIncomplete bool
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -151,12 +175,8 @@ func usagePresent(v gjson.Result) bool {
 // this workload — the request is ~99.95% cached and a cache write bills ~11.5x a
 // read, so content-token savings alone cannot express the economics.
 //
-// Dialects handled:
-//
-//	Anthropic  usage.{input_tokens, output_tokens,
-//	           cache_read_input_tokens, cache_creation_input_tokens}
-//	OpenAI     usage.{prompt_tokens, completion_tokens,
-//	           prompt_tokens_details.cached_tokens}
+// Dialects handled (Anthropic, OpenAI Responses, OpenAI chat, output-only): see
+// providerusage.Parse, which holds the field names.
 //
 // Anthropic's `input_tokens` already EXCLUDES the cached tiers, so it is the fresh
 // figure directly. OpenAI's `prompt_tokens` INCLUDES its cached_tokens, so fresh is
@@ -211,31 +231,8 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		}
 		return Usage{}, usageMissAbsent
 	}
-	var out Usage
-	switch {
-	case u.Get("input_tokens").Exists(): // Anthropic
-		out.FreshInput = u.Get("input_tokens").Int()
-		out.Output = u.Get("output_tokens").Int()
-		out.CacheRead = u.Get("cache_read_input_tokens").Int()
-		out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
-		// The per-TTL split, when the provider reports one. `cache_creation_input_tokens`
-		// is the total across both tiers, so this is a SUBSET of CacheWrite and never an
-		// addition to it.
-		out.CacheWrite1h = u.Get("cache_creation.ephemeral_1h_input_tokens").Int()
-	case u.Get("prompt_tokens").Exists(): // OpenAI
-		prompt := u.Get("prompt_tokens").Int()
-		out.Output = u.Get("completion_tokens").Int()
-		out.CacheRead = u.Get("prompt_tokens_details.cached_tokens").Int()
-		out.FreshInput = prompt - out.CacheRead
-		if out.FreshInput < 0 {
-			out.FreshInput = 0
-		}
-	case u.Get("output_tokens").Exists():
-		// An OUTPUT-ONLY block. Anthropic's streaming message_delta carries exactly
-		// this, and it holds the FINAL completion count — treating it as "no usage"
-		// under-reports every streamed response's output tokens.
-		out.Output = u.Get("output_tokens").Int()
-	default:
+	tiers, known := providerusage.Parse(u)
+	if !known {
 		// A usage block IS here and this parser read nothing out of it — the Bedrock Converse
 		// camelCase shape (`usage.inputTokens`) is the known instance. The DIALECT is deliberately
 		// not added here: getting the field names wrong (`cacheWriteInputTokens` vs
@@ -243,7 +240,9 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		// closes that gap is the shape record in responseUsage, which needs no guess.
 		return Usage{}, usageMissUnparsed
 	}
-	if out.FreshInput|out.CacheRead|out.CacheWrite|out.Output == 0 {
+	out := Usage{FreshInput: tiers.FreshInput, CacheRead: tiers.CacheRead, CacheWrite: tiers.CacheWrite,
+		CacheWrite1h: tiers.CacheWrite1h, Output: tiers.Output}
+	if tiers.Zero() {
 		// Recognised and genuinely zero, which is legitimate on some responses. Kept out of the
 		// unparsed counter, or every such response would inflate the one number that means a
 		// dialect is missing.
@@ -254,9 +253,13 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 
 // parseSSEUsage pulls usage out of a streamed response. Both dialects report it in
 // terminal events (Anthropic: message_start carries the input tiers and
-// message_delta the output; OpenAI: a final chunk with `usage`), so the tiers are
-// merged across events, taking the maximum of each — a later event repeating a
-// value must not double it.
+// message_delta the output; OpenAI: a final chunk with `usage`).
+//
+// The INPUT tiers (fresh, cache read, cache write) are taken as ONE set from the last event that carries an
+// input count, so a later event replaces an earlier one's tiers (#745): a litellm gateway puts the TOTAL
+// prompt in message_start and the true split in message_delta, and a per-field maximum counted the read
+// twice. An event with no input count (a real Anthropic message_delta) leaves the earlier tiers alone.
+// Output keeps the maximum, because the last event carries the final count and a repeat must not double it.
 func parseSSEUsage(raw []byte) (Usage, bool) {
 	u, why, _ := parseSSEUsageWhy(raw)
 	return u, why == usageMissNone
@@ -287,14 +290,10 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	// `worst` ranges over absent/all_zero/unparsed_dialect and nothing else. A `data:` line cut
 	// mid-JSON yields no present block, so the stream reads as "the provider streamed no usage".
 	//
-	// That leaves usage_unreadable reachable for a sniffed JSON response and structurally
-	// unreachable for a sniffed STREAM, which is where a head+tail window would hide a block —
-	// #200's own defect, in the corner this classification does not cover. Narrow in practice:
-	// Anthropic puts input_tokens in message_start at the front of the head window, so `found` is
-	// true and the answer is `parsed`. Closing it properly means passing the sniffer's own
-	// knowledge that it spliced (s.total > len(s.head)) into responseUsageWhy, which would also
-	// make the buffered case exact instead of inferred from ValidBytes. Filed rather than guessed
-	// at here.
+	// The corner that leaves open — a head+tail window hiding the block a whole response carried
+	// — is closed one frame up, in responseUsageWhy, from the sniffer's own knowledge that it
+	// spliced: an `absent` verdict over a spliced window is upgraded to unreadable there (#207),
+	// because "no block in what we kept" and "no block anywhere" are different facts.
 	worst := usageMissAbsent
 	worstPayload := "" // the event `worst` came from, so the record describes the right one
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -307,7 +306,7 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 			continue
 		}
 		// Anthropic nests the first usage under message.usage; OpenAI puts it at the top.
-		for _, path := range []string{"usage", "message.usage"} {
+		for _, path := range []string{"usage", "message.usage", "response.usage"} {
 			u := gjson.Get(payload, path)
 			// usagePresent, not Exists: `"usage": null` on every chunk is what OpenAI-dialect
 			// streaming sends absent stream_options.include_usage, and it is not a block.
@@ -323,10 +322,23 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 				continue
 			}
 			found = true
-			out.FreshInput = max64(out.FreshInput, one.FreshInput)
-			out.CacheRead = max64(out.CacheRead, one.CacheRead)
-			out.CacheWrite = max64(out.CacheWrite, one.CacheWrite)
-			out.CacheWrite1h = max64(out.CacheWrite1h, one.CacheWrite1h)
+			// THE INPUT TIERS COME FROM THE LAST EVENT THAT CARRIES AN INPUT COUNT, as one set. They were
+			// merged field by field with max(), which is wrong when two events report the input in different
+			// units. A litellm gateway streaming an Anthropic-shaped response puts the TOTAL prompt in
+			// message_start (`input_tokens` 7373, no cache fields) and the true split in message_delta
+			// (`input_tokens` 717, `cache_read_input_tokens` 6656). max() took 7373 fresh AND 6656 read, so
+			// billed input counted the read twice (14,029 for a prompt of 7,373) and PrevBilledInput, which
+			// the summarizer trigger and the warm gate read, was about 2x too large.
+			//
+			// Replacing is safe for the other shapes: a real Anthropic stream has the tiers in message_start
+			// and an output-only message_delta, so no later event carries an input count and message_start's
+			// values stay; and where a delta repeats the same input fields, the replacement is the same
+			// numbers. A cache MISS reports the total again in the delta with zero cache fields, which gives
+			// the same answer. Output keeps max(): the delta carries the final count.
+			if hasInputCount(u) {
+				out.FreshInput, out.CacheRead = one.FreshInput, one.CacheRead
+				out.CacheWrite, out.CacheWrite1h = one.CacheWrite, one.CacheWrite1h
+			}
 			out.Output = max64(out.Output, one.Output)
 		}
 	}
@@ -339,10 +351,17 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	return out, worst, worstPayload
 }
 
+// hasInputCount reports whether a usage block carries an input count at all (Anthropic or Responses
+// `input_tokens`, OpenAI `prompt_tokens`), as opposed to an output-only block such as Anthropic's streaming
+// message_delta.
+func hasInputCount(u gjson.Result) bool {
+	return u.Get("input_tokens").Exists() || u.Get("prompt_tokens").Exists()
+}
+
 // responseUsage picks the right parser for a response's content type. The returned
 // Usage carries the stop reason whatever `ok` says — see Usage.StopReason.
 func responseUsage(contentType string, body []byte) (Usage, bool) {
-	u, _, ok := responseUsageWhy(contentType, body)
+	u, _, ok := responseUsageWhy(contentType, body, false)
 	return u, ok
 }
 
@@ -350,10 +369,17 @@ func responseUsage(contentType string, body []byte) (Usage, bool) {
 // and recorded — the whole response is in scope here, which is what it takes to say anything
 // about it (parseUsage is also called per-event by the SSE path, where a skip means nothing).
 //
+// spliced says the bytes in body are a head+tail WINDOW rather than the whole response (the
+// sniffer's own knowledge, sn.spliced()). It upgrades an `absent` verdict to unreadable: over a
+// window, "no usage block in what we kept" is not "the provider sent none" — the middle of the
+// response was dropped on the floor, and the remedy is upstream of any parser. Only `absent` is
+// upgraded; a block that was present and rejected is a real dialect finding whatever the window
+// did, and `found` wins over everything (#207).
+//
 // The reason reaches the lifecycle log line beside `usage_reported`, so a deployment that has
 // quietly stopped accounting tokens says which of the five cases it is at the moment it happens,
 // instead of being reconstructed two iterations later from a cost figure.
-func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) {
+func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, usageMiss, bool) {
 	if len(body) == 0 {
 		return Usage{}, usageMissNoBody, false
 	}
@@ -370,14 +396,19 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 	} else {
 		u, why = parseUsageWhy(body)
 	}
+	if spliced && why == usageMissAbsent {
+		why = usageMissUnreadable
+	}
 	u.StopReason = responseStopReason(sse, body)
+	u.ToolUseNames = responseToolUseNames(sse, body)
+	u.ToolUseIncomplete = spliced
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.
 	if counter, alertable := usageCounters[why]; alertable {
 		counter.Add(1)
 		// len(body) so the record still reports the whole response's size — that is what says a
 		// window was spliced — while describing the document that actually failed to parse.
-		recordUsageShape(sse, len(body), doc)
+		recordUsageShape(sse, len(body), spliced, doc)
 	}
 	return u, why, why == usageMissNone
 }
@@ -470,8 +501,8 @@ func noteUsageShape(key string) bool {
 // is false" into "the provider is sending camelCase", which is the difference between an open
 // question and a one-line fix — without needing a captured body, an instrumented capture hop, or
 // any extra request.
-func recordUsageShape(sse bool, total int, doc []byte) {
-	attrs := usageShapeAttrs(sse, total, doc)
+func recordUsageShape(sse bool, total int, spliced bool, doc []byte) {
+	attrs := usageShapeAttrs(sse, total, spliced, doc)
 	if !noteUsageShape(usageShapeKey(attrs)) {
 		return
 	}
@@ -513,10 +544,10 @@ func ResetUsageShapeRecordForTest() {
 //
 // doc is the JSON document that failed to parse: the whole body for a buffered response, and for a
 // stream the ONE EVENT the classifier judged (see parseSSEUsageWhy) rather than the transport or its
-// last event. total is the whole response's size, which is the figure that says a window was
-// spliced.
-func usageShapeAttrs(sse bool, total int, doc []byte) []any {
-	attrs := []any{"sse", sse, "bytes", total,
+// last event. total is the whole response's size, and spliced says that size was seen through a
+// head+tail window — the two together are what say "the bytes were dropped, not the dialect".
+func usageShapeAttrs(sse bool, total int, spliced bool, doc []byte) []any {
+	attrs := []any{"sse", sse, "bytes", total, "spliced", spliced,
 		// Not parseable means the window was spliced rather than the dialect being strange —
 		// stated in the record so it cannot be misread as a field-name gap.
 		"valid_json", gjson.ValidBytes(doc),
@@ -589,6 +620,72 @@ func responseStopReason(sse bool, body []byte) string {
 	return ""
 }
 
+// responseToolUseNames reads every tool_use / function-call block NAME off a response, in the
+// order they appear, for issue #424's waitcause package. Three dialects, each read structurally
+// (never a regex over tool names) off the same bytes StopReason reads:
+//
+//	Anthropic Messages   content[].{type: "tool_use", name}         (buffered JSON, or an SSE
+//	                      content_block_start event's content_block)
+//	OpenAI chat           choices[0].message.tool_calls[].function.name (buffered), or a
+//	                      streamed delta.tool_calls[].function.name chunk
+//	OpenAI Responses      output[].{type: "function_call", name}    (buffered); not read from
+//	                      an SSE stream — Responses event names and nesting are not the same as
+//	                      Anthropic's and this proxy does not splice that transport (see
+//	                      proxy.go's own comment where it tests schema.IsResponses(wire)), so a streamed
+//	                      Responses tool call reads as if the response had none, same honest gap
+//	                      as a sniffer-truncated Anthropic stream.
+//
+// Best-effort by construction: a sniffed stream only has a bounded head+tail window (see
+// sniffer), so a tool_use far into a very long response can fall outside it. That under-reports
+// own_tool, it never invents one.
+func responseToolUseNames(sse bool, body []byte) []string {
+	if !sse {
+		return bufferedToolUseNames(body)
+	}
+	var names []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		// Anthropic: content_block_start carries the block once, at its start.
+		if cb := gjson.Get(payload, "content_block"); cb.Get("type").String() == "tool_use" {
+			if n := cb.Get("name").String(); n != "" {
+				names = append(names, n)
+			}
+			continue
+		}
+		// OpenAI chat: a streamed tool call's NAME arrives once, on the chunk that opens it;
+		// later chunks for the same call carry only an arguments delta with no name.
+		for _, tc := range gjson.Get(payload, "choices.0.delta.tool_calls").Array() {
+			if n := tc.Get("function.name").String(); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
+// bufferedToolUseNames reads tool_use/function-call names off a whole, non-streamed response
+// body (or a sniffed window of one — see responseToolUseNames).
+func bufferedToolUseNames(body []byte) []string {
+	var names []string
+	// The body names no dialect, so all three are read; a body matches only one of them. A
+	// Responses custom tool call is not counted, as before.
+	for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
+		for _, c := range schema.OutputCalls(wire, body) {
+			if !c.Custom && c.Name != "" {
+				names = append(names, c.Name)
+			}
+		}
+	}
+	return names
+}
+
 // firstStopReason returns the first non-empty stop reason among the known paths.
 func firstStopReason(payload string) string {
 	for _, p := range stopReasonPaths {
@@ -615,6 +712,12 @@ type sniffer struct {
 }
 
 func newSniffer(on bool) *sniffer { return &sniffer{on: on} }
+
+// spliced reports whether the retained window DROPPED anything: more bytes were written than
+// the head alone holds, so bytes() is a splice of head and tail with a middle missing. The usage
+// classifier needs this because "no usage block in what we kept" then stops meaning "the
+// provider sent none" — see responseUsageWhy.
+func (s *sniffer) spliced() bool { return s.on && s.total > len(s.head) }
 
 func (s *sniffer) write(p []byte) {
 	if !s.on {
@@ -647,6 +750,26 @@ func (s *sniffer) bytes() []byte {
 	out = append(out, s.head...)
 	out = append(out, '\n')
 	return append(out, s.tail...)
+}
+
+// disjoint is the retained window with no byte twice. For a response of sniffMax to 2*sniffMax
+// bytes the head and the tail overlap, and bytes() holds the overlap twice: a reader that counts
+// events (tool deferral's search count) would count one there twice. Here the tail is cut past
+// the head, so an overlap gives the exact body; a gap keeps the newline between the halves.
+func (s *sniffer) disjoint() []byte {
+	if !s.on {
+		return nil
+	}
+	if s.total <= len(s.head) {
+		return s.head
+	}
+	start := len(s.head) - (s.total - len(s.tail)) // the tail's first byte the head does not hold
+	if start < 0 {
+		return s.bytes() // a gap: nothing is held twice
+	}
+	out := make([]byte, 0, len(s.head)+len(s.tail)-start)
+	out = append(out, s.head...)
+	return append(out, s.tail[start:]...)
 }
 
 func max64(a, b int64) int64 {

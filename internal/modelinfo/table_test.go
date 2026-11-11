@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -131,7 +132,7 @@ func TestShippedPriceListLoads(t *testing.T) {
 	}
 }
 
-// The exact model ids ete-litellm serves, read from its /v1/models on 2026-08-19, plus
+// The exact model ids litellm-gateway serves, read from its /v1/models on 2026-08-19, plus
 // the tier names Bob puts on the wire. Every one of them must price, because an id that
 // does not is a dashboard row whose cost reads "unknown" — the Bob symptom this file
 // exists to fix. Note the gateway's own casing (`Azure/gpt-4o`) and the ids it serves
@@ -312,9 +313,8 @@ models:
 	}
 }
 
-// A bare id with a qualified entry under one provider, and no family wildcard at
-// all, still resolves via the new tail index rather than reporting unknown.
-func TestBareIDFallsToFamilyWhenNoQualifiedTailExists(t *testing.T) {
+// A bare id that is the tail of no qualified entry still falls to its family.
+func TestBareIDWithNoQualifiedTailUsesTheFamily(t *testing.T) {
 	tb, err := ParseTable([]byte(`
 models:
   - {match: "aws/claude-opus-5",  in: 3.80, out: 19.00}
@@ -346,5 +346,176 @@ models:
 	}
 	if _, ok := tb.Price(context.Background(), "gpt-5.6-sol"); ok {
 		t.Fatal("gpt-5.6-sol matched something in a table that has no entry for it")
+	}
+}
+
+// The file-level cache_read_frac: unset follows the model, a set value (even 0.1) wins for every
+// entry, and an entry's own cache_read beats both.
+func TestTableCacheReadFracUnsetFollowsTheModel(t *testing.T) {
+	const models = `
+models:
+  - {match: "aws/claude-opus-5-5", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5-5", in: 3.0, out: 15.0}
+  - {match: "aws/claude-fable-5-1", in: 10.0, out: 50.0}
+  - {match: "aws/claude-opus-5", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5-5-x", in: 3.0, out: 15.0, cache_read: 0.9}
+`
+	read := func(doc, model string) float64 {
+		tb, err := ParseTable([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, ok := tb.Price(context.Background(), model)
+		if !ok {
+			t.Fatalf("%s not priced", model)
+		}
+		return p.CacheRead * perMTok
+	}
+	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	for _, tc := range []struct {
+		doc, model string
+		want       float64
+	}{
+		{models, "aws/claude-opus-5-5", 0.25},
+		{models, "aws/claude-sonnet-5-5", 0.15},
+		{models, "aws/claude-fable-5-1", 0.25},
+		{models, "aws/claude-opus-5", 0.50},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-opus-5-5", 0.50},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-fable-5-1", 1.0},
+		{"cache_read_frac: 0.2\n" + models, "aws/claude-opus-5", 1.0},
+		{models, "aws/claude-sonnet-5-5-x", 0.9},
+		{"cache_read_frac: 0.1\n" + models, "aws/claude-sonnet-5-5-x", 0.9},
+	} {
+		if got := read(tc.doc, tc.model); !near(got, tc.want) {
+			t.Errorf("%s: cache_read = %v per MTok, want %v", tc.model, got, tc.want)
+		}
+	}
+	if _, err := ParseTable([]byte("cache_read_frac: 0\n" + models)); err == nil {
+		t.Error("cache_read_frac: 0 must be an error, not a silent per-model fallback")
+	}
+}
+
+// A blank read tier is filled for the QUERIED model, not the match pattern. A family entry and a
+// containment hit serve models with different tiers.
+func TestTableCacheReadFillsFromTheQueriedModel(t *testing.T) {
+	const doc = `
+models:
+  - {match: "claude-opus*", in: 5.0, out: 25.0}
+  - {match: "aws/claude-sonnet-5", in: 3.0, out: 15.0}
+  - {match: "aws/claude-fable-5-1*", in: 10.0, out: 50.0, cache_read: 0.7}
+`
+	for _, tc := range []struct {
+		doc, model string
+		want       float64
+	}{
+		{doc, "aws/claude-opus-5-5", 0.25},
+		{doc, "claude-opus-5-5", 0.25},
+		{doc, "claude-opus-5", 0.50},
+		{doc, "aws/claude-sonnet-5-5", 0.15}, // containment: the 5 entry serves 5-5
+		{doc, "aws/claude-sonnet-5", 0.30},
+		{doc, "aws/claude-fable-5-1", 0.7}, // explicit cache_read wins
+		{"cache_read_frac: 0.1\n" + doc, "claude-opus-5-5", 0.50},
+		{"cache_read_frac: 0.1\n" + doc, "aws/claude-sonnet-5-5", 0.30},
+	} {
+		tb, err := ParseTable([]byte(tc.doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, ok := tb.Price(context.Background(), tc.model)
+		if !ok {
+			t.Fatalf("%s not priced", tc.model)
+		}
+		if got := p.CacheRead * perMTok; math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("%s: cache_read = %v per MTok, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestTableParsesCompactionPoint(t *testing.T) {
+	tb, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1.0, out: 4.0, window: 200000, compaction_point: 167000}\n  - {match: \"aws/claude-sonnet-5\", in: 1.52, out: 7.6, window: 1000000}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if n, ok := tb.CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok || n != 167_000 {
+		t.Fatalf("compaction point = %d, %v, want 167000", n, ok)
+	}
+	if w, ok := tb.Window(ctx, "rits/zai-org/glm-5-3"); !ok || w != 200_000 {
+		t.Fatalf("the window must stay the real window, got %d", w)
+	}
+	if _, ok := tb.CompactionPoint(ctx, "aws/claude-sonnet-5"); ok {
+		t.Fatal("an entry with no compaction_point reported one")
+	}
+	if _, ok := (Chain{tb}).CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok {
+		t.Fatal("the chain did not pass the table's compaction point on")
+	}
+	if _, err := ParseTable([]byte("models:\n  - {match: x, in: 1, out: 1, compaction_point: -1}\n")); err == nil {
+		t.Fatal("a negative compaction_point was accepted")
+	}
+}
+
+func TestTableRejectsACompactionPointAboveItsWindow(t *testing.T) {
+	_, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1, out: 1, window: 200000, compaction_point: 250000}\n"))
+	if err == nil || !strings.Contains(err.Error(), "rits/zai-org/glm-5-3") {
+		t.Fatalf("err = %v, want a refusal that names the model", err)
+	}
+	// Not stated together: no check. A point alone is fine, and equal to the window is fine.
+	for _, y := range []string{
+		"models:\n  - {match: x, in: 1, out: 1, compaction_point: 250000}\n",
+		"models:\n  - {match: x, in: 1, out: 1, window: 200000, compaction_point: 200000}\n",
+	} {
+		if _, err := ParseTable([]byte(y)); err != nil {
+			t.Errorf("%q refused: %v", y, err)
+		}
+	}
+}
+
+// The inline form of the #324 acceptance test: it does not depend on the shipped example file.
+func TestBareIDResolvesToQualifiedEntryInline(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",      in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok || math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("bare claude-sonnet-5: ok=%v in=$%.2f/MTok, want $1.52", ok, p.Input*1e6)
+	}
+}
+
+// A request that names ANOTHER provider must not take the rate of a different provider's
+// entry because the two share a tail.
+func TestOtherProvidersPrefixDoesNotTakeAQualifiedTail(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",      in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "vertex/claude-sonnet-5")
+	if !ok || math.Abs(p.Input-2.28e-6) > 1e-15 {
+		t.Fatalf("vertex/claude-sonnet-5: ok=%v in=$%.2f/MTok, want $2.28 (the family, not aws's $1.52)", ok, p.Input*1e6)
+	}
+}
+
+// Two providers that price a tail identically are not ambiguous: the bare id takes that rate.
+func TestSameRateTailIsNotAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",         in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok || math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("bare claude-sonnet-5: ok=%v in=$%.2f/MTok, want $1.52", ok, p.Input*1e6)
 	}
 }

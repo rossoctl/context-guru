@@ -2,6 +2,8 @@ package kvcache
 
 import (
 	"context"
+	"math"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -635,5 +637,91 @@ func TestEveryShippedStrategyDescribesItself(t *testing.T) {
 	if (NoCache{}).Name() != "no-cache" || Fixed5m().Name() != "fixed-5m" ||
 		Fixed1h().Name() != "fixed-1h" {
 		t.Error("a strategy name moved; the dashboard groups results by these keys")
+	}
+}
+
+// A request the provider rejected before it read a prefix (4xx/5xx, no token accounting, nothing
+// cached) leaves the entry exactly as it was. Replayed as "cached 0 tokens" it erased a live entry,
+// so the request after it was billed a full rewrite: +$1.0k (2.7%) of the production fixed-5m
+// replay's gap to the real bill.
+func TestARejectedRequestDoesNotEraseTheLiveEntry(t *testing.T) {
+	rows := chain("u", "s", "m", base, 60_000, 60_000)
+	rej := rows[1]
+	rej.CachedContext, rej.InputTokens, rej.OutputTokens, rej.CostKnown, rej.Rejected = 0, 0, 0, false, true
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+
+	if r.NoOps != 1 || r.Requests != 2 {
+		t.Fatalf("no-ops/requests = %d/%d, want 1/2", r.NoOps, r.Requests)
+	}
+	if r.Hits != 1 || r.Misses != 1 {
+		t.Fatalf("hits/misses = %d/%d, want 1/1: the third request is 120 s after the entry was written", r.Hits, r.Misses)
+	}
+	near(t, "total", r.TotalUSD, costMiss+costHit)
+}
+
+// A request that succeeded but lost its usage data did refresh the entry, so it is NOT skipped.
+func TestASucceededRequestWithoutUsageStillRefreshesTheEntry(t *testing.T) {
+	rows := chain("u", "s", "m", base, 60_000, 60_000)
+	rows[1].CachedContext, rows[1].InputTokens, rows[1].OutputTokens, rows[1].CostKnown = 0, 0, 0, false
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+	if r.NoOps != 0 {
+		t.Fatalf("no-ops = %d, want 0: only a rejected request is skipped", r.NoOps)
+	}
+}
+
+// A miss the dashboard could not explain ("unknown") is not rescuable credit: it forces a miss
+// like prefix_change and cold_start (issue #600). It must not turn into a simulated hit.
+func TestAnUnexplainedMissIsAForcedMissToo(t *testing.T) {
+	rows := chain("u", "s", "m", base, 10_000)
+	rows[1].MissReason = "unknown"
+	r := Simulate(rows, Fixed5m(), Config{Prices: testPrices()})
+	if r.ForcedMisses != 1 {
+		t.Errorf("forced_misses = %d, want 1 for the unknown row", r.ForcedMisses)
+	}
+	if r.Hits != 0 {
+		t.Errorf("hits = %d, want 0: an unexplained miss must not become a simulated hit", r.Hits)
+	}
+	for reason, want := range map[string]bool{"unknown": true, "prefix_change": true, "cold_start": true, "hit": false, "ttl_expiry": false, "": false} {
+		if got := ForcedMiss(reason); got != want {
+			t.Errorf("ForcedMiss(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
+// The exact-optimum cost function agrees with Simulate: an unknown successor is not a hit.
+func TestStepCostTreatsAnUnexplainedMissAsAMiss(t *testing.T) {
+	cfg := Config{Prices: testPrices()}
+	prev := req(1, "u", "s", base, "m")
+	mk := func(reason string) float64 {
+		row := req(2, "u", "s", base+10_000, "m")
+		row.MissReason = reason
+		return stepCost(prev, ActionWrite5m, row, ActionWrite5m, cfg)
+	}
+	hit, unknown, forced := mk("hit"), mk("unknown"), mk("prefix_change")
+	if !(hit < unknown) {
+		t.Errorf("a hit (%.6f) must cost less than an unknown miss (%.6f)", hit, unknown)
+	}
+	if math.Abs(unknown-forced) > 1e-12 {
+		t.Errorf("unknown = %.6f, prefix_change = %.6f; they must price the same", unknown, forced)
+	}
+}
+
+// Issue #611 moves rows from prefix_change to cold_start. Both are forced misses, so every
+// figure of every arm must stay the same.
+func TestRelabellingPrefixChangeAsColdStartChangesNoFigure(t *testing.T) {
+	build := func(reason string) []*Request {
+		rows := chain("u", "s", "m", base, 10_000, 10_000, 10_000)
+		rows[1].MissReason = reason
+		return rows
+	}
+	for _, s := range []Strategy{Fixed5m(), Fixed1h(), alwaysDo{ActionPing1h}} {
+		a := Simulate(build("prefix_change"), s, Config{Prices: testPrices()})
+		b := Simulate(build("cold_start"), s, Config{Prices: testPrices()})
+		if a.ForcedMisses != 1 || b.ForcedMisses != 1 {
+			t.Fatalf("%s: forced_misses = %d / %d, want 1 / 1", s.Name(), a.ForcedMisses, b.ForcedMisses)
+		}
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%s: result differs after relabelling\nprefix_change: %+v\ncold_start:    %+v", s.Name(), a, b)
+		}
 	}
 }

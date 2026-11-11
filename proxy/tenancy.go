@@ -119,6 +119,17 @@ func (c *lru[V]) victim() *list.Element {
 	return back
 }
 
+// each walks every live entry, front (most recently used) to back, under the caller's lock.
+// Read-only: the walk must not put or remove, or the iteration order it just promised stops
+// being true. O(n), n bounded by max — the same bound victim() already scans — so a caller
+// that needs it hot wants a summary maintained on write, not this.
+func (c *lru[V]) each(fn func(k string, v V)) {
+	for el := c.ll.Front(); el != nil; el = el.Next() {
+		e := el.Value.(*lruEntry[V])
+		fn(e.k, e.v)
+	}
+}
+
 func (c *lru[V]) remove(k string) {
 	if el, ok := c.index[k]; ok {
 		c.ll.Remove(el)
@@ -151,6 +162,8 @@ type Tenancy struct {
 	Mode components.Mode
 	// CaptureContent is this tenant's consent to storing transcript text.
 	CaptureContent bool
+	// RecordTraces is this tenant's consent to --record trace recording.
+	RecordTraces bool
 	// Upstream names, by dialect, into Options.Upstreams.
 	UpAnthropic, UpOpenAI, UpBob string
 	// Cache is this tenant's host-level prompt-cache policy: the idle keep-alive and the
@@ -554,6 +567,27 @@ func (s *TenantSource) ForTenant(t *tenant.Tenant) (*Tenancy, error) {
 	return s.tenancy(t)
 }
 
+// ObserveNamespaces calls fn for every tenant whose CURRENT pipeline runs observe mode. The
+// restart grace's lookup (#766) uses it to answer "no lookup" for exactly those tenants:
+// observe rows carry no session id, so the recorder knows none of their threads and a miss
+// would read every warm thread as new — the one answer worse than not asking. Only tenants
+// that have RESOLVED at least once are here, which is no gap: a request resolves its tenancy
+// before its pipeline runs, so by the time a thread's key is asked about, its tenant is in
+// the cache. A tenant that switches modes rebuilds on its next request, and this walk reads
+// the rebuilt entry.
+func (s *TenantSource) ObserveNamespaces(fn func(tenantID string)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache.each(func(id string, c *cached) {
+		if c.t.Mode == components.ModeObserve {
+			fn(id)
+		}
+	})
+}
+
 func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	cfgDoc := s.reg.Config(t)
 
@@ -574,6 +608,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			tn := *c.t
 			tn.Label, tn.Manager = t.Label, t.IsManager()
 			tn.CaptureContent = t.CaptureContent
+			tn.RecordTraces = t.RecordTraces
 			tn.UpAnthropic, tn.UpOpenAI, tn.UpBob = t.UpAnthropic, t.UpOpenAI, t.UpBob
 			// Pipe/Store/Shadow are shared with the previous copy on purpose: they are
 			// internally synchronised, and per-tenant state must not be duplicated.
@@ -616,8 +651,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) {
 	tn := &Tenancy{
 		ID: t.ID, Label: t.Label, Manager: t.IsManager(),
-		CaptureContent: t.CaptureContent,
-		UpAnthropic:    t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		UpAnthropic: t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
 		Mode: components.ModeSync,
 	}
 	built, err := s.builder([]byte(cfgDoc), s.emitter)
@@ -707,6 +742,11 @@ func (h *Handler) statsTrusted(r *http.Request) bool {
 	if h.opts.StatsTrusted != nil {
 		return h.opts.StatsTrusted(r)
 	}
+	return directLoopback(r)
+}
+
+// directLoopback is a loopback peer that relayed nobody: see statsTrusted.
+func directLoopback(r *http.Request) bool {
 	ip := net.ParseIP(clientIP(r))
 	if ip == nil || !ip.IsLoopback() {
 		return false
@@ -722,7 +762,7 @@ func (h *Handler) statsTrusted(r *http.Request) bool {
 // tenancyFor resolves the caller's tenancy, or the static single-tenant one.
 func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 	if h.opts.Tenants == nil {
-		return h.static, nil
+		return h.static.Load(), nil
 	}
 	return h.opts.Tenants.Resolve(r)
 }
@@ -769,4 +809,32 @@ func failAuth(w http.ResponseWriter, err error) {
 	// Hand-rolled rather than encoding/json: msg is one of this file's constants or
 	// an upstream name, and a marshal error here would leave a bare status.
 	fmt.Fprintf(w, "{\"error\":%q}\n", msg)
+}
+
+// tenantObserves reports whether the thread behind key belongs to a deployment the grace
+// lookup must NOT answer for (#766): the whole proxy when the operator set mode observe, or
+// one hosted tenant whose current pipeline runs observe — its namespace is the "tenant:"
+// prefix session.Scoped puts on every hosted key. Those deployments' rows carry no session
+// id, so the recorder knows none of their threads; a miss would read every warm thread as
+// new, where declining the key (have=false) lets #759's start-time fallback answer.
+//
+// A false hit is possible and tolerable: an explicit session id may itself contain ':'
+// (session.Scoped allows it), so a sync tenant's id can look like an observe tenant's
+// namespace. The cost is one turn answered by the start-time rule instead of the lookup —
+// over-protection, the safe direction. The reverse cannot happen: a hosted observe tenant's
+// keys always carry its prefix.
+func (h *Handler) tenantObserves(key string) bool {
+	if h.mode() == components.ModeObserve {
+		return true
+	}
+	if h.opts.Tenants == nil {
+		return false
+	}
+	hit := false
+	h.opts.Tenants.ObserveNamespaces(func(tenantID string) {
+		if strings.HasPrefix(key, tenantID+":") {
+			hit = true
+		}
+	})
+	return hit
 }

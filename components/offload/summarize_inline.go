@@ -2,7 +2,6 @@ package offload
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -33,7 +32,7 @@ func (s *Summarize) summarizeInline(c *components.Ctx, rep *components.Report,
 	var key string
 	if mode == markerFull {
 		var err error
-		if spanJSON, err = json.Marshal(span); err != nil {
+		if spanJSON, err = summaryStashJSON(c, start, end, span); err != nil {
 			return nil, err
 		}
 		key = hashKey(string(spanJSON))
@@ -115,7 +114,7 @@ func (s *Summarize) summarizeInline(c *components.Ctx, rep *components.Report,
 	// index 1). A later turn appends messages, so this same prefix stays stable.
 	saveCheckpoint(c, sumCheckpoint{
 		SummaryMsg: summaryText, CoveredCount: end - start,
-		CoveredHash: spanHash(span), Key: key,
+		CoveredHash: summaryCoveredHash(c, start, end, span), Key: key,
 	})
 
 	// The fresh path's own event, filed HERE rather than at the top of the path: everything

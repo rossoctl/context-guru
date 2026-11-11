@@ -1,0 +1,17 @@
+$43.95 saved today. 2 of 3 caches are cold: their next message costs about
+$0.65 extra.
+
+Caches  time left before the next message costs extra
+*  session-A/main   opus-5    #####-------  2:14     ctx 34%
+-  session-A/sub-1  sonnet-5  ------------  COLD     ctx 9%
+-  session-B/main   opus-5    ------------  COLD     ctx 58%
+
+Saved today $43.95  #-#_=_:._=#-:__-
+
+Last 20 requests  oldest to newest
+o o o o o o o o o o o o o o o o o o o@X
+o hit  ~ partial  X miss  @ ping
+
+Do: the next message costs extra; /compact first to cut it.
+
+updated 22s ago   q quit  r refresh

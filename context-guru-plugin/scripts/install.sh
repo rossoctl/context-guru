@@ -62,8 +62,8 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 
 # Every fact the plan and the confirm both report. Kept in one place so `--plan` cannot describe a
 # different install from the one `--confirm` performs.
-R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0
-R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
+R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0 R_NOPING=0
+R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_STATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
 R_PORT_COMMITTED=0
@@ -222,7 +222,7 @@ route_resolve_options() {
   R_PRESET=$(kv "$cfg" option_preset);        : "${R_PRESET:=off}"
   R_IDLE=$(kv "$cfg" option_idle_exit);       : "${R_IDLE:=24h}"
   [ -z "$R_STRATEGY" ] && R_STRATEGY=$(kv "$cfg" option_cache_strategy)
-  : "${R_STRATEGY:=5-min-ping}"
+  : "${R_STRATEGY:=auto}"
   [ -z "$R_UPSTREAM" ] && R_UPSTREAM=$(kv "$cfg" option_upstream)
 }
 
@@ -425,6 +425,7 @@ route_confirm_command() {
   [ -n "$R_UPSTREAM" ] && c="$c --upstream $(shq "$R_UPSTREAM")"
   [ -n "$R_HEALTHURL" ] && c="$c --health-url $(shq "$R_HEALTHURL")"
   [ "$R_NOHEALTH" = 1 ] && c="$c --no-health-check"
+  [ "$R_NOPING" = 1 ] && c="$c --no-ping-header"
   [ "$R_NOGITIGNORE" = 1 ] && c="$c --no-gitignore-check"
   [ "$R_USERSCOPE" = 1 ] && c="$c --i-understand-machine-wide"
   [ -n "$R_ONEXISTING" ] && c="$c --on-existing-projects $(shq "$R_ONEXISTING")"
@@ -489,6 +490,12 @@ means every project except those)" ;;
 follow this machine-wide route instead (their own proxies are stopped; whatever they routed to \
 before context-guru is put back and would still override, reported per project)" ;;
     esac
+  fi
+  # The enablement route_enable_plugin writes (#318) is a machine-wide change in the same file, so it
+  # is part of what is agreed to here rather than something the report mentions afterwards.
+  if [ "$R_SCOPE" = user ]; then
+    q="$q, and enable the context-guru plugin in every project so its /context-guru:* commands work \
+everywhere, not only here (a machine-wide switch-off set in /plugin is left as it is)"
   fi
   if [ "$R_MODE" = attach ]; then
     q="$q (attach mode: nothing is started, the URL is assumed to be already serving)"
@@ -560,7 +567,7 @@ route_stop_adopted_proxy() {
     return 0
   fi
   rm -f "$apidfile" "${astate}/proxy-${aport}.owner" "${astate}/proxy-${aport}.fingerprint" \
-    2>/dev/null || true
+    "${astate}/keepalive-${aport}.yaml" 2>/dev/null || true
   emit "adopted_proxy_stopped=$aproj port=$aport"
 }
 
@@ -691,6 +698,13 @@ $R_STRATEGY was not checked and cache_strategy= in this report may be wrong too.
 plugin install rather than a bad argument: check python3 and $(route_here)/settings.py. Nothing was \
 installed, started or written."
   fi
+  # A name from before the ping-count rename (`5-min-ping`) is accepted and mapped to its new name, so a
+  # saved option or a remembered command still installs. `aliases=` is old:new pairs.
+  local aliases pair
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
   case ",${names}," in
     *",${R_STRATEGY},"*) : ;;
     *) route_needs "unknown_strategy" "--cache-strategy $R_STRATEGY is not a strategy. Known: \
@@ -835,7 +849,7 @@ get the conflict question with its own paired commands. Do not compose --on-conf
   # bare project key, which names a stranger only if that project still routes itself. settings.py
   # answers both, so this gate and start-proxy.sh's veto cannot drift apart.
   local owner_verdict
-  owner_verdict=$("$(route_here)/settings.py" owner-token --observed "$owner_key" 2>/dev/null \
+  owner_verdict=$("$(route_here)/settings.py" owner-token --port "$R_PORT" --observed "$owner_key" 2>/dev/null \
                     | sed -n 's/^verdict=//p' | head -1)
   if [ -n "$owner_key" ] && [ "$owner_verdict" = theirs ]; then
     emit "owner_project=$owner_key"
@@ -1061,6 +1075,7 @@ proxy is a broken one."
   local add=("$(route_here)/settings.py" add --file "$R_FILE" --url "$(route_url)")
   [ -n "$R_UPSTREAM" ] && add+=(--upstream "$R_UPSTREAM")
   [ -n "$R_BIN" ] && add+=(--bin "$R_BIN")
+  [ "$R_NOPING" = 1 ] && add+=(--no-ping-header)
   [ "$R_SCOPE" = user ] && add+=(--user-scope)
   # BOTH decisions overwrite the routing key - that is what routing through a proxy means. `chain`
   # differs from `replace` only in ADDITIONALLY recording the old value as the upstream, which the
@@ -1225,16 +1240,64 @@ any other project, since the machine-wide install has its own record and port."
   emit "backup=$(kv "$aout" backup)"
   emit "reset_hatch=$(kv "$aout" reset_hatch)"
   emit "replaced=$(kv "$aout" replaced)"
+  # Consent for the manual-ping opt-in header (x-context-guru-ping: 1): said every time it is written, so the user
+  # hears what the proxy keeps and for how long, and how to turn it off.
+  if [ "$R_NOPING" != 1 ]; then
+    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory so the Ping button can work: for 5 minutes after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, re-run the install with --no-ping-header."
+  fi
   route_install_statusline
+  route_enable_plugin "$ares"
   route_ensure_gitignore
   route_report
 }
 
-# ---- statusline, on by default -------------------------------------------------------------
-# A savings-focused install with nothing showing the savings is a worse first impression than a
-# status line that turns out to be unwanted, and unwanted is one command away (--no-statusline
-# here, or `settings.py off` any time after).
+# ---- enablement, machine-wide installs only (#318) -------------------------------------------
+# `/context-guru:install` can only run where the plugin is already ENABLED, which in practice is one
+# project: `/plugin` writes `enabledPlugins` into whichever scope it was asked for. `--scope user`
+# then carried routing, the port option and the status line everywhere and left enablement where it
+# started, so every other project was routed through the proxy, showed the status line (a plain
+# command path, which needs no enablement), and had no `/context-guru:*` commands at all — the state
+# that looks like a broken install, and that reloading plugins only confirms.
 #
+# So a machine-wide install completes what it promised, in the same file and under the same backup
+# and consent as the two writes above. `enable-plugin` writes only an ABSENT key and records it, so
+# uninstall takes back only what this added; an explicit `false` is the user's decision in `/plugin`
+# and is reported rather than flipped. Project and team scope write nothing here: a project install
+# runs where the plugin is already enabled, which is the project it routes.
+#
+# Never fatal, like the statusline: routing is written and health-checked by now.
+route_enable_plugin() {
+  [ "$R_SCOPE" = user ] || return 0
+  # --no-backup only when the routing write ($1, its result) took one this run. `unchanged` took
+  # none — the re-run a machine installed before this fix makes to get it — so this write backs up.
+  local eout nb=(--no-backup)
+  [ "${1:-}" = unchanged ] && nb=()
+  eout=$("$(route_here)/settings.py" enable-plugin --file "$R_FILE" --user-scope "${nb[@]}" 2>&1) \
+    || true
+  local found; found=$(kv "$eout" plugin_enabled)
+  local how="run: claude plugin enable context-guru@context-guru --scope user"
+  case "$found" in
+    added|already) emit "plugin_enabled=$found" ;;
+    explicitly_disabled)
+      emit "plugin_enabled=explicitly_disabled"
+      emit "plugin_enabled_note=context-guru is switched OFF machine-wide in $R_FILE (enabledPlugins), \
+which was left as it is: routing now covers every project, but its /context-guru:* commands appear only \
+in projects that enable it themselves. To have them everywhere, $how" ;;
+    *)
+      emit "plugin_enabled=skipped"
+      local why=${found:-$(kv "$eout" reason)}
+      emit "plugin_enabled_note=could not enable context-guru machine-wide (${why:-unknown}); its \
+/context-guru:* commands stay limited to projects that enable it. To have them everywhere, $how" ;;
+  esac
+}
+
+# ---- statusline, OFF by default since 0.6.1 ---------------------------------------------------
+# The Context Guru mod's band above the prompt now draws everything the status line drew (`saved $x of
+# $y session`, the cache clock, the context bar, `▲ update`), so the install no longer writes a
+# statusLine. `--statusline` asks for it too (both then show the same figures); `/context-guru:statusline`
+# installs it any time after. `--no-statusline` is accepted and does what the default now does.
+#
+# What follows is how the line is written WHEN it is asked for.
 # SAME FILE ROUTING JUST USED — not hardcoded to user scope. This used to write unconditionally
 # to $HOME/.claude/settings.json on the theory that it "renders nothing in a project that is not
 # routed, so it's safe regardless of scope" (skills/statusline/SKILL.md). That argument covers
@@ -1261,7 +1324,7 @@ any other project, since the machine-wide install has its own record and port."
 # silently. `route_here()` already resolves this script's own directory from `$0` for every other
 # call in this file — reuse it instead of a placeholder nothing will ever expand.
 route_install_statusline() {
-  [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
+  [ "$R_STATUSLINE" = 1 ] || { emit "statusline=off"; return 0; }
   local sout scode=0
   # --no-backup: the routing `add` a few lines up already backed up this file's pre-install
   # state. Without this, this second call took its own backup a moment later — of "routed, no
@@ -1332,7 +1395,9 @@ if [ "${1:-}" = --route ]; then
       --health-url) route_need_value --health-url "${2:-}"; R_HEALTHURL="$2"; shift ;;
       --upstream) route_need_value --upstream "${2:-}"; R_UPSTREAM="$2"; shift ;;
       --no-health-check) R_NOHEALTH=1 ;;
-      --no-statusline) R_NOSTATUSLINE=1 ;;
+      --no-ping-header) R_NOPING=1 ;;
+      --statusline) R_STATUSLINE=1 ;;
+      --no-statusline) R_STATUSLINE=0 ;;
       --no-gitignore-check) R_NOGITIGNORE=1 ;;
       --i-understand-machine-wide) R_USERSCOPE=1 ;;
       --i-consent-to-traffic-interception) R_CONSENT=1 ;;

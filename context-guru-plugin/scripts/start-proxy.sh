@@ -85,7 +85,17 @@ esac
 PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-off}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 BIN="${CONTEXT_GURU_BIN:-context-guru-proxy}"
-LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT:-unresolved}.log"
+# The log lives in the STATE directory, not TMPDIR (#251). Every other artefact this script writes
+# (pidfile, fingerprint, owner, dashboard DB) is scoped by CONTEXT_GURU_STATE, and the log was the
+# one that was not: pinning the state dir isolated everything but the log, so independent runs on
+# one machine shared ${TMPDIR}/context-guru-proxy-<port>.log — an append-only file with no per-run
+# boundary, whose "last lines" a failure report then read as this run's evidence. Resolved from the
+# same expression STATE uses in section (1b), with the same mkdir fallback to TMPDIR for a state
+# directory that cannot be made; resolved HERE because the gate's breadcrumbs below write to the log
+# before section (1b) needs STATE itself.
+LOG_DIR="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
+mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}"
+LOG="${LOG_DIR}/proxy-${PORT:-unresolved}.log"
 # See --emit-facts below. Off by default: the hook path's output is read by a person.
 EMIT_FACTS=0
 HEALTH="http://127.0.0.1:${PORT}/healthz"
@@ -254,7 +264,7 @@ case "$PORT_ARG" in
   *[!0-9]*) note "ignoring --port '$PORT_ARG': not a number" ;;
   *)
     PORT="$PORT_ARG"
-    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    LOG="${LOG_DIR}/proxy-${PORT}.log"
     HEALTH="http://127.0.0.1:${PORT}/healthz"
     ;;
 esac
@@ -263,10 +273,45 @@ esac
 # install-time path, where routing does not exist yet by definition and 8787 is the plugin.json
 # default a bare invocation means; without --force there is nothing to serve and nothing to gate
 # against, so decline the same way an unrouted project does.
+# --- (0b) keep the status line on the running plugin version (#551) -------------------------------
+# install.sh writes the status line command with the absolute, versioned path of the plugin that ran
+# the install, and the old version stays in the plugin cache. Nothing moved it on update, so the
+# status line silently kept running the old script. This runs before the routing gate on purpose: a
+# user-scope status line renders in projects this plugin does not route.
+#
+# Cheap by construction, because this hook runs at every session start in every project. A grep over
+# the three settings files decides whether python3 is worth starting at all: it must find our
+# ownership record, naming a plugin-cache path, that is not already this plugin's own script. The
+# fork happens only on a stale line (once per update); python3 then makes the real decision. Fails
+# open: every error is swallowed and the exit status is ignored.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  for sl_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    sl_line_=$(grep -hs '"installed_statusline"' "$sl_file_" 2>/dev/null) || sl_line_=""
+    # Since 0.6.1 the mod's band draws the status line, and a line an install wrote by default (no
+    # `"statusline_asked": true` beside it) is retired: that also needs python3, whatever path it names.
+    sl_asked_=$(grep -hs '"statusline_asked": *true' "$sl_file_" 2>/dev/null) || sl_asked_=""
+    if [ -n "$sl_line_" ] && [ -z "$sl_asked_" ]; then
+      python3 "$HERE/settings.py" statusline-repoint 2>/dev/null | head -1 || true
+      break
+    fi
+    case "$sl_line_" in
+      *plugins/cache*)
+        case "$sl_line_" in
+          *"$HERE/statusline.py"*) ;;
+          *) python3 "$HERE/settings.py" statusline-repoint 2>/dev/null \
+               | head -1 || true
+             break ;;
+        esac ;;
+    esac
+  done
+fi
+
 if [ -z "$PORT" ]; then
   if [ "$FORCE" = 1 ]; then
     PORT="8787"
-    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    LOG="${LOG_DIR}/proxy-${PORT}.log"
     HEALTH="http://127.0.0.1:${PORT}/healthz"
   else
     printf '%s declined: no install routes this directory and no port is configured\n' \
@@ -290,10 +335,42 @@ case "${ANTHROPIC_BASE_URL:-}" in
     # no-op statement, the script ran unrouted and exited here without a word — no output, no log,
     # no pidfile. Three rounds of guessing followed, and the fix was only found by reading this
     # branch in the source. One line costs nothing and answers it immediately.
+    #
+    # The URL is logged with its userinfo (user:pass@) replaced and its query dropped entirely, the
+    # way settings.py's redact_url protects credentials everywhere else it prints a base URL (#251):
+    # the diagnostic value is the port mismatch — the scheme, host and path — not the credentials a
+    # URL can carry. The query goes whole rather than selectively masked, because a query can carry
+    # a credential under a name no list of credential-looking words catches.
+    url_=$(printf '%s' "${ANTHROPIC_BASE_URL:-unset}" \
+      | sed -E -e 's#(//)[^/@?]*@#\1<credentials not shown>@#' -e 's#[?#].*##')
     printf '%s declined: ANTHROPIC_BASE_URL=%s does not name port %s; pass --force to start anyway\n' \
-      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${ANTHROPIC_BASE_URL:-unset}" "$PORT" >>"$LOG" 2>/dev/null
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$url_" "$PORT" >>"$LOG" 2>/dev/null
     exit 0 ;;
 esac
+fi
+
+# --- (1a) the ping header on an install that predates it (#685) ----------------------------------
+# Manual pings (the Ping button) work only when the session sends `x-context-guru-ping: 1`. Only
+# install.sh wrote it, so an older install never has it. The header makes the server keep the latest
+# request and key in memory, so it is written only when settings.py can prove the install predates
+# --no-ping-header (then it prints the consent words). Otherwise settings.py prints a one-time note.
+# The grep keeps python3 off the common path: it runs only when a settings file holds our routing
+# record with no ping record at all. Fails open: any error is swallowed.
+if [ "$FORCE" != 1 ] && [ -n "$HERE" ] && [ -f "$HERE/settings.py" ]; then
+  for ph_file_ in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.json" \
+                  "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/settings.local.json"; do
+    ph_seen_="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/ping-header-note.json"
+    ph_real_=$(realpath "$ph_file_" 2>/dev/null) || ph_real_="$ph_file_"
+    if grep -qs '"installed_base_url"' "$ph_file_" 2>/dev/null \
+       && ! grep -qs '"installed_ping_header"\|"ping_header_opt_out"' "$ph_file_" 2>/dev/null \
+       && ! grep -qsF "\"$ph_real_\"" "$ph_seen_" 2>/dev/null; then
+      ph_out_=$(python3 "$HERE/settings.py" ensure-ping-header 2>/dev/null) || ph_out_=""
+      ph_note_=$(printf '%s\n' "$ph_out_" | sed -n 's/^note=//p' | head -1)
+      [ -n "$ph_note_" ] && note "$ph_note_"
+      break
+    fi
+  done
 fi
 
 # --- (1b) what configuration do we WANT, and what is running? ----------------------------
@@ -336,7 +413,7 @@ owner_token_now() {
   if [ "$OWNER_TOKEN_RESOLVED" = 0 ]; then
     OWNER_TOKEN_RESOLVED=1
     if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
-      OWNER_TOKEN=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token 2>/dev/null \
+      OWNER_TOKEN=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token --port "$PORT" 2>/dev/null \
                       | sed -n 's/^owner=//p' | head -1)
     fi
     [ -n "$OWNER_TOKEN" ] || OWNER_TOKEN=$(pwd -P 2>/dev/null) || OWNER_TOKEN=""
@@ -358,7 +435,7 @@ owner_token_now() {
 # who trusts it would mis-reason about the one branch where the fix does not apply.
 owner_verdict() {
   if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
-    ov_=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token --observed "$1" 2>/dev/null \
+    ov_=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token --port "$PORT" --observed "$1" 2>/dev/null \
           | sed -n 's/^verdict=//p' | head -1)
     [ -n "$ov_" ] && { printf '%s\n' "$ov_"; return 0; }
   fi
@@ -723,213 +800,394 @@ fi
 CONFIG_ARGS=()
 KEEPALIVE_CFG="${STATE}/keepalive-${PORT}.yaml"
 
-# PRESET_NOTE is what the success note reports, and it is NOT $PRESET once --config is passed. Because
-# --config replaces the preset entirely (see above), the proxy runs whatever `preset:` the keep-alive
-# file recorded, while $PRESET still holds the plugin option. Reporting the option named a value that
-# was not in effect, and the two diverge the moment somebody changes the option after enabling
-# keep-alive — a confident report of something untrue, which is the failure this plugin exists to avoid.
-PRESET_NOTE="$PRESET"
-# STRATEGY_NOTE is the NAME of the cache strategy in effect. Reported because a name is the only
-# thing a user can say back to us: "put it back on 5-min-ping" has to be a sentence, not an
-# archaeology exercise over four tuning numbers. `none` is the absence of a config, so it is the
-# correct thing to report when there is no file - not "unknown", and not silence.
-#
-# It said `split` until the default preset became `off`. That name came from `cachesplit`, which is
-# no longer in the default pipeline, so the startup note was announcing a component that was not
-# running - and it was a SECOND encoding of a name settings.py already owns, which is the defect
-# shape this branch exists to remove. Caught by reading the note in a test run, not by the drift
-# test, which only covered the preset. TestTheStartupNoteUsesAStrategyNameSettingsKnows covers it now
-# (the earlier spelling of that name in this comment was of a test that never existed).
-STRATEGY_NOTE="none"
-if [ -f "$KEEPALIVE_CFG" ]; then
-  CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
-  # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
-  # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
-  # The name is trusted only on a file whose first line carries OUR marker. Read without that check,
-  # any foreign config with `strategy=` on line 1 was reported as `cache strategy <theirs>` in the
-  # startup note while `strategy show` called the same file `(foreign)` - and the stated point of
-  # recording the name in the file is that the two readers cannot disagree. Same marker test as
-  # settings.py's _strategy_is_ours(): the prefix, and `written by` on that line.
-  cfg_first=$(sed -n '1p' "$KEEPALIVE_CFG" 2>/dev/null)
-  case "$cfg_first" in
-    "# context-guru:"*"written by"*)
-      cfg_strategy=$(printf '%s\n' "$cfg_first" \
-        | sed -n 's/.*strategy=\([A-Za-z0-9._-]*\).*/\1/p') ;;
-    *) cfg_strategy= ;;
-  esac
-  if [ -n "$cfg_strategy" ]; then
-    STRATEGY_NOTE="$cfg_strategy"
-  else
-    STRATEGY_NOTE="unnamed (config predates named strategies, or is not ours)"
-  fi
-  # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path, so
-  # an unreadable, empty, comment-only or preset-less file must still start the proxy.
+# PRESET_NOTE and STRATEGY_NOTE are computed by this function rather than inline, so the preset
+# fallback in section (3b) below can call it again after `strategy sync` rewrites the keep-alive
+# file's `preset:` line — without this, a successful fallback would still report the REJECTED
+# preset in its success note, because PRESET_NOTE was computed once, before the rewrite.
+compute_preset_and_strategy_notes() {
+  # PRESET_NOTE is what the success note reports, and it is NOT $PRESET once --config is passed.
+  # Because --config replaces the preset entirely (see above), the proxy runs whatever `preset:`
+  # the keep-alive file recorded, while $PRESET still holds the plugin option. Reporting the
+  # option named a value that was not in effect, and the two diverge the moment somebody changes
+  # the option after enabling keep-alive — a confident report of something untrue, which is the
+  # failure this plugin exists to avoid.
+  PRESET_NOTE="$PRESET"
+  # STRATEGY_NOTE is the NAME of the cache strategy in effect. Reported because a name is the only
+  # thing a user can say back to us: "put it back on auto" has to be a sentence, not an
+  # archaeology exercise over four tuning numbers. `none` is the absence of a config, so it is the
+  # correct thing to report when there is no file - not "unknown", and not silence.
   #
-  # What keeps that true is the ABSENCE of `set -e` combined with the PRESENCE of `set -uo pipefail`
-  # (line 28) — and it is pipefail that makes the combination load-bearing, not -e alone. With pipefail,
-  # a failing `sed` (a config that exists but cannot be read) becomes this assignment's exit status; add
-  # -e and the script dies with status 2 BEFORE the proxy is launched, which is the failure this file's
-  # own header calls the biggest risk in the feature. Do not add -e here without reading
-  # TestStartProxyReportsThePresetActuallyInEffect's unreadable-config row, which exists to catch it.
-  #
-  # Anchored at column zero: `preset:` is a top-level key, and a nested one (e.g. components.offload.
-  # preset) in a hand-edited file both LOADS and would win a first-match-any-indentation search, so the
-  # note would name the inner value while the proxy ran the outer one. Inline comments are stripped for
-  # the same reason — `preset: cache # why` used to leak the comment into the note.
-  cfg_preset=$(sed -n 's/^preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
-                 | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | sed 's/[[:space:]]*$//')
-  if [ -n "$cfg_preset" ]; then
-    PRESET_NOTE="${cfg_preset} (from keepalive-${PORT}.yaml)"
-  else
-    # No preset: line. Do NOT say "compaction is off" — a config may set `pipeline:` directly without
-    # naming a preset, and files written before the always-state-the-preset rule exist in the wild. So
-    # report only what is known: the config decides, and it did not name one.
-    PRESET_NOTE="unstated in keepalive-${PORT}.yaml"
+  # It said `split` until the default preset became `off`. That name came from `cachesplit`, which is
+  # no longer in the default pipeline, so the startup note was announcing a component that was not
+  # running - and it was a SECOND encoding of a name settings.py already owns, which is the defect
+  # shape this branch exists to remove. Caught by reading the note in a test run, not by the drift
+  # test, which only covered the preset. TestTheStartupNoteUsesAStrategyNameSettingsKnows covers it now
+  # (the earlier spelling of that name in this comment was of a test that never existed).
+  STRATEGY_NOTE="none"
+  if [ -f "$KEEPALIVE_CFG" ]; then
+    CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
+    # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
+    # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
+    # The name is trusted only on a file whose first line carries OUR marker. Read without that check,
+    # any foreign config with `strategy=` on line 1 was reported as `cache strategy <theirs>` in the
+    # startup note while `strategy show` called the same file `(foreign)` - and the stated point of
+    # recording the name in the file is that the two readers cannot disagree. Same marker test as
+    # settings.py's _strategy_is_ours(): the prefix, and `written by` on that line.
+    cfg_first=$(sed -n '1p' "$KEEPALIVE_CFG" 2>/dev/null)
+    case "$cfg_first" in
+      "# context-guru:"*"written by"*)
+        cfg_strategy=$(printf '%s\n' "$cfg_first" \
+          | sed -n 's/.*strategy=\([A-Za-z0-9._-]*\).*/\1/p') ;;
+      *) cfg_strategy= ;;
+    esac
+    if [ -n "$cfg_strategy" ]; then
+      STRATEGY_NOTE="$cfg_strategy"
+    else
+      STRATEGY_NOTE="unnamed (config predates named strategies, or is not ours)"
+    fi
+    # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path, so
+    # an unreadable, empty, comment-only or preset-less file must still start the proxy.
+    #
+    # What keeps that true is the ABSENCE of `set -e` combined with the PRESENCE of `set -uo pipefail`
+    # (line 28) — and it is pipefail that makes the combination load-bearing, not -e alone. With pipefail,
+    # a failing `sed` (a config that exists but cannot be read) becomes this assignment's exit status; add
+    # -e and the script dies with status 2 BEFORE the proxy is launched, which is the failure this file's
+    # own header calls the biggest risk in the feature. Do not add -e here without reading
+    # TestStartProxyReportsThePresetActuallyInEffect's unreadable-config row, which exists to catch it.
+    #
+    # Anchored at column zero: `preset:` is a top-level key, and a nested one (e.g. components.offload.
+    # preset) in a hand-edited file both LOADS and would win a first-match-any-indentation search, so the
+    # note would name the inner value while the proxy ran the outer one. Inline comments are stripped for
+    # the same reason — `preset: cache # why` used to leak the comment into the note.
+    cfg_preset=$(sed -n 's/^preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
+                   | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | sed 's/[[:space:]]*$//')
+    if [ -n "$cfg_preset" ]; then
+      PRESET_NOTE="${cfg_preset} (from keepalive-${PORT}.yaml)"
+    else
+      # No preset: line. Do NOT say "compaction is off" — a config may set `pipeline:` directly without
+      # naming a preset, and files written before the always-state-the-preset rule exist in the wild. So
+      # report only what is known: the config decides, and it did not name one.
+      PRESET_NOTE="unstated in keepalive-${PORT}.yaml"
+    fi
   fi
-fi
+}
+compute_preset_and_strategy_notes
 
-# LAST-MOMENT re-probe, because the idempotence probe at section (2) ran a while ago and a single
-# transient failure of it is what set up the whole reported defect: the port was occupied the entire
-# time, one probe blipped, and this script launched into a port it could never bind. Re-asking here
-# removes the CAUSE rather than only detecting the consequence, and it is free.
+# attempt_launch: the re-probe, the launch, and the health-wait loop, as a function rather than
+# straight-line script. Section (3b) below calls this a SECOND time, once, when the binary rejects
+# the configuration we gave it — a config error is otherwise indistinguishable from "did not come
+# up" and leaves the session with no proxy and no explanation (fail-open, always, is a hard
+# boundary this repo states for exactly this shape of failure: a component error must never take
+# the request down with it).
 #
-# Anything answering now is not ours - we have not started yet - so this is the already-up case
-# arriving late. Take the same no-op decision section (2) takes when it cannot prove a change is
-# needed: say nothing, touch nothing.
-if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
-  printf '%s something is already answering on port %s; not starting a second proxy\n' \
-    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" >>"$LOG" 2>/dev/null
-  # On STDOUT, not only in the log, unlike the gate in section (1). Reaching this line means section
-  # (2) already decided a proxy was needed - it was either absent or due for replacement - so a port
-  # that answers NOW is unexpected, and staying quiet would leave a user whose configuration change
-  # did not apply with nothing to go on.
-  note "something else is answering on port ${PORT}, so no proxy was started and nothing was recorded."
-  note "if you changed a setting, it is NOT in effect; check with /context-guru:status."
+# `return 0` for every outcome this session should treat as settled — our proxy came up, or
+# something else already holds the port and nothing was started. `return 1` only for the one case
+# worth retrying: THIS launch's own proxy did not come up in its budget.
+attempt_launch() {
+  # LAST-MOMENT re-probe, because the idempotence probe at section (2) ran a while ago and a single
+  # transient failure of it is what set up the whole reported defect: the port was occupied the entire
+  # time, one probe blipped, and this script launched into a port it could never bind. Re-asking here
+  # removes the CAUSE rather than only detecting the consequence, and it is free.
+  #
+  # Anything answering now is not ours - we have not started yet - so this is the already-up case
+  # arriving late. Take the same no-op decision section (2) takes when it cannot prove a change is
+  # needed: say nothing, touch nothing.
+  if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
+    printf '%s something is already answering on port %s; not starting a second proxy\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" >>"$LOG" 2>/dev/null
+    # On STDOUT, not only in the log, unlike the gate in section (1). Reaching this line means section
+    # (2) already decided a proxy was needed - it was either absent or due for replacement - so a port
+    # that answers NOW is unexpected, and staying quiet would leave a user whose configuration change
+    # did not apply with nothing to go on.
+    note "something else is answering on port ${PORT}, so no proxy was started and nothing was recorded."
+    note "if you changed a setting, it is NOT in effect; check with /context-guru:status."
+    return 0
+  fi
+
+  # Where this attempt's output starts in $LOG. The log is append-only across starts, so a rejection
+  # logged by an EARLIER run must not be read as this run's (see the one-hour-key recovery below).
+  ATTEMPT_LOG_START=$(wc -c <"$LOG" 2>/dev/null | tr -d ' ') || ATTEMPT_LOG_START=0
+  : "${ATTEMPT_LOG_START:=0}"
+  PRESET="$PRESET" \
+    "${STARTER[@]}" "$BIN" \
+    --listen "127.0.0.1:${PORT}" \
+    --idle-exit="$IDLE_EXIT" \
+    --dashboard \
+    --dashboard-db "${STATE}/dashboard-${PORT}.db" \
+    "${UPSTREAM_ARGS[@]+"${UPSTREAM_ARGS[@]}"}" \
+    "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" \
+    >>"$LOG" 2>&1 &
+  started=$!
+  disown 2>/dev/null || true
+  # The pidfile is what uninstall uses. Written before the health wait so a proxy that comes up
+  # slowly is still stoppable, and it records the port it belongs to in its own name.
+  printf '%s\n' "$started" >"$PIDFILE" 2>/dev/null || true
+
+  # Budget on WALL CLOCK, not on an iteration count.
+  #
+  # This loop used to be `for _ in $(seq 1 60)` with `--max-time 2`, described as "up to ~15s". That
+  # arithmetic only holds when the port is REFUSED — then curl returns instantly and 60 x 0.25s is
+  # indeed ~15s. Against something that accepts and never answers (a hung proxy, a half-open socket,
+  # an unrelated service holding the port) every probe burns its full timeout instead: measured
+  # 2046ms each, so 60 iterations is ~122s, against this hook's 60s timeout.
+  #
+  # The consequence was not "a slow hook". The hook was KILLED at 60s, so the failure report below --
+  # log path, status pointer, last lines of the log -- never ran. A hung port is one of the likeliest
+  # ways to need that report, and it was the one case that never produced it.
+  #
+  # CONTEXT_GURU_HEALTH_BUDGET lets a caller with a tighter deadline ask for a shorter wait;
+  # check-proxy.sh runs from UserPromptSubmit and sets it low.
+  BUDGET="${CONTEXT_GURU_HEALTH_BUDGET:-15}"
+  case "$BUDGET" in
+    ''|*[!0-9]*) BUDGET=15 ;;   # never let a junk value turn the arithmetic below into an error
+  esac
+  deadline=$(( $(date +%s) + BUDGET ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    # --max-time 1: this is a loopback /healthz on a proxy that has just been launched. The generous
+    # timeout belongs on the idempotence probe above (where a false negative starts a SECOND proxy
+    # and overwrites the pidfile with a pid that immediately exits), not on this one.
+    if curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1; then
+      # WHOSE PROXY ANSWERED? The health poll cannot tell "the process I just launched" from "something
+      # else already on this port", and writing the fingerprint on the strength of it recreated the
+      # exact defect this branch exists to remove - via the mechanism meant to remove it.
+      #
+      # The sequence, reported by review-pr-249-250 and reproduced: one transient failure of the
+      # idempotence probe above skips the whole already-up block; this launch then fails to BIND
+      # because the port is occupied; the OLD proxy answers this poll; and the fingerprint is written
+      # describing a configuration that never ran. The next two sessions then no-op, because
+      # fp_have == fp_want. Ground truth in the reproduction: only the original preset ever bound.
+      #
+      # That is strictly worse than before this branch, and the reason is the shape of the change: each
+      # session used to re-derive the answer, so a stale reading corrected itself next time, and a
+      # PERSISTED false claim suppresses the correction instead. A cache of a decision has to be at
+      # least as trustworthy as re-deciding, or it is not a cache but a way to make one bad reading
+      # permanent.
+      #
+      # The trigger is not exotic, and this branch's own drain fix makes it more ordinary rather than
+      # less: a proxy whose listener has closed while it drains is exactly a failed probe.
+      #
+      # So: the pid we recorded is the authority on whether OUR proxy is up. If it is gone, something
+      # else is serving this port and we say so instead of persisting a claim about it.
+      # WHO HOLDS THE SOCKET, not "is my child alive". `kill -0` alone was true 22 ms before the new
+      # proxy had even exec'd (review timeline), so it could not distinguish "mine bound the port" from
+      # "mine is still starting while somebody else answers". Ask the kernel instead.
+      #
+      # Three outcomes, and the middle one is the finding:
+      #   owner == started        ours. Record it.
+      #   owner is another pid    not ours. Say so, record nothing.
+      #   owner unknown           no ss and no lsof. Fall back to the liveness check, which is weaker
+      #                           but still catches the common case of a proxy that exited outright.
+      owner=$(port_owner_pid) || owner=""
+      if [ -n "$owner" ] && [ "$owner" != "$started" ]; then
+        ours=0
+      elif [ -n "$owner" ]; then
+        ours=1
+      elif kill -0 "$started" 2>/dev/null; then
+        # The FALLBACK fired: neither ss nor lsof was on PATH, so this is the weaker liveness check and
+        # not the ownership one. Logged because it is invisible otherwise, and it is reachable in
+        # practice - a hook does not always run with a login shell's PATH, and macOS keeps lsof in
+        # /usr/sbin. Review lost a run to exactly that and could not see which check had answered.
+        printf '%s ownership of port %s could not be determined (no ss, no lsof); fell back to a \
+liveness check on pid %s, which cannot tell a proxy that bound from one that is merely alive\n' \
+          "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" "$started" >>"$LOG" 2>/dev/null
+        ours=1
+      else
+        ours=0
+      fi
+      if [ "$ours" = 1 ]; then
+        # Best-effort write: a state directory we cannot write is survivable everywhere else in this
+        # script, and the only cost is that the next session cannot tell a configuration change happened.
+        fingerprint_want >"$FINGERPRINT" 2>/dev/null || true
+        owner_token_now >"$OWNER" 2>/dev/null || true
+      else
+        # Deliberately REMOVED rather than left stale: a fingerprint describing the configuration we
+        # failed to start would make the next session believe it is already running. The owner file
+        # goes with it - claiming a port held by something we did not start is the worse error of the
+        # two, because it would make every OTHER project defer to a claim that is not true.
+        rm -f "$FINGERPRINT" 2>/dev/null || true
+        rm -f "$OWNER" 2>/dev/null || true
+        note "port ${PORT} is answering, but the proxy this hook started is not running - so something"
+        note "else holds the port and this session's requests go there, not through the configuration"
+        note "you asked for. Nothing was recorded. Log: ${LOG}"
+        note "check with /context-guru:status before assuming the new settings are in effect."
+        return 0
+      fi
+      if [ -n "$UPSTREAM" ]; then
+        note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
+        note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
+        return 0
+      fi
+      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT})."
+      note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
+      return 0
+    fi
+    # The process we just launched already exited, so nothing is ever going to answer $HEALTH —
+    # waiting out the rest of BUDGET before saying so only delays the report, and section (3b)'s
+    # retry with it. This is the ordinary case for exactly the failure that retry exists to
+    # recover from: a config the binary could not parse exits within milliseconds, not within
+    # BUDGET, and spinning the full wait on the FIRST (failing) attempt doubled the latency of
+    # every preset-rejection recovery for no reason — the second launch still had to run its own
+    # wait regardless. `kill -0` here is the plain liveness check, not the socket-ownership one a
+    # few lines up: a proxy that is merely slow to bind is still alive and must keep waiting.
+    if ! kill -0 "$started" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.25
+  done
+
+  return 1
+}
+
+# A per-run boundary in the log, and section (5) shows only lines after it (#251). The log is
+# append-only across starts by design (the one-hour-key recovery reads rejections an earlier attempt
+# in THIS run wrote), and `tail -n 5` on a fresh failure with nothing written yet used to print
+# whatever an EARLIER run left — worst case a previous successful run's lines, read as evidence for
+# this failure. The marker is written only when a launch is about to be attempted, so the already-up
+# and declined paths leave no trace they do not already leave. Same byte-offset discipline as
+# ATTEMPT_LOG_START below, which scopes the per-attempt reads the same way.
+RUN_LOG_START=$(wc -c <"$LOG" 2>/dev/null | tr -d ' ') || RUN_LOG_START=0
+: "${RUN_LOG_START:=0}"
+printf '%s run start: pid=%s port=%s preset=%s\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$" "$PORT" "$PRESET" >>"$LOG" 2>/dev/null
+
+if attempt_launch; then
   exit 0
 fi
 
-PRESET="$PRESET" \
-  "${STARTER[@]}" "$BIN" \
-  --listen "127.0.0.1:${PORT}" \
-  --idle-exit="$IDLE_EXIT" \
-  --dashboard \
-  --dashboard-db "${STATE}/dashboard-${PORT}.db" \
-  "${UPSTREAM_ARGS[@]+"${UPSTREAM_ARGS[@]}"}" \
-  "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" \
-  >>"$LOG" 2>&1 &
-started=$!
-disown 2>/dev/null || true
-# The pidfile is what uninstall uses. Written before the health wait so a proxy that comes up
-# slowly is still stoppable, and it records the port it belongs to in its own name.
-printf '%s\n' "$started" >"$PIDFILE" 2>/dev/null || true
+# --- (3b) the binary rejected the configuration — fail open with a working preset, once --------
+#
+# `attempt_launch` failing is not always "slow" or "hung" — the proxy binary can also exit almost
+# immediately because it could not PARSE what we asked it to run, and `config: unknown preset %q`
+# (config/config.go) is the one case this plugin can actually recover from on its own: the plugin
+# (settings.py's PRESETS) and the proxy BINARY are two separately released things, so a preset the
+# plugin considers valid (it was added to the picker before a proxy release that understands it
+# shipped — see DEFAULT_PRESET's neighbouring comments) can be a name the installed binary has
+# never heard of. Until now that silently took the session down: `off` is always valid (it IS the
+# passthrough pipeline — DEFAULT_PRESET), so retrying with it is a safe fallback the proxy cannot
+# also reject, and leaving the session with no proxy at all over a preset NAME is the opposite of
+# `Fail open, always` (this repo's own hard boundary, CLAUDE.md).
+#
+# Matched from the log rather than from the preset we asked for, because the log is what the
+# BINARY actually said — PRESET may already be `off` (nothing to fall back to; see the guard
+# below) or the failure may be unrelated to the preset entirely, in which case this block must not
+# fire and section (5) below reports the generic failure as it always has.
+#
+# `sed 's/\\//g'` first: slog renders the error string through %q INSIDE an already-quoted
+# `msg="..."` field, so the log holds `unknown preset \"zzz\"` — backslash before each inner
+# quote, not a bare `"`. Matching for a bare quote against that literal text never matches, which
+# silently disabled this whole block the first time it was tried (reproduced against a stub
+# binary before this comment was written); stripping the backslashes before grepping is what
+# makes the pattern below see the quote that is actually there.
+rejected_preset=""
+# From the run-start marker onward only (#251): the log is append-only and shared across starts, so
+# an earlier run's rejection must not make this run drop the user's preset — the same rule
+# TestAFailureReportShowsOnlyThisRunsLogLines holds for the failure report's tail.
+if [ -s "$LOG" ]; then
+  rejected_preset=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' \
+                       | grep -o 'unknown preset "[^"]*"' | tail -1 \
+                       | sed -E 's/unknown preset "(.*)"/\1/')
+fi
 
-# Budget on WALL CLOCK, not on an iteration count.
-#
-# This loop used to be `for _ in $(seq 1 60)` with `--max-time 2`, described as "up to ~15s". That
-# arithmetic only holds when the port is REFUSED — then curl returns instantly and 60 x 0.25s is
-# indeed ~15s. Against something that accepts and never answers (a hung proxy, a half-open socket,
-# an unrelated service holding the port) every probe burns its full timeout instead: measured
-# 2046ms each, so 60 iterations is ~122s, against this hook's 60s timeout.
-#
-# The consequence was not "a slow hook". The hook was KILLED at 60s, so the failure report below --
-# log path, status pointer, last lines of the log -- never ran. A hung port is one of the likeliest
-# ways to need that report, and it was the one case that never produced it.
-#
-# CONTEXT_GURU_HEALTH_BUDGET lets a caller with a tighter deadline ask for a shorter wait;
-# check-proxy.sh runs from UserPromptSubmit and sets it low.
-BUDGET="${CONTEXT_GURU_HEALTH_BUDGET:-15}"
-case "$BUDGET" in
-  ''|*[!0-9]*) BUDGET=15 ;;   # never let a junk value turn the arithmetic below into an error
-esac
-deadline=$(( $(date +%s) + BUDGET ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  # --max-time 1: this is a loopback /healthz on a proxy that has just been launched. The generous
-  # timeout belongs on the idempotence probe above (where a false negative starts a SECOND proxy
-  # and overwrites the pidfile with a pid that immediately exits), not on this one.
-  if curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1; then
-    # WHOSE PROXY ANSWERED? The health poll cannot tell "the process I just launched" from "something
-    # else already on this port", and writing the fingerprint on the strength of it recreated the
-    # exact defect this branch exists to remove - via the mechanism meant to remove it.
-    #
-    # The sequence, reported by review-pr-249-250 and reproduced: one transient failure of the
-    # idempotence probe above skips the whole already-up block; this launch then fails to BIND
-    # because the port is occupied; the OLD proxy answers this poll; and the fingerprint is written
-    # describing a configuration that never ran. The next two sessions then no-op, because
-    # fp_have == fp_want. Ground truth in the reproduction: only the original preset ever bound.
-    #
-    # That is strictly worse than before this branch, and the reason is the shape of the change: each
-    # session used to re-derive the answer, so a stale reading corrected itself next time, and a
-    # PERSISTED false claim suppresses the correction instead. A cache of a decision has to be at
-    # least as trustworthy as re-deciding, or it is not a cache but a way to make one bad reading
-    # permanent.
-    #
-    # The trigger is not exotic, and this branch's own drain fix makes it more ordinary rather than
-    # less: a proxy whose listener has closed while it drains is exactly a failed probe.
-    #
-    # So: the pid we recorded is the authority on whether OUR proxy is up. If it is gone, something
-    # else is serving this port and we say so instead of persisting a claim about it.
-    # WHO HOLDS THE SOCKET, not "is my child alive". `kill -0` alone was true 22 ms before the new
-    # proxy had even exec'd (review timeline), so it could not distinguish "mine bound the port" from
-    # "mine is still starting while somebody else answers". Ask the kernel instead.
-    #
-    # Three outcomes, and the middle one is the finding:
-    #   owner == started        ours. Record it.
-    #   owner is another pid    not ours. Say so, record nothing.
-    #   owner unknown           no ss and no lsof. Fall back to the liveness check, which is weaker
-    #                           but still catches the common case of a proxy that exited outright.
-    owner=$(port_owner_pid) || owner=""
-    if [ -n "$owner" ] && [ "$owner" != "$started" ]; then
-      ours=0
-    elif [ -n "$owner" ]; then
-      ours=1
-    elif kill -0 "$started" 2>/dev/null; then
-      # The FALLBACK fired: neither ss nor lsof was on PATH, so this is the weaker liveness check and
-      # not the ownership one. Logged because it is invisible otherwise, and it is reachable in
-      # practice - a hook does not always run with a login shell's PATH, and macOS keeps lsof in
-      # /usr/sbin. Review lost a run to exactly that and could not see which check had answered.
-      printf '%s ownership of port %s could not be determined (no ss, no lsof); fell back to a \
-liveness check on pid %s, which cannot tell a proxy that bound from one that is merely alive\n' \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" "$started" >>"$LOG" 2>/dev/null
-      ours=1
-    else
-      ours=0
-    fi
-    if [ "$ours" = 1 ]; then
-      # Best-effort write: a state directory we cannot write is survivable everywhere else in this
-      # script, and the only cost is that the next session cannot tell a configuration change happened.
-      fingerprint_want >"$FINGERPRINT" 2>/dev/null || true
-      owner_token_now >"$OWNER" 2>/dev/null || true
-    else
-      # Deliberately REMOVED rather than left stale: a fingerprint describing the configuration we
-      # failed to start would make the next session believe it is already running. The owner file
-      # goes with it - claiming a port held by something we did not start is the worse error of the
-      # two, because it would make every OTHER project defer to a claim that is not true.
-      rm -f "$FINGERPRINT" 2>/dev/null || true
-      rm -f "$OWNER" 2>/dev/null || true
-      note "port ${PORT} is answering, but the proxy this hook started is not running - so something"
-      note "else holds the port and this session's requests go there, not through the configuration"
-      note "you asked for. Nothing was recorded. Log: ${LOG}"
-      note "check with /context-guru:status before assuming the new settings are in effect."
+# The binary rejected a one-hour key (`keepalive_idle_seconds_1h`, `keepalive_max_pings_1h`). The
+# plugin updates through the marketplace and the binary does not, so a newer plugin can write a key an
+# older binary's strict loader has never heard of. Only a non-default value is ever written (see
+# settings.py ONE_HOUR_DEFAULTS), so this is the `2-ping` case; the recovery is the same shape as the
+# preset one: re-render WITHOUT the keys and retry once. The proxy then pings a 1-hour cache like a
+# 5-minute one, which is what that binary always did.
+if [ -s "$LOG" ] && tail -c "+$((${ATTEMPT_LOG_START:-0} + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then
+  note "the installed proxy (${HAVE}) does not know the one-hour keep-alive keys; starting without them."
+  note "a 1-hour cache is then pinged on the 5-minute schedule until you update the proxy (/context-guru:update)."
+  if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] \
+     && CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy sync \
+          --port "$PORT" --preset "$PRESET" --legacy-binary >/dev/null 2>&1; then
+    compute_preset_and_strategy_notes
+    if attempt_launch; then
       exit 0
     fi
-    if [ -n "$UPSTREAM" ]; then
-      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
-      note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
-      exit 0
+  else
+    note "could not rewrite keepalive-${PORT}.yaml without them (strategy sync failed)."
+  fi
+fi
+
+if [ -n "$rejected_preset" ] && [ "$PRESET" != off ]; then
+  note "the installed proxy (${HAVE}) does not know preset \"${rejected_preset}\": config: unknown preset \"${rejected_preset}\"."
+  note "starting with preset \`off\` instead so this session is not blocked; keep-alive stays armed."
+  note "to run the preset you configured, update the proxy (/context-guru:update) or pick a"
+  note "preset the installed binary supports (/context-guru:preset-picker)."
+  PRESET=off
+  # Re-render the keep-alive file's `preset:` line to match — otherwise --config (CONFIG_ARGS)
+  # still points the retry at a file naming the SAME rejected preset, and $PRESET above is
+  # ignored outright: --config REPLACES --preset, exactly the divergence compute_preset_and_
+  # strategy_notes's own comment already describes. `strategy sync` is the one function that
+  # writes this file, so this is not a second encoding of that rule.
+  #
+  # The exit status is CHECKED, not discarded: a failed rewrite (an unwritable STATE dir,
+  # settings.py briefly unexecutable) leaves the file naming the SAME rejected preset, so the
+  # retry below resubmits the identical configuration and fails for the identical reason — this
+  # fallback's whole point, silently defeated. Reported distinctly so that outcome never reads
+  # as an unexplained second failure of the fallback itself.
+  sync_failed=0
+  if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+    if ! CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy sync \
+           --port "$PORT" --preset "$PRESET" >/dev/null 2>&1; then
+      sync_failed=1
+      note "could not rewrite keepalive-${PORT}.yaml to preset \`off\` (strategy sync failed);"
+      note "the retry below is likely to hit the same rejection, since --config still names"
+      note "whatever preset the file held before."
     fi
-    note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT})."
-    note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
+  else
+    sync_failed=1
+  fi
+  # Recompute the success note's PRESET_NOTE/STRATEGY_NOTE from the file `strategy sync` just
+  # rewrote — otherwise a successful fallback would report the REJECTED preset as if it had run.
+  compute_preset_and_strategy_notes
+  if attempt_launch; then
     exit 0
   fi
-  sleep 0.25
-done
+  # Fell through: even the fallback did not come up. If the rewrite above failed, say so again
+  # here where the failure actually lands, rather than leave the retry's failure looking like a
+  # second, unrelated mystery.
+  if [ "$sync_failed" = 1 ]; then
+    note "the \`off\` fallback did not take effect because the keep-alive config could not be"
+    note "rewritten; see the note above."
+  fi
+  # Whatever is wrong now is not necessarily the preset name any more — let the sibling-error
+  # check below inspect the (now updated) log unconditionally, rather than being skipped just
+  # because A preset rejection fired earlier in this same run.
+fi
+
+# Named diagnostics for config errors $LOG now holds, checked UNCONDITIONALLY rather than gated
+# on `rejected_preset` being empty: the retry section above can itself fail for an unrelated
+# reason — the same keep-alive file can name an unknown strategy or upstream alongside the
+# preset that was just fixed — and that failure is in the log too, equally namable. Gating this
+# on "no preset was rejected" made it unreachable in exactly the case where the log holds the
+# most information: after a preset fallback whose own retry failed differently.
+if [ -s "$LOG" ]; then
+  # From the run-start marker onward only (#251), same as the preset grep above: a stale line from
+  # an earlier run must not name a cause this run never hit.
+  unescaped=$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | sed 's/\\//g')
+  if printf '%s\n' "$unescaped" | grep -qE 'unknown (strategy|baseline strategy|upstream) "'; then
+    # Sibling config errors this plugin cannot fall back from — a strategy or upstream name has
+    # no safe universal substitute the way `off` is for a preset — but a NAMED cause is still
+    # strictly better than the generic note alone, which is section (5)'s whole shortfall: today
+    # this reads from the log only as an opaque tail, never translated into "here is specifically
+    # what broke".
+    bad=$(printf '%s\n' "$unescaped" \
+            | grep -oE 'unknown (strategy|baseline strategy|upstream) "[^"]*"' | tail -1)
+    note "the installed proxy (${HAVE}) rejected the configuration: config: ${bad}."
+  fi
+fi
 
 # --- (5) failed, and the session still has to work ---------------------------------------
 note "the proxy did not come up on port ${PORT}; this session's requests will fail until it does."
 note "log: ${LOG}"
 note "fix it with /context-guru:status, or stop routing with /context-guru:uninstall."
-if [ -s "$LOG" ]; then
+# Only THIS run's lines, from the run-start marker onward (#251): an append-only log shared across
+# starts otherwise lets a fresh failure with nothing written yet report an earlier run's output —
+# a previous SUCCESSFUL run's lines being the worst case, because they read as "the proxy is fine"
+# during a failure. Nothing after the marker prints nothing, which is the honest report.
+if [ -s "$LOG" ] && [ -n "$(tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null)" ]; then
   note "last lines:"
-  tail -n 5 "$LOG" | sed 's/^/context-guru:   /'
+  tail -c "+$((RUN_LOG_START + 1))" "$LOG" 2>/dev/null | tail -n 5 | sed 's/^/context-guru:   /'
 fi
 exit 0

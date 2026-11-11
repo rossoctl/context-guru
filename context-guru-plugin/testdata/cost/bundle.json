@@ -1,0 +1,940 @@
+{
+ "spend": {
+  "window": {
+   "since": 1791417600000,
+   "until": 0
+  },
+  "requests": 11995,
+  "priced_requests": 11983,
+  "unpriced_requests": 12,
+  "usd": {
+   "fresh": 25.71,
+   "cache_read": 445.56,
+   "cache_write": 257.05,
+   "output": 128.53,
+   "total": 856.85
+  },
+  "stored_cost_usd": 856.85,
+  "rewrites": {
+   "idle_expiry": {
+    "n": 214,
+    "tokens": 31400000,
+    "usd": 107.79,
+    "write_usd": 123.96
+   },
+   "prefix_change": {
+    "n": 23,
+    "tokens": 3100000,
+    "usd": 14.57,
+    "write_usd": 16.75
+   },
+   "new_thread": {
+    "n": 41,
+    "tokens": 2300000,
+    "usd": 7.28,
+    "write_usd": 8.38
+   },
+   "cold_start": {
+    "n": 96,
+    "tokens": 4000000,
+    "usd": 14.57,
+    "write_usd": 16.75
+   },
+   "history_rewrite": {
+    "n": 3,
+    "tokens": 600000,
+    "usd": 1.46,
+    "write_usd": 1.68
+   }
+  },
+  "idle_gaps": [
+   {
+    "band": "5-10m",
+    "n": 71,
+    "usd": 23.71
+   },
+   {
+    "band": "10-30m",
+    "n": 96,
+    "usd": 49.58
+   },
+   {
+    "band": "30-60m",
+    "n": 22,
+    "usd": 15.09
+   },
+   {
+    "band": "1-4h",
+    "n": 19,
+    "usd": 14.01
+   },
+   {
+    "band": ">4h",
+    "n": 6,
+    "usd": 5.39
+   }
+  ],
+  "top_rewrites": [
+   {
+    "ts": 1791324000000,
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "model": "claude-opus-5",
+    "context": 412000,
+    "gap_s": 1380,
+    "cause": "idle_expiry",
+    "usd": 1.96
+   },
+   {
+    "ts": 1791234000000,
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "model": "claude-opus-5",
+    "context": 388000,
+    "gap_s": 2410,
+    "cause": "idle_expiry",
+    "usd": 1.84
+   },
+   {
+    "ts": 1791406800000,
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "model": "claude-opus-5",
+    "context": 301000,
+    "gap_s": 840,
+    "cause": "idle_expiry",
+    "usd": 1.43
+   },
+   {
+    "ts": 1791147600000,
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "model": "claude-opus-5",
+    "context": 295000,
+    "gap_s": 52,
+    "cause": "prefix_change",
+    "usd": 1.4
+   },
+   {
+    "ts": 1791061200000,
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "model": "claude-opus-5",
+    "context": 180000,
+    "gap_s": 610,
+    "cause": "idle_expiry",
+    "usd": 0.86
+   }
+  ],
+  "models": [
+   {
+    "model": "claude-opus-5",
+    "requests": 8040,
+    "usd": {
+     "total": 574.31
+    },
+    "rewrite_usd": 97.63
+   },
+   {
+    "model": "claude-sonnet-5",
+    "requests": 3328,
+    "usd": {
+     "total": 237.78
+    },
+    "rewrite_usd": 40.42
+   },
+   {
+    "model": "claude-haiku-4-5",
+    "requests": 626,
+    "usd": {
+     "total": 44.75
+    },
+    "rewrite_usd": 7.61
+   }
+  ],
+  "sessions": [
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "model": "claude-opus-5",
+    "first": 1790985600000,
+    "last": 1791469800000,
+    "turns": 1322,
+    "usd": {
+     "total": 440.89
+    },
+    "rewrites": 7,
+    "rewrite_usd": 74.95
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "model": "claude-sonnet-5",
+    "first": 1790985600000,
+    "last": 1791469800000,
+    "turns": 800,
+    "usd": {
+     "total": 266.85
+    },
+    "rewrites": 4,
+    "rewrite_usd": 45.36
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "model": "claude-sonnet-5",
+    "first": 1790985600000,
+    "last": 1791469800000,
+    "turns": 313,
+    "usd": {
+     "total": 104.36
+    },
+    "rewrites": 1,
+    "rewrite_usd": 17.74
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "model": "claude-sonnet-5",
+    "first": 1790985600000,
+    "last": 1791469800000,
+    "turns": 134,
+    "usd": {
+     "total": 44.75
+    },
+    "rewrites": 0,
+    "rewrite_usd": 7.61
+   }
+  ],
+  "daily": [
+   {
+    "day": 1790294400000,
+    "requests": 963,
+    "usd": {
+     "cache_read": 35.7915,
+     "cache_write": 20.6489,
+     "output": 10.3245,
+     "fresh": 2.0649,
+     "total": 68.8298
+    },
+    "rewrite_usd": 11.7011,
+    "rewrites": 7,
+    "by_model": {
+     "claude-opus-5": 45.6464,
+     "claude-sonnet-5": 19.8675,
+     "claude-haiku-4-5": 3.3159
+    }
+   },
+   {
+    "day": 1790380800000,
+    "requests": 1017,
+    "usd": {
+     "cache_read": 37.7919,
+     "cache_write": 21.803,
+     "output": 10.9015,
+     "fresh": 2.1803,
+     "total": 72.6767
+    },
+    "rewrite_usd": 12.355,
+    "rewrites": 8,
+    "by_model": {
+     "claude-opus-5": 49.9007,
+     "claude-sonnet-5": 18.7641,
+     "claude-haiku-4-5": 4.0119
+    }
+   },
+   {
+    "day": 1790467200000,
+    "requests": 136,
+    "usd": {
+     "cache_read": 5.0801,
+     "cache_write": 2.9308,
+     "output": 1.4654,
+     "fresh": 0.2931,
+     "total": 9.7694
+    },
+    "rewrite_usd": 1.6608,
+    "rewrites": 1,
+    "by_model": {
+     "claude-opus-5": 6.3977,
+     "claude-sonnet-5": 2.8699,
+     "claude-haiku-4-5": 0.5018
+    }
+   },
+   {
+    "day": 1790553600000,
+    "requests": 105,
+    "usd": {
+     "cache_read": 3.9101,
+     "cache_write": 2.2558,
+     "output": 1.1279,
+     "fresh": 0.2256,
+     "total": 7.5194
+    },
+    "rewrite_usd": 1.2783,
+    "rewrites": 0,
+    "by_model": {
+     "claude-opus-5": 5.0422,
+     "claude-sonnet-5": 2.1215,
+     "claude-haiku-4-5": 0.3557
+    }
+   },
+   {
+    "day": 1790640000000,
+    "requests": 1252,
+    "usd": {
+     "cache_read": 46.5306,
+     "cache_write": 26.8446,
+     "output": 13.4223,
+     "fresh": 2.6845,
+     "total": 89.482
+    },
+    "rewrite_usd": 15.2119,
+    "rewrites": 9,
+    "by_model": {
+     "claude-opus-5": 59.4946,
+     "claude-sonnet-5": 25.7692,
+     "claude-haiku-4-5": 4.2182
+    }
+   },
+   {
+    "day": 1790726400000,
+    "requests": 1324,
+    "usd": {
+     "cache_read": 49.1962,
+     "cache_write": 28.3824,
+     "output": 14.1912,
+     "fresh": 2.8382,
+     "total": 94.608
+    },
+    "rewrite_usd": 16.0834,
+    "rewrites": 10,
+    "by_model": {
+     "claude-opus-5": 66.0752,
+     "claude-sonnet-5": 24.1369,
+     "claude-haiku-4-5": 4.396
+    }
+   },
+   {
+    "day": 1790812800000,
+    "requests": 828,
+    "usd": {
+     "cache_read": 30.7662,
+     "cache_write": 17.7497,
+     "output": 8.8749,
+     "fresh": 1.775,
+     "total": 59.1658
+    },
+    "rewrite_usd": 10.0582,
+    "rewrites": 6,
+    "by_model": {
+     "claude-opus-5": 38.4823,
+     "claude-sonnet-5": 16.6283,
+     "claude-haiku-4-5": 4.0552
+    }
+   },
+   {
+    "day": 1790899200000,
+    "requests": 997,
+    "usd": {
+     "cache_read": 37.0377,
+     "cache_write": 21.3679,
+     "output": 10.6839,
+     "fresh": 2.1368,
+     "total": 71.2263
+    },
+    "rewrite_usd": 12.1085,
+    "rewrites": 7,
+    "by_model": {
+     "claude-opus-5": 45.5387,
+     "claude-sonnet-5": 21.8918,
+     "claude-haiku-4-5": 3.7958
+    }
+   },
+   {
+    "day": 1790985600000,
+    "requests": 1264,
+    "usd": {
+     "cache_read": 46.9634,
+     "cache_write": 27.0943,
+     "output": 13.5471,
+     "fresh": 2.7094,
+     "total": 90.3142
+    },
+    "rewrite_usd": 15.3534,
+    "rewrites": 10,
+    "by_model": {
+     "claude-opus-5": 63.2152,
+     "claude-sonnet-5": 22.5107,
+     "claude-haiku-4-5": 4.5884
+    }
+   },
+   {
+    "day": 1791072000000,
+    "requests": 214,
+    "usd": {
+     "cache_read": 7.9576,
+     "cache_write": 4.5909,
+     "output": 2.2955,
+     "fresh": 0.4591,
+     "total": 15.3031
+    },
+    "rewrite_usd": 2.6015,
+    "rewrites": 1,
+    "by_model": {
+     "claude-opus-5": 10.4789,
+     "claude-sonnet-5": 3.9967,
+     "claude-haiku-4-5": 0.8274
+    }
+   },
+   {
+    "day": 1791158400000,
+    "requests": 103,
+    "usd": {
+     "cache_read": 3.8347,
+     "cache_write": 2.2123,
+     "output": 1.1062,
+     "fresh": 0.2212,
+     "total": 7.3744
+    },
+    "rewrite_usd": 1.2536,
+    "rewrites": 0,
+    "by_model": {
+     "claude-opus-5": 4.8327,
+     "claude-sonnet-5": 2.1099,
+     "claude-haiku-4-5": 0.4318
+    }
+   },
+   {
+    "day": 1791244800000,
+    "requests": 1218,
+    "usd": {
+     "cache_read": 45.2498,
+     "cache_write": 26.1056,
+     "output": 13.0528,
+     "fresh": 2.6106,
+     "total": 87.0188
+    },
+    "rewrite_usd": 14.7932,
+    "rewrites": 9,
+    "by_model": {
+     "claude-opus-5": 55.761,
+     "claude-sonnet-5": 25.7375,
+     "claude-haiku-4-5": 5.5203
+    }
+   },
+   {
+    "day": 1791331200000,
+    "requests": 1520,
+    "usd": {
+     "cache_read": 56.4705,
+     "cache_write": 32.5791,
+     "output": 16.2896,
+     "fresh": 3.2579,
+     "total": 108.5971
+    },
+    "rewrite_usd": 18.4615,
+    "rewrites": 12,
+    "by_model": {
+     "claude-opus-5": 73.4575,
+     "claude-sonnet-5": 30.395,
+     "claude-haiku-4-5": 4.7445
+    }
+   },
+   {
+    "day": 1791417600000,
+    "requests": 1049,
+    "usd": {
+     "cache_read": 38.9758,
+     "cache_write": 22.486,
+     "output": 11.243,
+     "fresh": 2.2486,
+     "total": 74.9534
+    },
+    "rewrite_usd": 12.7421,
+    "rewrites": 8,
+    "by_model": {
+     "claude-opus-5": 49.9898,
+     "claude-sonnet-5": 20.9814,
+     "claude-haiku-4-5": 3.9823
+    }
+   }
+  ],
+  "session_days": [
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790294400000,
+    "usd": 35.3223
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790294400000,
+    "usd": 20.6482
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790294400000,
+    "usd": 9.5434
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790294400000,
+    "usd": 3.3159
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790380800000,
+    "usd": 38.5454
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790380800000,
+    "usd": 22.7106
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790380800000,
+    "usd": 7.4088
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790380800000,
+    "usd": 4.0119
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790467200000,
+    "usd": 4.6455
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790467200000,
+    "usd": 3.5044
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790467200000,
+    "usd": 1.1177
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790467200000,
+    "usd": 0.5018
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790553600000,
+    "usd": 3.6853
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790553600000,
+    "usd": 2.7138
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790553600000,
+    "usd": 0.7646
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790553600000,
+    "usd": 0.3557
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790640000000,
+    "usd": 43.9307
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790640000000,
+    "usd": 31.1278
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790640000000,
+    "usd": 10.2053
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790640000000,
+    "usd": 4.2182
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790726400000,
+    "usd": 54.2869
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790726400000,
+    "usd": 23.5766
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790726400000,
+    "usd": 12.3486
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790726400000,
+    "usd": 4.396
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790812800000,
+    "usd": 29.3334
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790812800000,
+    "usd": 18.2977
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790812800000,
+    "usd": 7.4795
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790812800000,
+    "usd": 4.0552
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790899200000,
+    "usd": 33.147
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790899200000,
+    "usd": 24.7834
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790899200000,
+    "usd": 9.5001
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790899200000,
+    "usd": 3.7958
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1790985600000,
+    "usd": 50.3434
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1790985600000,
+    "usd": 25.7436
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1790985600000,
+    "usd": 9.6389
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1790985600000,
+    "usd": 4.5884
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1791072000000,
+    "usd": 8.1484
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1791072000000,
+    "usd": 4.661
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1791072000000,
+    "usd": 1.6662
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1791072000000,
+    "usd": 0.8274
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1791158400000,
+    "usd": 3.7288
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1791158400000,
+    "usd": 2.2078
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1791158400000,
+    "usd": 1.006
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1791158400000,
+    "usd": 0.4318
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1791244800000,
+    "usd": 40.9323
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1791244800000,
+    "usd": 29.6574
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1791244800000,
+    "usd": 10.9088
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1791244800000,
+    "usd": 5.5203
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1791331200000,
+    "usd": 58.0826
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1791331200000,
+    "usd": 30.7499
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1791331200000,
+    "usd": 15.0201
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1791331200000,
+    "usd": 4.7445
+   },
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "day": 1791417600000,
+    "usd": 36.7555
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "day": 1791417600000,
+    "usd": 26.4686
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "day": 1791417600000,
+    "usd": 7.7471
+   },
+   {
+    "session": "t:44444444-dddd-4ddd-8ddd-000000000004",
+    "day": 1791417600000,
+    "usd": 3.9823
+   }
+  ],
+  "live": [
+   {
+    "session": "t:11111111-aaaa-4aaa-8aaa-000000000001",
+    "model": "claude-opus-5",
+    "last_ts": 1791473305000,
+    "context": 212000,
+    "ttl_ms": 300000,
+    "ttl_1h": false,
+    "messages": 88
+   },
+   {
+    "session": "t:22222222-bbbb-4bbb-8bbb-000000000002",
+    "model": "claude-sonnet-5",
+    "last_ts": 1791471900000,
+    "context": 96000,
+    "ttl_ms": 300000,
+    "ttl_1h": false,
+    "messages": 41
+   },
+   {
+    "session": "t:33333333-cccc-4ccc-8ccc-000000000003",
+    "model": "claude-sonnet-5",
+    "last_ts": 1791471600000,
+    "context": 18000,
+    "ttl_ms": 3600000,
+    "ttl_1h": true,
+    "messages": 9
+   }
+  ],
+  "rates": {
+   "claude-opus-5": {
+    "input": 3.8e-06,
+    "output": 1.9e-05,
+    "cache_read": 3.8e-07,
+    "cache_write": 4.75e-06,
+    "cache_write_1h": 7.6e-06
+   },
+   "claude-sonnet-5": {
+    "input": 1.52e-06,
+    "output": 7.6e-06,
+    "cache_read": 1.52e-07,
+    "cache_write": 1.9e-06,
+    "cache_write_1h": 3.04e-06
+   },
+   "claude-haiku-4-5": {
+    "input": 7.6e-07,
+    "output": 3.8e-06,
+    "cache_read": 7.6e-08,
+    "cache_write": 9.5e-07,
+    "cache_write_1h": 1.52e-06
+   }
+  },
+  "ledger": {
+   "gross_saved_usd": 10.28,
+   "cg_llm_usd": 4.1,
+   "ping_usd": 9.6,
+   "ping_saved_usd": 0
+  }
+ },
+ "tools": {
+  "totals": {
+   "priced": true,
+   "unused_usd": 0
+  },
+  "servers": [
+   {
+    "server": "playwright",
+    "tools": 22,
+    "tools_used": 0,
+    "tokens": 9400,
+    "sessions_declared": 31,
+    "sessions_used": 0,
+    "calls": 0,
+    "unused_usd": 18.4,
+    "priced": true
+   },
+   {
+    "server": "github",
+    "tools": 41,
+    "tools_used": 6,
+    "tokens": 14200,
+    "sessions_declared": 33,
+    "sessions_used": 12,
+    "calls": 87,
+    "unused_usd": 0,
+    "priced": true
+   },
+   {
+    "server": "figma",
+    "tools": 14,
+    "tools_used": 0,
+    "tokens": 6100,
+    "sessions_declared": 9,
+    "sessions_used": 0,
+    "calls": 0,
+    "unused_usd": 6.2,
+    "priced": true
+   },
+   {
+    "server": "context-guru",
+    "tools": 3,
+    "tools_used": 0,
+    "tokens": 900,
+    "sessions_declared": 33,
+    "sessions_used": 0,
+    "calls": 0,
+    "unused_usd": 1.9,
+    "priced": true
+   },
+   {
+    "server": "sentry",
+    "tools": 9,
+    "tools_used": 0,
+    "tokens": 3300,
+    "sessions_declared": 33,
+    "sessions_used": 0,
+    "calls": 0,
+    "unused_usd": 7.1,
+    "priced": true
+   }
+  ],
+  "skills": {
+   "state": "ok",
+   "skills": [
+    {
+     "kind": "skill",
+     "name": "pdf",
+     "tokens": 310,
+     "sessions_declared": 33,
+     "sessions_used": 0,
+     "calls": 0,
+     "unused_usd": 1.1,
+     "priced": true
+    },
+    {
+     "kind": "skill",
+     "name": "context-guru:status",
+     "tokens": 120,
+     "sessions_declared": 33,
+     "sessions_used": 0,
+     "calls": 0,
+     "unused_usd": 0.5,
+     "priced": true
+    },
+    {
+     "kind": "skill",
+     "name": "brand-voice",
+     "tokens": 420,
+     "sessions_declared": 33,
+     "sessions_used": 0,
+     "calls": 0,
+     "unused_usd": 1.6,
+     "priced": true
+    }
+   ]
+  },
+  "tools": [
+   {
+    "kind": "tool",
+    "name": "NotebookEdit",
+    "tokens": 1200,
+    "sessions_declared": 33,
+    "sessions_used": 0,
+    "calls": 0,
+    "unused_usd": 3.3,
+    "priced": true,
+    "builtin": false,
+    "removal": {
+     "command": "claude --disallowedTools \"NotebookEdit\""
+    }
+   }
+  ],
+  "aside": [
+   {
+    "name": "Bash",
+    "unused_usd": 0
+   },
+   {
+    "name": "LSP",
+    "unused_usd": 2.4
+   }
+  ]
+ },
+ "last_used": {
+  "tools": [
+   {
+    "name": "mcp__figma__get_file",
+    "calls": 4,
+    "last_ts": 1791127800000
+   },
+   {
+    "name": "mcp__sentry__search_issues",
+    "calls": 2,
+    "last_ts": 1786116600000
+   },
+   {
+    "name": "Skill",
+    "skill": "pdf",
+    "calls": 1,
+    "last_ts": 1788017400000
+   }
+  ]
+ },
+ "now": 1791473400000
+}

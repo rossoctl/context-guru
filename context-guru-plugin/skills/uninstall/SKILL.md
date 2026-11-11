@@ -1,6 +1,7 @@
 ---
 name: uninstall
-description: Stop routing Claude Code through context-guru — remove the ANTHROPIC_BASE_URL key it added, stop the local proxy, and optionally delete the binary. Use when the user asks to uninstall, remove, disable, turn off, or stop context-guru, or says routing through it is breaking their sessions.
+description: Stop routing Claude Code through context-guru. Removes the ANTHROPIC_BASE_URL key it added, stops the local proxy, and can delete the binary.
+disable-model-invocation: true
 ---
 
 # Uninstall context-guru
@@ -107,6 +108,13 @@ exactly as the loop above pairs the two** — and then do steps 2 and 3 a second
 (`port show --key "$KEY"`, with `$KEY` from `project-key --user-scope` as in step 2). The flag is the
 whole confirmation, so do not add it before they answer — and never to make the loop above quieter.
 
+`plugin_enabled_removed=true` on that run means the machine-wide install had also enabled the plugin
+for every project, and that enablement went with it: say that `/context-guru:*` commands now remain
+only in projects that enable it themselves. (`claude plugin list` may still show a disabled user-scope
+entry for it — Claude Code's own record, which `claude plugin uninstall context-guru@context-guru`
+clears.) `false` means it was not ours to remove (they enabled it
+machine-wide themselves, or switched it off since) — it stays as it is, and needs no mention.
+
 The `port unset` is not housekeeping on this path, it is the difference between an uninstall and a
 booby trap. The loop above never reaches this file (it is refused there, which is the point), so
 without it a confirmed machine-wide removal leaves `pluginConfigs` naming a `port` in the one file
@@ -196,7 +204,8 @@ Once it is confirmed stopped, release the port — and only then:
 
 ```bash
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
-rm -f "${STATE}/proxy-${PORT}.owner" "${STATE}/proxy-${PORT}.fingerprint"
+rm -f "${STATE}/proxy-${PORT}.owner" "${STATE}/proxy-${PORT}.fingerprint" \
+  "${STATE}/keepalive-${PORT}.yaml"
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release
 
 # A MACHINE-WIDE install is not filed under any project — it has its own record, so that a project
@@ -216,10 +225,14 @@ loses a port per uninstall, silently, until installs start landing further and f
 no visible reason. The `.owner` file is what makes a *future* install on that port refuse with
 `port_owned_by_another_project`: it names the project that owned the proxy you just stopped, so
 leaving it behind gets the next install here refused over a proxy that no longer exists. The
-`.fingerprint` describes the same dead proxy and goes with it.
+`.fingerprint` describes the same dead proxy and goes with it, and so does `keepalive-<port>.yaml`:
+left behind, it is read by whichever install lands on this port next
+(`start-proxy.sh`'s `PRESET_NOTE=…"(from keepalive-${PORT}.yaml)"`), which inherits a dead
+project's cache strategy — pings, idle window, per-ping spend cap — and reports it as if it were
+that install's own config.
 
 **Only do this if the proxy is actually stopped.** If the kill reported **NOT OURS**, or the health
-check still answers, leave all three alone — they describe something that is still running, and a
+check still answers, leave all four alone — they describe something that is still running, and a
 released record plus a live proxy is the one state nothing else in the plugin expects. Neither
 command is allowed to be load-bearing either: `port release` fails open by design, so report a
 `result=skipped` and finish the uninstall rather than stopping on it.
@@ -239,7 +252,7 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   `install-scope.json` (which port belongs to which project, shared by every project on the machine
   — so deleting it affects the others, not just this one), the dashboard
   database (session metadata and token counts, no prompt content unless they enabled content
-  capture), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
+  capture, and the session state: summary checkpoints, which hold summary text), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
   copy — fine once they are working again and have confirmed it, but say so before they agree.
 - **Delete the recovery folder(s)** — `<dir>/context-guru-settings-json/`, beside each settings
   file the install touched (so `.claude/context-guru-settings-json/` for a project install, or

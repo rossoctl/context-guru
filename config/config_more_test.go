@@ -162,8 +162,14 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 // the number above. The measurement is not retracted and the rule still holds everywhere
 // else: what an exemption buys is that adding toon to a THIRD preset still has to be a
 // decision somebody makes here, rather than something that quietly spreads.
+//
+// conservative/medium/high/xhigh/ultrahigh are exempt for the same reason as house/housellm: they carry
+// house's or housellm's pipeline verbatim, toon included, rather than re-deriving it.
 func TestToonIsInNoPreset(t *testing.T) {
-	byOperatorRequest := map[string]bool{"house": true, "housellm": true}
+	byOperatorRequest := map[string]bool{
+		"house": true, "housellm": true,
+		"conservative": true, "medium": true, "high": true, "xhigh": true, "ultrahigh": true,
+	}
 	for name, pipeline := range presets {
 		if byOperatorRequest[name] {
 			continue
@@ -325,5 +331,72 @@ func TestHousellmFloorClearsTheBandsThatLoseAtEveryK(t *testing.T) {
 			"$32.41-$79.75 per MTok saved against $%.2f on even a top-decile session, so a call there "+
 			"loses money whatever k turns out to be. Move the table with a new measurement, not the "+
 			"literal alone.", got.MinTokens, floor, floor, p90TokenValue)
+	}
+}
+
+// `expand.fixed_restore` reaches the pipeline every host holds per tenant, and is off unless set.
+func TestExpandFixedRestoreReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: off\n": false,
+		"preset: off\nexpand:\n  fixed_restore: true\n": true,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.FixedRestore() != want {
+			t.Errorf("%q: FixedRestore() = %v, want %v", doc, pipe.FixedRestore(), want)
+		}
+	}
+	if _, err := LoadBytes([]byte("expand:\n  fixed_restor: true\n")); err == nil {
+		t.Error("a typo'd expand key was accepted")
+	}
+}
+
+// `expand.inband_breakpoint` (#784) is off unless set.
+func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: off\n": false,
+		"preset: off\nexpand:\n  inband_breakpoint: true\n":  true,
+		"preset: off\nexpand:\n  inband_breakpoint: false\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.InBandBreakpoint() != want {
+			t.Errorf("%q: InBandBreakpoint() = %v, want %v", doc, pipe.InBandBreakpoint(), want)
+		}
+	}
+}
+
+// `cache.tail_breakpoint` (#795) is on unless set to false, and never on an empty pipeline.
+func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
+	for doc, want := range map[string]bool{
+		"preset: cache\n": true,
+		"preset: cache\ncache:\n  tail_breakpoint: true\n":  true,
+		"preset: cache\ncache:\n  tail_breakpoint: false\n": false,
+		"preset: off\n": false,
+		"preset: off\ncache:\n  tail_breakpoint: true\n": false,
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := c.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pipe.TailBreakpoint() != want {
+			t.Errorf("%q: TailBreakpoint() = %v, want %v", doc, pipe.TailBreakpoint(), want)
+		}
 	}
 }

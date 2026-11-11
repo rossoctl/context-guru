@@ -237,6 +237,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -273,8 +274,9 @@ HORIZON_5M_MS = 5 * 60 * 1000
 HORIZON_1H_MS = 60 * 60 * 1000
 
 # A miss with one of these recorded reasons could not have been prevented by any TTL: the
-# content moved, or there was no entry to begin with.
-UNRESCUABLE = frozenset({"prefix_change", "cold_start"})
+# content moved, there was no entry to begin with, or the dashboard could not explain the miss
+# (an unexplained miss is never counted as rescuable).
+UNRESCUABLE = frozenset({"prefix_change", "cold_start", "unknown"})
 
 
 def tier_of(action: str) -> str:
@@ -320,7 +322,59 @@ def normalize_action(value: Any) -> str:
 
 PER_MTOK = 1e6
 DEFAULT_CACHE_READ_MULTIPLE = 0.1
+# Per-model cache-read tiers: port of internal/modelinfo.CacheReadFracFor. Source: the official
+# pricing page, https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02.
+_CACHE_READ_TIERS = (("fable", 5, 1, 0.025), ("mythos", 5, 1, 0.025),
+                     ("opus", 5, 5, 0.05), ("sonnet", 5, 5, 0.05))
+
+
+def _tier_version(full: str, tier: str) -> tuple[int, int] | None:
+    i = full.rfind(tier)
+    if i < 0:
+        return None
+    m = re.match(r"[-._](\d{1,9})(?:[-._](\d{1,9}))?", full[i + len(tier):])
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)) if m.group(2) else -1
+
+
+def cache_read_frac_for(model: str) -> float:
+    """The cache-READ multiple of base input for a model (Go: modelinfo.CacheReadFracFor)."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    for tier, major, minor, frac in _CACHE_READ_TIERS:
+        if _tier_version(full, tier) == (major, minor):
+            return frac
+    return DEFAULT_CACHE_READ_MULTIPLE
 DEFAULT_WRITE_5M_MULTIPLE = 1.25
+
+
+def _gpt_56_or_later(model: str) -> bool:
+    """Go: modelinfo.GPT56OrLater. The last "gpt-" token picks the model."""
+    m = (model or "").lower()
+    i = m.rfind("gpt-")
+    if i < 0:
+        return False
+    mt = re.match(r"(\d+)(.*)", m[i + 4:])
+    if not mt:
+        return False
+    major, rest = int(mt.group(1)), mt.group(2)
+    if major != 5:
+        return major > 5
+    mm = re.match(r"\.(\d+)", rest)
+    return bool(mm) and int(mm.group(1)) >= 6
+
+
+def charges_cache_write_premium(model: str) -> bool:
+    """Go: modelinfo.chargesCacheWritePremium. Only Claude/Anthropic and GPT-5.6+ bill a
+    cache-creation premium. Every other family writes at the fresh input rate."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    return "claude" in full or "anthropic" in full or _gpt_56_or_later(model)
+
+
+def cache_write_frac_for(model: str, file_frac: float = DEFAULT_WRITE_5M_MULTIPLE) -> float:
+    """The 5-minute cache-WRITE multiple of base input for a model (Go: CacheWriteFracFor, with
+    the operator's cache_write_frac in place of 1.25 for a family that charges a premium)."""
+    return file_frac if charges_cache_write_premium(model) else 1.0
 DEFAULT_WRITE_1H_MULTIPLE = 2.0
 DEFAULT_PING_INPUT_TOKENS = 1
 DEFAULT_PING_OUTPUT_TOKENS = 1
@@ -342,6 +396,9 @@ class ModelPricing:
     ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS
     source: str = ""
     known: bool = False
+    # True when cache_read was left blank and the file sets no cache_read_frac. _lookup then
+    # fills it from the QUERIED model, as Go's Table.Price does.
+    read_derived: bool = False
 
     def write_rate(self, tier: str) -> float:
         """The creation rate for one tier. TTL_NONE creates nothing, so it is 0 — the
@@ -461,8 +518,15 @@ class PriceBook:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if not isinstance(raw, Mapping):
             raise ValueError(f"{path}: not a mapping")
-        read_frac = float(raw.get("cache_read_frac") or DEFAULT_CACHE_READ_MULTIPLE)
+        # Unset means "per model"; a value is the operator's own gateway multiple and wins.
+        file_read_frac = None
+        if raw.get("cache_read_frac") is not None:
+            file_read_frac = float(raw["cache_read_frac"])
+            if file_read_frac <= 0:
+                raise ValueError(f"{path}: cache_read_frac must be above 0")
         write_frac = float(raw.get("cache_write_frac") or DEFAULT_WRITE_5M_MULTIPLE)
+        if write_frac < 0:
+            raise ValueError(f"{path}: cache_write_frac must not be negative")
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
         for i, m in enumerate(raw.get("models") or ()):
@@ -473,7 +537,9 @@ class PriceBook:
             match = match.rstrip("*")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
             cr, cw = float(m.get("cache_read") or 0.0), float(m.get("cache_write") or 0.0)
-            if min(in_r, out_r, cr, cw) < 0:
+            # The entry's 1-hour write as a multiple of `in` (table.go cache_write_1h_frac).
+            w1h_frac = float(m.get("cache_write_1h_frac") or 0.0)
+            if min(in_r, out_r, cr, cw, w1h_frac) < 0:
                 raise ValueError(f"{path}: {match!r} has a negative rate")
             if in_r == 0 and out_r == 0:
                 raise ValueError(
@@ -481,12 +547,14 @@ class PriceBook:
                     f"it free")
             price = ModelPricing(
                 model=match, input=in_r / PER_MTOK, output=out_r / PER_MTOK,
-                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * read_frac,
-                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * write_frac,
+                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * (
+                    file_read_frac if file_read_frac is not None else cache_read_frac_for(match)),
+                read_derived=(not cr) and file_read_frac is None,
+                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * cache_write_frac_for(match, write_frac),
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
                 source=SOURCE_PRICE_LIST, known=True)
-            price = replace(price, write_1h=book._derive_write_1h(price))
+            price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
         # Longest match first: specificity is a property of the match, not of the file's
@@ -495,13 +563,17 @@ class PriceBook:
         book._entries = entries
         return book
 
-    def _derive_write_1h(self, p: ModelPricing) -> float:
+    def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
         """The 1-hour creation rate, the one rate no price list publishes.
 
         Derived from the multiplier against base INPUT, because that is how the provider
         documents it, and never allowed below the 5-minute rate: a list that implied
         otherwise would be a typo, and honouring it would make every 1h arm look free.
+        An entry's own cache_write_1h_frac wins over the book's multiple, as in Go's
+        Price.CacheWrite1hFor.
         """
+        if entry_frac > 0:
+            return max(p.input * entry_frac, p.write_5m)
         if p.input > 0:
             w = p.input * self.write_1h_multiple
         elif p.write_5m > 0:
@@ -543,16 +615,21 @@ class PriceBook:
     def _lookup(self, model: str) -> ModelPricing:
         full = (model or "").strip().lower()
         tail = full.rsplit("/", 1)[-1]
+        def hit(price: ModelPricing) -> ModelPricing:
+            if price.read_derived:
+                price = replace(price, cache_read=price.input * cache_read_frac_for(model))
+            return replace(price, model=model)
+
         for match, _prefix, _qual, price in self._entries:
             if match == full or match == tail:
-                return replace(price, model=model)
+                return hit(price)
         for match, prefix, qualified, price in self._entries:  # longest first
             if prefix:
                 if full.startswith(match) or tail.startswith(match):
-                    return replace(price, model=model)
+                    return hit(price)
                 continue
             if qualified and match in full:
-                return replace(price, model=model)
+                return hit(price)
         return ModelPricing(model=model, ping_input_tokens=self.ping_input_tokens,
                             ping_output_tokens=self.ping_output_tokens)
 

@@ -1,19 +1,24 @@
 package offload
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -89,8 +94,49 @@ func newSweep(t *testing.T, extraYAML string) *ExtractSweep {
 	if err != nil {
 		t.Fatalf("newExtractSweep: %v", err)
 	}
-	return c.(*ExtractSweep)
+	e := c.(*ExtractSweep)
+	// THE TWO SEAMS THESE FIXTURES NEED, because the production defaults moved (#404):
+	//
+	// forceAsk: the sweep no longer asks inside a request on a time window. It asks at the keep-alive
+	// ping, and the in-request ask that remains is the econ trigger's. These tests drive the
+	// in-request ask (the adjudication and the splice), so they force it, except where the subject is
+	// the econ trigger itself.
+	//
+	// minInventory: the shipped default is now 1. These fixtures were written against the old floor
+	// of 10 and several assert exactly what it declines, so they keep it unless they set their own.
+	if !strings.Contains(extraYAML, "min_inventory") {
+		e.minInventory = fixtureInventory
+	}
+	return e
 }
+
+// askOffload is e.Offload followed by the ping-time question, with the question's gates and events
+// merged into rep. The in-request ask is gone (#404); the adjudication these tests exercise now runs
+// at the keep-alive ping, and this lets a test read its counters the way it read them from a request's
+// Report. It asks only when the ping would be offered the question. A removal is NOT applied here: that
+// is the cold apply (extract_sweep_apply.go).
+func askOffload(e *ExtractSweep, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
+	keys, err := e.Offload(req, rep, c)
+	key := thread.Key(c.Session, c.Thread)
+	defer clearSweepPing(key)
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		rep.Gate("ping_not_offered_" + string(reason))
+		return keys, err
+	}
+	res := dispatch(batchTestBudget, SweepPingWait{})
+	for g, n := range res.Gates {
+		rep.GateN(g, n)
+	}
+	for ev, n := range res.Events {
+		rep.EventN(ev, n)
+	}
+	return keys, err
+}
+
+// fixtureInventory is the inventory floor the pre-#404 fixtures assume. It is NOT the production
+// default (defaultMinInventory is 1); the stocked fixtures below are sized to it.
+const fixtureInventory = 10
 
 // newSweepSmall is newSweep with the inventory floor lowered to 1.
 //
@@ -137,7 +183,7 @@ func sweepReq() *bschemas.BifrostChatRequest {
 // unchanged — the refusal test quotes both back.
 func sweepReqStocked() *bschemas.BifrostChatRequest {
 	req := sweepReq()
-	for i := 0; i < defaultMinInventory; i++ {
+	for i := 0; i < fixtureInventory; i++ {
 		req.Input = append(req.Input, toolResultMsgWithID("toolu_fixture_"+strconv.Itoa(i),
 			strings.Repeat("record "+strconv.Itoa(i)+" of the audit log\n", 900)))
 	}
@@ -165,14 +211,23 @@ func preExpiryCtx(session string, asker components.PrefixAsker, st store.Store) 
 		CacheAware: true, MaxCachedIdx: -1,
 		ColdCache: false, IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000,
 		PrefixAsk: asker,
-		// A request model, so the FALLBACK path has somewhere to go. Without it a missed cache read
-		// would decline for lack of a model rather than for the reason under test.
-		Model: components.ModelSpec{Incoming: fallbackModel, Static: fallbackModel},
+		// The host's keep-alive can ping this thread. A test about a thread it cannot ping clears this.
+		CanKeepAlive: func() bool { return true },
+		Model:        components.ModelSpec{Incoming: fallbackModel, Static: fallbackModel},
 	}
 }
 
-// fallbackModel answers the self-contained fallback prompt, and records what it was shown so a test
-// can assert that the expensive path really is the one that carries content.
+// debugLogCtx attaches a logger at DEBUG level to the context, writing to buf, so a test can assert on
+// what was actually logged. Built on logging.New/logging.With rather than a hand-rolled handler, so the
+// level check this test depends on is the SAME code path Setup() wires up in production.
+func debugLogCtx(buf *bytes.Buffer, session string, asker components.PrefixAsker, st store.Store) *components.Ctx {
+	c := preExpiryCtx(session, asker, st)
+	c.Ctx = logging.With(c.Ctx, slog.New(logging.New(buf, slog.LevelDebug, false)))
+	return c
+}
+
+// fallbackModel is a request model the fixtures put on the Ctx, and records what it was shown. The
+// sweep no longer falls back to it; tests use it to assert that nothing ever calls it.
 var fallbackModel = &recordingModel{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"keep"}]`}
 
 type recordingModel struct {
@@ -189,209 +244,171 @@ func (m *recordingModel) Complete(_ context.Context, prompt string) (string, err
 
 func (m *recordingModel) lastPrompt() string { s, _ := m.prompt.Load().(string); return s }
 
-// The whole point: inside the window the sweep asks ONE question over the cached transcript and removes
-// what the model says is spent, leaving a recoverable marker.
-func TestSweepRemovesSpentOutputsFromOneCachedAsk(t *testing.T) {
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	asker.cacheRead = 19595
-	e := newSweepSmall(t, "")
-	req := sweepReqStocked()
-	original := schema.MessageText(req.Input[1])
-	st := store.NewMemory(store.Options{})
-	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, st)); err != nil {
-		t.Fatalf("Offload must fail open: %v", err)
-	}
-	// PRECONDITION: exactly one ask, and it acted. Without this every assertion below is vacuous — a
-	// component that never ran leaves the transcript exactly as a correct keep does.
-	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected ONE prefix ask, got %d (gates: %v)", n, rep.Gates)
-	}
-	if rep.Events["sweep_dropped"] == 0 {
-		t.Fatalf("no removal was recorded, so nothing under test ran (gates: %v)", rep.Gates)
-	}
-	got := schema.MessageText(req.Input[1])
-	if got == original {
-		t.Fatal("the spent output was not removed")
-	}
-	if !strings.Contains(got, "context-guru removed a spent tool output") {
-		t.Errorf("no shape descriptor left in place: %q", got)
-	}
-	marks := expand.ParseMarkers(got)
-	if len(marks) != 1 {
-		t.Fatalf("expected one resolvable marker, got %d in %q", len(marks), got)
-	}
-	if back, ok := expand.Resolve(st, marks[0]); !ok || back != original {
-		t.Fatalf("the removal is not recoverable: ok=%v byte-identical=%v", ok, back == original)
-	}
-	// The ask went out under the SCOPED session id, which is what the host keys its stash by.
-	if asker.sess() != "s" {
-		t.Errorf("the ask was made for session %q, not the request's", asker.sess())
-	}
-	// And the verified read is recorded, because it is the mechanism's whole justification.
-	if rep.Events["sweep_prefix_cache_read_ok"] != 1 {
-		t.Errorf("the cache read was not recorded (gates: %v)", rep.Gates)
-	}
-}
-
-// ONE CALL FOR EVERY CANDIDATE. There is no batching any more: nothing is copied per candidate, so
-// there is nothing to divide. Twenty candidates must be one ask naming twenty labels.
-func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
+// BATCHED, NOT CAPPED (#132). Twenty candidates are two balanced questions of 10 (the batch size is 12, so
+// k = ceil(20/12) = 2), asked in sequence over the same cached transcript, and every candidate is judged
+// exactly once. They used to be one ask of the 12 largest with the other 8 left out.
+func TestSweepAsksTwentyCandidatesAsTwoBalancedBatches(t *testing.T) {
 	const n = 20
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
 	e := newSweepSmall(t, "")
 	rep := &components.Report{}
-	if _, err := e.Offload(manyCandidates(n), rep,
+	if _, err := askOffload(e, manyCandidates(n), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if got := atomic.LoadInt64(&asker.calls); got != 1 {
-		t.Fatalf("%d candidates took %d asks; the shape is ONE ask over the cached transcript", n, got)
+	if got := atomic.LoadInt64(&asker.calls); got != 2 {
+		t.Fatalf("%d candidates took %d asks, want 2 balanced batches", n, got)
 	}
-	// UP TO THE CAP, and the remainder counted rather than dropped silently. The cap exists because
-	// the reply carries a verbatim quote per verdict against a fixed budget, and truncation discards
-	// the WHOLE array — so an uncapped ask on a large transcript sweeps nothing at all. See
-	// maxAskItems. What this test still pins is the shape: ONE ask, not one call per output.
-	if got := rep.Events["sweep_adjudicated"]; got != maxAskItems {
-		t.Fatalf("sweep_adjudicated = %d, want %d (the ask cap) — the inventory was starved before "+
-			"assembly (gates: %v)", got, maxAskItems, rep.Gates)
+	// Every candidate was judged, and none twice.
+	if got := rep.Events["sweep_adjudicated"]; got != n {
+		t.Fatalf("sweep_adjudicated = %d, want %d: every candidate is asked about once (gates: %v)", got, n, rep.Gates)
 	}
-	if got := rep.Gates["sweep_over_ask_cap"]; got != n-maxAskItems {
-		t.Errorf("sweep_over_ask_cap = %d, want %d: what the cap left unasked must be counted, or a "+
-			"component that swept %d of %d would report plain success", got, n-maxAskItems,
-			maxAskItems, n)
+	if got := rep.Gates["sweep_over_ask_cap"]; got != 0 {
+		t.Errorf("sweep_over_ask_cap = %d, want 0: 20 is under 12 x 4", got)
 	}
 	if rep.Events["sweep_inventory_of_one"] != 0 {
 		t.Errorf("an inventory of %d was recorded as one (gates: %v)", n, rep.Gates)
 	}
-	// The cap must NOT trip the starvation tripwire: that alarm is for a pre-filter quietly thinning
-	// the comparison, and a deliberate ceiling firing it would make it noise on exactly the
-	// transcripts where it should be loudest.
+	// Batching must NOT trip the starvation tripwire: that alarm is for a pre-filter quietly thinning the
+	// comparison.
 	if got := rep.Events["sweep_inventory_thinned"]; got != 0 {
-		t.Errorf("the ask cap tripped sweep_inventory_thinned (%d); that counter is for an upstream "+
-			"filter, not for this ceiling", got)
-	}
-	// Every candidate the ask CARRIES must be named in it, and the cap keeps the largest.
-	ask := asker.ask()
-	named := 0
-	for i := 0; i < n; i++ {
-		if strings.Contains(ask, "["+strconv.Itoa(i)+"] ") {
-			named++
-		}
-	}
-	if named != maxAskItems {
-		t.Errorf("the one ask named %d candidates, want %d", named, maxAskItems)
+		t.Errorf("batching tripped sweep_inventory_thinned (%d); that counter is for an upstream filter", got)
 	}
 }
 
-// A MISSED CACHE READ FALLS BACK BY DEFAULT, AND IS COUNTED EITHER WAY.
-//
-// The count is the part that is not optional: the cache read is the mechanism's whole justification, and
-// a silent miss looks identical to a working call except on the bill. What happens next is a choice
-// between two real costs, and the default keeps the component working — treating "no prefix" as "no
-// verdicts" would disable it on every session's first turn and read as a model that declined to act.
-func TestSweepFallsBackWhenTheCacheReadDidNotHappen(t *testing.T) {
-	asker := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 0}
-	before := atomic.LoadInt64(&fallbackModel.calls)
+// THE FAILURE IS LOGGED AT WARN, so the cause is never lost: the gate and session must appear on the
+// line.
+func TestSweepAskFailureIsLoggedAtWarn(t *testing.T) {
+	askFailed := errors.New("upstream 500: context deadline-ish failure")
+	for _, tc := range []struct {
+		name, extraYAML string
+	}{
+		{"failed ask", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			asker := &fakeAsker{err: askFailed}
+			e := newSweepSmall(t, tc.extraYAML)
+			rep := &components.Report{}
+			if _, err := askOffload(e, sweepReq(), rep,
+				debugLogCtx(&buf, "sess-warn-1", asker, store.NewMemory(store.Options{}))); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "WARN") {
+				t.Errorf("the ask failure was not logged at WARN: %s", out)
+			}
+			if !strings.Contains(out, "sweep_ask_failed") {
+				t.Errorf("the WARN line does not name the gate it raised: %s", out)
+			}
+			if !strings.Contains(out, "sess-warn-1") {
+				t.Errorf("the WARN line does not carry the session: %s", out)
+			}
+		})
+	}
+}
+
+// fakeCoverageAsker adds components.PrefixCoverage to fakeAsker, so a test can control what the
+// sweep's own stale-prefix guard sees without going through proxy's real sentStash.
+type fakeCoverageAsker struct {
+	fakeAsker
+	covers bool
+	// gotCount/gotHash record what the guard actually asked for, so a test can tell "the guard
+	// never ran" from "it ran and was satisfied" — both look like covers==true from the outside.
+	gotCount atomic.Int64
+	gotHash  atomic.Value
+}
+
+func (f *fakeCoverageAsker) CoversSpan(_ string, count int, hash string) bool {
+	f.gotCount.Store(int64(count))
+	f.gotHash.Store(hash)
+	return f.covers
+}
+
+// The sweep's own version of #402's stale-prefix guard: a candidate the component believes is
+// already inside the cached prefix (i <= c.MaxCachedIdx, the same test sweep_candidate_at_depth
+// uses) must be verified against the asker's actual coverage before the ask runs — the ask reads
+// proxy's sentStash through the identical PrefixAsker.Ask construction cache_aware_summarizer
+// does, and so inherits the identical risk of answering from a transcript that does not cover
+// what this turn is about to rely on it having read.
+func TestSweepDeclinesOnAStalePrefix(t *testing.T) {
+	asker := &fakeCoverageAsker{covers: false}
 	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-stale", asker, store.NewMemory(store.Options{}))
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReqStocked(), rep,
-		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
 		t.Fatal(err)
 	}
-	// PRECONDITION: the prefix ask happened, so this is about the READ and not about never asking.
-	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected one prefix ask, got %d (gates: %v)", n, rep.Gates)
+	if rep.Gates["sweep_stale_prefix"] != 1 {
+		t.Fatalf("a stale stash was not counted as sweep_stale_prefix (gates: %v)", rep.Gates)
 	}
-	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 1 {
-		t.Fatalf("a zero cache read was not counted; the mechanism's failure would be invisible "+
-			"(gates: %v)", rep.Gates)
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a stale prefix must be caught BEFORE paying for the "+
+			"call, the same discipline cache_aware_summarizer's guard uses", asker.calls)
 	}
-	if rep.Events["sweep_fallback_used"] != 1 {
-		t.Fatalf("the default did not fall back, so the component stops working on a first turn "+
-			"(gates: %v)", rep.Gates)
-	}
-	if rep.Gates["sweep_fallback_blocked"] != 0 {
-		t.Errorf("the fallback was blocked without block_fallback being set (gates: %v)", rep.Gates)
-	}
-	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 1 {
-		t.Fatalf("the fallback made %d completions, want 1", n)
-	}
-	// THE FALLBACK IS THE PATH THAT CARRIES CONTENT, and that is exactly what makes it expensive.
-	// Asserted so the two paths cannot quietly converge: if the prefix ask ever started shipping
-	// samples, this is the only place the difference is visible.
-	if p := fallbackModel.lastPrompt(); !strings.Contains(p, "content:") {
-		t.Errorf("the fallback prompt carries no output content, so the model cannot judge: %.200q", p)
+	// At the ping the stash holds the registering request's whole body, so every message is inside the
+	// cached prefix and the deepest candidate decides how much coverage is required.
+	if got := asker.gotCount.Load(); got != int64(len(req.Input)) {
+		t.Errorf("the guard asked coverage for %d messages, want %d (the deepest candidate is the last "+
+			"message)", got, len(req.Input))
 	}
 }
 
-// STRICT MODE forgoes the yield rather than paying for it. The right choice where the bill matters more
-// than the removal, and the honest one to reach for if the zero-read counter turns out to be common.
-func TestBlockFallbackDeclinesInsteadOfPaying(t *testing.T) {
-	asker := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 0}
-	before := atomic.LoadInt64(&fallbackModel.calls)
-	e := newSweepSmall(t, "block_fallback: true\n")
-	req := sweepReq()
-	original := schema.MessageText(req.Input[1])
-	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
-		t.Fatal(err)
-	}
-	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected one prefix ask, got %d (gates: %v)", n, rep.Gates)
-	}
-	// COUNTED IN THIS MODE TOO. That is the part that does not depend on the switch.
-	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 1 {
-		t.Fatalf("strict mode did not count the missed read (gates: %v)", rep.Gates)
-	}
-	if rep.Gates["sweep_fallback_blocked"] != 1 {
-		t.Fatalf("block_fallback did not refuse the fallback (gates: %v)", rep.Gates)
-	}
-	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 0 {
-		t.Fatalf("strict mode still paid for %d fallback completions", n)
-	}
-	if rep.Events["sweep_dropped"] != 0 {
-		t.Fatalf("strict mode acted on a full-price read (gates: %v)", rep.Gates)
-	}
-	if schema.MessageText(req.Input[1]) != original {
-		t.Fatal("content was removed in a mode that declined to act")
-	}
-}
-
-// No asker at all — a non-Anthropic route, or no incoming client. Counted, and it takes the same fork
-// as a missed read: fall back by default, decline under block_fallback.
-func TestSweepFallsBackWithNoAsker(t *testing.T) {
-	before := atomic.LoadInt64(&fallbackModel.calls)
+// A count-changing component BEFORE the sweep is a third decline, distinct from a stale stash
+// (#452): the raw and pipeline coordinates name different messages, so rawSpanForHash cannot
+// locate a span at all and the guard declines WITHOUT judging the stash — which can be perfectly
+// current. Counted as sweep_coords_shifted, never as sweep_stale_prefix, so a `high`/`xhigh`
+// pipeline (summarize first, then this) does not report a stash defect on every compacted turn.
+func TestSweepCountsShiftedCoordinatesApartFromAStalePrefix(t *testing.T) {
+	// covers: true, so only the coordinate shift can decline — if the stash were judged, it
+	// would pass.
+	asker := &fakeCoverageAsker{covers: true}
 	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-shifted", asker, store.NewMemory(store.Options{}))
+	// What apply.BodyOpts would have set had a component ahead of the sweep changed the message
+	// count: the pre-pipeline body holds one message more than req.Input does at this position.
+	raw := make([]bschemas.ChatMessage, len(req.Input), len(req.Input)+1)
+	copy(raw, req.Input)
+	ctx.RawInput = append(raw, req.Input[0])
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReq(), rep,
-		preExpiryCtx("s", nil, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Gates["sweep_no_asker"] != 1 {
-		t.Fatalf("a missing asker was not counted (gates: %v)", rep.Gates)
+	if rep.Gates["sweep_coords_shifted"] != 1 {
+		t.Fatalf("a shifted coordinate system was not counted as sweep_coords_shifted (gates: %v)", rep.Gates)
 	}
-	if rep.Events["sweep_fallback_used"] != 1 {
-		t.Fatalf("no asker did not fall back (gates: %v)", rep.Gates)
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("a shifted coordinate system was counted as a stale stash (gates: %v)", rep.Gates)
 	}
-	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 1 {
-		t.Fatalf("the fallback made %d completions, want 1", n)
+	if got := asker.gotCount.Load(); got != 0 {
+		t.Errorf("CoversSpan was consulted for %d messages; with the coordinates shifted there is "+
+			"no span safe to compare, so the stash must not be judged at all", got)
 	}
+	if atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("Ask was called %d times; a guard that cannot locate the span must decline before "+
+			"paying for the call", asker.calls)
+	}
+}
 
-	// And under block_fallback it declines instead.
-	before = atomic.LoadInt64(&fallbackModel.calls)
-	strict := newSweepSmall(t, "block_fallback: true\n")
-	rep2 := &components.Report{}
-	if _, err := strict.Offload(sweepReq(), rep2,
-		preExpiryCtx("s", nil, store.NewMemory(store.Options{}))); err != nil {
+// The mirror of the test above: the asker reports full coverage, so the ask proceeds exactly as
+// it did before this guard existed.
+func TestSweepAsksNormallyWhenPrefixCovers(t *testing.T) {
+	asker := &fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]"}}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-covers", asker, store.NewMemory(store.Options{}))
+	rep := &components.Report{}
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
 		t.Fatal(err)
 	}
-	if rep2.Gates["sweep_fallback_blocked"] != 1 {
-		t.Fatalf("block_fallback did not refuse the no-asker fallback (gates: %v)", rep2.Gates)
+	if rep.Gates["sweep_stale_prefix"] != 0 {
+		t.Fatalf("a covering prefix was wrongly declined as stale (gates: %v)", rep.Gates)
 	}
-	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 0 {
-		t.Fatalf("strict mode still paid for %d completions with no asker", n)
+	if atomic.LoadInt64(&asker.calls) != 1 {
+		t.Fatalf("the ask did not run (calls=%d)", asker.calls)
 	}
 }
 
@@ -426,7 +443,7 @@ func TestSweepCountsAMissingPrefixApartFromAFailure(t *testing.T) {
 			asker := &fakeAsker{err: tc.err}
 			e := newSweepSmall(t, "")
 			rep := &components.Report{}
-			if _, err := e.Offload(sweepReq(), rep,
+			if _, err := askOffload(e, sweepReq(), rep,
 				preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 				t.Fatal(err)
 			}
@@ -436,128 +453,96 @@ func TestSweepCountsAMissingPrefixApartFromAFailure(t *testing.T) {
 			if rep.Gates[tc.gate] != 1 {
 				t.Fatalf("%s was not counted as %s (gates: %v)", tc.name, tc.gate, rep.Gates)
 			}
-			// And it falls back rather than skipping, which is what keeps the component alive on a
-			// session's first turn.
-			if rep.Events["sweep_fallback_used"] != 1 {
-				t.Errorf("%s did not fall back (gates: %v)", tc.name, rep.Gates)
+			// There is no fallback: the ordinary ping is sent instead.
+			if rep.Events["sweep_fallback_used"] != 0 || tc.name == "" {
+				t.Errorf("%s fell back (gates: %v)", tc.name, rep.Gates)
 			}
 		})
 	}
 }
 
-// THE PRE-EXPIRY WINDOW. The ask needs a cache that still EXISTS; the removal wants one that is nearly
-// worthless. Both hold only in the window before expiry, and this pins every edge of it.
-func TestSweepFiresOnlyInThePreExpiryWindow(t *testing.T) {
+// THE TIME WINDOW IS GONE (#404). A sweep configured the shipped way asks NOTHING inside a request, on
+// any cache state, including the state that used to be its window (a cache a minute from expiry). It
+// asks at the keep-alive ping instead (extract_sweep_ping_test.go).
+func TestSweepAsksNothingInsideARequestByDefault(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		idleMs   int64
-		ttlMs    int64
-		cold     bool
-		wantFire bool
+		name   string
+		idleMs int64
+		cold   bool
 	}{
-		{"inside the window", 4 * 60 * 1000, 5 * 60 * 1000, false, true},
-		{"right at the early edge", 4 * 60 * 1000, 5 * 60 * 1000, false, true},
-		{"too early: plenty of TTL left", 60 * 1000, 5 * 60 * 1000, false, false},
-		{"too late: already expired", 6 * 60 * 1000, 5 * 60 * 1000, false, false},
-		{"exactly at expiry", 5 * 60 * 1000, 5 * 60 * 1000, false, false},
-		{"apply already called it cold", 4 * 60 * 1000, 5 * 60 * 1000, true, false},
-		{"TTL unknown", 4 * 60 * 1000, 0, false, false},
-		{"no previous turn on record", 0, 5 * 60 * 1000, false, false},
-		{"a 1h TTL, one minute from expiry", 59*60*1000 + 30*1000, 60 * 60 * 1000, false, true},
-		{"a 1h TTL, half an hour in", 30 * 60 * 1000, 60 * 60 * 1000, false, false},
+		{"where the old window was: a minute from expiry", 4 * 60 * 1000, false},
+		{"plenty of TTL left", 30 * 1000, false},
+		{"a cold request", 10 * 60 * 1000, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newSweepSmall(t, "")
-			c := &components.Ctx{
-				IdleMs: tc.idleMs, CacheTTLMs: tc.ttlMs, ColdCache: tc.cold,
+			asker := &labelAsker{verdict: "drop", needed: "none"}
+			asker.cacheRead = 19595
+			c0, err := newExtractSweep([]byte("min_tokens: 2000\nmin_inventory: 1\nshadow: true\n"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got := e.sweeping(c); got != tc.wantFire {
-				t.Fatalf("sweeping = %v, want %v (idle=%dms ttl=%dms cold=%v)",
-					got, tc.wantFire, tc.idleMs, tc.ttlMs, tc.cold)
+			e := c0.(*ExtractSweep) // as shipped, shadow aside
+			req := sweepReqStocked()
+			original := schema.MessageText(req.Input[1])
+			c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+			c.IdleMs, c.ColdCache = tc.idleMs, tc.cold
+			rep := &components.Report{}
+			if _, err := e.Offload(req, rep, c); err != nil {
+				t.Fatal(err)
+			}
+			if n := atomic.LoadInt64(&asker.calls); n != 0 {
+				t.Fatalf("a request asked %d times inside the pipeline; the question belongs to the ping", n)
+			}
+			if schema.MessageText(req.Input[1]) != original {
+				t.Fatal("a request modified a message with no held answer to apply")
+			}
+			if rep.Gates["not_in_pre_expiry_window"] != 0 {
+				t.Errorf("the retired window gate is still being raised: %v", rep.Gates)
 			}
 		})
 	}
 }
 
-// Outside the window nothing is asked and nothing is touched.
-func TestSweepDoesNothingOutsideTheWindow(t *testing.T) {
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	asker.cacheRead = 19595
-	e := newSweepSmall(t, "")
-	req := sweepReq()
-	original := schema.MessageText(req.Input[1])
-	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-	c.IdleMs = 30 * 1000 // plenty of TTL left
-	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, c); err != nil {
+// The retired keys must not stop a config from loading: a production config may still hold them, and a
+// proxy that will not start breaks fail open. Each is ignored with one warning and a count, and the
+// sweep is then exactly the sweep built without the key.
+func TestRetiredKeysLoadWarnAndChangeNothing(t *testing.T) {
+	want := map[string]string{
+		"pre_expiry_seconds": "180", "econ_trigger": "true", "econ_ignore_ask_cost": "true",
+		"reward_premium": "20", "min_pressure": "0.2", "block_fallback": "true",
+	}
+	base, err := newExtractSweep([]byte("min_tokens: 1500\nshadow: true\n"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := atomic.LoadInt64(&asker.calls); n != 0 {
-		t.Fatalf("a turn outside the window made %d asks", n)
+	for key, val := range want {
+		before := SweepPingCounters().RetiredKeys[key]
+		var buf bytes.Buffer
+		old := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		got, err := newExtractSweep([]byte("min_tokens: 1500\nshadow: true\n" + key + ": " + val + "\n"))
+		slog.SetDefault(old)
+		if err != nil {
+			t.Errorf("%s stopped the config from loading: %v", key, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, base) {
+			t.Errorf("%s changed the sweep: %+v vs %+v", key, got, base)
+		}
+		if n := strings.Count(buf.String(), "retired setting"); n != 1 || !strings.Contains(buf.String(), key) {
+			t.Errorf("%s: want exactly one warning naming it, got %d: %s", key, n, buf.String())
+		}
+		if SweepPingCounters().RetiredKeys[key]-before != 1 {
+			t.Errorf("%s was not counted", key)
+		}
 	}
-	if rep.Gates["not_in_pre_expiry_window"] == 0 {
-		t.Errorf("a turn outside the window must say why it did nothing (gates: %v)", rep.Gates)
+	// All six at once, and in a block that is otherwise empty.
+	all := ""
+	for k, v := range want {
+		all += k + ": " + v + "\n"
 	}
-	if schema.MessageText(req.Input[1]) != original {
-		t.Fatal("a turn outside the window modified a message")
-	}
-}
-
-// The window's width is configurable, and widening it moves the early edge.
-func TestPreExpirySecondsWidensTheWindow(t *testing.T) {
-	narrow := newSweepSmall(t, "")
-	wide := newSweepSmall(t, "pre_expiry_seconds: 180\n")
-	// Three minutes idle on a five-minute TTL: two minutes remaining.
-	c := &components.Ctx{IdleMs: 3 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000}
-	if narrow.sweeping(c) {
-		t.Error("the default one-minute window fired with two minutes of TTL left")
-	}
-	if !wide.sweeping(c) {
-		t.Error("a three-minute window did not fire with two minutes of TTL left")
-	}
-}
-
-// A removal decided in the window MUST be replayed on every later turn. Without that, the next turn
-// re-sends the removed output verbatim — the saving evaporates AND the prefix the provider is caching
-// stops being byte-stable, which costs more than the sweep saved.
-func TestSweepReplaysItsRemovalOnLaterTurns(t *testing.T) {
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	asker.cacheRead = 19595
-	e := newSweepSmall(t, "")
-	st := store.NewMemory(store.Options{})
-
-	first := sweepReq()
-	original := schema.MessageText(first.Input[1])
-	rep1 := &components.Report{}
-	if _, err := e.Offload(first, rep1, preExpiryCtx("sess", asker, st)); err != nil {
-		t.Fatal(err)
-	}
-	if rep1.Events["sweep_dropped"] == 0 {
-		t.Fatalf("the first turn did not remove anything, so there is nothing to replay (gates: %v)",
-			rep1.Gates)
-	}
-	windowText := schema.MessageText(first.Input[1])
-
-	later := sweepReq() // the same transcript again, on a turn outside the window
-	c := preExpiryCtx("sess", asker, st)
-	c.IdleMs = 5 * 1000
-	rep2 := &components.Report{}
-	if _, err := e.Offload(later, rep2, c); err != nil {
-		t.Fatal(err)
-	}
-	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("the later turn asked again: %d asks total", n)
-	}
-	if rep2.Events["reapplied_same_session"] != 1 {
-		t.Fatalf("the later turn did not replay the frozen removal (gates: %v)", rep2.Gates)
-	}
-	got := schema.MessageText(later.Input[1])
-	if got == original {
-		t.Fatal("the later turn re-sent the removed output verbatim; the saving is gone")
-	}
-	if got != windowText {
-		t.Fatalf("the replay is not byte-identical, so the cached prefix churns:\n first %q\n later %q",
-			windowText, got)
+	if _, err := newExtractSweep([]byte(all)); err != nil {
+		t.Errorf("a block of only retired keys did not load: %v", err)
 	}
 }
 
@@ -570,7 +555,7 @@ func TestSweepIgnoresAVerdictForAnUnofferedLabel(t *testing.T) {
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
 	if rep.Events["sweep_adjudicated"] == 0 {
@@ -598,7 +583,7 @@ func TestSweepCountsKeepEverythingSeparatelyFromAFailure(t *testing.T) {
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", keepAll, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, preExpiryCtx("s", keepAll, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
 	if rep.Events["sweep_adjudicated"] == 0 {
@@ -618,7 +603,7 @@ func TestSweepCountsKeepEverythingSeparatelyFromAFailure(t *testing.T) {
 	cut := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"partial`, cacheRead: 19595}
 	e2 := newSweepSmall(t, "")
 	rep2 := &components.Report{}
-	if _, err := e2.Offload(sweepReq(), rep2,
+	if _, err := askOffload(e2, sweepReq(), rep2,
 		preExpiryCtx("s2", cut, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +626,7 @@ func TestSweepRefusesADropThatNamesAnObligation(t *testing.T) {
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
 	if rep.Events["sweep_adjudicated"] == 0 {
@@ -676,7 +661,7 @@ func TestSweepCountsAnInventoryOfOne(t *testing.T) {
 	asker.cacheRead = 19595
 	e := newSweepSmall(t, "")
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReq(), rep,
+	if _, err := askOffload(e, sweepReq(), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +691,7 @@ func TestSweepCountsAThinnedInventory(t *testing.T) {
 	asker.cacheRead = 19595
 	e := newSweepSmall(t, "")
 	rep := &components.Report{}
-	if _, err := e.Offload(manyCandidates(n), rep,
+	if _, err := askOffload(e, manyCandidates(n), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +740,7 @@ func TestSweepRaisesTheContractedCounterNames(t *testing.T) {
 			tc.asker.cacheRead = 19595
 			e := newSweepSmall(t, "")
 			rep := &components.Report{}
-			if _, err := e.Offload(sweepReq(), rep,
+			if _, err := askOffload(e, sweepReq(), rep,
 				preExpiryCtx("s", tc.asker, store.NewMemory(store.Options{}))); err != nil {
 				t.Fatal(err)
 			}
@@ -823,7 +808,7 @@ func TestSweepSendsTheInventoryAndNotTheOutputs(t *testing.T) {
 	req := sweepReq()
 	body := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
-	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	if _, err := askOffload(e, req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
 	ask := asker.ask()
@@ -839,8 +824,9 @@ func TestSweepSendsTheInventoryAndNotTheOutputs(t *testing.T) {
 	if strings.Contains(ask, body) {
 		t.Error("the whole output body was copied into the ask, defeating the mechanism")
 	}
-	// The ask must be a small multiple of the contract, not a transcript copy.
-	if len(ask) > 4000 {
+	// The ask must be a small multiple of the contract, not a transcript copy. The bound includes the
+	// evidence paragraph, which is on by default (#404).
+	if len(ask) > 6500 {
 		t.Errorf("the ask is %d chars; it should be the contract plus one line per candidate", len(ask))
 	}
 	// And it must not be a compaction prompt.
@@ -873,7 +859,7 @@ func TestSweepCountsWhetherTheAnswerCameViaTheToolOrProse(t *testing.T) {
 			asker := &fakeAsker{reply: verdicts, cacheRead: 19595, viaTool: tc.viaTool}
 			e := newSweepSmall(t, "")
 			rep := &components.Report{}
-			if _, err := e.Offload(sweepReq(), rep,
+			if _, err := askOffload(e, sweepReq(), rep,
 				preExpiryCtx("s-"+tc.name, asker, store.NewMemory(store.Options{}))); err != nil {
 				t.Fatal(err)
 			}
@@ -896,29 +882,6 @@ func TestSweepCountsWhetherTheAnswerCameViaTheToolOrProse(t *testing.T) {
 	}
 }
 
-// The FALLBACK is neither shape. fallbackAsk calls Model.Complete(), which carries no tool to declare,
-// so counting its reply as prose would report a shape that was never on offer -- and would silently
-// inflate the prose count with calls that could not have used the tool even in principle.
-func TestSweepDoesNotAttributeAReplyShapeToTheFallback(t *testing.T) {
-	// cacheRead 0 sends this down the fallback fork, which is the only way in without a real
-	// non-Anthropic route.
-	asker := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"keep"}]`, cacheRead: 0}
-	e := newSweepSmall(t, "")
-	rep := &components.Report{}
-	if _, err := e.Offload(sweepReq(), rep,
-		preExpiryCtx("s-fb", asker, store.NewMemory(store.Options{}))); err != nil {
-		t.Fatal(err)
-	}
-	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 1 {
-		t.Fatalf("the fallback fork was never taken, so this asserts nothing "+
-			"(gates: %v events: %v)", rep.Gates, rep.Events)
-	}
-	if rep.Events["sweep_answered_via_tool"] != 0 || rep.Events["sweep_answered_via_prose"] != 0 {
-		t.Errorf("the fallback was attributed a reply shape it could not have had (events: %v)",
-			rep.Events)
-	}
-}
-
 // A component that DECLINED must not report itself as having mutated the request, and the inventory
 // floor is a decline. It returns early, so the tail's `changed == 0` check never saw it: 29,321 of
 // 29,372 production rows read `mutated=1, acted=0, skipped=0`, which dash/event.go's
@@ -926,39 +889,26 @@ func TestSweepDoesNotAttributeAReplyShapeToTheFallback(t *testing.T) {
 // exits are asserted, because the two reach the floor with different candidate counts and only one
 // of them records a gate at all (GateN is a no-op at n<=0).
 func TestSweepDeclinedAtInventoryFloorReportsSkipped(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		idleMs   int64
-		wantGate string
-	}{
-		// In the window, but sweepReq offers 2 candidates against the default floor of 10.
-		{"in the window, below the inventory floor", 4 * 60 * 1000, "sweep_inventory_below_min"},
-		// Outside it, phase 1 collects nothing, so BOTH counters are suppressed at zero and the
-		// only record of the turn is the window gate.
-		{"outside the window, no candidates at all", 30 * 1000, "not_in_pre_expiry_window"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			asker := &labelAsker{verdict: "drop", needed: "none"}
-			asker.cacheRead = 19595
-			e := newSweep(t, "") // defaultMinInventory, NOT newSweepSmall's floor of 1
-			req := sweepReq()
-			c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
-			c.IdleMs = tc.idleMs
-			rep := &components.Report{}
-			if _, err := e.Offload(req, rep, c); err != nil {
-				t.Fatalf("Offload must fail open: %v", err)
-			}
-			if n := atomic.LoadInt64(&asker.calls); n != 0 {
-				t.Fatalf("a declining turn made %d asks", n)
-			}
-			if !rep.Skipped {
-				t.Errorf("a component that declined reports Skipped=false, so dash reads mutated=1 "+
-					"for a turn that changed nothing (gates: %v)", rep.Gates)
-			}
-			if rep.Gates[tc.wantGate] == 0 {
-				t.Errorf("no %s gate recorded (gates: %v)", tc.wantGate, rep.Gates)
-			}
-		})
+	// A request asks nothing, collects nothing and changes nothing, so it records no gate and must
+	// still report Skipped. The inventory floor is the ping's: a thread below it is offered no question.
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweep(t, "") // the fixture floor of 10, NOT newSweepSmall's floor of 1
+	req := sweepReq()
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	rep := &components.Report{}
+	if _, err := askOffload(e, req, rep, c); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 0 {
+		t.Fatalf("a declining turn made %d asks", n)
+	}
+	if !rep.Skipped {
+		t.Errorf("a component that declined reports Skipped=false, so dash reads mutated=1 "+
+			"for a turn that changed nothing (gates: %v)", rep.Gates)
+	}
+	if rep.Gates["ping_not_offered_below_min_inventory"] == 0 {
+		t.Errorf("the ping was offered a question below the floor (gates: %v)", rep.Gates)
 	}
 }
 
@@ -972,97 +922,126 @@ func TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit(t *testing.T) {
 	asker.cacheRead = 39805 // a real partial hit, so CacheRead == 0 is FALSE
 	asker.cacheWrite = 260604
 	e := newSweepSmall(t, "")
-	rep := &components.Report{}
-	if _, err := e.Offload(sweepReq(), rep,
-		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	if _, err := e.Offload(sweepReq(), &components.Report{}, c); err != nil {
 		t.Fatal(err)
 	}
+	key := thread.Key(c.Session, c.Thread)
+	defer clearSweepPing(key)
+	dispatch, _, reason, ok := SweepPingSubstitute(key)
+	if !ok {
+		t.Fatalf("no question offered (reason %q)", reason)
+	}
+	// Since #721 the write alone decides nothing: the partial hit is caught because it read far less
+	// than the turn it followed (here 300,000), which is what a rebuilt prefix looks like.
+	res := dispatch(time.Second, SweepPingWait{LastTurnRead: 300000})
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected ONE ask, got %d (gates: %v)", n, rep.Gates)
+		t.Fatalf("expected ONE ask, got %d (gates: %v)", n, res.Gates)
 	}
-	if rep.Gates["sweep_prefix_cache_write"] == 0 {
-		t.Errorf("an ask that re-created the agent's prefix for %d tokens recorded nothing "+
-			"(gates: %v)", asker.cacheWrite, rep.Gates)
+	if res.Gates["sweep_prefix_cache_read_below_turn"] == 0 {
+		t.Errorf("an ask that read 39805 of a 300000 turn recorded nothing (gates: %v)", res.Gates)
 	}
-	// And the pre-existing zero-read counter must NOT fire, because the read did happen. The two
-	// name different failures and collapsing them would lose the distinction the fix is for.
-	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 0 {
-		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", rep.Gates)
-	}
-}
-
-// block_fallback now declines on a partial hit that WROTE, not only on a zero read, so the two cases
-// must stay distinguishable. This asserts the counters, which is one of two things a reader sees: see
-// TestBlockFallbackDecliningAWritePublishesTheCorrectRejection for the other, the Rejection string
-// itself. (549714c claimed the call row is dropped here because rec.Component stays "" -- that is only
-// true of THIS test's own `rep := &components.Report{}`. In production, pipeline.go sets
-// rep.Component = comp.Name() before Offload ever runs, and the assignment at extract_sweep.go's
-// `r.rec = components.ModelCall{Component: rep.Component, ...}` happens before this decline branch, so
-// the row survives and the Rejection string is published. See the other test for the fix.)
-func TestBlockFallbackDistinguishesAZeroReadFromAWrite(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		read, write int
-		wantGate    string
-		notGate     string
-	}{
-		{"zero read", 0, 0, "sweep_prefix_cache_read_ZERO", "sweep_prefix_cache_write"},
-		{"partial hit that wrote", 39805, 260604, "sweep_prefix_cache_write", "sweep_prefix_cache_read_ZERO"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			asker := &labelAsker{verdict: "drop", needed: "none"}
-			asker.cacheRead, asker.cacheWrite = tc.read, tc.write
-			e := newSweepSmall(t, "block_fallback: true\n")
-			req := sweepReq()
-			original := schema.MessageText(req.Input[1])
-			rep := &components.Report{}
-			if _, err := e.Offload(req, rep,
-				preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
-				t.Fatal(err)
-			}
-			if rep.Gates["sweep_fallback_blocked"] != 1 {
-				t.Fatalf("block_fallback did not decline (gates: %v)", rep.Gates)
-			}
-			if rep.Gates[tc.wantGate] == 0 {
-				t.Errorf("did not record %s (gates: %v)", tc.wantGate, rep.Gates)
-			}
-			if rep.Gates[tc.notGate] != 0 {
-				t.Errorf("recorded %s for the wrong failure (gates: %v)", tc.notGate, rep.Gates)
-			}
-			// And declining must leave the transcript alone, which is the point of the switch.
-			if schema.MessageText(req.Input[1]) != original {
-				t.Error("a declined ask modified a message")
-			}
-		})
+	// And the zero-read counter must NOT fire, because the read did happen. The two name different
+	// failures and collapsing them would lose the distinction the fix is for.
+	if res.Gates["sweep_prefix_cache_read_ZERO"] != 0 {
+		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", res.Gates)
 	}
 }
 
-// The Rejection string 549714c added is published, not dropped: rep.Component is never "" in
-// production, because pipeline.go's runOne sets it (`Report{Component: comp.Name(), ...}`) before
-// calling Offload, and `r.rec = components.ModelCall{Component: rep.Component, ...}` fills rec.Component
-// from it well before this decline branch runs. So the row clears the `call.rec.Component != ""` guard
-// and lands in rep.Calls with the branched reason -- the field an operator actually reads on
-// extraction_calls.rejection, which this PR itself calls out as already mis-analysed twice.
-func TestBlockFallbackDecliningAWritePublishesTheCorrectRejection(t *testing.T) {
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	asker.cacheRead, asker.cacheWrite = 39805, 260604
-	e := newSweepSmall(t, "block_fallback: true\n")
-	// rep.Component set exactly as pipeline.go's runOne sets it, ahead of calling Offload.
-	rep := &components.Report{Component: "extract_llm_sweep"}
-	if _, err := e.Offload(sweepReq(), rep,
-		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+// fakeCoveredAsker adds components.PrefixCoveredAsker to fakeCoverageAsker: the single-snapshot ask
+// (#571), recording the span it was handed.
+type fakeCoveredAsker struct {
+	fakeCoverageAsker
+	snapshotErr   error
+	askCoveredHit atomic.Int64
+	gotCoverCount atomic.Int64
+	gotCoverHash  atomic.Value
+}
+
+func (f *fakeCoveredAsker) AskCovered(_ context.Context, _ string, count int, hash, _ string) (string, components.PrefixUsage, error) {
+	f.askCoveredHit.Add(1)
+	f.gotCoverCount.Store(int64(count))
+	f.gotCoverHash.Store(hash)
+	if f.snapshotErr != nil {
+		return "", components.PrefixUsage{}, f.snapshotErr
+	}
+	return f.reply, components.PrefixUsage{CacheRead: f.cacheRead}, nil
+}
+
+// The ask goes out through AskCovered with the span the guard verified, so the stash cannot change
+// between the check and the ask; a snapshot AskCovered refuses is counted as a stale prefix, not as
+// a failed call, and nothing was sent.
+func TestSweepAsksOnTheSnapshotItChecked(t *testing.T) {
+	asker := &fakeCoveredAsker{fakeCoverageAsker: fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]", cacheRead: 19595}}}
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
+	ctx := preExpiryCtx("s-covered", asker, store.NewMemory(store.Options{}))
+	rep := &components.Report{}
+	if _, err := askOffload(e, req, rep, ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Calls) != 1 {
-		t.Fatalf("expected the declined call to be published, got %d rows", len(rep.Calls))
+	if asker.askCoveredHit.Load() != 1 || atomic.LoadInt64(&asker.calls) != 0 {
+		t.Fatalf("AskCovered calls=%d, plain Ask calls=%d; the ask must be the single-snapshot one",
+			asker.askCoveredHit.Load(), asker.calls)
 	}
-	call := rep.Calls[0]
-	if call.Component == "" {
-		t.Fatal("published row has no Component, so it never clears the caller's guard")
+	// At the ping every message is inside the cached prefix, so the span the guard verified reaches
+	// the deepest candidate: the last message.
+	if got := asker.gotCoverCount.Load(); got != int64(len(req.Input)) {
+		t.Errorf("AskCovered was given count %d, want the guard's %d", got, len(req.Input))
 	}
-	const want = "the prefix ask re-created the agent's prefix instead of reading it and " +
-		"block_fallback is set; declining rather than paying again for a full-price transcript read"
-	if call.Rejection != want {
-		t.Errorf("Rejection = %q, want %q", call.Rejection, want)
+	if h, _ := asker.gotCoverHash.Load().(string); h == "" || h != asker.gotHash.Load() {
+		t.Errorf("AskCovered was given hash %q, want the one the guard verified (%v)", h, asker.gotHash.Load())
+	}
+
+	// Now the snapshot disagrees with the early read.
+	stale := &fakeCoveredAsker{fakeCoverageAsker: fakeCoverageAsker{covers: true, fakeAsker: fakeAsker{reply: "[]"}},
+		snapshotErr: components.ErrStalePrefix}
+	ctx2 := preExpiryCtx("s-covered-stale", stale, store.NewMemory(store.Options{}))
+	rep2 := &components.Report{}
+	if _, err := askOffload(e, sweepReqStocked(), rep2, ctx2); err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Gates["sweep_stale_prefix"] != 1 || rep2.Gates["sweep_ask_failed"] != 0 {
+		t.Fatalf("a refused snapshot must count as sweep_stale_prefix, not a failed ask (gates: %v)", rep2.Gates)
+	}
+}
+
+// readLabelAsker is a labelAsker that also reports the text the model read, as a PrefixReadAsker does.
+type readLabelAsker struct {
+	labelAsker
+	read string
+}
+
+func (m *readLabelAsker) AskRead(ctx context.Context, session string, _ int, _, ask string) (string, components.PrefixUsage, string, error) {
+	reply, u, err := m.labelAsker.Ask(ctx, session, ask)
+	return reply, u, m.read, err
+}
+
+// The quote check uses the text the model READ (fix 6). A quote taken from a message newer than the
+// request's transcript is real, and must not be counted as fabricated. With no read text the old check
+// stays, so the same quote IS counted: that is the control.
+func TestAQuoteFromTheBodyTheModelReadIsNotCountedAsFabricated(t *testing.T) {
+	const quote = "a line that only the newest message carries"
+	run := func(read string) *components.Report {
+		a := &readLabelAsker{labelAsker: labelAsker{verdict: "keep", needed: "c", quote: quote}, read: read}
+		a.cacheRead = 19595
+		rep := &components.Report{}
+		if _, err := askOffload(newSweepSmall(t, ""), sweepReq(), rep,
+			preExpiryCtx("s", a, store.NewMemory(store.Options{}))); err != nil {
+			t.Fatal(err)
+		}
+		if rep.Events["sweep_adjudicated"] == 0 {
+			t.Fatalf("no ask was made (gates: %v)", rep.Gates)
+		}
+		return rep
+	}
+	if rep := run("the body the model read. " + quote); rep.Gates["sweep_quote_fabricated"] != 0 {
+		t.Errorf("a quote found in the body the model read was counted as fabricated (gates: %v)", rep.Gates)
+	}
+	if rep := run(""); rep.Gates["sweep_quote_fabricated"] == 0 {
+		t.Errorf("control: the same quote with no read text should be counted as fabricated (gates: %v)", rep.Gates)
+	}
+	if rep := run("a body without it"); rep.Gates["sweep_quote_fabricated"] == 0 {
+		t.Errorf("a quote absent from the body the model read was not counted (gates: %v)", rep.Gates)
 	}
 }

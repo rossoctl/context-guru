@@ -5,7 +5,7 @@
 // Captures hold real traffic and are never committed, so everything here skips unless
 // pointed at one:
 //
-//	CG_CORPUS='/home/vpcuser/cg-research/bench/*.jsonl' \
+//	CG_CORPUS='/path/to/bench/*.jsonl' \
 //	  go test ./components/offload -run 'Ledger|AgentFilter' -v
 //
 // The in-process ledger (metrics.Aggregator.FilterMiss) ranks unmatched shapes by
@@ -289,7 +289,7 @@ const ledgerPrice = 3.0 / 1e6 * (0.9054*0.1 + 0.0946*1.25)
 // removed for each agent_filters mode, marker-inclusive and never-worse-gated exactly as
 // cmdfilter applies them. Run it per arm to get per-arm numbers:
 //
-//	for a in short long mixed cold; do CG_CORPUS="/home/vpcuser/cg-research/bench/$a.jsonl" \
+//	for a in short long mixed cold; do CG_CORPUS="/path/to/bench/$a.jsonl" \
 //	  go test ./components/offload -run AgentFilterCorpusMeasure -v; done
 func TestAgentFilterCorpusMeasure(t *testing.T) {
 	pairs := ledgerCorpus(t)

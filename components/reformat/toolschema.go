@@ -235,8 +235,12 @@ func stripToolAnnotations(raw []byte) ([]byte, bool) {
 		}
 		schemaNode, ok := tool["input_schema"]
 		if !ok {
-			// Anthropic server tools (web_search, bash_20250124, ...) are schema-less,
-			// and OpenAI-shaped bodies nest it under function.parameters.
+			// Responses function tools put parameters on the declaration itself;
+			// Chat Completions nests them under function.parameters.
+			schemaNode, ok = tool["parameters"]
+		}
+		if !ok {
+			// Anthropic server tools (web_search, bash_20250124, ...) are schema-less.
 			if fn, isFn := tool["function"].(map[string]any); isFn {
 				schemaNode, ok = fn["parameters"]
 			}

@@ -38,7 +38,7 @@ func recWithInventory(t *testing.T, inv *Inventory, withText bool) *DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	rec.RecordInventory("t1", "s1", 1000, inv, withText)
+	rec.RecordInventory("t1", "s1", 1000, inv, withText, "")
 	db := rec.DB()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -266,11 +266,19 @@ func TestStoredPromptTextIsScrubbedAndCapped(t *testing.T) {
 		}
 	}
 
-	// The cap, on the one field a caller sizes. Only just over it: the scan BPE-tokenizes
-	// what it measures, so a 200 KB fixture costs two minutes of test time to prove the same
-	// thing an 80 KB one proves.
-	big := ScanInventory("anthropic", sysBody(t, strings.Repeat("x", 80<<10),
-		[]string{tool("Bash", strings.Repeat("y", 80<<10))}, skillsReminder))
+	// The cap, on the one field a caller sizes. The scan BPE-tokenizes what it measures, and
+	// a single repeated character is the tokenizer's worst case for merge cost: measured on
+	// this machine, 80 KB of "x" took 5.4s to tokenize against 23ms for 80 KB of repeated
+	// natural-ish text (github.com/rossoctl/context-guru#315) — same size, same "over the cap"
+	// fixture, 230x cheaper. Repeating a short phrase keeps the byte length (what the cap
+	// actually checks) identical while avoiding that degenerate merge pattern.
+	repeatToLen := func(phrase string, n int) string {
+		return strings.Repeat(phrase, n/len(phrase)+2)[:n]
+	}
+	bigText := repeatToLen("hello world foo bar baz qux ", 80<<10)
+	bigTool := repeatToLen("run it with these args and flags now ", 80<<10)
+	big := ScanInventory("anthropic", sysBody(t, bigText,
+		[]string{tool("Bash", bigTool)}, skillsReminder))
 	db2 := recWithInventory(t, big, true)
 	for _, got := range storedTexts(t, db2) {
 		// The cap plus RedactContent's own truncation marker, which it appends after
@@ -294,7 +302,7 @@ func TestSessionSystemPromptRowsAreBounded(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		inv := ScanInventory("anthropic", sysBody(t,
 			fmt.Sprintf("You are Claude Code. It is %d.", i), tools, skillsReminder))
-		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true)
+		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true, "")
 	}
 	db := rec.DB()
 	deadline := time.Now().Add(10 * time.Second)
@@ -358,7 +366,7 @@ func TestSystemPromptIsRecordedForEveryDeclarationSet(t *testing.T) {
 			t.Fatal("no inventory scanned")
 		}
 		digests = append(digests, inv.Digest)
-		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true)
+		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true, "")
 	}
 	if digests[0] == digests[1] {
 		t.Fatal("the two declaration sets hashed the same; the fixture proves nothing")

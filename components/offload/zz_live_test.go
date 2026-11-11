@@ -7,7 +7,8 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -17,10 +18,8 @@ func TestLiveSummarizeExample(t *testing.T) {
 	if os.Getenv("CG_LIVE") == "" {
 		t.Skip("set CG_LIVE=1 CG_BASE=... CG_TOKEN=... to run the live example")
 	}
-	model := cheapmodel.Anthropic{
-		BaseURL: os.Getenv("CG_BASE"), APIKey: os.Getenv("CG_TOKEN"),
-		Model: "claude-sonnet-4-6", MaxTokens: 2048,
-	}
+	d, ref := dispatchtest.HTTP(os.Getenv("CG_BASE"), dispatchtest.AnthropicAuth(os.Getenv("CG_TOKEN"), ""))
+	model := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-4-6", MaxTokens: 2048}
 	msg := func(role bschemas.ChatMessageRole, text string) bschemas.ChatMessage {
 		m := bschemas.ChatMessage{Role: role}
 		schema.SetMessageText(&m, text)

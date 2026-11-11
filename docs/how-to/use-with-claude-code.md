@@ -124,4 +124,5 @@ scripts/with-guru.sh codesmart -- claude
 </details>
 
 See also: [Quickstart: proxy](../get-started/quickstart-proxy.md) ·
-[Measure savings](measure-savings.md) · [Reversibility & recovery](recover-context.md)
+[Measure savings](measure-savings.md) · [Reversibility & recovery](recover-context.md) ·
+[Test against a subscription in an isolated sandbox](test-subscription-sandbox.md)

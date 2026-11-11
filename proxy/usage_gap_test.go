@@ -79,7 +79,7 @@ func TestEveryUsageOutcomeIsDistinguishable(t *testing.T) {
 				"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n", usageMissNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, why, ok := responseUsageWhy(tc.ct, []byte(tc.body))
+			_, why, ok := responseUsageWhy(tc.ct, []byte(tc.body), false)
 			if why != tc.want {
 				t.Fatalf("classified %v, want %v — %q", why, tc.want, tc.body)
 			}
@@ -135,7 +135,7 @@ func TestOnlyAnAccountingOutageMovesTheUsageCounters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			unpBefore, unrBefore := UsageGaps()
-			responseUsageWhy(tc.ct, []byte(tc.body))
+			responseUsageWhy(tc.ct, []byte(tc.body), false)
 			unp, unr := UsageGaps()
 			if got := unp - unpBefore; got != tc.wantUnp {
 				t.Errorf("usage_unparsed moved by %d, want %d: the counter whose whole meaning is "+
@@ -162,7 +162,7 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 	defer slog.SetDefault(prev)
 	ResetUsageShapeRecordForTest()
 
-	responseUsageWhy("application/json", []byte(body))
+	responseUsageWhy("application/json", []byte(body), false)
 	got := buf.String()
 
 	// It names WHERE the block is and WHAT the provider calls the fields — the answer the dialect
@@ -192,7 +192,7 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 	// One per process. A run with this gap has it on EVERY request — 4,015 of 4,015 in the
 	// iteration that motivated this — so a per-response record is a log line per request.
 	buf.Reset()
-	responseUsageWhy("application/json", []byte(body))
+	responseUsageWhy("application/json", []byte(body), false)
 	if strings.Contains(buf.String(), "cg.usage_unaccounted") {
 		t.Fatalf("a second unaccounted response logged a second shape record:\n%s", buf.String())
 	}
@@ -219,7 +219,7 @@ func TestTheShapeRecordDescribesTheUnreadableEventNotTheLastOne(t *testing.T) {
 	stream := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" +
 		"{\"inputTokens\":10,\"cacheReadInputTokens\":9}}}\n" +
 		"data: {\"type\":\"message_stop\"}\n"
-	_, why, _ := responseUsageWhy("text/event-stream", []byte(stream))
+	_, why, _ := responseUsageWhy("text/event-stream", []byte(stream), false)
 	if why != usageMissUnparsed {
 		t.Fatalf("classified %v, want unparsed_dialect — the fixture is not exercising the gap", why)
 	}
@@ -246,7 +246,7 @@ func TestTheShapeRecordSkipsANullBlockForTheOneThatHasTheAnswer(t *testing.T) {
 	ResetUsageShapeRecordForTest()
 
 	responseUsageWhy("application/json",
-		[]byte(`{"usage":null,"response":{"usage":{"inputTokens":10,"outputTokens":2}}}`))
+		[]byte(`{"usage":null,"response":{"usage":{"inputTokens":10,"outputTokens":2}}}`), false)
 	got := buf.String()
 	if !strings.Contains(got, "usage_at=response.usage") || !strings.Contains(got, "inputTokens") {
 		t.Fatalf("the record points at the null block instead of the one carrying the fields, so "+
@@ -267,11 +267,61 @@ func TestTheShapeRecordSaysWhenTheBytesWereNotAWholeDocument(t *testing.T) {
 	// The splice has to hide the block, or it is simply read correctly — see the note in
 	// TestOnlyAnAccountingOutageMovesTheUsageCounters.
 	responseUsageWhy("application/json",
-		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`))
+		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`), false)
 	got := buf.String()
 	if !strings.Contains(got, "valid_json=false") {
 		t.Fatalf("the record does not say the bytes would not parse, so it reads as a dialect "+
 			"problem when the fix is in the sniffer:\n%s", got)
+	}
+}
+
+// #207: a spliced window must not turn "no usage block in what we kept" into "the provider
+// streamed none". Those are different facts with different remedies — one is the sniffer's
+// window, the other is the provider — and only the first is an accounting outage. The sniffer
+// carries its own knowledge that it spliced (sn.spliced()), and responseUsageWhy upgrades an
+// `absent` verdict over a spliced window to unreadable. A block that WAS present but rejected
+// keeps its dialect verdict whatever the window did.
+func TestASplicedStreamReportsUnreadableNotAbsent(t *testing.T) {
+	// A stream whose visible window holds no usage block at all. Over the WHOLE stream this is
+	// `absent` (benign); over a spliced window it is unknowable, which is `unreadable`.
+	stream := "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"...\"}}\n"
+
+	_, unreadBefore := UsageGaps()
+	_, why, ok := responseUsageWhy("text/event-stream", []byte(stream), true)
+	if why != usageMissUnreadable || ok {
+		t.Fatalf("a spliced window with no visible usage block classified %v (ok=%v), want "+
+			"unreadable — \"none in what we kept\" is not \"the provider sent none\"", why, ok)
+	}
+	if _, unread := UsageGaps(); unread != unreadBefore+1 {
+		t.Errorf("the spliced-window miss did not move usage_unreadable (%d -> %d)", unreadBefore, unread)
+	}
+
+	// The same stream NOT spliced keeps the benign reading: a whole response that carried no
+	// usage block is the provider's own absence, not a window of ours.
+	if _, why, _ := responseUsageWhy("text/event-stream", []byte(stream), false); why != usageMissAbsent {
+		t.Fatalf("an unspliced stream with no usage block classified %v, want absent", why)
+	}
+
+	// And a present-but-rejected block keeps its dialect verdict over a spliced window: the
+	// finding is about the field names, and the window must not mask it.
+	dialect := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" +
+		"{\"inputTokens\":10,\"cacheReadInputTokens\":9}}}\n"
+	if _, why, _ := responseUsageWhy("text/event-stream", []byte(dialect), true); why != usageMissUnparsed {
+		t.Fatalf("a spliced window over a rejected block classified %v, want unparsed_dialect — "+
+			"the window must not mask a real dialect finding", why)
+	}
+
+	// The record says the bytes were a window, so the unreadable verdict cannot be misread as a
+	// dialect gap.
+	ResetUsageShapeRecordForTest()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	responseUsageWhy("text/event-stream", []byte(stream), true)
+	if got := buf.String(); !strings.Contains(got, "spliced=true") {
+		t.Errorf("the shape record does not say the bytes were a spliced window, so an unreadable "+
+			"verdict reads as a dialect problem:\n%s", got)
 	}
 }
 
@@ -294,10 +344,10 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 
 	// First: a spliced window, which is alertable but says nothing about any dialect.
 	responseUsageWhy("application/json",
-		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`))
+		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`), false)
 	// Then: the response whose shape somebody actually needs.
 	responseUsageWhy("application/json",
-		[]byte(`{"id":"msg_1","usage":{"inputTokens":10,"cacheReadInputTokens":9}}`))
+		[]byte(`{"id":"msg_1","usage":{"inputTokens":10,"cacheReadInputTokens":9}}`), false)
 
 	got := buf.String()
 	if !strings.Contains(got, "inputTokens") || !strings.Contains(got, "cacheReadInputTokens") {
@@ -309,7 +359,7 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 	// request produces one line, not one per request.
 	buf.Reset()
 	responseUsageWhy("application/json",
-		[]byte(`{"id":"msg_2","usage":{"inputTokens":11,"cacheReadInputTokens":8}}`))
+		[]byte(`{"id":"msg_2","usage":{"inputTokens":11,"cacheReadInputTokens":8}}`), false)
 	if strings.Contains(buf.String(), "cg.usage_unaccounted") {
 		t.Fatalf("a second response of an ALREADY RECORDED shape logged again; a run with this gap "+
 			"on 4,015 of 4,015 requests would write 4,015 lines:\n%s", buf.String())
@@ -319,7 +369,7 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 	buf.Reset()
 	for i := 0; i < usageShapeMax+4; i++ {
 		responseUsageWhy("application/json",
-			[]byte(`{"usage":{"tokensVariant`+strconv.Itoa(i)+`":1}}`))
+			[]byte(`{"usage":{"tokensVariant`+strconv.Itoa(i)+`":1}}`), false)
 	}
 	if n := strings.Count(buf.String(), "cg.usage_unaccounted"); n > usageShapeMax {
 		t.Fatalf("recorded %d shapes with a cap of %d: a provider varying its key names could "+

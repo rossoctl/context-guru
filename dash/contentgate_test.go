@@ -39,7 +39,7 @@ func newContentFixture(t *testing.T, principal func(*http.Request) (Principal, b
 	if inv == nil {
 		t.Fatal("no inventory scanned")
 	}
-	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true)
+	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true, "")
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		_, withText := textRows(t, f.rec.DB())
@@ -140,7 +140,7 @@ func TestPromptPartsAreStrippedForAnUntrustedCaller(t *testing.T) {
 	if inv == nil {
 		t.Fatal("no inventory scanned")
 	}
-	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true)
+	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true, "")
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, withText := textRows(t, f.rec.DB()); withText > 0 {

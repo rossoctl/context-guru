@@ -3,6 +3,7 @@ package offload
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,41 +60,67 @@ func newSummarizeKeepLast(t *testing.T, keepLast int) *Summarize {
 }
 
 func TestSummarizeEmitsAShapeValidTranscript(t *testing.T) {
-	fixtures := map[string][]bschemas.ChatMessage{
+	// wire is the fixture's WireGroup (#457): the ORIGINAL wire message each normalized
+	// message came from. The summarizeSpan boundary aligns to it, and the shape assertion
+	// below maps it onto the emitted indices. nil means every message is its own wire one.
+	type shapeFixture struct {
+		msgs []bschemas.ChatMessage
+		wire []int
+	}
+	fixtures := map[string]shapeFixture{
 		// The ordinary shape: a system prompt at index 0, a PARALLEL tool exchange in the
 		// middle, a user turn at the tail. The summary lands at index 1, in front of that
 		// tail — the position 2edb9d4's system-role summary was rejected at — and the span
 		// boundary can fall between the parallel call and its two results (fb5c460).
-		"system head, parallel exchange": {
+		"system head, parallel exchange": {msgs: []bschemas.ChatMessage{
 			sysMsg("you are a coding agent"),
 			userMsg("Fix the failing handler in src/mod/file.go and run the tests."),
 			callMsg("t_a", "t_b"),
 			bulkResult("t_a"), bulkResult("t_b"),
 			userMsg("keep going"),
-		},
+		}, wire: []int{0, 1, 2, 3, 4, 5}},
 		// The shape e7d1aa8 was about: msgs[0] is itself an assistant tool-call message, so
 		// preserving it as the head leaves its calls unanswered once their results are
 		// summarized away. dropOrphanedToolResults cannot repair this direction — there is
 		// nothing orphaned to drop, the CALL is the thing left dangling.
-		"assistant tool-call head": {
+		"assistant tool-call head": {msgs: []bschemas.ChatMessage{
 			callMsg("t_head"),
 			bulkResult("t_head"),
 			userMsg("Fix the failing handler and run the tests."),
 			userMsg("keep going"),
-		},
+		}, wire: []int{0, 1, 2, 3}},
 		// A serial exchange at the tail, so the boundary can land between a single call and
 		// its single result too.
-		"serial exchange at the tail": {
+		"serial exchange at the tail": {msgs: []bschemas.ChatMessage{
 			sysMsg("you are a coding agent"),
 			userMsg("Fix the failing handler and run the tests."),
 			bulkResult("t_old"), // an idless-history-shaped result, its call already summarized
 			callMsg("t_1"), bulkResult("t_1"),
 			userMsg("keep going"),
-		},
+		}, wire: []int{0, 1, 2, 3, 4, 5}},
+		// #461's shape: the tool_result answering t_s SHARES its wire message with a
+		// sibling text block, so in the normalized list a user message sits between the
+		// call and its answer. Judged without the grouping that is a false
+		// answered-tool-use violation — the exact false positive ValidateShapeGrouped
+		// exists to read correctly, so this fixture keeps the oracle on the grouped path
+		// wherever the splice leaves the group standing. The TWO big early messages are
+		// what make the group stand: the tail can only start at the call while the span
+		// still holds ≥2 messages to trade for one summary (a 1-message span replaces
+		// nothing and the splice is declined), so the exchange needs two summarizable
+		// messages in front of it.
+		"sibling-first split group": {msgs: []bschemas.ChatMessage{
+			sysMsg("you are a coding agent"),
+			userMsg(strings.Repeat("early trajectory the summary should cover, with real bulk. ", 40)),
+			userMsg(strings.Repeat("more early context for the same summary, also with bulk. ", 40)),
+			callMsg("t_s"),
+			userMsg("the user said this while the tool ran"),
+			bulkResult("t_s"),
+			userMsg("keep going"),
+		}, wire: []int{0, 1, 2, 3, 4, 4, 5}},
 	}
 
 	acted := 0
-	for name, base := range fixtures {
+	for name, fx := range fixtures {
 		for keepLast := 1; keepLast <= 4; keepLast++ {
 			// The fixture is deliberately re-cloned: Offload reassigns req.Input but the
 			// messages themselves are shared, and a leaked mutation would make the next
@@ -109,15 +136,16 @@ func TestSummarizeEmitsAShapeValidTranscript(t *testing.T) {
 			// the wrong span.
 			c := &components.Ctx{Ctx: context.Background(),
 				Session: fmt.Sprintf("shape-%s-%d", name, keepLast),
-				Store:   store.NewMemory(store.Options{}), CtxWindow: 1_000_000}
+				Store:   store.NewMemory(store.Options{}), CtxWindow: 1_000_000,
+				WireGroup: fx.wire}
 			sc := newSummarizeKeepLast(t, keepLast)
-			first := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(base)}
+			first := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(fx.msgs)}
 			var rep1 components.Report
 			if _, err := sc.Offload(first, &rep1, c); err != nil {
 				t.Fatalf("%s keep_last=%d: commissioning turn: %v", name, keepLast, err)
 			}
 			WaitForSummaryForTest(c.Session, 5*time.Second)
-			req := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(base)}
+			req := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(fx.msgs)}
 			var rep components.Report
 			if _, err := sc.Offload(req, &rep, c); err != nil {
 				t.Fatalf("%s keep_last=%d: splicing turn: %v", name, keepLast, err)
@@ -126,7 +154,13 @@ func TestSummarizeEmitsAShapeValidTranscript(t *testing.T) {
 				continue
 			}
 			acted++
-			if vs := schema.ValidateShape(req.Input); len(vs) != 0 {
+			// The fixture's WireGroup names the INPUT's indices; the splice deleted messages
+			// and inserted the summary, so it no longer lines up with req.Input (and a length
+			// mismatch collapses to nil inside the validator). outWireGroups rebuilds the
+			// grouping in the EMITTED coordinates, so the spliced list is judged with the
+			// grouping it actually has.
+			if vs := schema.ValidateShapeGrouped(bschemas.Anthropic, req.Input,
+				outWireGroups(t, req.Input, fx.msgs, fx.wire)); len(vs) != 0 {
 				t.Errorf("%s keep_last=%d: summarize emitted %d shape violation(s) — a "+
 					"provider rejects the whole request:\n%s", name, keepLast, len(vs),
 					schema.FormatShapeViolations(vs, req.Input))
@@ -139,6 +173,49 @@ func TestSummarizeEmitsAShapeValidTranscript(t *testing.T) {
 		t.Fatalf("summarize acted on only %d of %d fixture/keep_last combinations; the shape "+
 			"assertions never ran on at least one fixture", acted, len(fixtures))
 	}
+}
+
+// outWireGroups maps the fixture's wire grouping onto the SPLICED output's indices (#461).
+// The splice keeps [head, tail] in order but DELETES the covered messages and INSERTS the
+// summary, so the request's own WireGroup — input coordinates — no longer lines up with
+// req.Input, and ValidateShapeGrouped would collapse it to nil. Rematching each emitted
+// message against the fixture recovers the grouping in the emitted coordinates: the
+// summary matches nothing and gets a wire group of its own. Every fixture message is
+// unique, so an ambiguous match fails HERE rather than silently validating a wrong
+// grouping; and more than one unmatched message fails too — only the summary may be new.
+func outWireGroups(t *testing.T, out, base []bschemas.ChatMessage, baseWire []int) []int {
+	t.Helper()
+	if baseWire == nil {
+		return nil
+	}
+	groups := make([]int, len(out))
+	fresh := len(baseWire) // group ids the inserted summary can take
+	used := make([]bool, len(base))
+	for i, m := range out {
+		match := -1
+		for j, b := range base {
+			if used[j] || !reflect.DeepEqual(m, b) {
+				continue
+			}
+			if match >= 0 {
+				t.Fatalf("emitted message %d matches fixture messages %d and %d — the "+
+					"wire-group rematch is ambiguous", i, match, j)
+			}
+			match = j
+		}
+		if match < 0 {
+			groups[i] = fresh
+			fresh++
+			continue
+		}
+		used[match] = true
+		groups[i] = baseWire[match]
+	}
+	if fresh > len(baseWire)+1 {
+		t.Fatalf("%d emitted messages matched no fixture message — only the inserted "+
+			"summary may be new", fresh-len(baseWire))
+	}
+	return groups
 }
 
 // The paired proof that the assertion above has teeth: the transcripts the PRE-FIX code

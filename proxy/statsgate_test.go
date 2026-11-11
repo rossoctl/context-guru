@@ -36,19 +36,19 @@ func TestStatsGateRejectsRelayedLoopbackRequests(t *testing.T) {
 
 		// Relayed through a same-host front end. Before the fix every one of these
 		// returned true and served the aggregate to the network.
-		{"relayed by nginx", "127.0.0.1:5555", map[string]string{"X-Forwarded-For": "9.1.2.3"}, false},
-		{"relayed, X-Real-IP only", "127.0.0.1:5555", map[string]string{"X-Real-IP": "9.1.2.3"}, false},
+		{"relayed by nginx", "127.0.0.1:5555", map[string]string{"X-Forwarded-For": "203.0.113.9"}, false},
+		{"relayed, X-Real-IP only", "127.0.0.1:5555", map[string]string{"X-Real-IP": "203.0.113.9"}, false},
 		{"relayed, proto only", "127.0.0.1:5555", map[string]string{"X-Forwarded-Proto": "https"}, false},
 		{"relayed, host only", "127.0.0.1:5555", map[string]string{"X-Forwarded-Host": "cg.ibm.com"}, false},
 
 		// A remote peer was never trusted and still is not, headers or no headers.
 		// The second case is the important one: a caller that strips its own
 		// forwarded headers must not thereby look local.
-		{"remote peer", "9.1.2.3:5555", nil, false},
-		{"remote peer with no headers", "9.1.2.3:5555", map[string]string{}, false},
+		{"remote peer", "203.0.113.9:5555", nil, false},
+		{"remote peer with no headers", "203.0.113.9:5555", map[string]string{}, false},
 
 		// A forged XFF from a remote peer is irrelevant — the branch is unreachable.
-		{"remote peer forging loopback XFF", "9.1.2.3:5555", map[string]string{"X-Forwarded-For": "127.0.0.1"}, false},
+		{"remote peer forging loopback XFF", "203.0.113.9:5555", map[string]string{"X-Forwarded-For": "127.0.0.1"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/stats", nil)
@@ -74,7 +74,7 @@ func TestStatsGateHonoursExplicitPredicate(t *testing.T) {
 		// Deliberately the shape the default predicate would REJECT, so a true
 		// result can only have come from the override.
 		r.RemoteAddr = "127.0.0.1:5555"
-		r.Header.Set("X-Forwarded-For", "9.1.2.3")
+		r.Header.Set("X-Forwarded-For", "203.0.113.9")
 		if got := h.statsTrusted(r); got != want {
 			t.Errorf("explicit predicate returning %v was overridden, got %v", want, got)
 		}

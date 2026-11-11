@@ -104,6 +104,13 @@ Environment=DASHBOARD_DISK_LOW=0.85
 # a manager can override it per tenant in the control plane.
 Environment=DASHBOARD_MAX_ROWS_PER_TENANT=100000
 
+# Client lifecycle signals (POST /signal): a tenant's Claude Code hooks report that a session ended
+# (exit, Ctrl-C, closing the terminal, /clear, logout) or was compacted, and the keep-alive stops
+# pinging that session's cache. On by default whenever the keep-alive runs; stated here because this
+# file is what an operator reads. Every effect only removes spend, and a missing event is the
+# no-signal policy. `off` removes the route (404) and ignores any end mark already recorded.
+Environment=CONTEXT_GURU_CLIENT_SIGNALS=on
+
 Restart=always
 RestartSec=2
 # The whole point of Restart=always here: if this process is down, every user's

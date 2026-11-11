@@ -1,6 +1,7 @@
 ---
 name: update
-description: Check whether a newer context-guru-proxy BINARY has been released and, if the user wants it, install it. Use when the user asks to update, upgrade, or check the version of context-guru or its proxy, or after a session-start note said a newer proxy is available. The plugin itself updates through the marketplace; this updates the proxy binary, which is released separately and does not move when the plugin does.
+description: Check for a newer context-guru-proxy binary and install it if you want. The plugin itself updates through the marketplace.
+disable-model-invocation: true
 ---
 
 # Update the context-guru proxy binary
@@ -56,33 +57,7 @@ misleading thing this skill can do.
   automatically in the background and take effect at the proxy's next start — this skill can still
   run it now on request.
 
-## 3. Only install on an explicit "yes"
-
-If — and only if — the user says to update now, run, verbatim:
-
-```
-CONTEXT_GURU_UPGRADE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
-```
-
-This is the same checksum-verified download path `/context-guru:install` uses for a first install —
-nothing here reimplements it. Report `result=installed`/`checksum=`/any `reason=` exactly as that
-skill does; a failure there is a hard stop, not something to retry silently.
-
-On success, restart the proxy so the new binary is live now rather than at the next session:
-
-```
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
-```
-
-`start-proxy.sh` already compares the running proxy's fingerprint (which now includes the binary
-version) against what should be running, and restarts it itself when they differ — you do not need
-to stop anything by hand.
-
-**If the user asked you to check but explicitly said not to install, stop after step 2.** Checking
-is not a decision, and running this step without one turns "tell me what's out there" into an
-upgrade the user did not ask for.
-
-## 4. Record the answer — only when the user actually gave one
+## 3. Record the answer first — only when the user actually gave one
 
 Never run any of these unless the user said one of these three things out loud, in this
 conversation. Merely running step 1, or the user asking "did you check for updates," is **not** an
@@ -99,3 +74,40 @@ the confusion this rule exists to prevent.
 
 A silent or absent answer to a question you actually asked is a **no** — record it as `skip`. A
 question you never asked has no answer to record at all.
+
+Do this **before** step 4, and regardless of what step 4 does next. "Install this release" and
+"remember what to do about future releases" are two different things the user can answer
+independently — a failed download in step 4 is not a reason to have skipped this one.
+
+**Report the answer from the store, not from what you intended to write.** Each of the three
+commands above prints `result=recorded answer=…`; read that line back (or re-run
+`update-check show`) and tell the user what is actually recorded. Never assert that a preference
+was saved without having seen the store confirm it — that gap is exactly how a broken write ends
+up reported as a success.
+
+## 4. Only install on an explicit "yes"
+
+If — and only if — the user says to update now, run, verbatim:
+
+```
+CONTEXT_GURU_UPGRADE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
+```
+
+This is the same checksum-verified download path `/context-guru:install` uses for a first install —
+nothing here reimplements it. Report `result=installed`/`checksum=`/any `reason=` exactly as that
+skill does; a failure there is a hard stop on the install — not on step 3, which has already run and
+whose recorded answer stands regardless.
+
+On success, restart the proxy so the new binary is live now rather than at the next session:
+
+```
+"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
+```
+
+`start-proxy.sh` already compares the running proxy's fingerprint (which now includes the binary
+version) against what should be running, and restarts it itself when they differ — you do not need
+to stop anything by hand.
+
+**If the user asked you to check but explicitly said not to install, stop after step 2.** Checking
+is not a decision, and running this step without one turns "tell me what's out there" into an
+upgrade the user did not ask for.

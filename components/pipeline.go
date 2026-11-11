@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"regexp"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/schema"
@@ -18,6 +19,14 @@ import (
 type Pipeline struct {
 	comps   []Component
 	emitter Emitter
+	// fixedRestore is the config's `expand.fixed_restore` (#407). It lives on the pipeline
+	// because the pipeline is the per-config-document value every host already holds per
+	// tenant, and the decision spans all of its offloaders at once rather than any one of them.
+	fixedRestore bool
+	// inBandBreakpoint is the config's `expand.inband_breakpoint` (#784).
+	inBandBreakpoint bool
+	// tailBreakpoint is the config's `cache.tail_breakpoint` (#795), resolved by the builder.
+	tailBreakpoint bool
 }
 
 // NewPipeline builds a pipeline from already-constructed components in order.
@@ -26,6 +35,18 @@ func NewPipeline(comps []Component, e Emitter) *Pipeline {
 		e = NopEmitter{}
 	}
 	return &Pipeline{comps: comps, emitter: e}
+}
+
+// Emitter returns the pipeline's configured Emitter, so a caller that needs an optional
+// capability on it (e.g. KeepAliveEmitter) has one path to reach it instead of threading a
+// second field through every place a Pipeline is built. Nil-safe: a nil *Pipeline (a
+// Tenancy built with none, or one from before a pipeline exists) reports NopEmitter, so a
+// caller's type assertion simply finds nothing rather than panicking.
+func (p *Pipeline) Emitter() Emitter {
+	if p == nil {
+		return NopEmitter{}
+	}
+	return p.emitter
 }
 
 // Names returns the component names in pipeline order, which is what makes an EMPTY pipeline
@@ -50,7 +71,7 @@ func (p *Pipeline) Names() []string {
 // report. req is mutated; on any per-component failure that component's changes
 // are rolled back, so the returned request is never worse than the input.
 func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
-	rr := &RunReport{Session: c.Session, TokensBefore: schema.MessagesTokens(req), Mode: c.effMode()}
+	rr := &RunReport{Session: c.Session, Mode: c.effMode()}
 	// Hand cmdfilter its per-family ledger sink when the emitter implements one, so no
 	// host has to thread a second field through every Ctx construction site.
 	if c.FilterStats == nil {
@@ -59,19 +80,40 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 		}
 	}
 	if c.Bypass {
-		rr.TokensAfter = rr.TokensBefore
+		// A bypassed request is forwarded untouched, so there is nothing to compare and the token
+		// count is left at zero: counting the whole transcript here cost ~0.35 s per MiB on the
+		// request path (a 33 MiB compaction request took ~12 s before it was forwarded). The
+		// dashboard writer counts it off the request path (Event.BypassTokens).
 		return rr
+	}
+	rr.TokensBefore = schema.MessagesTokens(req)
+	// The cut fraction of this pipeline, for a component that estimates the turns left before a cut. Only
+	// ENABLED components count: a summarizer that is configured but off for this request cuts nothing.
+	// An enabled summarizer that will not cut (no model resolved, its cache_state declines) still counts.
+	// The horizon is shorter then, which is the safe direction.
+	if c.CutFrac <= 0 {
+		for _, comp := range p.comps {
+			if cf, ok := comp.(CutFracProvider); ok && comp.Enabled(c) {
+				if f := cf.CutFrac(); f > 0 && (c.CutFrac <= 0 || f < c.CutFrac) {
+					c.CutFrac = f
+				}
+			}
+		}
 	}
 	// ONE snapshot for the whole run, kept in step with req.Input as components land
 	// (see runOne). Cloning the entire transcript per component was ~20% of the rewrite
 	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its
 	// messages were re-cloned unchanged six times over.
 	snap := schema.CloneMessages(req.Input)
+	own := ownOutputs(req)
+	// clientHash is the hash of each changed message's text as the client sent it, filled by the
+	// first component that changes the message (see changesOf).
+	clientHash := map[int]string{}
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c, &snap)
+		rep := p.runOne(comp, req, c, &snap, own, clientHash)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -95,7 +137,7 @@ func safeEmit(fn func()) {
 // snap is the run's live snapshot: on entry it holds an independent deep copy of
 // req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
 // what changed, or the lot after a revert or a count change).
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage) (rep Report) {
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage, own map[int]bool, clientHash map[int]string) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := *snap
 	// revert installs the snapshot and re-establishes an independent one, because
@@ -171,17 +213,109 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 	default:
-		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// Only a change that SURVIVED can be discarded by the writeback layer. Recording
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
-		if rep.Kind == "reformat" {
+		if restoreOwn(&rep, before, req.Input, own) {
+			after = tokensOf(req.Input)
+		}
+		// After restoreOwn: it can rewrite req.Input once changedIdx has run.
+		rep.CountChanged = len(before) != len(req.Input)
+		rep.Changes = changesOf(before, req.Input, rep.ChangedIdx, clientHash)
+		if rep.CountChanged {
+			if c, ok := spliceOf(before, req.Input); ok {
+				rep.Changes = []Change{c}
+			}
+			// Indices before and after a count change do not line up, so the client hashes no
+			// longer name the right messages. Every later change is dropped by the savings code
+			// anyway (apply.OpsFromRun); clearing keeps a stale hash from being reused.
+			clear(clientHash)
+		}
+		rep.TokensBefore, rep.TokensAfter = baseline, after
+		// A Reformat stashes nothing, and neither does an Offload that dropped content on purpose
+		// (rep.Irreversible: marker_mode summary/off). Without a key, every consumer of CacheKeys
+		// counts the run's saving as new content on every turn it is re-applied, so derive the
+		// keys from the content instead. An Offload that stashed keeps its own: they are store keys.
+		if rep.Kind == "reformat" || (rep.Irreversible && len(rep.CacheKeys) == 0) {
 			rep.CacheKeys = reformatKeys(before, rep.ChangedIdx)
 		}
 		resync(snap, req.Input, rep.ChangedIdx)
 	}
 	return rep
+}
+
+// changesOf sizes each changed message and hashes its text AS THE CLIENT SENT IT. clientHash
+// holds that hash for every message an earlier component of the run already changed; the first
+// component to change a message sees the client's own text in before, so it records the hash. The
+// hash therefore does not depend on what earlier components did: if one of them starts or stops
+// acting between turns, a later component keeps the same ChangeID (accountant replay).
+func changesOf(before, after []schemas.ChatMessage, idx []int, clientHash map[int]string) []Change {
+	if len(idx) == 0 {
+		return nil
+	}
+	out := make([]Change, 0, len(idx))
+	for _, i := range idx {
+		if i < 0 || i >= len(before) || i >= len(after) {
+			continue
+		}
+		bt, at := schema.MessageText(before[i]), schema.MessageText(after[i])
+		h, ok := clientHash[i]
+		if !ok {
+			sum := sha256.Sum256([]byte(bt))
+			h = hex.EncodeToString(sum[:6])
+			if clientHash != nil {
+				clientHash[i] = h
+			}
+		}
+		out = append(out, Change{Idx: i, BytesBefore: len(bt), BytesAfter: len(at), Hash: h})
+	}
+	return out
+}
+
+// spliceOf finds the one contiguous range that differs between before and after, by a common
+// prefix and suffix scan with the same equality changedIdx uses (reflect.DeepEqual). The scan
+// always yields a single range; if the true change was several, the range is wider than needed,
+// which only makes the operation coarser, never wrong. The hash covers the removed messages' text
+// before the run (the inserted text when nothing was removed, so the ChangeID is not constant).
+func spliceOf(before, after []schemas.ChatMessage) (Change, bool) {
+	p := 0
+	for p < len(before) && p < len(after) && reflect.DeepEqual(before[p], after[p]) {
+		p++
+	}
+	s := 0
+	for s < len(before)-p && s < len(after)-p &&
+		reflect.DeepEqual(before[len(before)-1-s], after[len(after)-1-s]) {
+		s++
+	}
+	removed, inserted := before[p:len(before)-s], after[p:len(after)-s]
+	if len(removed) == 0 && len(inserted) == 0 {
+		return Change{}, false
+	}
+	var bb, ba int
+	h := sha256.New()
+	// A 0x00 byte separates the messages, so ["ab","c"] and ["a","bc"] hash apart.
+	for k, m := range removed {
+		t := schema.MessageText(m)
+		bb += len(t)
+		if k > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(t))
+	}
+	for k, m := range inserted {
+		t := schema.MessageText(m)
+		ba += len(t)
+		if len(removed) == 0 {
+			if k > 0 {
+				h.Write([]byte{0})
+			}
+			h.Write([]byte(t))
+		}
+	}
+	return Change{Idx: p, BytesBefore: bb, BytesAfter: ba,
+		Hash:   hex.EncodeToString(h.Sum(nil)[:6]),
+		Splice: &Splice{At: p, Removed: len(removed), Inserted: len(inserted)}}, true
 }
 
 // reformatKeys gives a Reformat the content-derived dedup keys an Offload gets for free
@@ -231,6 +365,65 @@ func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []i
 	for _, i := range changed {
 		(*snap)[i] = schema.CloneMessages(live[i : i+1])[0]
 	}
+}
+
+// ownOutput matches a tool call that runs one of context-guru's own READ commands: the plugin's
+// `scripts/cg.py <read subcommand>` or `scripts/tv.py`, matched by the script and the
+// subcommand rather than the directory, because the directory is not ours to name (an installed
+// Claude Code plugin lives under …/<version>/, a --plugin-dir one under any name, and the Codex
+// skills run `python3 ../../scripts/cg.py …` relative to the skill). Nothing else is exempt: not
+// another plugin's script, not a path that happens to contain "context-guru", and not cg.py's
+// apply/revert, which change a setting rather than report one. Matched against the call's JSON
+// arguments, so a quote may arrive escaped.
+var ownOutput = regexp.MustCompile(`(^|[\s"'/])scripts/(cg\.py(\\?["'])?\s+(adapt|home|savings|cache|waste|session|doctor)(\s|\\?["']|$)|tv\.py\b)`)
+
+// toolCallsOf is schema.ToolCalls, a variable so a test can make it panic.
+var toolCallsOf = schema.ToolCalls
+
+// ownOutputs are the tool results our own plugin commands produced. They are the product's
+// answer to the user — a report, a cost table, the question it is about to ask — and the agent
+// is told to print them verbatim, so no component may change a byte of one: a compacted
+// report is a wrong report.
+func ownOutputs(req *schemas.BifrostChatRequest) (out map[int]bool) {
+	// Runs before any component, outside runOne's recover: a panic here exempts nothing rather
+	// than failing the request.
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	for i, tc := range toolCallsOf(req) {
+		if ownOutput.MatchString(tc.Args) {
+			if out == nil {
+				out = map[int]bool{}
+			}
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// restoreOwn puts back any of our own outputs a component changed, so the rest of its work
+// stands. It reports whether it restored anything. A count change (a summarizer) has no
+// per-message diff to restore and is left alone.
+func restoreOwn(rep *Report, before, live []schemas.ChatMessage, own map[int]bool) bool {
+	if len(own) == 0 || len(before) != len(live) {
+		return false
+	}
+	kept, restored := rep.ChangedIdx[:0], false
+	for _, i := range rep.ChangedIdx {
+		if own[i] {
+			live[i] = schema.CloneMessages(before[i : i+1])[0]
+			restored = true
+			continue
+		}
+		kept = append(kept, i)
+	}
+	if restored {
+		rep.ChangedIdx = kept
+		rep.Gate("own_output")
+	}
+	return restored
 }
 
 func tokensOf(msgs []schemas.ChatMessage) int {
@@ -333,6 +526,31 @@ func (p *Pipeline) HasOffload() bool {
 	}
 	return false
 }
+
+// SetFixedRestore records the config's `expand.fixed_restore` switch. Set once by the
+// builder, before the pipeline serves a request.
+func (p *Pipeline) SetFixedRestore(on bool) { p.fixedRestore = on }
+
+// FixedRestore reports whether expanded content is restored as a separate message at a fixed
+// anchor rather than by un-compacting the original in place (#407). Nil-safe: false.
+func (p *Pipeline) FixedRestore() bool { return p != nil && p.fixedRestore }
+
+// SetInBandBreakpoint records the config's `expand.inband_breakpoint` switch. Set once by the
+// builder, before the pipeline serves a request.
+func (p *Pipeline) SetInBandBreakpoint(on bool) { p.inBandBreakpoint = on }
+
+// InBandBreakpoint reports whether the host moves the last cache_control in messages to the end
+// of an in-band follow-up request (#784). Nil-safe: false, the default.
+func (p *Pipeline) InBandBreakpoint() bool { return p != nil && p.inBandBreakpoint }
+
+// SetTailBreakpoint records the config's `cache.tail_breakpoint` switch, as resolved by the
+// builder. Set once, before the pipeline serves a request.
+func (p *Pipeline) SetTailBreakpoint(on bool) { p.tailBreakpoint = on }
+
+// TailBreakpoint reports whether apply adds a breakpoint at the end of a request whose client put
+// its last one far from the end (#795). Nil-safe: false, which is also what a pipeline built
+// without the config's builder reads.
+func (p *Pipeline) TailBreakpoint() bool { return p != nil && p.tailBreakpoint }
 
 // Has reports whether a component with this name is configured in the pipeline.
 // Hosts use it to gate body-level work that belongs to a component's concern but

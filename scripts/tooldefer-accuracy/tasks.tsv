@@ -1,0 +1,40 @@
+cron-d1	cron	direct	CronCreate	Schedule a cron job in this session that runs the prompt "check the build status" every weekday at 09:00.
+cron-v1	cron	vague	CronCreate	Remind me every morning at nine to check the build status.
+cron-d2	cron	direct	CronCreate	Create a recurring cron schedule, every 15 minutes, that runs the prompt "run the unit tests".
+cron-v2	cron	vague	CronCreate	Every quarter of an hour from now on, kick off the unit tests for me automatically.
+wake-d1	wakeup	direct	ScheduleWakeup	Schedule a wakeup so that you resume this task in 20 minutes, with the prompt "continue the migration".
+wake-v1	wakeup	vague	ScheduleWakeup	I have to step away. Pick the migration back up by yourself in about twenty minutes.
+wake-d2	wakeup	direct	ScheduleWakeup	Use a scheduled wakeup to come back to this session in 30 minutes and re-check the deploy.
+wake-v2	wakeup	vague	ScheduleWakeup	The deploy is still rolling out. Look at it again on your own in half an hour, I will not be here to ask.
+mon-d1	monitor	direct	Monitor	Start a background monitor on the command "tail -f server.log" that notifies you when a line with ERROR appears.
+mon-v1	monitor	vague	Monitor	Keep watching server.log while it grows and tell me as soon as an error shows up in it.
+fetch-d1	webfetch	direct	WebFetch	Fetch the page https://example.com and tell me its title.
+fetch-v1	webfetch	vague	WebFetch	What does example.com show right now? I want the main heading.
+fetch-d2	webfetch	direct	WebFetch	Use web fetch to read https://www.iana.org/help/example-domains and summarize it in one line.
+fetch-v2	webfetch	vague	WebFetch	Go to the IANA page about example domains (https://www.iana.org/help/example-domains) and tell me what it says, briefly.
+wt-d1	worktree	direct	EnterWorktree	Create a new git worktree for a branch named feature-x and switch this session into it.
+wt-v1	worktree	vague	EnterWorktree	I want to try an experimental change without touching my current checkout. Set me up in an isolated copy of the repo to work in.
+nb-d1	notebook	direct	NotebookEdit	In analysis.ipynb, replace the source of the first code cell with print('hello').
+nb-v1	notebook	vague	NotebookEdit	My analysis notebook prints the wrong greeting in its first cell. Make it say hello instead of hi.
+la-d1	agents	direct	ListAgents	List the other agents and sessions that are running right now.
+la-v1	agents	vague	ListAgents	Is anyone else working alongside you at the moment? Check who is out there.
+sm-d1	agents	direct	SendMessage	Send a message to the agent named builder that says "tests are green".
+sm-v1	agents	vague	SendMessage	Let the builder agent know that the tests passed.
+wf-d1	workflow	direct	Workflow	Use the Workflow tool to run a minimal workflow script that only returns the string hello.
+wf-v1	workflow	vague	Workflow	Orchestrate this as a scripted multi-step workflow: fan out three parallel steps that each return a number, then join them. Keep the script minimal.
+wx-d1	mcp-probe	direct	mcp__probe__get_weather	Use the weather tool to get the forecast for Lisbon.
+wx-v1	mcp-probe	vague	mcp__probe__get_weather	Should I take an umbrella when I go out in Oslo today?
+fx-d1	mcp-probe	direct	mcp__probe__convert_currency	Use the currency conversion tool to convert 250 USD to EUR.
+fx-v1	mcp-probe	vague	mcp__probe__convert_currency	A hotel costs 99 pounds a night. How much is that in yen today?
+zip-d1	mcp-probe	direct	mcp__probe__lookup_zip	Use the ZIP lookup tool to find the city for ZIP code 62704.
+zip-v1	mcp-probe	vague	mcp__probe__lookup_zip	Which town is the postcode 62704 in? It is a US one.
+tk-d1	mcp-ops	direct	mcp__ops__create_ticket	Create a ticket in the issue tracker titled "Login page times out", priority high.
+tk-v1	mcp-ops	vague	mcp__ops__create_ticket	The login page keeps timing out. Get this filed with the team so it does not get lost; it is fairly urgent.
+pg-d1	mcp-ops	direct	mcp__ops__page_oncall	Page the on-call engineer for the payments service: the checkout API returns 500 for every request.
+pg-v1	mcp-ops	vague	mcp__ops__page_oncall	Payments is completely down, every checkout fails. Get a human on it right now.
+rb-d1	mcp-ops	direct	mcp__ops__search_runbooks	Search the runbooks for how to rotate TLS certificates.
+rb-v1	mcp-ops	vague	mcp__ops__search_runbooks	Our TLS certificate expires tomorrow. What is our documented procedure for renewing it?
+mon-d2	monitor	direct	Monitor	Use the Monitor tool to watch the output of "python3 -u worker.py" and notify you on each line that contains DONE.
+mon-v2	monitor	vague	Monitor	worker.py runs for a long while. Keep an eye on what it prints and let me know when it reports DONE, without blocking on it.
+wt-d2	worktree	direct	EnterWorktree	Use EnterWorktree to start an isolated worktree named spike and continue the session inside it.
+wt-v2	worktree	vague	EnterWorktree	I need a sandboxed copy of this repository on its own branch, so my main working tree stays clean while you work. Move this session there.

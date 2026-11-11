@@ -1,22 +1,33 @@
 ---
 name: status
-description: Report whether the local context-guru proxy is running, whether this project is routed through it, and what it has actually saved — reading /stats and explaining the numbers honestly. Use when the user asks about context-guru status, savings, cache hit rate, cost, tokens saved, or whether the proxy is working. Accepts --stats to print the raw /stats JSON verbatim instead of the interpreted report.
+description: Home screen. Is the proxy running and this project routed, dollars saved, and the top three things to do next. --stats writes the raw /stats JSON to a file.
+disable-model-invocation: true
 
 ---
 
 # context-guru status
 
 **If invoked with `--stats`**, skip everything below: resolve the port the same way step 1 does
-(`settings.py port show`, then `settings.py config`, then the `plugin.json` default), run
+(`settings.py port show`, then `settings.py config`, then the `plugin.json` default), write the JSON
+to a snapshot file, and reply with the path only:
 
 ```bash
-curl -fsS "http://127.0.0.1:${PORT}/stats" | jq .
+set -o pipefail  # a failed curl must fail the pipeline, not write an empty snapshot through jq
+OUT="$(mktemp "${TMPDIR:-/tmp}/context-guru-stats-${PORT}.XXXXXX")"
+if command -v jq >/dev/null 2>&1; then
+  curl -fsS "http://127.0.0.1:${PORT}/stats" | jq . >"$OUT"
+else
+  curl -fsS "http://127.0.0.1:${PORT}/stats" >"$OUT"
+fi
 ```
 
-and print its output verbatim — no narration, no interpretation, not even the liveness check. This
-is for someone who wants the JSON itself, not a reading of it; a failed curl (proxy not up) should
-still be shown as-is rather than translated into prose. If `jq` is not installed, fall back to the
-bare `curl` and print the unformatted body rather than failing.
+Reply with `$OUT` and its size, and nothing else — no narration, no interpretation, not even the
+liveness check. This is for someone who wants the JSON itself, not a reading of it; the file holds
+the exact bytes `jq` (or `curl`) wrote, which a printed copy cannot promise. Do not print the JSON:
+Claude Code already shows the tool output to the user, so printing it again shows the same document
+twice and costs roughly 3,000-4,000 output tokens for nothing. A failed curl (proxy not up) is still
+shown as-is rather than translated into prose. Old snapshots are `$TMPDIR`'s to clean up; do not
+delete them yourself.
 
 **Otherwise**, answer two questions in order, because the second is meaningless if the first is "no":
 
@@ -79,35 +90,23 @@ Report the combinations plainly, because they mean different things:
 - **Set, proxy answering** — working. Go to step 2.
 - **Set, nothing answering** — this session's API requests are failing right now. Start it:
   `"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"`, and if that does not work, read
-  `${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log`. If they want out immediately, that is
+  `${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/proxy-${PORT}.log`
+  — the same expression the starter itself uses, because `CONTEXT_GURU_STATE` is a hook variable
+  and is usually unset in a Bash call. If they want out immediately, that is
   `/context-guru:uninstall`.
 - **Set to a base URL that is not ours** — say so and stop. Something else owns their routing.
 
-## 2. What it saved
+## 2. How it is doing
 
 ```bash
-curl -fsS "http://127.0.0.1:${PORT}/stats"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" home
 ```
 
-Lead with the **billed token tiers** (`cache_read`, `cache_creation`, input, output). Those come
-from the provider's own usage block, so they are the numbers the user can check against their own
-bill or usage page. Under the default preset (`off`), the whole story is the keep-alive block: a
-ping moves tokens from the premium cache-creation tier to the discounted cache-read tier by
-refreshing the cache before it expires, and that shift *is* the saving.
-
-Then, if they are non-zero: `requests`, `saved_tokens`, `savings_pct`, and the keep-alive block
-(`pings`, `spend_usd`, `wrote_instead_of_read`) — that block is the in-memory ping ledger, always
-present, cheap, and reset on restart.
-
-If `--dashboard` is enabled, `/stats` also carries a `savings` object with up to three scopes —
-`current` (the session that most recently sent a real request), `live` (every session the keeper
-still considers active, summed), and `all` (process lifetime). Each scope reports the SAME
-reconciled figure the dashboard does — `keepalive_net_usd` (did the pings pay for themselves) and
-`total_saved_usd` (every mechanism combined) — computed once in `dash` and shared, so `/stats` and
-the dashboard can never disagree. A scope is *absent*, not zeroed, when there is nothing to report
-yet (fresh proxy: no `current`; no `--dashboard`: no `savings` at all).
-
-The dashboard shows the same numbers over time, plus a UI: `http://127.0.0.1:<port>/dashboard/`.
+Print its output exactly as it is, in one code block. It opens with the dollars saved, then today
+against yesterday, then the top three things to do. Saved dollars (`✓ Saved`) and spend you could
+still avoid (`≈ Estimated`) are different things: never add them or call an estimate a saving.
+The other questions have their own commands: `/context-guru:insights` (`savings`, `cache`, `tools`),
+`/context-guru:session`, `/context-guru:doctor`.
 
 ## Be honest about the numbers
 
@@ -120,6 +119,10 @@ These caveats are not hedging; each one is a way a confident reading would be wr
   the *second and later* turns of a session; the first request of a session is nearly always
   cold — measured, 1,105 of 1,127 session starts.
 ### Is a configuration change still pending?
+
+The home screen (`cg.py home`) prints `preset: <running> (<saved> after a restart)` when the preset in
+the settings file differs from the one the proxy runs (the `preset` key of `/stats`). Pass it on. The
+fix is `/context-guru:preset-picker`, which restarts the proxy after one yes.
 
 `start-proxy.sh` records what the running proxy was started with, in
 `$CONTEXT_GURU_STATE/proxy-<port>.fingerprint`. Compare it against what the options ask for now:
@@ -190,5 +193,5 @@ cached record — instead of re-explaining any of this here.
   these totals cover all of them.
 
 If the numbers are genuinely flat after real use, say that and offer the next step — usually
-`codesmart`, which adds the offloaders — rather than reaching for a favourable reading of a
-flat graph.
+`/context-guru:preset-picker`'s `conservative` tier, which adds the offloaders — rather than
+reaching for a favourable reading of a flat graph.

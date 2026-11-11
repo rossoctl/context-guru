@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,13 +15,15 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -51,11 +54,14 @@ func fakeCheapModelCached(t *testing.T, in, out, cacheWrite, cacheRead int) (*ht
 
 // cgLLMHandler wires a recorder + a config whose summarizer uses the "config"-source
 // cheap model, so the request path can be made to spend our own model money on purpose.
-func cgLLMHandler(t *testing.T, upstream string, cheap components.Model) (*Handler, *dash.Recorder) {
-	return cgLLMHandlerPriced(t, upstream, cheap, fixedPricer{})
+// cheapURL/cheapModel build the Options.CheapModel config ("" cheapURL = unconfigured): the
+// endpoint and credential are the operator's own now, pinned once, not a components.Model the
+// test builds and hands in directly.
+func cgLLMHandler(t *testing.T, upstream, cheapURL, cheapModel string) (*Handler, *dash.Recorder) {
+	return cgLLMHandlerPriced(t, upstream, cheapURL, cheapModel, fixedPricer{})
 }
 
-func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
+func cgLLMHandlerPriced(t *testing.T, upstream, cheapURL, cheapModel string,
 	prices modelinfo.Pricer) (*Handler, *dash.Recorder) {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(
@@ -76,11 +82,16 @@ func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
+	var cheapCfg *CheapModelConfig
+	if cheapURL != "" {
+		cheapCfg = &CheapModelConfig{Provider: "anthropic", BaseURL: cheapURL,
+			APIKey: "unused-by-the-fake", Model: cheapModel}
+	}
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		AnthropicUpstream: upstream,
 		Dashboard:         rec,
 		Prices:            prices,
-		CheapModel:        cheap,
+		CheapModel:        cheapCfg,
 	})
 	t.Cleanup(h.Close)
 	return h, rec
@@ -132,7 +143,8 @@ func postChat(t *testing.T, srv *httptest.Server, session string) {
 func TestCGLLMCostIsNotChargedToAnotherTenantsRequest(t *testing.T) {
 	cheap, cheapCalls := fakeCheapModel(t, 10_000, 2_000)
 	// The other tenant's compaction client: same process, its own request context.
-	other := cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "m", APIKey: "unused-by-the-fake"}
+	otherD, otherRef := dispatchtest.HTTP(cheap.URL, nil)
+	other := cheapmodel.Anthropic{D: otherD, Ref: otherRef, Model: "m"}
 
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// tenant-b's extract_llm call, mid-flight of tenant-a's request.
@@ -146,7 +158,7 @@ func TestCGLLMCostIsNotChargedToAnotherTenantsRequest(t *testing.T) {
 	defer up.Close()
 
 	// No cheap model of its own: tenant-a's pipeline cannot spend a cent here.
-	h, rec := cgLLMHandler(t, up.URL, nil)
+	h, rec := cgLLMHandler(t, up.URL, "", "")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -185,8 +197,7 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
 
-	h, rec := cgLLMHandler(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "m", APIKey: "unused-by-the-fake"})
+	h, rec := cgLLMHandler(t, up.URL, cheap.URL, "m")
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -251,9 +262,7 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 	wantCheap := 10_000*(1.0/1e6) + 2_000*(5.0/1e6)
 	wantAgent := 10_000*(15.0/1e6) + 2_000*(75.0/1e6)
 
-	h, rec := cgLLMHandlerPriced(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "compact-model", APIKey: "unused-by-the-fake"},
-		prices)
+	h, rec := cgLLMHandlerPriced(t, up.URL, cheap.URL, "compact-model", prices)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
@@ -322,8 +331,7 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 	want := price.Cost(in, cr, cw, out)
 	freshOnly := price.Cost(in, 0, 0, out)
 
-	h, rec := cgLLMHandlerPriced(t, up.URL,
-		cheapmodel.Anthropic{BaseURL: cheap.URL, Model: "compact-model", APIKey: "unused-by-the-fake"},
+	h, rec := cgLLMHandlerPriced(t, up.URL, cheap.URL, "compact-model",
 		twoModelPricer{agent: price, compact: price})
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -392,18 +400,31 @@ func TestTheCallersAuthSchemeSurvivesIntoOurOwnCalls(t *testing.T) {
 		})
 	}
 
-	// And it must reach the client incomingModel builds, not just be computable.
+	// And it must reach the client incomingModel builds, not just be computable: proven here by
+	// an actual round trip, since the scheme now lives in the Dispatcher's held credential, not
+	// in a field on the returned cheapmodel.Anthropic.
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
 	h := &Handler{opts: Options{}}
+	h.dispatcher()
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("Authorization", "Bearer sk-caller-abc123456")
-	m := h.incomingModel(bschemas.Anthropic, upstream{base: "https://gw.example"},
+	m := h.incomingModel(bschemas.Anthropic, upstream{base: srv.URL},
 		[]byte(`{"model":"claude-haiku-4-5"}`), r)
 	a, ok := m.(cheapmodel.Anthropic)
 	if !ok {
 		t.Fatalf("incomingModel returned %T, want cheapmodel.Anthropic", m)
 	}
-	if a.AuthScheme != "bearer" {
-		t.Fatalf("the built client would send the caller's bearer token as %q", a.AuthScheme)
+	if _, err := a.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer sk-caller-abc123456" {
+		t.Fatalf("the built client sent Authorization %q, want the caller's bearer token", gotAuth)
 	}
 }
 
@@ -551,4 +572,180 @@ func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
 			"reports window_not_exact forever — a permanent zero in the mode built for measuring",
 			sid)
 	}
+	// The per-thread record the billed-growth horizon reads (primary thread: the key is the session).
+	// Written after cg:bin:, so poll for it too.
+	var foundThread bool
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
+			foundThread = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !foundThread {
+		t.Errorf("no cg:bint: record in the shadow store under %q: the billed-growth horizon would "+
+			"read an unknown thread figure forever in observe mode", sid)
+	}
+}
+
+// The enforced path records the per-thread figure next to the session figure.
+func TestEnforcedModeRecordsBilledInputPerThread(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [summarize]\ncomponents:\n  summarize:\n    keep_last: 1\n" +
+			"    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMemory(store.Options{})
+	h := New(pipe, st, agg, Options{AnthropicUpstream: up.URL})
+	t.Cleanup(h.Close)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(summarizableRequest()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-enforced")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	sid := apply.SessionIDFor("", "sess-enforced", bschemas.Anthropic, []byte(summarizableRequest()))
+	for i := 0; i < 200; i++ {
+		_, a := st.Get(store.BilledPrefix + sid)
+		_, b := st.Get(store.BilledThreadPrefix + sid)
+		if a && b {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, a := st.Get(store.BilledPrefix + sid)
+	_, b := st.Get(store.BilledThreadPrefix + sid)
+	t.Fatalf("billed records after an enforced request: session=%v thread=%v, want both", a, b)
+}
+
+// A subagent's answer must land under the SUBAGENT's thread key in observe mode, which is the key
+// the off-path run reads. Observe returns an empty Trace, so a write that took the thread from it
+// would put every thread's figure on the primary key and overwrite the main thread's.
+func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [summarize]\nmode: observe\ncomponents:\n  summarize:\n    keep_last: 1\n" +
+			"    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		Mode:              components.ModeObserve,
+	})
+	t.Cleanup(h.Close)
+	shadow := h.shadow
+	if shadow == nil {
+		t.Fatal("observe mode built no shadow store")
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(summarizableRequest()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-observe-sub")
+	req.Header.Set(agentIDHeader, "sub1")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("proxy returned %d", resp.StatusCode)
+	}
+	sid := apply.SessionIDFor("", "sess-observe-sub", bschemas.Anthropic, []byte(summarizableRequest()))
+	if sid == "" {
+		t.Fatal("no session id derived for the observe body")
+	}
+	subKey := store.BilledThreadPrefix + thread.Key(sid, "a:sub1")
+	var found bool
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(subKey); ok {
+			found = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("no cg:bint: record under the subagent thread key %q", subKey)
+	}
+	if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
+		t.Errorf("the subagent's figure was written under the primary thread key, so it would overwrite the main thread's")
+	}
+}
+
+// The observe record must be keyed under the id the SHADOW PIPELINE derives. toolfilter's skills
+// half rewrites the head system message before that id is hashed, so an id taken from the raw body
+// is a different key and PrevBilledInput stays 0 (#175 round 2).
+func TestObserveBilledInputKeyMatchesThePipelineWithTheSkillsHalfActive(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [toolfilter, summarize]\nmode: observe\ncomponents:\n  toolfilter:\n    remove: [skill__deep-research]\n" +
+			"  summarize:\n    keep_last: 1\n    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: up.URL, Mode: components.ModeObserve})
+	t.Cleanup(h.Close)
+	shadow := h.shadow
+	if shadow == nil {
+		t.Fatal("observe mode built no shadow store")
+	}
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	var m map[string]any
+	_ = json.Unmarshal([]byte(summarizableRequest()), &m)
+	msgs := m["messages"].([]any)
+	head := map[string]any{"role": "system", "content": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n" +
+		"- dataviz: Use for charts and plots.\n- deep-research: A research harness.\n</system-reminder>"}
+	m["messages"] = append([]any{head}, msgs...)
+	m["tools"] = []any{map[string]any{"name": "Skill", "description": "Invoke a skill.", "input_schema": map[string]any{"type": "object"}}}
+	body, _ := json.Marshal(m)
+
+	// No explicit session header: the id is DERIVED from the head, which is the divergent case.
+	resp, err := srv.Client().Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	raw := apply.SessionIDFor("", "", bschemas.Anthropic, body)
+	want := apply.EnforcedSessionIDFor(pipe, "", "", "", bschemas.Anthropic, false, body)
+	if raw == want {
+		t.Fatal("fixture does not exercise the bug: raw id equals the pipeline id")
+	}
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(store.BilledPrefix + want); ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Errorf("no cg:bin: record under the pipeline's id %q (raw-body id is %q)", want, raw)
 }

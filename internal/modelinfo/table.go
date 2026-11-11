@@ -13,7 +13,7 @@ import (
 
 // A Table is an OPERATOR-SUPPLIED price list, consulted before the public LiteLLM
 // map. It exists because the public map prices the public API, and a gateway does
-// not have to charge that: IBM's ete-litellm bills claude-sonnet-5 at $1.52/MTok in
+// not have to charge that: IBM's litellm-gateway bills claude-sonnet-5 at $1.52/MTok in
 // where anthropic.com bills $3.00, so every dollar figure this dashboard produced
 // for that gateway was ~2x too high. A price list is also the only way to price a
 // model the public map has never heard of — a preview deployment, an internal
@@ -44,14 +44,19 @@ type tableEntry struct {
 	qualified bool
 	price     Price
 	window    int
+	// compactionPoint is the operator's compaction point in billed tokens, or 0.
+	compactionPoint int
 }
 
 // tableFile is the on-disk shape.
 type tableFile struct {
 	// CacheReadFrac/CacheWriteFrac fill in the two cache tiers for entries that do
 	// not state them. Defaults follow the Anthropic-family multiples the rest of
-	// this package already assumes (0.1x a read, 1.25x a write).
-	CacheReadFrac  float64          `yaml:"cache_read_frac"`
+	// this package already assumes (1.25x a write; a read per model, see CacheReadFracFor).
+	//
+	// CacheReadFrac is a pointer: nil (key unset) means "per model", and a value, even 0.1,
+	// is the operator's gateway multiple and wins for every entry.
+	CacheReadFrac  *float64         `yaml:"cache_read_frac"`
 	CacheWriteFrac float64          `yaml:"cache_write_frac"`
 	Models         []tableFileModel `yaml:"models"`
 }
@@ -64,9 +69,17 @@ type tableFileModel struct {
 	Out        float64 `yaml:"out"`
 	CacheRead  float64 `yaml:"cache_read"`
 	CacheWrite float64 `yaml:"cache_write"`
+	// CacheWrite1hFrac is the 1-hour cache-write rate as a multiple of In. 0 (unset) means
+	// AnthropicCacheWrite1hFrac. A gateway that bills the 1-hour write at the input rate sets 1.0.
+	CacheWrite1hFrac float64 `yaml:"cache_write_1h_frac"`
 	// Window optionally overrides the context window for a model the public map
 	// does not list either (a preview id), so fraction triggers still scale.
 	Window int `yaml:"window"`
+	// CompactionPoint optionally states, in BILLED input tokens, where the client compacts this model's
+	// conversation (Claude Code on a GLM compacts near 167k of a 200k window). It is NOT derived from
+	// window and does not change it. Used by internal/compactionpoint, for models its bootstrap table
+	// does not know. 0 = unset.
+	CompactionPoint int `yaml:"compaction_point"`
 	// Note is documentation for whoever edits the file — in particular, which
 	// entries are an operator ESTIMATE (a tier) rather than a published rate.
 	Note string `yaml:"note"`
@@ -95,11 +108,14 @@ func ParseTable(b []byte) (*Table, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("model price list: %w", err)
 	}
-	if f.CacheReadFrac == 0 {
-		f.CacheReadFrac = 0.1
+	if f.CacheReadFrac != nil && *f.CacheReadFrac <= 0 {
+		return nil, fmt.Errorf("model price list: cache_read_frac must be above 0")
+	}
+	if f.CacheWriteFrac < 0 {
+		return nil, fmt.Errorf("model price list: cache_write_frac must not be negative")
 	}
 	if f.CacheWriteFrac == 0 {
-		f.CacheWriteFrac = 1.25
+		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
 	}
 	t := &Table{}
 	for i, m := range f.Models {
@@ -109,8 +125,17 @@ func ParseTable(b []byte) (*Table, error) {
 		}
 		prefix := strings.HasSuffix(match, "*")
 		match = strings.TrimSuffix(match, "*")
+		if m.Window > 0 && m.CompactionPoint > m.Window {
+			return nil, fmt.Errorf("model price list: %q states compaction_point %d above its window %d", m.Match, m.CompactionPoint, m.Window)
+		}
+		if m.Window < 0 || m.CompactionPoint < 0 {
+			return nil, fmt.Errorf("model price list: %q has a negative window or compaction_point", m.Match)
+		}
 		if m.In < 0 || m.Out < 0 || m.CacheRead < 0 || m.CacheWrite < 0 {
 			return nil, fmt.Errorf("model price list: %q has a negative rate", m.Match)
+		}
+		if m.CacheWrite1hFrac < 0 {
+			return nil, fmt.Errorf("model price list: %q: cache_write_1h_frac must not be negative", m.Match)
 		}
 		if m.In == 0 && m.Out == 0 {
 			return nil, fmt.Errorf("model price list: %q has no rates; omit the entry rather than pricing it free", m.Match)
@@ -118,23 +143,24 @@ func ParseTable(b []byte) (*Table, error) {
 		p := Price{
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
+			Write1hFrac: m.CacheWrite1hFrac,
 		}
-		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * f.CacheReadFrac
+		// A blank tier is filled at lookup, when the model is known (Price.CacheReadFor). The
+		// file-level multiples travel with the entry. A cache_read_frac the file leaves unset
+		// stays 0, so the queried model decides.
+		if f.CacheReadFrac != nil {
+			p.ReadFrac = *f.CacheReadFrac
 		}
-		if p.CacheWrite == 0 {
-			// The file-level cache_write_frac is documented in prices.example.yaml as "the
-			// Anthropic-family multiples", so it is applied to the Anthropic family and not
-			// to models whose provider charges no creation premium at all. An entry that
-			// states its own cache_write is honoured above and never reaches this line.
-			frac := f.CacheWriteFrac
-			if !chargesCacheWritePremium(match) {
-				frac = 1.0
-			}
-			p.CacheWrite = p.Input * frac
+		// The file-level cache_write_frac is documented in prices.example.yaml as "the
+		// Anthropic-family multiples", so it is applied to the Anthropic family and not
+		// to models whose provider charges no creation premium at all. The family is that of
+		// the entry's own match, as before.
+		p.WriteFrac = f.CacheWriteFrac
+		if !chargesCacheWritePremium(match) {
+			p.WriteFrac = 1.0
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
+			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window, compactionPoint: m.CompactionPoint})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -183,7 +209,9 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 			continue // an explicit bare entry for this tail already wins on its own
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
-			ambiguous[tail] = true
+			if prev.price != e.price { // two providers at one rate are not a guess
+				ambiguous[tail] = true
+			}
 			continue
 		}
 		tails[tail] = e
@@ -235,7 +263,7 @@ func (t *Table) lookup(model string) (tableEntry, bool) {
 	if t == nil || len(t.entries) == 0 {
 		return tableEntry{}, false
 	}
-	full, tail := normalize(model)
+	full, tail := Normalize(model)
 	for _, e := range t.entries {
 		if e.match == full || e.match == tail {
 			return e, true
@@ -244,8 +272,12 @@ func (t *Table) lookup(model string) (tableEntry, bool) {
 	// A bare id resolves to the one qualified entry it is the tail of (#324), before
 	// any wildcard family is consulted — see deriveBareTails for precedence and the
 	// ambiguous case.
-	if e, ok := t.bareTail[tail]; ok {
-		return e, true
+	// Only for a request that carries no provider prefix. `vertex/claude-sonnet-5` shares the
+	// tail of `aws/claude-sonnet-5` but is another provider's traffic; it must not take aws's rate.
+	if full == tail {
+		if e, ok := t.bareTail[tail]; ok {
+			return e, true
+		}
 	}
 	for _, e := range t.entries { // longest match first
 		if e.prefix {
@@ -268,7 +300,10 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	if !ok {
 		return Price{}, false
 	}
-	return e.price, true
+	// The fill uses the QUERIED model, not the match pattern: a family entry such as
+	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
+	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
+	return e.price.Resolved(model), true
 }
 
 // Window returns an operator-supplied context window, for models the public map
@@ -278,6 +313,16 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 func (t *Table) WindowExact(ctx context.Context, model string) (int, bool, bool) {
 	w, ok := t.Window(ctx, model)
 	return w, ok, ok
+}
+
+// CompactionPoint returns the operator's compaction point for a model, in billed input tokens.
+// ok=false when the entry states none, so the bootstrap table of internal/compactionpoint answers.
+func (t *Table) CompactionPoint(_ context.Context, model string) (int, bool) {
+	e, ok := t.lookup(model)
+	if !ok || e.compactionPoint <= 0 {
+		return 0, false
+	}
+	return e.compactionPoint, true
 }
 
 func (t *Table) Window(_ context.Context, model string) (int, bool) {

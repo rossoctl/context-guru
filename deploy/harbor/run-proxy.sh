@@ -10,7 +10,7 @@
 # CG_GATEWAY_BASE / CG_GATEWAY_KEY (the upstream; otherwise read from ~/.claude/settings.json).
 set -euo pipefail
 export PATH=$PATH:/usr/local/go/bin
-CG=/home/vpcuser/projects/context-engineering/context-guru
+CG="$(cd "$(dirname "$0")/../.." && pwd)"
 G=${CG_GATEWAY_BASE:-}; T=${CG_GATEWAY_KEY:-}
 if [ -z "$G" ] || [ -z "$T" ]; then
   creds=$(python3 -c 'import json,os;e=json.load(open(os.path.expanduser("~/.claude/settings.json")))["env"];print(e["ANTHROPIC_BASE_URL"]+"|"+e["ANTHROPIC_AUTH_TOKEN"])')
