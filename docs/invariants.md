@@ -393,6 +393,7 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 | G11 | The proxy has no counter of pings that went out but were never priced. | An upstream counter, in a separate PR. | No |
+| G12 | The keeper's skip reason (`too large`, `below limits`, `over budget`, `no entry`, and others). It lives only in the keeper's memory and the cache-state endpoint. `/stats` and the database do not show it by reason, so a thread that is never pinged shows only an empty `keepalive_strategy_id`. On a hosted deployment, one 875k-token thread went 2 days with no ping (`too large`, #1100), and it took 3 investigations to find the reason. | Count skips by reason in `/stats` and as `cg_keepalive_skipped_total{reason}`. Also write the reason on the real request row (for example `keepalive_skip_reason`), so K2 and K10 can split misses by reason. | No |
 
 ## Monitor spec (draft)
 
