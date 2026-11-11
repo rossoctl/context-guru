@@ -42,8 +42,9 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 	for _, want := range []string{
 		"ctl('/api/me/limits')",
 		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
-		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered())", // a filter hides the estimate
-		"'data-testid': 'saved-total-usd'", // the dollar view is still there for everyone else
+		"subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered(), state.sub.fit)", // a filter hides the estimate
+		"ctl('/api/me/fivehour-weights?since=' + fiveHourStartMs(f))",                                                  // the learned weights (#1047)
+		"'data-testid': 'saved-total-usd'",                                                                             // the dollar view is still there for everyone else
 		"loadOverviewLimits();",
 		"if (!readsLimits(account && account.tenant)) { done(null); return; }", // a manager keeps dollars
 		"if (seq !== state.subSeq) return;",                                    // an older answer is dropped
@@ -105,6 +106,7 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 		"tk ? tile('ka-net-tok'",
 		"'data-testid': 'ka-measured-tokens'",
 		"'data-testid': 'ka-forecast-weights'",
+		"const fv = forecastView(recIn, kaState.sub), rec = fv.rec;", // the learned forecast on a subscription (#1047)
 		"'data-testid': 'ka-split-tokens'",
 		"tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd)", // the dollar view stays for everyone else
 		"o.tokens_unmeasured_requests > 0",
