@@ -13,6 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -80,12 +81,10 @@ func TestBilledElsewhereMarkerReachesTheDashboardCostQuery(t *testing.T) {
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.Stats().SummarySubstituted == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a committed keep-alive summary call (the offload side)",
+		func() bool { return k.Stats().SummarySubstituted >= 1 })
 	if k.Stats().SummarySubstituted != 1 {
-		t.Fatal("no committed summary call: the offload side never ran")
+		t.Fatalf("committed summary calls = %d, want 1", k.Stats().SummarySubstituted)
 	}
 	_, calls := readDeferred(t, st, "sess-1")
 	if len(calls) != 1 {
@@ -124,13 +123,10 @@ func TestBilledElsewhereMarkerReachesTheDashboardCostQuery(t *testing.T) {
 		dash.ExtractionRow{Component: "cache_aware_summarizer", Model: "m1", CostUSD: 0.0161, Strategy: strategy}))
 
 	var rows []*dash.ComponentRow
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if rows, err = rec.DB().Components(dash.Filter{TenantAll: true}); err == nil && len(rows) >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the recorder to write both component rows", func() bool {
+		rows, err = rec.DB().Components(dash.Filter{TenantAll: true})
+		return err == nil && len(rows) >= 2
+	})
 	got := map[string]*dash.ComponentRow{}
 	for _, r := range rows {
 		got[r.Component] = r

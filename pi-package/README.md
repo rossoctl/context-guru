@@ -95,7 +95,7 @@ and `consent_question_replace` with `confirm_command_replace`. Setup with a conf
 |---|---|
 | `/context-guru status` | Proxy up or down, the port, the preset, the cache strategy, the dashboard link |
 | `/context-guru preset [name]` | `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. Restarts the proxy after a yes |
-| `/context-guru cache-strategy [name]` | `auto`, `1-ping`, `2-ping`, `none`. Restarts the proxy after a yes |
+| `/context-guru cache-strategy [name]` | Lists the strategies the proxy offers, then sets one. Restarts the proxy after a yes |
 | `/context-guru update` | Checks for a newer proxy release and installs it after a yes |
 | `/context-guru uninstall` | Restores `models.json`, stops and removes the service, deletes the downloaded binary |
 
@@ -109,14 +109,9 @@ The default preset is `off`: the proxy trims nothing. The default cache strategy
 sends small keep-alive requests while you are idle, which uses some of your own quota. Choose `none`
 to turn the pings off.
 
-One cache strategy drives both providers. What each one spends:
-
-| Strategy | Anthropic | OpenAI |
-|---|---|---|
-| `none` | No pings | No pings |
-| `auto` | 5-minute cache: first ping after 240 s idle, at most 2. 1-hour cache: 1 ping at 59 minutes | GPT-5.6 and later: a ping after 28 minutes idle, at most 2 |
-| `1-ping` | At most 1 ping per idle gap | At most 1 ping per idle gap, after 28 minutes |
-| `2-ping` | At most 2 pings per idle gap, on both cache lifetimes | At most 2 pings per idle gap, after 28 minutes |
+One cache strategy drives both providers. The package keeps no list of strategies. It asks the proxy
+(`context-guru-proxy strategies`) for the names and the texts, and offers the strategies that serve both
+Anthropic and OpenAI. `/context-guru cache-strategy` shows the names. The proxy's text for a strategy is in the `setup` question and in `python3 scripts/pi_plugin.py configure --list`.
 
 ## The proxy config
 
@@ -125,10 +120,12 @@ the package's marker. The second line names the cache strategy.
 
 - **A proxy of v0.7.1 or later** gets the strategy by name (`cache:` / `strategy: auto`). The proxy
   fills the cache keys from its own table at each start. So a new proxy release brings new values.
-- **An older proxy** does not accept that key. It gets the cache keys written out, from the package's
-  own table.
+- **An older proxy** cannot list or set a strategy other than `none`, and the package has no fallback
+  table. `setup`, `cache-strategy` and `preset` with another name refuse, and say:
+  "update the proxy to v0.7.1 or later". An existing config is left as it is on such a proxy.
 - The package reads the version from `context-guru-proxy --version`. That command never starts a proxy.
-  A version it cannot read counts as old.
+  A release before v0.7.1 counts as old. The strategy list then comes from `context-guru-proxy strategies`,
+  which runs with a 5-second limit, no config, no dashboard and no stored state, in a fresh temp directory.
 - `none` writes no `cache:` block, on any proxy.
 - **The config is written again before each start:** in `setup`, `preset`, `cache-strategy`,
   `update` (with the new binary) and the session-start `restart`. It comes from the install record:
@@ -250,3 +247,5 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
 python3 -m unittest discover -s scripts      # controller and models.json route
 node --test tests/*.test.ts                   # extension helpers (Node 22.18+)
 ```
+
+See the [matrix of plugins, providers and settings](../docs/reference/plugins-matrix.md) for what each plugin offers per provider.
