@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"github.com/rossoctl/context-guru/internal/metricspush"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
 // TestCentralRecordingRulesGiveTheRightNumber pushes counters at a steady, known rate and checks that

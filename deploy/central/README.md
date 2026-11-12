@@ -143,7 +143,7 @@ exists.
 | Rule syntax | `promtool check rules prometheus/rules/*.yml` | The rules parse. |
 | Alert and rule logic | `promtool test rules prometheus/tests/alerts_test.yml` | Each alert fires when it should and stays quiet when it should not. |
 | Collector config | `otelcol-contrib validate --config=otel-collector.yml` | The config is valid. |
-| Names and labels | `internal/metricspush` end-to-end tests (see `central_e2e_test.go`) | A real push arrives under the names and labels of the spec. |
+| Names and labels | `proxyapp/metricspush` end-to-end tests (see `central_e2e_test.go`) | A real push arrives under the names and labels of the spec. |
 | Recording rules | the same package, with `CENTRAL_SLOW=1` (about 6 minutes) | The rules compute the right number from traffic at a known rate. |
 
 Start the stack for the end-to-end tests with `docker compose -f compose.yaml up -d`. If port 3001 is

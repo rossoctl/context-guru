@@ -17,7 +17,7 @@ import (
 	acmetrics "github.com/rossoctl/accountant/metrics"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/metricspush"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/proxy"
 )
@@ -27,7 +27,7 @@ import (
 // CENTRAL_COLLECTOR and CENTRAL_PROMETHEUS are set:
 //
 //	CENTRAL_COLLECTOR=http://127.0.0.1:4319 CENTRAL_PROMETHEUS=http://127.0.0.1:9090 \
-//	go test ./internal/metricspush -run Central -v
+//	go test ./proxyapp/metricspush -run Central -v
 //
 // Authentication is off on the central (rossoctl/context-guru#1130), so no token is needed. The one test
 // that checks a token is refused runs only with CENTRAL_AUTH=on.

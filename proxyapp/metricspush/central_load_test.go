@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/metricspush"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/proxy"
 )
 

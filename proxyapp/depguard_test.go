@@ -16,7 +16,7 @@ import (
 //
 // The OpenTelemetry API and the metrics SDK are allowed. They are small (about 1.4 MB with the
 // metrics push) and link neither gRPC nor protobuf. The push sends OTLP as JSON from
-// internal/metricspush for that reason: the standard OTLP exporter sends protobuf and would
+// proxyapp/metricspush for that reason: the standard OTLP exporter sends protobuf and would
 // break this test. An earlier version banned the whole go.opentelemetry.io/ prefix, which also
 // banned the API that the accountant module already imports.
 func TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf(t *testing.T) {

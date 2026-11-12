@@ -35,7 +35,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/metricspush"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"

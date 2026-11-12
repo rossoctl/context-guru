@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/metricspush"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
 // e2eRun sends n requests one after another on one kept-alive connection and returns the time of
