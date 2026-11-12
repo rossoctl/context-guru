@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -453,6 +454,11 @@ type TenantSource struct {
 
 	mu    sync.Mutex
 	cache *lru[*cached] // tenant id -> built tenancy
+
+	// disk is the shared session-state copy (#1104), nil when off. One Disk serves every tenant
+	// store: hosted keys carry the "tenant:<id>" prefix (session.Scoped), so tenants never meet.
+	disk     *store.Disk
+	stateTTL time.Duration
 }
 
 type cached struct {
@@ -653,6 +659,21 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	return tn, nil
 }
 
+// SetSessionState attaches d, the session-state table, to every tenant store built from now on
+// (#1104). Call it once, before serving. A hosted restart then reads a returning session's
+// metadata state back, like a local install: dedup's keep-in-full marks among it. The caller
+// opens d metadata-only, so no summary text or other content key reaches the file. stateTTL is
+// how long memory trusts a loaded session before it reads again; zero keeps the store default.
+// A nil d turns it off.
+func (s *TenantSource) SetSessionState(d *store.Disk, stateTTL time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.disk, s.stateTTL = d, stateTTL
+	s.mu.Unlock()
+}
+
 // carryKeepMarks moves the "keep in full" marks (#1097) from the tenancy a config change replaces
 // to its rebuilt one, when both run the same components in the same order. A mark says the agent
 // expanded an output, so the new pipeline must keep sending it in full: if it compacts it again,
@@ -699,6 +720,13 @@ func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) 
 		return tn, nil
 	}
 	tn.Pipe, tn.Store, tn.Preset, tn.Cache = built.Pipe, built.Store, built.Preset, built.Cache
+	s.mu.Lock()
+	d, life := s.disk, s.stateTTL
+	s.mu.Unlock()
+	if mem, ok := tn.Store.(*store.Memory); ok && d != nil {
+		mem.SetStateTTL(life)
+		mem.AttachDisk(d)
+	}
 	if built.Mode != "" {
 		tn.Mode = built.Mode
 	}

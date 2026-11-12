@@ -676,6 +676,17 @@ func NewMemory(o Options) *Memory {
 	}
 }
 
+// SetStateTTL sets the lifetime of the session state keys (Options.StateTTLSeconds) after the
+// store is built. Zero or less leaves it as it is. Call it before serving.
+func (m *Memory) SetStateTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.stateTTL = d
+	m.mu.Unlock()
+}
+
 func (*Memory) Persists() bool { return true }
 
 // Durable reports whether this store's state survives a restart: a disk copy is attached.
