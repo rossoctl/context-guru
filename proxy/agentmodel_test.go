@@ -154,7 +154,8 @@ func TestBobSummaryCallUsesBobsModelPathAndApikey(t *testing.T) {
 	up, calls := summaryUpstream(t)
 	h := summaryHandler(t, "incoming", Options{BobUpstream: up.URL})
 
-	got := postSummarizable(t, h, bobModelPath, "premium-ide", "Apikey bob-caller-key", calls)
+	postSummarizable(t, h, bobModelPath, "premium-ide", "Apikey bob-caller-key", calls)
+	got := awaitSummaryCalls(t, calls, 1)
 
 	if len(got) != 1 {
 		t.Fatalf("Bob's upstream got %d summary calls, want 1; all calls: %d", len(got), len(calls()))
@@ -175,7 +176,8 @@ func TestOpenAISummaryCallTargetIsUnchanged(t *testing.T) {
 	up, calls := summaryUpstream(t)
 	h := summaryHandler(t, "incoming", Options{OpenAIUpstream: up.URL})
 
-	got := postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "Bearer openai-caller-key", calls)
+	postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "Bearer openai-caller-key", calls)
+	got := awaitSummaryCalls(t, calls, 1)
 
 	if len(got) != 1 {
 		t.Fatalf("OpenAI upstream got %d summary calls, want 1; all calls: %d", len(got), len(calls()))
@@ -306,7 +308,8 @@ func TestOpenAIRouteStillFallsBackToTheOperatorsKey(t *testing.T) {
 	up, calls := summaryUpstream(t)
 	h := summaryHandler(t, "incoming", Options{OpenAIUpstream: up.URL, OpenAIKey: "sk-operator-openai"})
 
-	got := postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "", calls)
+	postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "", calls)
+	got := awaitSummaryCalls(t, calls, 1)
 
 	if len(got) != 1 || got[0].auth != "Bearer sk-operator-openai" {
 		t.Fatalf("summary calls = %d, want 1 with the operator's key as Bearer", len(got))
