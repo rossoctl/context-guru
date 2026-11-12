@@ -192,3 +192,15 @@ func TestEstRangeShowsANegativeFloor(t *testing.T) {
 		t.Fatalf("node --test estrange.test.mjs failed: %v\n%s", err, out)
 	}
 }
+
+// TestMoneyUnitFormatting runs moneyunit.test.mjs: usd() keeps `$` for USD, writes "1.75 Bobcoins" for
+// Bob's unit, and shows no figure for a mixed view. Without this wrapper the node test never runs in CI.
+func TestMoneyUnitFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH, so moneyunit.test.mjs did not run; run `node --test dash/moneyunit.test.mjs`")
+	}
+	if out, err := exec.Command(node, "--test", "moneyunit.test.mjs").CombinedOutput(); err != nil {
+		t.Fatalf("node --test moneyunit.test.mjs failed: %v\n%s", err, out)
+	}
+}

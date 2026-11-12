@@ -94,7 +94,7 @@ const CGCharts = (() => {
       return emptyState(host, 'No priced requests yet', 'This needs provider usage data and a known model price.');
     }
     const pad = { l: 52, r: 76, t: 14, b: 24 };
-    const f = frame(host, 220, 'Cumulative net saving over time, in dollars');
+    const f = frame(host, 220, 'Cumulative net saving over time, in ' + moneyWord());
     const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals) || 1;
     const x = (i) => pad.l + (bins.length === 1 ? 0 : (i / (bins.length - 1)) * (f.w - pad.l - pad.r));
     const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (f.h - pad.t - pad.b);
