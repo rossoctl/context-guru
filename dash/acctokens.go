@@ -26,17 +26,15 @@ type TierTokens struct {
 	CacheWrite1h int64 `json:"cache_write_1h"`
 }
 
-func (t *TierTokens) add(o TierTokens) {
-	t.Input += o.Input
-	t.CacheRead += o.CacheRead
-	t.CacheWrite5m += o.CacheWrite5m
-	t.CacheWrite1h += o.CacheWrite1h
+// lib is t as the library's TierTokens, so the arithmetic below is the library's own.
+func (t TierTokens) lib() accountant.TierTokens {
+	return accountant.TierTokens{Input: int(t.Input), CacheRead: int(t.CacheRead),
+		CacheWrite5m: int(t.CacheWrite5m), CacheWrite1h: int(t.CacheWrite1h)}
 }
 
-func (t TierTokens) less(o TierTokens) TierTokens {
-	return TierTokens{Input: t.Input - o.Input, CacheRead: t.CacheRead - o.CacheRead,
-		CacheWrite5m: t.CacheWrite5m - o.CacheWrite5m, CacheWrite1h: t.CacheWrite1h - o.CacheWrite1h}
-}
+func (t *TierTokens) add(o TierTokens) { *t = tiersOf(t.lib().Add(o.lib())) }
+
+func (t TierTokens) less(o TierTokens) TierTokens { return tiersOf(t.lib().Sub(o.lib())) }
 
 func tiersOf(t accountant.TierTokens) TierTokens {
 	return TierTokens{Input: int64(t.Input), CacheRead: int64(t.CacheRead),

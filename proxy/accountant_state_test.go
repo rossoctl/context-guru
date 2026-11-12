@@ -104,7 +104,7 @@ func TestSavingsEndReusesTheClientHashOnlyForIdenticalBytes(t *testing.T) {
 	if held() != 1 {
 		t.Fatalf("begin kept %d client hashes, want 1", held())
 	}
-	s.end(r, accountant.Thread{ID: "main"}, client, nil, accFacts)
+	rec1 := s.end(r, accountant.Thread{ID: "main"}, client, nil, accFacts)
 	if held() != 0 {
 		t.Fatalf("end left %d client hashes behind", held())
 	}
@@ -113,11 +113,11 @@ func TestSavingsEndReusesTheClientHashOnlyForIdenticalBytes(t *testing.T) {
 	// A changed body takes the other path, and the answer is the one a fresh hash gives.
 	changed := []byte(strings.Replace(string(client), "word word", "wurd word", -1))
 	r2 := s.begin(meta, client)
-	s.end(r2, accountant.Thread{ID: "main"}, changed, nil, accFacts)
-	if r2.Forwarded.Pos[len(r2.Forwarded.Pos)-1].Hash == r2.Client.Pos[len(r2.Client.Pos)-1].Hash {
+	rec2 := s.end(r2, accountant.Thread{ID: "main"}, changed, nil, accFacts)
+	if rec2.Forwarded.Pos[len(rec2.Forwarded.Pos)-1].Hash == rec2.Client.Pos[len(rec2.Client.Pos)-1].Hash {
 		t.Fatal("a changed forwarded body reused the client hash")
 	}
-	if want := accBodies(client); fmt.Sprint(r.Forwarded) != fmt.Sprint(want) || len(same.Checks) > 1 {
+	if want := accBodies(client); fmt.Sprint(rec1.Forwarded) != fmt.Sprint(want) || len(same.Checks) > 1 {
 		t.Fatalf("the reused hash differs from a fresh one")
 	}
 }
