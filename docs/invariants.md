@@ -100,6 +100,9 @@ and `ultrahigh` after that. W3 has 1,339 real requests and 257 pings.
 | K9 | intent | A release does not cut the pings per long wait. | per day, by thread type (main or subagent) and `waiting_for`: pings per real-turn gap longer than 300 s | a drop of more than 30% against the week before, at the same request volume | see [the #1040 case](#case-a-default-change-hidden-by-a-config-layer-1040) |  |  |
 | K10 | side effect | A long wait that the plan covers does not miss for lack of a ping. | per day, by thread type and prefix band (under 20k, 20k to 80k, 80k or more): gaps longer than 300 s with no ping between and `cache_write > cache_read` on the turn after | a rise of more than 2× against the week before, in any band | see the #1040 case |  |  |
 | K11 | contract | A real turn that comes back warm after a ping gets keep-alive credit. | A real request (`keepalive = 0`) with a `keepalive = 1` row before it on the same `session_id` and `thread_id`, in the same idle gap. The gap since the thread's previous real request is 300 s or more (5-min tier). The turn read its cache (`cache_read > cache_write`). The check is `keepalive_saved_usd > 0`. Report the share with credit, per day and per host ([Q4](#q4-credit-for-warm-turns-after-a-ping)). | a share below 80% on a day with 10 or more such turns, or any day at 0% with 10 or more | — | — | Laptop (v0.7.1): **about 100 of 100** in the last 3 days. Hosted deployment, before its v0.7.2 deploy: 31 of 33. Hosted deployment, after the deploy: **0 of 48 (B10)**. Measured 2026-11-11. |
+| K12 | contract | A large thread is not refused for its bytes alone (#1100, #1102). | `cg_keepalive_refused_total{reason="too_large"}` per day (#1137) | any rise against the week before; a non-zero count after #1102 is a body over 32 MiB | — | — | not shipped yet (#1137) |
+| K13 | side effect | The per-tenant cap does not evict a manual hold that a user is waiting on. | `cg_keepalive_manual_hold_evicted_total{reason="bytes"\|"count"}` per day; the WARN line when a tenant holds 2 bodies of 8 MiB or more (#1137) | any `reason="bytes"` eviction; report the WARN count | — | — | not shipped yet (#1137) |
+| K14 | intent | Held bodies stay well inside the hold cap. | the `cg_keepalive_manual_hold_body_bytes` histogram (buckets at 1, 4, 8, 16 and 32 MiB); `cg_tenant_keepalive_manual_hold_bytes` aggregated over tenants (#1137) | a share above 8 MiB that rises week over week | — | — | not shipped yet (#1137) |
 
 - **A miss after the warm time ends is not a breach.** The strategy accepts that cost. The monitor
   reports it but does not alert on it.
@@ -393,12 +396,12 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | G8 | A tool the model needed but never searched for (D4), and a purge that ran (D9). | D4: only the #871 test sees it. D9: a purge counter. | No |
 | G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 | G11 | The proxy has no counter of pings that went out but were never priced. | An upstream counter, in a separate PR. | No |
-| G12 | The keeper's skip reason (`too large`, `below limits`, `over budget`, `no entry`, and others). It lives only in the keeper's memory and the cache-state endpoint. `/stats` and the database do not show it by reason, so a thread that is never pinged shows only an empty `keepalive_strategy_id`. On a hosted deployment, one 875k-token thread went 2 days with no ping (`too large`, #1100), and it took 3 investigations to find the reason. | Count skips by reason in `/stats` and as `cg_keepalive_skipped_total{reason}`. Also write the reason on the real request row (for example `keepalive_skip_reason`), so K2 and K10 can split misses by reason. | No |
+| G12 | **Partly closed by #1137** (the `too_large` refusals and the manual-hold evictions get counters). Still open: the other skip reasons. The keeper's skip reason (`too large`, `below limits`, `over budget`, `no entry`, and others). It lives only in the keeper's memory and the cache-state endpoint. `/stats` and the database do not show it by reason, so a thread that is never pinged shows only an empty `keepalive_strategy_id`. On a hosted deployment, one 875k-token thread went 2 days with no ping (`too large`, #1100), and it took 3 investigations to find the reason. | Count skips by reason in `/stats` and as `cg_keepalive_skipped_total{reason}`. Also write the reason on the real request row (for example `keepalive_skip_reason`), so K2 and K10 can split misses by reason. | No |
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
+- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Weekly:** K2, K5, K14, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
@@ -509,3 +512,5 @@ where cache_miss_reason = 'hit' and keepalive = 0
 # Per day and host: counted turns, turns with keepalive_saved_usd > 0, and the share.
 # K11 breach: share < 80% with 10 or more turns, or share = 0% with 10 or more turns.
 ```
+
+- **Reading #1137's counters on a hosted deployment:** `/metrics` is open only to loopback, or with the `METRICS_TOKEN` bearer. A monitor on the box reads it from `127.0.0.1` with no credential. `cg_tenant_keepalive_manual_hold_bytes` carries a tenant id and label, and the WARN line carries a tenant id. The monitor must aggregate them over tenants, and report no tenant id.
