@@ -1,0 +1,338 @@
+<!-- GENERATED FILE. Do not edit it. Edit the row files in docs/data-dependence/ and run:
+     go run ./cmd/gen-datadep
+     See "Keep this page right" below. -->
+
+# Data dependence
+
+This page says, for each component and feature, whether it needs **stored customer data**. It also
+says what each one does at three storage levels: off, metadata only, and everything.
+
+## Summary
+
+- **The rule:** a component or feature works from **metadata** only. A feature that needs
+  **content** is a rare, deliberate exception. Many users turn storage off, and a feature that
+  quietly needs content then works worse, with nothing reported.
+- **13 of 24 components need no stored content to do their job:**
+  - 5 keep nothing.
+  - 2 keep only hashes or names: `cacheinject` keeps hashes, and `toolfilter` keeps tool names when
+    tool deferral is on (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`).
+  - 1 keeps only a speed-up cache.
+  - 5 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
+- **5 more could work on metadata only**, with a small change: one "already done" flag per message.
+- **4 components cannot work without content.** A model writes their text, and the words differ
+  each time. These are `extract_llm`, `summarize`, `cache_aware_summarizer` and `agentdiet`.
+- **2 are special cases.** `skeleton` refuses to run without storage. `extract_llm_sweep` holds only
+  metadata (ids, hashes, counts, verdicts), but it keeps copies of the conversation in memory and
+  its question to the model needs last turn's text.
+- **Context Guru keeps content after the user opts out**, in 7 places. The worst are 2 full
+  request bodies per thread, and the last request body for keep-alive.
+- **With storage off today, use preset `conservative` and cache strategy `none` or `1-hour-head`.**
+  Every other plugin preset pays for savings that last one turn, so it does not work.
+- **"Metadata only" does not exist yet.** Today the Store keeps everything or nothing.
+
+## Terms
+
+- **Content**: text from the user or the agent, or text made from it. Examples: transcript text,
+  tool output, request bodies, system prompts, tool declarations. A summary, a shortened tool
+  output and a code skeleton are content too.
+- **Metadata**: values that do not let you read the content back. Examples: hashes, counts,
+  sizes, ids, token numbers, timestamps, flags. **A short hash of content is metadata.** A
+  shortened copy, a sample, or the first characters of content are content.
+- **Kept**: held after the request ends, in memory or on disk. Text held only while one request
+  runs is not kept.
+- **Store**: Context Guru's in-memory key-value store for each conversation. It is never written to
+  disk. `store.enabled: false` replaces it with a Store that keeps nothing.
+- **Original**: the text of a tool output before a component shortened it. Context Guru keeps it in
+  the Store so the model can get it back with the `expand` tool.
+- **Frozen decision**: the exact shortened text a component sent. Context Guru keeps it in the Store
+  and sends the same text on every later turn.
+- **Breaks the cache**: the next turn sends different bytes for a message the provider already
+  cached. The user then pays to write the cache again, from that message to the end.
+- **No way back**: the model cannot get removed text back through the `expand` tool. The agent
+  still has its own copy.
+- **Host**: the program that runs Context Guru. That is the proxy binary, or another program
+  that uses Context Guru as a library. The host sends requests to the provider and holds
+  credentials.
+- **Kind** (in the tables): `none` (keeps nothing), `metadata`, or `content`. It is what the
+  component keeps at the "Everything" level.
+- **Decided by**: the person, and the issue or PR, that decided the current behaviour. If no later
+  decision exists, it is the author of the PR that added the component. Ask that person before
+  you change the row.
+
+## The three storage levels
+
+| Level | What Context Guru keeps | Exists today? |
+|---|---|---|
+| **Off** | Nothing in the Store. It keeps only the in-memory trackers that every request needs: how much of the conversation the provider cached, and when. These hold counts and timestamps. | **Partly.** `store.enabled: false` removes the Store. It does **not** remove the in-memory content in [Features outside the pipeline](#features-outside-the-pipeline). |
+| **Metadata only** | Hashes, counts, ids, token numbers, timestamps and flags, in the Store and in memory. No content. | **No.** The "Metadata only" columns say what the code would do with a Store that refuses content. [What "metadata only" would need](#what-metadata-only-would-need) lists the changes. |
+| **Everything** | Content and metadata. | Yes. This is the default. |
+
+## Why Context Guru stores rewrites at all
+
+The client never sees the rewritten request, so it cannot keep it.
+
+1. The client (for example Claude Code) sends its **whole transcript** on every request.
+2. Context Guru rewrites that copy and sends the result to the provider.
+3. The provider returns **only the new assistant message**. The API cannot hand an edited history
+   back.
+4. The client **adds** that message to its own transcript. Its transcript still holds the
+   original tool outputs.
+5. On the next turn the client sends the originals again. Context Guru must make the same rewrite
+   again.
+
+The results:
+
+- **A rewrite that depends only on the message needs no storage.** Context Guru runs it again every
+  turn and gets the same bytes. Only CPU time is repeated. These components work this way:
+  `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cachesplit`, `cmdfilter`, `linecap`,
+  `dedup`, `smartcrush` and `extract`.
+- **Storage is necessary only when Context Guru cannot rebuild the rewrite from the message:**
+  - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`, `agentdiet`). A
+    model gives different words each time.
+  - **Gated rewrites** (`mask`, `failed_run`, `collapse`, `readlifecycle`, `coref`). They act only
+    on the part of the conversation that is not cached yet. On the next turn they must know that
+    they already acted. A flag is enough.
+- **The originals for `expand`** are a copy of what the client already has. Context Guru keeps them
+  only because it cannot ask the client for its copy.
+
+**Where the data sits matters.** Context Guru runs inside a host: the proxy binary, or another
+program that uses it as a library. With the local plugin install, the Store is in the proxy process
+on the user's own machine. That machine already holds the full transcript. Storing content is
+mainly a question for the hosted service, where the Store is on our side.
+
+**A possible change, not checked:** a plugin inside the client could rewrite the local transcript
+itself. The client would then keep the shortened version, and Context Guru would not need to store
+it. Nobody has checked if Claude Code's plugin or hook interface lets a plugin change earlier
+messages.
+
+## Will my setup work?
+
+Find your preset and your cache strategy below. Each cell says what happens at that storage level.
+
+- ✅ **Works**: the same as with everything stored.
+- ✅ **Works, no `expand`**: the same savings. The model cannot ask for removed text back. The
+  agent still has its own copy.
+- 🟡 **Works, metadata**: it works, and it keeps **only metadata** to do it (hashes, counts,
+  timestamps). It keeps no content.
+- ❌ **Does not work**: it does nothing, or it pays for something that lasts only one turn. That
+  is a model call, or a cache write when a shortened message comes back in full the next turn.
+  The cell says which.
+
+There is no "partly". A setup that pays for a saving that lasts one turn does not work.
+
+"Metadata only" does not exist yet. That column says what would happen if it were added to the
+code as it is today.
+
+### Plugin presets
+
+These are the presets in the Claude Code plugin picker.
+
+| Preset | Off | Metadata only | Everything |
+|---|---|---|---|
+| `off` | ✅ Works | ✅ Works | ✅ Works |
+| `conservative` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
+| `medium` | ❌ **Does not work.** `extract_llm` pays for a model call on each new large output, and the rewrite lasts one turn. The summary is never made. | ❌ The same as Off | ✅ Works |
+| `high` | ❌ **Does not work.** The same as `medium`. | ❌ The same as `medium`. On OpenAI it also pays for a summary every turn and throws it away. | ✅ Works |
+| `xhigh` | ❌ **Does not work.** The same as `high`. The sweep also pays full price to ask which outputs to remove, and the removals last one turn. | ❌ The same as Off | ✅ Works |
+
+**With storage off, use `conservative`.** It is the only plugin preset that saves anything.
+
+### Cache strategies
+
+| Strategy | Off | Metadata only | Everything | Decided by |
+|---|---|---|---|---|
+| `none` | ✅ Works | ✅ Works | ✅ Works | David Amid, #569 |
+| `auto` (was `5-min-ping`; `5-min-ping` is now an alias) | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works | David Amid, #569 |
+| `1-ping`, `2-ping`, `30-min-ping` (the same ping mechanism as `auto`; they differ only in how many pings and when) | ❌ The same as `auto` | ❌ The same as `auto` | ✅ Works | David Amid, #569 |
+| `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works | David Amid, #569 |
+
+The named strategies are one table in the proxy (`config/strategy.go`, #980). That change only gives
+the existing strategies one home and a `cache.strategy` key. It does not change what any strategy
+keeps.
+
+**Why `auto` (and the other ping strategies) needs storage and `1-hour-head` does not:** a ping is a **new** request that
+Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
+exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
+that the client sends anyway. The client supplies the bytes, so Context Guru keeps nothing.
+
+**The credential:** Context Guru itself does not keep it. It keeps only a handle, and the host that
+runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
+Dispatcher keeps the credential in memory, masked, until the hold ends.
+
+`medium` makes its summary in the idle time that `auto` keeps warm. Without a ping strategy,
+`medium` almost never makes a summary, at any level.
+
+### Other presets
+
+These presets are for the standalone proxy and for benchmarks.
+
+| Preset | Off | Metadata only | Everything |
+|---|---|---|---|
+| `cache`, `safe` | ✅ Works | ✅ Works | ✅ Works |
+| `house`, `coding`, `mcp` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
+| `balanced`, `codesafe` | ❌ **Does not work.** `failed_run` (and `collapse` in `codesafe`) shortens a message once, then sends it in full the next turn. The user pays a cache write for a saving of one turn. | ❌ The same as Off | ✅ Works |
+| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ❌ **Does not work.** `extract_llm` (and the sweep in `housellm`) pays for model calls that last one turn. Some rule-based rewrites also last one turn. | ❌ The same as Off | ✅ Works |
+| `summarize` | ❌ **Does not work.** It does not start, because it cannot tell how full the window is. | ❌ **Does not work, and costs money.** It pays for a summary every turn and throws it away. | ✅ Works |
+| `summarizer1509` | ❌ **Does not work, and costs money.** It starts at a fixed size (20,000 tokens), pays for a summary every turn and throws it away. | ❌ The same as Off | ✅ Works |
+| `agentdiet` | ❌ **Does not work.** It pays for a model call every turn, and the rewrite lasts one turn. | ❌ The same as Off | ✅ Works |
+
+## Pipeline components
+
+One row for each registered component. Each row is its own file,
+`docs/data-dependence/components/<name>.md`. The test `components/all/datadep_test.go` fails when:
+
+- a registered component has no row file;
+- a row file names a component that does not exist;
+- a cell is empty, or the reason is shorter than 8 words or is only a pointer into the code.
+
+| Component | Kind | Where | Off | Metadata only | Everything | Reason | Decided by |
+|---|---|---|---|---|---|---|---|
+{{component_rows}}
+
+### Libraries that are not components
+
+- **`dsl`** (the filter engine) keeps nothing per request. It holds only the rules from your filter
+  files. `cmdfilter` and `linecap` use it, and those two keep the originals.
+
+## Features outside the pipeline
+
+One file for each row: `docs/data-dependence/features/<slug>.md`.
+
+| Feature | Kind | Off | Metadata only | Everything | Reason |
+|---|---|---|---|---|---|
+{{feature_rows}}
+
+## What "metadata only" would need
+
+1. **A separate "may store content" check.** Every component must ask it before a model call, and
+   Context Guru must ask it before it offers `expand`. Today one flag answers two questions: "can I
+   keep the original?" and "can I keep the result?". Either answer makes some components pay for
+   a model call and then throw the result away.
+2. **An "already done" flag per message** for the rule-based components. All of them except
+   `skeleton` can build the same text again from the message the client sends again. The flag
+   keeps the cache stable. The code already has a path that builds lost text again; the flag
+   would start it.
+3. **Two small extra values:** the cut size for `collapse`, and the label for `readlifecycle`.
+4. **A way for `coref` to send its cuts again.** Until then, turn `coref` off at this level.
+5. **A byte bound, and a switch, for the sweep's in-memory conversation copies** (#404 PR C). The removals it used to repeat from a flag are gone: the sweep no longer writes them.
+6. **Turn off the model-written components** (`extract_llm`, `summarize`, `cache_aware_summarizer`,
+   `agentdiet`). Context Guru cannot build their text again, so they either pay for nothing or break
+   the cache.
+7. **Turn off** keep-alive, the body stash and `expand`. The dashboard keeps only metadata columns,
+   and its memos keep only hashes and counts.
+
+## What this audit found
+
+The audit read the code at commit 2a7a86f. This page records the findings. It does not change any
+behaviour. Each finding needs a decision from its owner.
+
+### Content kept after the user opted out
+
+1. **The body stash** keeps 2 full request bodies per thread, on every successful request. No
+   switch turns it off. It fills even when no component uses it.
+2. **Keep-alive** keeps the last request body, with storage off and with content capture off.
+   The proxy binary's Dispatcher also keeps the user's credential, masked, for the same time. The
+   plugin turns keep-alive on by default. See #595.
+3. **Nothing deletes `declaration_text`**: not retention, and not an account purge. Tool
+   declarations and whole system prompts stay after the user turns consent off.
+4. **Turning consent off deletes nothing.** Old rows in `request_content`, `extraction_calls` and
+   the archive stay until retention or a purge removes them.
+5. **The dashboard writes some columns without consent:** tool, MCP-server and skill names,
+   `extraction_calls.rejection` (it can hold the provider's error text), and
+   `request_components.err` (not scrubbed).
+6. **Some in-memory copies ignore both switches:** the dashboard memos, the `toolschema` cache, the
+   `cache_aware_summarizer` copies of turns, the `extract_llm_sweep` conversation copies (2 per
+   thread, only where the keep-alive can ping), and the observe-mode store.
+7. **In hosted mode, `--store` changes only the operator's config.** Each account follows only its
+   own `store.enabled`.
+
+### Problems with storage off today
+
+- **7 components do not work.** They pay for a saving that lasts one turn: `mask`, `failed_run`,
+  `collapse`, `readlifecycle`, `coref`, `extract_llm` and `agentdiet`.
+  - Each one shortens a message once, then sends it in full the next turn. The user pays a cache
+    write each time, so storage off can cost more than no compaction.
+  - `extract_llm` and `agentdiet` also pay for a model call each time.
+  - `coref` also loses its spending limit.
+- **The summarizers do not work.**
+  - `summarize` and `cache_aware_summarizer` do not start with their default settings. This is
+    safe only by accident. They start as soon as Context Guru keeps the billed-token record, as at
+    "metadata only".
+  - `summarizer1509` starts at a fixed size, pays for a summary every turn and throws it away.
+- **`skeleton` refuses to run.** This is the safe behaviour.
+- **No way back** for the rest: `cmdfilter`, `linecap`, `dedup`, `smartcrush` and `extract` still
+  work, but the model cannot get removed text back through `expand`.
+- **Nothing warns at startup** when a component that does not work runs with storage off.
+
+### Code comments that disagreed with the defaults
+
+This PR fixes 3 code comments that said the wrong default:
+
+- The dashboard's `CaptureContent` comment said "on by default". It is off.
+- The account `CaptureContent` comment said "Off by default". A new account starts with it **on**.
+- The `LifecycleSignals` comment said "Off by default". The flag is on by default. It writes only
+  counts.
+
+## Open questions
+
+1. **Does "Off" allow in-memory metadata?** This page says yes. Without the cache tracker,
+   components can edit the cached part of the conversation.
+2. **Are tool, MCP-server and skill names metadata?** They are ids, but the user chooses them.
+3. **Are content hashes metadata?** They are short SHA-256 values with no secret salt. A person who
+   can read the Store can check if Context Guru saw a guessed text. A secret salt stops that.
+4. **Is a session id from the client metadata?** It can contain a user or account id.
+
+## Keep this page right
+
+[`CLAUDE.md`](https://github.com/rossoctl/context-guru/blob/main/CLAUDE.md) holds the rule, under
+"Hard boundaries". The PR template asks for it.
+
+- Every PR that adds or changes a component or feature states its data dependence at each level.
+  It also adds or edits the row file, and then runs `go run ./cmd/gen-datadep` (see
+  [How to add or change a row](#how-to-add-or-change-a-row)).
+- A PR that changes a row's **Kind** or a level column, in either direction, says so at the top.
+  The person in "Decided by" confirms it before merge.
+- Write the reason in plain words: **why** the component needs the data. A file name or line
+  number is not a reason, and the test rejects it.
+
+## How to add or change a row
+
+This page is **generated**. Do not edit `docs/data-dependence.md` by hand.
+
+1. Add or edit one file: `docs/data-dependence/components/<name>.md` for a pipeline component
+   (the file name is the component name), or `docs/data-dependence/features/<slug>.md` for a
+   feature. Copy a file that is next to it.
+2. A row file has a front matter and a body. The front matter is `key: value`, one line for each
+   key. It is not YAML. The body is the **Reason**, in plain words.
+   - Component keys: `name`, `kind`, `where`, `off`, `metadata_only`, `everything`, `decided_by`.
+   - Feature keys: `name`, `kind`, `off`, `metadata_only`, `everything`.
+   - `order` (optional) is a number. Rows sort by `order`, then by file name. Without it, a row
+     goes to the end, in file name order.
+3. Run `go run ./cmd/gen-datadep` from the repo root. Commit the row file **and** this page.
+4. `internal/datadep` has a test that fails when this page is not what the generator makes.
+5. **A conflict in this page** after a merge or a rebase: take either side, and run
+   `go run ./cmd/gen-datadep` again. Do not resolve it by hand. The row files do not conflict
+   when two PRs touch different rows.
+
+The text of this page outside the two tables is in `docs/data-dependence/page.md.tmpl`. Edit that
+file for it, and run the generator.
+
+## Technical notes: what each switch turns off
+
+| Switch | Default | Turns off | Does not turn off |
+|---|---|---|---|
+| `store.enabled` (YAML) | on | The Store: originals, frozen decisions, saved model results, billed-token and cache-time records. Context Guru stops offering the `expand` tool. | The observe-mode store, the body stash, keep-alive bodies and credentials, component caches in memory, the dashboard |
+| `--store` / `STORE` | follows YAML | Overrides the operator's `store.enabled` | In hosted mode, each account's own `store.enabled` |
+| `--dashboard` / `DASHBOARD` | off (the plugin turns it on) | The dashboard database and its in-memory memos. Keep-alive also stops keeping bodies. | The body stash, the Store |
+| `--dashboard-content` / `DASHBOARD_CONTENT` | off | New writes of `request_content`, extraction-call text and `declaration_text` | Tool, MCP-server and skill names; `extraction_calls.rejection`; `request_components.err`; rows already written; keep-alive; the body stash; the memos |
+| Account consent `capture_content` (hosted) | **on** for a new account | The same as `--dashboard-content`, for one account. Both must be on. | The same as the row above. Turning it off deletes nothing. |
+| `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `declaration_text`, `tenant_spend`, `archived_sessions` |
+| `--archive-remote` | off | Upload of old sessions to remote storage | — |
+| `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, the held credential, and pings | Manager strategies and per-session overrides can turn it on again |
+| `CONTEXT_GURU_KEEPALIVE=off` | unset | All keep-alive, everywhere | — |
+| `INJECT_EXPAND` | `auto` | The `expand` tool offer | Storing the originals |
+| `CONTEXT_GURU_DUMP`, `CONTEXT_GURU_CAPTURE` | unset | (opt-in) Writes before/after text or whole request bodies to a file, with no redaction. Context Guru refuses them in hosted mode. | — |
+| `CG_LOG_LEVEL=debug` | `info` | (opt-in) Logs the first 160 characters of each tool output | — |
+
+The **body stash** keeps the last request body of each thread, for a cheap question to the model
+(see [Features outside the pipeline](#features-outside-the-pipeline)). **No switch** turns it off.

@@ -3,6 +3,7 @@ package proxy
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rossoctl/accountant"
@@ -19,10 +20,27 @@ const pingStoreMax = 4096
 type PingStore struct {
 	mu sync.Mutex
 	m  map[string]accountant.PingFacts
+	// priced counts the pings PingSavings priced (it returned ok), manual ones too.
+	priced atomic.Int64
 }
 
 // NewPingStore returns an empty store holding at most pingStoreMax threads.
 func NewPingStore() *PingStore { return &PingStore{m: map[string]accountant.PingFacts{}} }
+
+// notePriced counts one priced ping. Nil-safe.
+func (s *PingStore) notePriced() {
+	if s != nil {
+		s.priced.Add(1)
+	}
+}
+
+// Priced is how many pings PingSavings priced. Nil-safe: a host with no store reads 0.
+func (s *PingStore) Priced() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.priced.Load()
+}
 
 // put keeps the latest facts for key; a second ping overwrites the first. When the store is full
 // and key is new, an arbitrary other entry is evicted (map order), which only costs the evicted
@@ -118,6 +136,7 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (res accountant.Re
 	}
 	ops, facts := pingOps(pingFromReport(r), accountant.Billing{Mode: accountant.BillingAPI})
 	res = accountantStandalone(ops)
+	st.notePriced()
 	if !r.Manual {
 		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
 	}

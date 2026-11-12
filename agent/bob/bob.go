@@ -31,3 +31,9 @@ func (Bob) Paths() []string { return []string{ModelPath} }
 // SessionID is the Bob IDE's task id. The IDE sends it only in the X-Task-Id header, not in the
 // body. Bob Shell sends metadata.taskId in the body, which the host reads before this.
 func (Bob) SessionID(h http.Header) string { return h.Get("X-Task-Id") }
+
+// ModelTarget sends the host's own calls to Bob's model path: Bob serves chat on no other path.
+// Bob takes the key as `Authorization: Apikey <key>`, the way the Bob client sends it.
+func (Bob) ModelTarget() agent.ModelTarget {
+	return agent.ModelTarget{Path: ModelPath, AuthScheme: "Apikey"}
+}

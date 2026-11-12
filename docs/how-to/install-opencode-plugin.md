@@ -8,7 +8,7 @@ It is project-safe, reversible, and does not add an API key.
 ## You need
 
 - OpenCode 1.19.5. Other versions are not tested.
-- Proxy v0.7.1 or later. The plugin downloads v0.7.2, or uses the `context-guru-proxy` on your `PATH`.
+- Proxy v0.7.1 or later. The plugin downloads v0.7.3, or uses the `context-guru-proxy` on your `PATH`.
 - macOS or Linux.
 
 ## Install
@@ -33,7 +33,7 @@ entry in that project's `opencode.json`.
 
 Restart OpenCode after changing the config. On the first startup, the plugin:
 
-1. Reuses `context-guru-proxy` from `PATH`, or downloads release **v0.7.2** and verifies its SHA-256 checksum. Set `CONTEXT_GURU_VERSION` to pick another release.
+1. Reuses `context-guru-proxy` from `PATH`, or downloads release **v0.7.3** and verifies its SHA-256 checksum. Set `CONTEXT_GURU_VERSION` to pick another release.
 2. Starts one loopback proxy for the project, using a free port beginning at `8787`.
 3. Routes Anthropic requests to `/anthropic/v1` and OpenAI requests to `/openai/v1`.
 4. Preserves any configured provider gateway host and path prefix as the proxy's upstream, avoiding a duplicate trailing `/v1`.

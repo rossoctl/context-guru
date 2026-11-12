@@ -71,9 +71,9 @@ exit 0
 
 
 class FakeProxy:
-    """A local HTTP server in a thread: /healthz, /api/requests, /signal."""
+    """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats when given."""
 
-    def __init__(self, last_bob_ts_ms=None):
+    def __init__(self, last_bob_ts_ms=None, stats=None):
         self.signals = []
         self.paths = []
         owner = self
@@ -91,6 +91,8 @@ class FakeProxy:
                                                               "agent": "bob"}]
                     body = json.dumps({"requests": rows, "next_cursor": 0,
                                        "total": len(rows)}).encode()
+                elif self.path == "/stats" and stats is not None:
+                    body = json.dumps(stats).encode()
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -561,6 +563,12 @@ class SetupTest(TempHome):
         self.assertIn(f"rc_file={self.rc}", out)
         self.assertIn(f"settings={self.home / '.bob/settings/settings.json'}", out)
         self.assertIn("consent_question=", out)
+        self.assertIn("preset=bob-ultrahigh\n", out)
+        self.assertIn("preset_effects=", out)
+        question = out.split("consent_question=")[1]
+        for words in ("stores content on this Mac", "your own Bob key", "flat prices",
+                      "configure --preset lossless"):
+            self.assertIn(words, question)
         self.assertIn("log in to Bob once", out)
         self.assertEqual(self.tree(), before)
         self.assertEqual(self.launchctl_calls(), [])
@@ -676,7 +684,7 @@ class SetupTest(TempHome):
             "--config", str(state / f"bob-{proxy.port}.yaml")])
         self.assertNotIn("--idle-exit", plist["ProgramArguments"])
         self.assertEqual((state / f"bob-{proxy.port}.yaml").read_text(),
-                         PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n")
+                         PLUGIN.CONFIG_MARKER + "\n" + PLUGIN.BOB_PRESETS["bob-ultrahigh"])
         self.assertEqual(self.rc.read_bytes(),
                          b"alias g=git\n" + ROUTE.block(proxy.port))
         self.assertTrue(HOOKS.is_installed(self.home / ".bob/settings/settings.json"))
@@ -783,6 +791,26 @@ class LoopbackNeverUsesTheUserProxyTest(TempHome):
         self.assertIn("/api/requests?limit=1&agent=bob", proxy.paths)
         self.assert_nothing_reached_the_user_proxy()
 
+    def test_the_tool_defer_counts_reach_the_local_proxy_directly(self):
+        import time
+        stats = {"tool_defer": {"requests": 12}}
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000) - 60_000, stats=stats) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("tool_defer_requests=12", out)
+        self.assert_nothing_reached_the_user_proxy()
+
+    def test_no_call_to_127_0_0_1_uses_plain_urlopen(self):
+        # A new local call written with urllib.request.urlopen would read HTTP_PROXY again.
+        source = (HERE / "bob_plugin.py").read_text()
+        for number, line in enumerate(source.splitlines(), 1):
+            if "urllib.request.urlopen(" in line:
+                self.assertNotIn("127.0.0.1", line, f"bob_plugin.py:{number}: use LOOPBACK.open")
+        self.assertEqual(source.count("urllib.request.urlopen("), 2,
+                         "only the 2 GitHub downloads may use the user's proxy")
+
     def test_signal_reaches_the_local_proxy_directly(self):
         payload = {"session_id": "task-123", "hook_event_name": "SessionStart", "source": "compact"}
         with FakeProxy() as proxy:
@@ -828,6 +856,36 @@ class StatusTest(TempHome):
         code, out, _ = self.run_main("status")
         self.assertEqual(code, 1)
         self.assertIn("result=not_installed", out)
+
+    def test_status_shows_the_tool_defer_counts_from_stats(self):
+        import time
+        stats = {"tool_defer": {"requests": 12, "ledger": {"deferred_tokens": 34567},
+                                "add_backs": 2, "wrong_guesses": 1, "turned_off": 0,
+                                "client_search_disabled": {"unknown_description": 0, "break": 0}}}
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), stats=stats) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("/stats", proxy.paths)
+        for line in ("tool_defer_requests=12", "tool_defer_deferred_tokens=34567",
+                     "tool_defer_add_backs=2", "tool_defer_wrong_guesses=1",
+                     "tool_defer_turned_off=0", "tool_defer_break=0"):
+            self.assertIn(line + "\n", out)
+
+    def test_status_omits_tool_defer_counts_the_proxy_does_not_report(self):
+        import time
+        for stats in (None, {}, {"tool_defer": {"requests": 3}}):
+            with self.subTest(stats=stats):
+                with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), stats=stats) as proxy:
+                    ROUTE.install(self.rc, proxy.port)
+                    self.write_record(proxy.port, rc_file=str(self.rc))
+                    code, out, _ = self.run_main("status")
+                self.assertEqual(code, 0, out)
+                self.assertIn("result=ok\n", out)
+                shown = sorted(line for line in out.splitlines() if line.startswith("tool_defer_"))
+                self.assertEqual(shown, ["tool_defer_requests=3"] if stats and stats.get("tool_defer")
+                                 else [])
 
 
 class HookHandlerTest(TempHome):
@@ -976,6 +1034,17 @@ class UninstallTest(TempHome):
         self.assertFalse(PLUGIN.record_path().exists())
         self.assertFalse((PLUGIN.state_dir() / f"bob-{proxy.port}.yaml").exists())
 
+    def test_uninstall_removes_the_price_copy_of_bob_ultrahigh(self):
+        with FakeProxy() as proxy:
+            self.install(proxy)
+            self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+            prices = PLUGIN.proxy_prices(proxy.port)
+            self.assertTrue(prices.exists())
+            code, out, _ = self.run_main("uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=removed", out)
+        self.assertFalse(prices.exists())
+
     def test_uninstall_purge_removes_the_state_folder(self):
         with FakeProxy() as proxy:
             self.install(proxy)
@@ -1049,6 +1118,16 @@ class ResetScriptTest(TempHome):
             done = self.reset("--yes")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(config.exists())
+
+    def test_reset_removes_the_price_copy_of_bob_ultrahigh(self):
+        with FakeProxy() as proxy:
+            self.install(proxy, b"x\n", b"{}\n")
+            self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+            prices = PLUGIN.proxy_prices(proxy.port)
+            self.assertTrue(prices.exists())
+            done = self.reset("--yes")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(prices.exists())
 
     def test_reset_removes_a_legacy_block(self):
         with FakeProxy() as proxy:
