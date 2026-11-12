@@ -33,6 +33,7 @@ import (
 type Disk struct {
 	db        *sql.DB
 	metaOnly  bool
+	hosted    bool
 	retention time.Duration
 	now       func() time.Time
 
@@ -70,6 +71,11 @@ type DiskOptions struct {
 	// MetadataOnly keeps content keys (summary text, results, freeze decisions, held answers) off
 	// the disk. Only the metadata keys are written.
 	MetadataOnly bool
+	// Hosted is the shared table of a multi-tenant proxy (#1104). It is always metadata-only, and
+	// it refuses the namespaces with no session id in the key (globalPrefixes): their rows are
+	// keyed by a content hash, so two tenants would share one row, and a tenant purge could not
+	// find it. Those keys stay in memory, per tenant, as before.
+	Hosted bool
 	// Retention is how long a row lives after its last write. Zero => DefaultDiskRetention.
 	Retention time.Duration
 	// FlushEvery is how often pending writes go to the file. Zero => 1 s.
@@ -110,6 +116,9 @@ func hasAnyPrefix(key string, ps []string) bool {
 func isStateKey(key string) bool { return hasAnyPrefix(key, StatePrefixes) }
 
 func (d *Disk) allowed(key string) bool {
+	if d.hosted && hasAnyPrefix(key, globalPrefixes) {
+		return false
+	}
 	if d.metaOnly {
 		return hasAnyPrefix(key, metadataPrefixes)
 	}
@@ -153,7 +162,7 @@ func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
 		fe = defaultFlushEvery
 	}
 	d := &Disk{
-		db: db, metaOnly: o.MetadataOnly, retention: ret, now: time.Now,
+		db: db, metaOnly: o.MetadataOnly || o.Hosted, hosted: o.Hosted, retention: ret, now: time.Now,
 		pending: map[string]pendingRow{}, flushEvery: fe,
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}

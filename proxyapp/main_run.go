@@ -1668,10 +1668,10 @@ func accountantStatePath(dashDB string, dashboard bool) string {
 
 // openHostedSessionState opens the session-state table for a hosted proxy (#1104). It is ALWAYS
 // metadata-only, whatever --session-state-metadata-only says: a tenant's summary text and other
-// content keys must never reach the file. It returns nil, after a warning, when the table is
+// content keys must never reach the file. It also refuses the keys that carry no session id (cg:swx:, cg:xres:): tenants would share a row. It returns nil, after a warning, when the table is
 // unusable; hosted state then stays in memory.
 func openHostedSessionState(db *sql.DB, retention time.Duration) *store.Disk {
-	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, Retention: retention})
+	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, Hosted: true, Retention: retention})
 	if err != nil {
 		slog.Warn("context-guru: session state table unusable; hosted state stays in memory only", "err", err)
 		return nil
