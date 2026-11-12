@@ -67,11 +67,13 @@ export function fiveHourWeights(x: unknown): FiveHourWeights | undefined {
   return { read, write5m, write1h, learned5m, learned1h, requests: num(f.requests) ?? 0 }
 }
 
-/** The write weight for this entry: the tier the proxy uses for it (ttl_s 3600 is the 1-hour tier, 300 the 5-minute
- * one) when the fit has a weight for that tier; otherwise the tier the fit learned (5-minute when it learned both). */
+/** The LEARNED write weight for this entry's tier (ttl_s 3600 is the 1-hour tier, 300 the 5-minute one), or undefined
+ * when the fit did not learn that tier. A weight the fit did not learn is the API price scaled to the account's spend,
+ * a guess, so the band does not show it as a share (owner's decision, David Amid, #1135, 2026-11-12). With the tier
+ * unknown: the tier the fit learned (5-minute when it learned both). */
 function writeWeight(w: FiveHourWeights, tier: '5m' | '1h' | undefined): number | undefined {
-  if (tier === '1h' && w.write1h !== undefined) return w.write1h
-  if (tier === '5m' && w.write5m !== undefined) return w.write5m
+  if (tier === '1h') return w.learned1h ? w.write1h : undefined
+  if (tier === '5m') return w.learned5m ? w.write5m : undefined
   return w.learned5m ? w.write5m : w.write1h
 }
 
@@ -93,7 +95,7 @@ export function sharePct(pct: number): string {
  *   are the same prefix, so a `rd · wr if cold` pair says nothing about the cost (#1095). */
 export type NextPrice =
   | { kind: 'usd'; warm?: string; cold?: string }
-  | { kind: 'share'; warm?: string; cold?: string }
+  | { kind: 'share'; warm?: string; cold?: string; coldIsTokens: boolean }
   | { kind: 'tokens'; now?: string; color: 'success' | 'warning' }
 
 export function nextPrice(m: ThreadView, isSubscription: boolean, weights?: FiveHourWeights): NextPrice {
@@ -103,12 +105,12 @@ export function nextPrice(m: ThreadView, isSubscription: boolean, weights?: Five
   if (n === undefined || n < 1) return { kind: 'tokens', color }
   // The proxy priced this state (as before): without its price there is no figure.
   if (weights) {
+    // The cold figure stays in tokens (`90.0k wr`, `coldIsTokens`) when the fit did not learn this tier's write weight.
     const ww = writeWeight(weights, m.writeTier)
-    return {
-      kind: 'share',
-      warm: m.warmUsd === undefined ? undefined : sharePct(100 * n * weights.read),
-      cold: m.coldUsd === undefined || ww === undefined ? undefined : sharePct(100 * n * ww),
-    }
+    const warm = m.warmUsd === undefined ? undefined : sharePct(100 * n * weights.read)
+    const cold = m.coldUsd === undefined ? undefined : ww === undefined ? `${tokens(n)} wr` : sharePct(100 * n * ww)
+    // With no price for either state there is no share: fall through to the one token figure (or `unknown`).
+    if (warm !== undefined || cold !== undefined) return { kind: 'share', warm, cold, coldIsTokens: ww === undefined }
   }
   const priced = m.isWarm ? m.warmUsd !== undefined : m.coldUsd !== undefined
   if (!priced) return { kind: 'tokens', color }

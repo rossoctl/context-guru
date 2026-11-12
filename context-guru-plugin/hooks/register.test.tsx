@@ -430,7 +430,8 @@ for (const cols of [140, 60]) {
 
 test('on a subscription with learned weights row 1 fits 60 columns with the longest next-ping hint', async ($, on) => {
   usage = FIVE_HOUR
-  docOverride = withWeights(WEIGHTS, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
+  // The 1-hour tier, with its write weight learned, so the cold figure is a share too (the longest form).
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_1h: true } }, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
   await boot($, on, true)
   usage = docOverride = null
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
@@ -441,13 +442,27 @@ test('on a subscription with learned weights row 1 fits 60 columns with the long
   await ui.unmount()
 })
 
-test('the cold share uses the write tier of the entry: the 1-hour weight on a 1-hour entry, the learned one when unknown', async ($, on) => {
+test('the cold share uses only a learned write weight for the entry tier, and the learned one when the tier is unknown', async ($, on) => {
   usage = FIVE_HOUR
+  // A 1-hour entry, and the fit did not learn the 1-hour write: the cold figure stays in tokens, the warm one is a share.
   docOverride = withWeights(WEIGHTS, { ttl_s: 3600 })
   await boot($, on, true)
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
-  expect((await dump(ui)).split('\n')[0]).toMatch(/≈0\.1% of 5h · ≈2\.7% if cold/) // 90k × 3e-7: the 1-hour weight, though not learned
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/≈0\.1% of 5h · 90\.0k wr if cold/)
+  expect(row1).not.toMatch(/≈2\.7%|wr of 5h/) // 90k × 3e-7 is the scaled API price, not learned: never shown
   await ui.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/if it is cold +90\.0k wr  \(90k tokens cached\)/)
+  expect(text).not.toMatch(/wr of 5h/)
+  await pane.unmount()
+  // A 1-hour entry, and the fit learned the 1-hour write: that weight.
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_1h: true } }, { ttl_s: 3600 })
+  await clock.advance(16_000)
+  const ui1 = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui1)).split('\n')[0]).toMatch(/≈0\.1% of 5h · ≈2\.7% if cold/)
+  await ui1.unmount()
   // No tier on the entry (then no clock either: the band draws it cold), and the fit learned only the 1-hour write: that one.
   docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_5m: false, cache_write_1h: true } }, { ttl_s: undefined })
   await clock.advance(16_000)
@@ -455,6 +470,20 @@ test('the cold share uses the write tier of the entry: the 1-hour weight on a 1-
   const ui2 = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
   expect((await dump(ui2)).split('\n')[0]).toMatch(/next message ≈2\.7% of 5h/)
   await ui2.unmount()
+})
+
+test('with learned weights but no price for either state the pane shows one unknown line, not two', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, next_cold_usd, rewrite_usd, ...rest } = t; return rest }
+  const w = withWeights(WEIGHTS)
+  docOverride = d => { const x = w(d); return { ...drop(x), threads: x.threads?.map((t: any) => (t.main ? drop(t) : t)) } }
+  await boot($, on, true)
+  usage = docOverride = null
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/NEXT MESSAGE\nnext message unknown\n/)
+  expect(text).not.toMatch(/if the cache is warm|if it is cold/)
+  await pane.unmount()
 })
 
 test('a tiny share reads <0.1%, and a large one has no decimals', async ($, on) => {

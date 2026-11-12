@@ -337,6 +337,8 @@ export const register: Register = on => {
     // The share's unit. Below 80 columns it moves in front (`next 5h ≈0.1% · ≈1.5% cold`), so row 1 still fits 60
     // columns with the longest next-ping hint.
     const isShare = price.kind === 'share'
+    // A cold figure left in tokens (the fit did not learn that write tier) carries no `of 5h`.
+    const coldShare = price.kind === 'share' && !price.coldIsTokens
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -354,7 +356,7 @@ export const register: Register = on => {
               <Text dimColor>{narrow ? (isShare ? 'next 5h ' : 'next ') : 'next message '}</Text>
               {warm !== undefined && <Text color={warmColor}>{warm}</Text>}
               {warm !== undefined && isShare && !narrow && <Text dimColor> of 5h</Text>}
-              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{isShare && !narrow && warm === undefined ? ' of 5h' : ''}{narrow ? ' cold' : ' if cold'}</Text>}
+              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{coldShare && !narrow && warm === undefined ? ' of 5h' : ''}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
           {!m.isWarm && (
@@ -362,7 +364,7 @@ export const register: Register = on => {
               <Text dimColor>○ cache cold</Text>
               {cold !== undefined && <Text dimColor> · next message </Text>}
               {cold !== undefined && <Text color={coldColor}>{cold}</Text>}
-              {cold !== undefined && isShare && <Text dimColor> of 5h</Text>}
+              {cold !== undefined && coldShare && <Text dimColor> of 5h</Text>}
             </Text>
           )}
           {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
@@ -507,6 +509,7 @@ export const register: Register = on => {
     const next = nextPrice(m, (await read($, context))?.fiveHour !== undefined, v.weights)
     // The share carries its unit; the dollars do not need one.
     const unit = next.kind === 'share' ? ' of 5h' : ''
+    const coldUnit = next.kind === 'share' && !next.coldIsTokens ? ' of 5h' : ''
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -534,7 +537,7 @@ export const register: Register = on => {
             <Text>
               <Text dimColor>if it is cold      </Text>
               {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
-              {next.cold !== undefined && unit !== '' && <Text dimColor>{unit}</Text>}
+              {next.cold !== undefined && coldUnit !== '' && <Text dimColor>{coldUnit}</Text>}
               {m.tokens !== undefined && (
                 // At 60 columns the share's line has room for the short words only.
                 <Text dimColor>{next.kind === 'share' ? `  (${Math.round(m.tokens / 1000)}k tokens cached)` : `  (${Math.round(m.tokens / 1000)}k tokens in the cached prefix)`}</Text>
