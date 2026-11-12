@@ -130,8 +130,9 @@ Dock.
 
 The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Bob bills in
 Bobcoins, not dollars. With `bob-ultrahigh`, the dashboard's and the status bar's Bob cost figures are
-Bobcoins (2.0 per million tokens, see below), even where they show a `$` sign. With another preset,
-the proxy does not price Bob.
+Bobcoins (2.0 per million tokens, see below). The dashboard shows them as Bobcoins. The Bob status
+bar shows Bobcoins with a proxy that sends `currency`. With another preset, the proxy does not price
+Bob.
 
 ## Presets
 
@@ -163,10 +164,10 @@ It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`), **in Bo
 dollars**: 2.0 Bobcoins per million tokens for fresh input, a cache read, a cache write and output
 alike. That is the rate IBM's own per-call credits show. The sweep's cost gate needs the flat rate.
 Without it, the gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. So with
-this preset the dashboard's and the status bar's Bob cost figures are Bobcoins, even where they
-still show a `$` sign. Leaving the preset, `uninstall` and the reset script remove the prices.
+this preset the dashboard's and the status bar's Bob cost figures are Bobcoins. The file says
+`currency: Bobcoins`, so the proxy sends that unit and the dashboard shows Bobcoins. Leaving the preset, `uninstall` and the reset script remove the prices.
 
-It needs context-guru-proxy v0.7.2 or newer. On an older release, `configure` refuses it and says
+It needs context-guru-proxy v0.7.4 or newer. On an older release, `configure` refuses it and says
 to update first.
 
 The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut
