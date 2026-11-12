@@ -272,6 +272,8 @@ func checkIdleExit(d time.Duration, upstreamsPath, bobUpstream string, o store.O
 	} else if err := store.ValidateIdleExit(d, o); err != nil {
 		return err
 	}
+	// Bob does not run on hosted for now (owner decision, 2026-11-12). So the --bob-upstream part of
+	// this rule also hits local Bob. The rule is kept for the "/" catch-all reason below.
 	if d > 0 && (upstreamsPath != "" || bobUpstream != "") {
 		// A self-terminating GATEWAY is a different kind of wrong: --upstreams means this
 		// process serves other people's agents, where "the proxy vanished overnight" is far
