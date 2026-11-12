@@ -125,6 +125,7 @@ nav:
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md
       - Pi package and Claude Code plugin compared: reference/pi-vs-claude-code.md
+      - Plugins, providers and settings: reference/plugins-matrix.md
       - Test a subscription login in a sandbox: how-to/test-subscription-sandbox.md
       - How it saves money: get-started/how-it-saves.md
       - Technical overview: get-started/overview.md
@@ -157,6 +158,7 @@ nav:
       - Sync & observe: how-to/operating-modes.md
       - Config & routes reference: reference/reference.md
       - Session recorder (cg_record build): reference/session-recorder.md
+      - 'Hosted and local: where they differ, and why': reference/hosted-vs-local.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
   - "The dashboard, tab by tab": how-to/dashboard-guide.md

@@ -9,18 +9,19 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite" // the host (the dashboard) brings the driver; the tests stand in for it
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 )
 
 // hostDB stands in for the dashboard's handle: a pool on a file the test owns.
 func hostDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return testdb.Open(t, path)
+}
+
+// brokenDB is hostDB for a file that is broken on purpose: it does not check the file.
+func brokenDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	return testdb.OpenUnchecked(t, path)
 }
 
 func newDiskStore(t *testing.T, path string, o DiskOptions, opt Options) (*Memory, *Disk) {
@@ -297,7 +298,7 @@ func TestDiskFailsOpen(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("this is not sqlite, it is a long enough text to fill a header....................................."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(hostDB(t, bad), DiskOptions{}); err == nil {
+	if d, err := OpenDisk(brokenDB(t, bad), DiskOptions{}); err == nil {
 		// The driver may open lazily; then every operation must fail soft.
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
@@ -310,7 +311,7 @@ func TestDiskFailsOpen(t *testing.T) {
 		d.Close()
 	}
 	// A directory that does not exist.
-	if _, err := OpenDisk(hostDB(t, filepath.Join(dir, "no", "such", "dir", "s.db")), DiskOptions{}); err == nil {
+	if _, err := OpenDisk(brokenDB(t, filepath.Join(dir, "no", "such", "dir", "s.db")), DiskOptions{}); err == nil {
 		t.Fatal("expected an error for an unwritable path")
 	}
 	// A database closed under the store.
@@ -342,7 +343,7 @@ func TestDiskReadOnlyFile(t *testing.T) {
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(hostDB(t, path), DiskOptions{}); err == nil {
+	if d, err := OpenDisk(brokenDB(t, path), DiskOptions{}); err == nil {
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
 		m.Put(SumPrefix+"t", []byte("y"))

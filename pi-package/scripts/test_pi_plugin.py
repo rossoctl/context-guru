@@ -23,8 +23,26 @@ import models_route  # noqa: E402
 import pi_plugin  # noqa: E402
 
 
+def _row(name, providers, spends=True, desc=None):
+    return {"name": name, "providers": providers, "spends": spends, "desc": desc or f"text of {name}", "cache": {}}
+
+
+# What the proxy prints for `strategies` once the tag fix for #1062 is in. Pi keeps no table of its own.
+FAKE_TABLE = {
+    "default": "auto", "aliases": {"5-min-ping": "auto"}, "presets": list(pi_plugin.PRESETS),
+    "strategies": [_row("none", ["any"], False), _row("auto", ["anthropic", "openai"]),
+                   _row("1-ping", ["anthropic", "openai"]), _row("2-ping", ["anthropic", "openai"]),
+                   _row("1-hour-head", ["anthropic"], False), _row("30-min-ping", ["openai"])],
+}
+
+
 class Sandbox(unittest.TestCase):
     def setUp(self):
+        # The proxy answers `strategies` and is a v0.7.1 release, unless a test says otherwise.
+        self.table = mock.patch.object(pi_plugin, "load_strategy_table", side_effect=lambda binary: FAKE_TABLE)
+        self.table.start()
+        self.state_of_version = mock.patch.object(pi_plugin, "proxy_version_state", return_value="named")
+        self.state_of_version.start()
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.env = mock.patch.dict(os.environ, {
@@ -35,6 +53,8 @@ class Sandbox(unittest.TestCase):
         self.state = root / "state/context-guru-pi/routing.json"
 
     def tearDown(self):
+        self.state_of_version.stop()
+        self.table.stop()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -195,13 +215,23 @@ class Controller(Sandbox):
         self.assertFalse(pi_plugin.state_dir().exists())
 
     def test_the_one_question_names_both_providers_and_what_spends_quota(self):
-        _, facts = self.run_main("setup", "--plan")
+        # A proxy binary that answers, so the test does not depend on one being installed on this machine.
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/proxy"):
+            _, facts = self.run_main("setup", "--plan")
         question = facts["consent_question"]
         self.assertIn("Anthropic and OpenAI", question)
         self.assertIn("/anthropic, forwarding to api.anthropic.com", question)
         self.assertIn("/openai/v1, forwarding to api.openai.com", question)
-        self.assertIn("after 4 minutes idle", question)
-        self.assertIn("after 28 minutes idle", question)
+        # The strategy text is the proxy's, word for word. Pi has no copy of it.
+        self.assertIn("quota", question)
+        self.assertIn("What it does, from the proxy: text of auto", question)
+        self.assertNotIn("4 minutes", question)
+
+    def test_plan_with_no_proxy_binary_has_no_empty_text(self):
+        with mock.patch.object(pi_plugin, "find_binary", return_value=None):
+            _, facts = self.run_main("setup", "--plan")
+        self.assertIn("quota", facts["consent_question"])
+        self.assertNotIn("from the proxy", facts["consent_question"])
 
     def test_plan_with_strategy_none_does_not_mention_spend(self):
         _, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
@@ -327,8 +357,9 @@ class Controller(Sandbox):
         text = pi_plugin.render_config("medium", "auto")
         self.assertTrue(text.startswith(pi_plugin.MARKER + "\n"))
         self.assertIn("preset: medium\n", text)
-        self.assertIn("  keepalive: true\n", text)
-        self.assertIn("  keepalive_max_usd_per_ping: 0.5\n", text)
+        self.assertIn("preset: medium\ncache:\n  strategy: auto\n", text.replace(
+            "# The proxy fills the cache keys of this strategy from its own table.\n", ""))
+        self.assertNotIn("keepalive", text)
         self.assertNotIn("cache:", pi_plugin.render_config("off", "none"))
 
     def test_config_refuses_a_file_it_did_not_write(self):
@@ -475,13 +506,20 @@ class Restart(Sandbox):
         self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
         self.assertEqual(facts["port"], "8800")
 
-    def write_config(self, strategy="auto", by_name=False):
+    LITERAL = (pi_plugin.MARKER + "\n# strategy=auto.\npreset: high\ncache:\n  keepalive: true\n"
+               "  keepalive_max_pings: 2\n")
+
+    def write_config(self, strategy="auto", literal=False):
         pi_plugin.write_record({"port": 8800, "preset": "high", "cache_strategy": strategy, "binary": "/bin/proxy"})
-        pi_plugin.write_proxy_config("high", strategy, None, by_name)
+        if literal:  # what an older package wrote: the keys, not the name
+            pi_plugin.proxy_config().parent.mkdir(parents=True, exist_ok=True)
+            pi_plugin.proxy_config().write_text(self.LITERAL)
+        else:
+            pi_plugin.write_proxy_config("high", strategy)
 
     def test_an_old_literal_config_is_re_rendered_by_name_before_the_restart(self):
         self.our_unit()
-        self.write_config()
+        self.write_config(literal=True)
         self.assertIn("keepalive_max_pings: 2", pi_plugin.proxy_config().read_text())
         with mock.patch.object(pi_plugin, "names_strategies", return_value=True) as supports:
             code, facts = self.restart("systemd", [False, True])
@@ -495,18 +533,28 @@ class Restart(Sandbox):
         self.assertNotIn("keepalive", text)
         self.assertEqual(self.calls, [["systemctl", "--user", "restart", "context-guru-pi.service"]])
 
-    def test_an_old_binary_keeps_the_literal_keys_and_a_second_restart_changes_nothing(self):
+    def test_an_old_binary_keeps_the_file_as_it_is_and_the_restart_goes_on(self):
+        """A proxy before v0.7.1 refuses the `strategy` key, so the file is never rewritten for it."""
         self.our_unit()
-        self.write_config(strategy="2-ping", by_name=True)
+        self.write_config(literal=True)
         with mock.patch.object(pi_plugin, "names_strategies", return_value=False):
-            _, first = self.restart("systemd", [False, True])
-            self.assertIn("  keepalive_max_pings_1h: 2\n", pi_plugin.proxy_config().read_text())
+            code, first = self.restart("systemd", [False, True])
             _, second = self.restart("systemd", [False, True])
-        self.assertEqual((first["config"], second["config"]), ("rendered", "unchanged"))
+        self.assertEqual((code, first["result"], first["config"], second["config"]), (0, "up", "old_proxy", "old_proxy"))
+        self.assertEqual(pi_plugin.proxy_config().read_text(), self.LITERAL)
+
+    def test_none_is_written_on_any_binary(self):
+        self.our_unit()
+        self.write_config(strategy="none")
+        pi_plugin.proxy_config().write_text(self.LITERAL)
+        with mock.patch.object(pi_plugin, "names_strategies", return_value=False):
+            _, facts = self.restart("systemd", [False, True])
+        self.assertEqual(facts["config"], "rendered")
+        self.assertNotIn("cache:", pi_plugin.proxy_config().read_text())
 
     def test_a_proxy_that_answers_gets_the_new_file_and_no_restart(self):
         self.our_plist()
-        self.write_config()
+        self.write_config(literal=True)
         with mock.patch.object(pi_plugin, "names_strategies", return_value=True):
             code, facts = self.restart("launchd", lambda port, timeout=1: True)
         self.assertEqual((code, facts["result"], facts["config"]), (0, "already_up", "rendered"))
@@ -525,7 +573,7 @@ class Restart(Sandbox):
 
     def test_restart_asks_find_binary_when_the_record_has_no_binary(self):
         self.our_unit()
-        self.write_config()
+        self.write_config(literal=True)
         record = pi_plugin.read_record()
         del record["binary"]
         pi_plugin.write_record(record)
@@ -543,7 +591,7 @@ class Restart(Sandbox):
 
     def test_a_failed_re_render_does_not_stop_the_restart(self):
         self.our_unit()
-        self.write_config()
+        self.write_config(literal=True)
         before = pi_plugin.proxy_config().read_text()
         with mock.patch.object(pi_plugin, "names_strategies", return_value=True), \
                 mock.patch.object(pi_plugin, "write_proxy_config", side_effect=OSError("disk full")):
@@ -675,25 +723,21 @@ class ConfigByName(Sandbox):
         return str(path)
 
     def test_a_new_binary_gets_the_name_and_no_literal_keys(self):
-        text = pi_plugin.render_config("medium", "auto", by_name=True)
+        text = pi_plugin.render_config("medium", "auto")
         self.assertTrue(text.startswith(pi_plugin.MARKER + "\n# strategy=auto."))
         self.assertIn("preset: medium\ncache:\n  strategy: auto\n", text.replace(
             "# The proxy fills the cache keys of this strategy from its own table.\n", ""))
         self.assertNotIn("keepalive", text)
 
-    def test_an_old_binary_gets_the_literal_keys(self):
-        text = pi_plugin.render_config("medium", "2-ping")
-        self.assertNotIn("strategy:", text)
-        for key, value in pi_plugin.STRATEGIES["2-ping"]["cache"].items():
-            self.assertIn(f"  {key}: {str(value).lower() if isinstance(value, bool) else value}\n", text)
+    def test_pi_keeps_no_copy_of_the_strategy_table(self):
+        self.assertFalse(hasattr(pi_plugin, "STRATEGIES"))
+        self.assertNotIn("keepalive_max_pings", pi_plugin.render_config("medium", "2-ping"))
 
-    def test_none_writes_no_cache_block_on_any_binary(self):
-        self.assertEqual(pi_plugin.render_config("high", "none", by_name=True),
-                         pi_plugin.render_config("high", "none", by_name=False))
-        self.assertNotIn("cache:", pi_plugin.render_config("high", "none", by_name=True))
+    def test_none_writes_no_cache_block(self):
+        self.assertNotIn("cache:", pi_plugin.render_config("high", "none"))
 
     def test_the_upstream_comment_lines_stay_with_the_name(self):
-        text = pi_plugin.render_config("off", "1-ping", {"openai": "https://gw.example/openai"}, by_name=True)
+        text = pi_plugin.render_config("off", "1-ping", {"openai": "https://gw.example/openai"})
         self.assertIn("# chained: openai -> proxy -> https://gw.example/openai (--openai-upstream", text)
         self.assertIn("  strategy: 1-ping\n", text)
 
@@ -702,6 +746,8 @@ class ConfigByName(Sandbox):
                  "context-guru-proxy 0.7.2-rc1 (commit x)": True, "context-guru-proxy 0.7.1-rc1 (commit x)": False,
                  "context-guru-proxy v0.7.1-rc1 (commit x)": False, "context-guru-proxy 0.7.0 (commit x)": False,
                  "context-guru-proxy dev (commit x)": False, "Usage of context-guru-proxy:": False}
+        # The version rule under test, so the suite-wide stub is off.
+        self.state_of_version.stop()
         for output, want in cases.items():
             self.assertEqual(pi_plugin.names_strategies(self.fake_binary(output)), want, output)
         self.assertFalse(pi_plugin.names_strategies(self.fake_binary("flag provided but not defined", 2)))
@@ -731,15 +777,15 @@ class ConfigByName(Sandbox):
         download.assert_not_called()
         self.assertEqual(path.read_text(), "preset: high\n")
 
-    def installed(self, strategy="auto", by_name=False, binary="/bin/proxy"):
+    def installed(self, strategy="auto", binary="/bin/proxy"):
         pi_plugin.write_record({"port": 8800, "preset": "medium", "cache_strategy": strategy, "binary": binary,
                                 "upstreams": {"anthropic": "https://gw.example/anthropic"}})
-        pi_plugin.write_proxy_config("medium", strategy, {"anthropic": "https://gw.example/anthropic"}, by_name)
+        pi_plugin.write_proxy_config("medium", strategy, {"anthropic": "https://gw.example/anthropic"})
 
     def test_an_invalid_record_leaves_the_file_alone(self):
         self.installed()
         before = pi_plugin.proxy_config().read_text()
-        for record in ({"preset": "huge", "cache_strategy": "auto"}, {"preset": "medium", "cache_strategy": "9-ping"}):
+        for record in ({"preset": "huge", "cache_strategy": "auto"}, {"preset": "medium", "cache_strategy": "Not A Name"}):
             with mock.patch.object(pi_plugin, "names_strategies") as supports:
                 self.assertEqual(pi_plugin.rerender_config(record, "/bin/proxy"), "invalid_record")
             supports.assert_not_called()
@@ -785,7 +831,8 @@ class ConfigByName(Sandbox):
         self.assertIn("  strategy: 1-ping\n", pi_plugin.proxy_config().read_text())
 
     def test_update_re_renders_with_the_new_binary_before_the_start(self):
-        self.installed(binary=str(pi_plugin.managed_binary()))  # an old install: literal keys
+        self.installed(binary=str(pi_plugin.managed_binary()))
+        pi_plugin.proxy_config().write_text(Restart.LITERAL)  # an old install: literal keys
         new = str(pi_plugin.managed_binary())
         asked, seen = [], {}
 
@@ -890,6 +937,143 @@ class ConfigByName(Sandbox):
         self.assertEqual((updated[0], updated[1]["result"], updated[1]["reason"]), (1, "error", "busy"))
         self.assertEqual((pi_plugin.record_path().read_text(), pi_plugin.proxy_config().read_text()), before)
         start.assert_not_called()
+
+
+class StrategiesFromTheProxy(Sandbox):
+    """#1062: Pi asks the proxy binary for its strategy table and keeps no copy of it."""
+
+    def setUp(self):
+        super().setUp()
+        self.table.stop()                 # the real probe runs here, against fake binaries
+        self.state_of_version.stop()
+        pi_plugin._TABLES.clear()
+        self.addCleanup(pi_plugin._TABLES.clear)
+        self.count = 0
+
+    def fake(self, body):
+        self.count += 1
+        path = Path(self.tmp.name) / f"proxy{self.count}"
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+        return str(path)
+
+    def printing(self, document):
+        out = Path(self.tmp.name) / f"table{self.count + 1}.json"
+        out.write_text(json.dumps(document))
+        return self.fake(f'[ "$1" = strategies ] || exit 9\ncat {out}\n')
+
+    def test_the_probe_reads_the_table_the_binary_prints(self):
+        table = pi_plugin.load_strategy_table(self.printing(FAKE_TABLE))
+        self.assertEqual([r["name"] for r in table["strategies"]][:2], ["none", "auto"])
+        self.assertEqual(table["aliases"], {"5-min-ping": "auto"})
+
+    def test_the_probe_is_safe_a_scrubbed_env_a_fresh_dir_and_no_dashboard(self):
+        seen = Path(self.tmp.name) / "seen.txt"
+        binary = self.fake(f'{{ echo "cwd=$(pwd)"; echo "listen=$LISTEN_ADDR"; echo "config=[$CONFIG]"; '
+                           f'echo "dashboard=$DASHBOARD"; echo "db=[$DASHBOARD_DB]"; echo "store=[$STORE]"; '
+                           f'echo "state=[$SESSION_STATE_DIR]"; echo "rec=[$CG_RECORD_DIR]"; echo "arch=[$ARCHIVE_DIR]"; '
+                           f'echo "ctl=[$CONTROL_DB]"; echo "ups=[$UPSTREAMS]"; echo "idle=[$IDLE_EXIT]"; '
+                           f'}} > {seen}\nexit 1\n')
+        env = {k: "x" for k in ("DASHBOARD_DB", "STORE", "SESSION_STATE_DIR", "CG_RECORD_DIR", "ARCHIVE_DIR",
+                                "CONTROL_DB", "UPSTREAMS", "IDLE_EXIT")}
+        with mock.patch.dict(os.environ, env), self.assertRaises(pi_plugin.StrategyError):
+            pi_plugin.load_strategy_table(binary)
+        got = dict(line.split("=", 1) for line in seen.read_text().splitlines())
+        self.assertEqual((got["listen"], got["config"], got["dashboard"]), ("127.0.0.1:0", "[]", "0"))
+        for key in ("db", "store", "state", "rec", "arch", "ctl", "ups", "idle"):
+            self.assertEqual(got[key], "[]", key)
+        self.assertTrue(Path(got["cwd"]).name.startswith("cg-strategies-"))
+        self.assertFalse(Path(got["cwd"]).exists(), "the probe directory is removed")
+
+    def test_an_old_binary_that_serves_is_stopped_at_the_time_limit(self):
+        binary = self.fake("exec sleep 30\n")
+        with mock.patch.object(pi_plugin, "STRATEGIES_TIMEOUT", 0.3), self.assertRaises(pi_plugin.StrategyError) as cm:
+            pi_plugin.load_strategy_table(binary)
+        self.assertEqual(cm.exception.reason, "proxy_too_old")
+        self.assertIn("v0.7.1 or later", str(cm.exception))
+
+    def test_bad_output_gives_the_clean_error_not_a_traceback(self):
+        bad = ["not json at all", "[1, 2]", "{}", '{"strategies": []}',
+               json.dumps({**FAKE_TABLE, "aliases": []}), json.dumps({**FAKE_TABLE, "aliases": {"a": 1}}),
+               json.dumps({"strategies": [{"name": "x", "providers": ["any"], "spends": "yes", "desc": "d"}]}),
+               json.dumps({"strategies": [{"name": "x y", "providers": ["any"], "spends": True, "desc": "d"}]}),
+               json.dumps({"strategies": [{"name": "x", "providers": "any", "spends": True, "desc": "d"}]})]
+        for text in bad:
+            pi_plugin._TABLES.clear()
+            out = Path(self.tmp.name) / "bad.txt"
+            out.write_text(text)
+            with self.assertRaises(pi_plugin.StrategyError, msg=text):
+                pi_plugin.load_strategy_table(self.fake(f"cat {out}\n"))
+        with self.assertRaises(pi_plugin.StrategyError):       # bytes that are not UTF-8
+            pi_plugin.load_strategy_table(self.fake("printf '\\377\\376'\n"))
+        with self.assertRaises(pi_plugin.StrategyError):       # a non-zero exit
+            pi_plugin.load_strategy_table(self.fake("echo '{}'\nexit 3\n"))
+        with self.assertRaises(pi_plugin.StrategyError) as cm:
+            pi_plugin.load_strategy_table(None)
+        self.assertEqual(cm.exception.reason, "no_proxy_binary")
+
+    def test_the_offer_is_the_strategies_that_serve_every_provider_pi_routes(self):
+        names = [r["name"] for r in pi_plugin.offered_strategies(FAKE_TABLE)]
+        self.assertEqual(names, ["none", "auto", "1-ping", "2-ping"])
+
+    def test_none_works_with_no_binary_and_no_table(self):
+        self.assertEqual(pi_plugin.resolve_strategy("none", None), ("none", None))
+
+    def test_a_name_is_resolved_through_the_proxy_aliases_and_the_offer(self):
+        binary = self.printing(FAKE_TABLE)
+        with mock.patch.object(pi_plugin, "proxy_version_state", return_value="named"):
+            self.assertEqual(pi_plugin.resolve_strategy("5-min-ping", binary)[0], "auto")
+            self.assertEqual(pi_plugin.resolve_strategy("auto", binary)[1]["desc"], "text of auto")
+            for name in ("1-hour-head", "30-min-ping", "nope"):
+                with self.assertRaises(pi_plugin.StrategyError) as cm:
+                    pi_plugin.resolve_strategy(name, binary)
+                self.assertEqual(cm.exception.reason, "unknown_strategy")
+
+    def test_a_proxy_older_than_v0_7_1_refuses_every_name_but_none_with_the_update_hint(self):
+        binary = self.printing(FAKE_TABLE)       # even a table that answers does not rescue an old release
+        with mock.patch.object(pi_plugin, "proxy_version_state", return_value="older"):
+            self.assertEqual(pi_plugin.resolve_strategy("none", binary)[0], "none")
+            with self.assertRaises(pi_plugin.StrategyError) as cm:
+                pi_plugin.resolve_strategy("auto", binary)
+        self.assertEqual(cm.exception.reason, "proxy_too_old")
+        self.assertIn("update the proxy to v0.7.1 or later", str(cm.exception))
+
+    def test_a_v0_7_0_binary_that_really_prints_its_version_is_refused(self):
+        binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexec sleep 30\n')
+        pi_plugin.write_record({"port": 8800, "binary": binary, "preset": "off", "cache_strategy": "none"})
+        with mock.patch.object(pi_plugin, "STRATEGIES_TIMEOUT", 0.3):
+            code, facts = self.run_main("configure", "--cache-strategy", "auto")
+            self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
+            self.assertFalse(pi_plugin.proxy_config().exists())
+            self.assertEqual(pi_plugin.read_record()["cache_strategy"], "none")
+            with mock.patch.object(pi_plugin, "start_service", return_value=True):
+                code, facts = self.run_main("configure", "--cache-strategy", "none")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        self.assertNotIn("cache:", pi_plugin.proxy_config().read_text())
+
+    def test_list_comes_from_the_proxy_and_an_old_proxy_lists_only_none(self):
+        binary = self.printing(FAKE_TABLE)
+        pi_plugin.write_record({"port": 8800, "binary": binary})
+        with mock.patch.object(pi_plugin, "proxy_version_state", return_value="named"):
+            _, facts = self.run_main("configure", "--list")
+        self.assertEqual(facts["strategies"], "none,auto,1-ping,2-ping")
+        self.assertEqual(facts["strategy_1_ping"], "text of 1-ping")
+        with mock.patch.object(pi_plugin, "proxy_version_state", return_value="older"):
+            _, facts = self.run_main("configure", "--list")
+        self.assertEqual(facts["strategies"], "none")
+        self.assertIn("v0.7.1 or later", facts["strategy_error"])
+
+    def test_setup_on_a_proxy_that_cannot_list_refuses_a_named_strategy_and_writes_nothing(self):
+        binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
+        pi_plugin.write_record({"binary": binary})
+        for argv in (("setup", "--plan"), ("setup", "--i-consent-to-traffic-interception")):
+            code, facts = self.run_main(*argv)
+            self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
+        self.assertFalse(pi_plugin.proxy_config().exists())
+        self.assertFalse(self.models.exists())
+        code, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
+        self.assertEqual((code, facts["result"]), (0, "planned"))
+        self.assertNotIn("quota", facts["consent_question"])
 
 
 GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}

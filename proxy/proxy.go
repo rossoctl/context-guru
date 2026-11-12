@@ -707,6 +707,8 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
+		// The model-info half below is local-only. Bob is not deployed on hosted for now (owner,
+		// 2026-11-12), so this rule was not designed for hosted Bob. See docs/reference/hosted-vs-local.md.
 		if isBobProfile(r) || (h.opts.Tenants == nil && isBobModelInfo(r)) {
 			// We have to read this one response, so do not let it arrive compressed.
 			req.Header.Del("Accept-Encoding")

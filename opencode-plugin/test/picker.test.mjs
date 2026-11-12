@@ -56,17 +56,19 @@ test("a binary that does not know the word and keeps serving is killed at the li
 test("only strategies for a routed provider are offered", () => {
   const names = (dialects) => offeredStrategies(FAKE_STRATEGIES, dialects).map((row) => row.name)
   assert.deepEqual(names(["anthropic"]), ["none", "auto", "1-ping", "2-ping", "1-hour-head"])
-  assert.deepEqual(names(["openai"]), ["none", "30-min-ping"])
+  assert.deepEqual(names(["openai"]), ["none", "auto", "1-ping", "2-ping", "30-min-ping"])
   assert.deepEqual(names(["anthropic", "openai"]), FAKE_STRATEGIES.strategies.map((row) => row.name))
 })
 
 test("the default is the proxy default, the alias is read as its new name, and an unfit name gives none", () => {
   assert.deepEqual(resolveStrategy(FAKE_STRATEGIES, undefined, ["anthropic"]), { name: "auto" })
   assert.deepEqual(resolveStrategy(FAKE_STRATEGIES, "5-min-ping", ["anthropic"]), { name: "auto" })
-  // The proxy default is not offered on an OpenAI-only setup: run none, and say why.
-  const openai = resolveStrategy(FAKE_STRATEGIES, undefined, ["openai"])
-  assert.equal(openai.name, "none")
-  assert.match(openai.reason, /not offered for openai/)
+  // The proxy default is offered on an OpenAI-only setup too (#1062), so no fallback to none.
+  assert.deepEqual(resolveStrategy(FAKE_STRATEGIES, undefined, ["openai"]), { name: "auto" })
+  // A name for another provider is still refused: none, and say why.
+  const head = resolveStrategy(FAKE_STRATEGIES, "1-hour-head", ["openai"])
+  assert.equal(head.name, "none")
+  assert.match(head.reason, /not offered for openai/)
   assert.equal(resolveStrategy(FAKE_STRATEGIES, "nonsense", ["anthropic"]).name, "none")
   assert.deepEqual(effectiveSettings("/nonexistent-state", { preset: "ultrahigh", cacheStrategy: "5-min-ping" }), { preset: "ultrahigh", requestedStrategy: "5-min-ping" })
   assert.deepEqual(effectiveSettings("/nonexistent-state", { preset: "bogus" }), { preset: "off", requestedStrategy: undefined })
@@ -94,18 +96,18 @@ test("the proxy gets cache.strategy at start, and the picker files hold only the
   }
 })
 
-test("an OpenAI-only setup offers only the OpenAI and any strategies, and runs none by default", async () => {
+test("an OpenAI-only setup offers the OpenAI, both-provider and any strategies, and runs auto by default", async () => {
   const directory = "/tmp/context-guru-picker-openai"
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
   try {
     const hooks = await plugin.server(context(directory))
     await hooks.config({ provider: { openai: { options: { baseURL: "https://api.openai.com/v1" } } } })
     const state = stateDirectory(directory)
-    assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /strategy: none/)
+    assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /strategy: auto/)
     const shown = await run(join(state, "context-guru-strategy"))
-    assert.ok(shown.out.includes("choice 30-min-ping:") && shown.out.includes("choice none:"))
-    assert.ok(!shown.out.includes("choice auto:") && !shown.out.includes("choice 1-ping:"))
-    const refused = await run(join(state, "context-guru-strategy"), ["set", "2-ping"])
+    assert.ok(["30-min-ping", "none", "auto", "1-ping", "2-ping"].every((n) => shown.out.includes(`choice ${n}:`)))
+    assert.ok(!shown.out.includes("choice 1-hour-head:"))
+    const refused = await run(join(state, "context-guru-strategy"), ["set", "1-hour-head"])
     assert.equal(refused.status, 2)
     const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
     process.kill(record.pid, "SIGTERM")
