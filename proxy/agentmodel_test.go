@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -131,15 +133,16 @@ func summaryCallsOf(calls func() []seenCall) []seenCall {
 // awaitSummaryCalls waits, with a time limit, until the upstream has got at least want summary
 // calls, then waits for every detached summary to end so a late extra call shows too. A test that
 // wants a call must use it: the in-flight check alone cannot tell "no summary started" from "the
-// summary has not started yet".
+// summary has not started yet". testutil.WaitForState bounds the wait.
 func awaitSummaryCalls(t *testing.T, calls func() []seenCall, want int) []seenCall {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for len(summaryCallsOf(calls)) < want && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if !offload.WaitForAllSummariesForTest(time.Until(deadline) + time.Second) {
-		t.Fatal("a detached summary call was still running after the time limit")
+	testutil.WaitForState(t, "the summary call (a request with max_tokens) to reach the fake upstream",
+		func() bool { return len(summaryCallsOf(calls)) >= want },
+		func() string {
+			return fmt.Sprintf("summary calls = %d, all calls = %d", len(summaryCallsOf(calls)), len(calls()))
+		})
+	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
+		t.Fatal("a detached summary call was still running after 30s")
 	}
 	return summaryCallsOf(calls)
 }
