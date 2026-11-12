@@ -17,9 +17,9 @@ import (
 	acmetrics "github.com/rossoctl/accountant/metrics"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
 // These tests need the central stack (deploy/central/compose.yaml) to be up. They push real metrics

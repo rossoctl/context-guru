@@ -430,7 +430,8 @@ cmd_nginx() {
     ok "nothing listens on port 80"
   fi
   say "Next"
-  printf '  curl -sS -o /dev/null -w "%%{http_code}\\n" https://%s/cortex/v1/metrics   # expect 401 (no token)\n' "$host"
+  printf '  curl -sS -o /dev/null -w "%%{http_code}\\n" -X POST -H "content-type: application/json" -d "{}" https://%s/cortex/v1/metrics   # expect 200 (an empty push)\n' "$host"
+  printf '  Authentication is off today: the stack does not check a token (see README.md).\n'
   return_fails
 }
 

@@ -13,8 +13,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
 // TestCentralLoad is a LOAD GENERATOR, not a test: it asserts nothing. It pushes every metric set,

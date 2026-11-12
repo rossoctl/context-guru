@@ -10,9 +10,9 @@ import (
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
-	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )

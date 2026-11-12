@@ -1,5 +1,9 @@
 package proxy
 
+// This test stays in package proxy on purpose. It needs the package's unexported test helpers
+// (accHandlerOpts, usageUpstream, fixedPricer, anthropicRequest) and the Handler, which a test
+// outside the package cannot reach. It imports proxyapp/metricspush for the push provider only.
+
 import (
 	"context"
 	"io"

@@ -189,7 +189,7 @@ func counterNames(t *testing.T, r *sdk.ManualReader) map[string]bool {
 }
 
 // The ping does not pass through the handler's finish. This drives one through the real emitter and
-// checks that the keep-alive metrics and the savings request counter appear. The first version of
+// checks that the keep-alive metrics appear and that no inference request is counted. The first version of
 // the metrics booked pings only in unit tests: the production path never reached them.
 func TestKeepAlivePingReachesTheMetrics(t *testing.T) {
 	reader := sdk.NewManualReader()
