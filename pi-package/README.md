@@ -111,7 +111,7 @@ to turn the pings off.
 
 One cache strategy drives both providers. The package keeps no list of strategies. It asks the proxy
 (`context-guru-proxy strategies`) for the names and the texts, and offers the strategies that serve both
-Anthropic and OpenAI. To see what each one does, run `/context-guru cache-strategy`.
+Anthropic and OpenAI. `/context-guru cache-strategy` shows the names. The proxy's text for a strategy is in the `setup` question and in `python3 scripts/pi_plugin.py configure --list`.
 
 ## The proxy config
 
