@@ -1105,7 +1105,7 @@ type Snapshot struct {
 	// Missing: real requests that followed keep-alive pings but found no ping facts, so credit was lost
 	// on that return. It also counts a return after an unpriced ping (non-2xx, no usage), after an
 	// eviction, and a request whose pricing panicked. If it keeps rising while Priced stays 0, the ping
-	// side is not wired or its pings keep failing (see the keeper's pings and failed). Counts only; Missing moves only with the dashboard on.
+	// side is not wired or its pings keep failing (see the keeper's pings, failed and skipped). Counts only; Missing moves only with the dashboard on.
 	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
 	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
 
