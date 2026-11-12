@@ -828,7 +828,9 @@ func (a *API) routes() []route {
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
 		h := rt.h
-		// Inside the cache, so a cached body carries the unit it was computed with.
+		// Inside cachedRoute, so its cached body carries the unit it was computed with. A route with its
+		// own cache in the handler (stats, components, tools, insights, spend) gets a unit at most 30 s
+		// old on a body that may be older.
 		if currencyRoutes[rt.pattern] {
 			h = a.withCurrency(h)
 		}

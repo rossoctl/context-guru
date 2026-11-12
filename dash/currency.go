@@ -68,6 +68,7 @@ var currencyRoutes = map[string]bool{
 	"GET /api/kvcache": true, "GET /api/kvcache/rows": true, "GET /api/kvcache/simulate": true,
 	"GET /api/kvcache/pricing": true, "GET /api/kvcache/suggest": true, "GET /api/kvcache/suggest/holdout": true,
 	"GET /api/insights": true, "GET /api/spend/explain": true,
+	"GET /api/adapt/compaction": true, "GET /api/adapt/settings": true, "GET /api/adapt/tools": true,
 }
 
 // withCurrency adds `currency` to the JSON object a money route answers with: the unit of the rows

@@ -951,8 +951,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
 	// every earlier row: those were not recorded, so they read as no copy.
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
-	// The unit of the row's costs. Additive, USD on every earlier row, which is true: before the price
-	// file could name a unit, the dashboard read every cost as dollars.
+	// The unit of the row's costs. Additive, USD on every earlier row: before the price file could name
+	// a unit, the dashboard read every cost as dollars. A row a Bobcoins price file costed before this
+	// column existed also reads USD, so a view across the upgrade can say mixed.
 	{"requests", "currency", "TEXT NOT NULL DEFAULT 'USD'"},
 }
 

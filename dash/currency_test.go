@@ -143,7 +143,7 @@ func TestEveryMoneyRouteSaysTheUnit(t *testing.T) {
 		"/api/keepalive", "/api/keepalive/behaviour", "/api/keepalive/calc", "/api/keepalive/live",
 		"/api/keepalive/recommend", "/api/keepalive/sessions", "/api/tools", "/api/tool-defer", "/api/toolfilter",
 		"/api/kvcache", "/api/kvcache/rows", "/api/kvcache/simulate", "/api/kvcache/pricing",
-		"/api/kvcache/suggest", "/api/insights", "/api/spend/explain"} {
+		"/api/kvcache/suggest", "/api/insights", "/api/spend/explain", "/api/adapt/tools", "/api/adapt/settings"} {
 		if !currencyRoutes["GET "+p] {
 			t.Errorf("%s shows money and is not in currencyRoutes", p)
 			continue
