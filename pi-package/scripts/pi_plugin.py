@@ -694,7 +694,7 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
         spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
                   if upstreams else "using your own quota on each provider")
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
-                     f"{spends}. What it does, from the proxy: {row['desc']} "
+                     f"{spends}.{' What it does, from the proxy: ' + row['desc'] if row['desc'] else ''} "
                      "Pi's own cache warming stops for routed models.")
         headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
         if headered:

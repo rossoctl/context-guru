@@ -215,7 +215,9 @@ class Controller(Sandbox):
         self.assertFalse(pi_plugin.state_dir().exists())
 
     def test_the_one_question_names_both_providers_and_what_spends_quota(self):
-        _, facts = self.run_main("setup", "--plan")
+        # A proxy binary that answers, so the test does not depend on one being installed on this machine.
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/proxy"):
+            _, facts = self.run_main("setup", "--plan")
         question = facts["consent_question"]
         self.assertIn("Anthropic and OpenAI", question)
         self.assertIn("/anthropic, forwarding to api.anthropic.com", question)
@@ -224,6 +226,12 @@ class Controller(Sandbox):
         self.assertIn("quota", question)
         self.assertIn("What it does, from the proxy: text of auto", question)
         self.assertNotIn("4 minutes", question)
+
+    def test_plan_with_no_proxy_binary_has_no_empty_text(self):
+        with mock.patch.object(pi_plugin, "find_binary", return_value=None):
+            _, facts = self.run_main("setup", "--plan")
+        self.assertIn("quota", facts["consent_question"])
+        self.assertNotIn("from the proxy", facts["consent_question"])
 
     def test_plan_with_strategy_none_does_not_mention_spend(self):
         _, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
